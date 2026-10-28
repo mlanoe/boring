@@ -1,0 +1,16 @@
+pub use IndexAction as def void(int)
+
+struct Inner:
+    IndexAction onSelect
+    req void fire(int i):
+        onSelect(i)
+
+struct Outer:
+    IndexAction onSelect
+    req Inner make():
+        Inner(onSelect = onSelect)
+
+def main():
+    let o = Outer(onSelect = (i):
+        print "got {i}")
+    o.make().fire(3)

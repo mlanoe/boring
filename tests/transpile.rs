@@ -423,6 +423,7 @@ transpile_test!(misc_scenarios_2);
 // Multi-statement closure body containing a `for` loop used to emit `/* complex stmt */`
 // (loop silently dropped) — see tests/cases/closure_block_for_loop.br.
 transpile_test!(closure_block_for_loop);
+transpile_test!(fn_field_forwarded_to_ctor);
 // Bare `Fn(args)` param must emit a unit return (was `-> Fn`, E0782) — tests/cases/fn_param_bare_type.br.
 transpile_test!(fn_param_bare_type);
 

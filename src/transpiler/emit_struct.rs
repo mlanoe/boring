@@ -3252,6 +3252,13 @@ impl Transpiler {
                 }
             }
         }
+        // A bare read of this struct's own fn-typed field (`Inner(onSelect = onSelect)`) is already
+        // the handle: clone it rather than wrapping it a second time.
+        if let ExprKind::Var(v) = &value.kind {
+            if self.bare_self_field_type(v).is_some_and(|t| self.resolve_fn_field_type(&t).is_some()) {
+                return format!("{}.clone()", self.emit_expr(value));
+            }
+        }
         // A stored closure must be `'static`: `move` it, first cloning what it captures so the
         // enclosing code stays usable afterwards and nothing borrowed from the enclosing frame
         // leaks in. That is every shared handle (actor/`Arc`/`Rc` binding — possibly only a
