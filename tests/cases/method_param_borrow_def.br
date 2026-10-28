@@ -1,0 +1,69 @@
+# `def` methods get the inferred `&T` parameter too; an argument that overlaps the receiver
+# (`self.m(self.items)`) is copied at the call site. A free function sharing a method's name does
+# not block inference; same-named methods on several types borrow when they all agree.
+struct Point:
+    float x
+    float y
+
+struct Acc:
+    var [int] items = []
+    var int total = 0
+    var Point last = Point(0.0, 0.0)
+
+    def addAll([int] xs):
+        for x in xs:
+            total += x
+
+    def absorb(Point p):
+        last = p.clone()
+        total += 1
+
+    def selfFeed():
+        self.addAll(self.items)
+        self.addAll(items)
+
+    def count([int] xs):
+        total += xs.len() as int
+
+struct Acc2:
+    var int total = 0
+
+    def count([int] xs):
+        total += (xs.len() as int) * 2
+
+struct Registry:
+    var {string=[int]} tbl
+
+    # `ms` is only read here and stored through a collection method: the stored copy is independent
+    def put(string name, [int] ms):
+        tbl.set(name, ms)
+
+# Same name as the methods above, different call shape
+int addAll([int] xs):
+    xs.len() as int
+
+def main():
+    let b = [1, 2, 3]
+    mut a = Acc()
+    a.addAll(b)
+    print a.total
+    a.items.push(5)
+    a.items.push(6)
+    a.addAll(a.items)
+    print a.total
+    a.selfFeed()
+    print a.total
+    a.absorb(Point(1.0, 2.0))
+    print a.total
+    print a.last.y
+    print addAll(b)
+    mut a2 = Acc2()
+    a2.count(b)
+    a.count(b)
+    print a2.total
+    print a.total
+    print b.len()
+    mut reg = Registry({=})
+    reg.put("x", b)
+    print reg.tbl.len()
+    print b.len()

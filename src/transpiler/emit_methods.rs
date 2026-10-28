@@ -4924,6 +4924,30 @@ impl Transpiler {
         if !is_user_struct_receiver && external_arg_borrows.is_none() {
             self.check_unresolved_receiver_lent_args(obj, method, args);
         }
+        // A `def` method's inferred `&T` parameter, handed a place that overlaps the receiver
+        // (`self.m(self.items)`, `c.m(c.items)`), would hold a shared borrow across `&mut self`
+        // (E0502): pass a copy instead, which is what the by-value convention did anyway.
+        if !self.borrowed_def_methods.is_empty() {
+            let key = self.resolve_expr_struct_type(obj)
+                .or_else(|| self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name))
+                .map(|t| format!("{}::{}", t, method))
+                .filter(|k| self.trait_borrowed_methods.contains_key(k))
+                .or_else(|| self.trait_borrowed_method_by_name.get(method).cloned());
+            if let Some(key) = key.filter(|k| self.borrowed_def_methods.contains(k)) {
+                let tys = self.trait_borrowed_methods.get(&key);
+                for (i, a) in args.iter().enumerate() {
+                    let borrowed = matches!(tys.and_then(|t| t.get(i)),
+                        Some(Some(Type::Qualified(_, OwnerQual::Borrow))));
+                    if borrowed && self.places_overlap(obj, &a.value) {
+                        if let Some(slot) = args_s.get_mut(i) {
+                            let e = self.emit_expr(&a.value);
+                            let e = if e.ends_with(".clone()") { e } else { format!("{e}.clone()") };
+                            *slot = format!("&{e}");
+                        }
+                    }
+                }
+            }
+        }
         // Rust collection methods that take a positional usize index:
         // Boring's `uint` maps to u64, so cast the first argument to usize.
         // Exception: `remove` on HashMap/HashSet takes &K/&T (not a usize index).
@@ -6254,6 +6278,36 @@ impl Transpiler {
         }
     }
 
+    /// The place `e` names as a path from its root variable (`self.a.b` → `["self","a","b"]`);
+    /// a bare name that is a field of the enclosing struct is `self.<name>`. `None` for anything
+    /// that is not a plain place (a call, a literal, ...).
+    fn place_path(&self, e: &Expr) -> Option<Vec<String>> {
+        match &e.kind {
+            ExprKind::Var(v) => {
+                let implicit_field = !self.known_local_vars.contains(v.as_str()) && v != "self"
+                    && self.self_type.as_deref()
+                        .and_then(|t| self.struct_fields.get(t))
+                        .is_some_and(|fs| fs.iter().any(|(n, _)| n == v));
+                Some(if implicit_field { vec!["self".to_string(), v.clone()] } else { vec![v.clone()] })
+            }
+            ExprKind::Field(obj, name) => {
+                let mut p = self.place_path(obj)?;
+                p.push(name.clone());
+                Some(p)
+            }
+            ExprKind::Index(obj, _) => self.place_path(obj),
+            _ => None,
+        }
+    }
+
+    /// Whether borrowing `arg` while `recv` is mutably borrowed conflicts: one place is a prefix
+    /// of the other (disjoint fields of the same struct do not).
+    fn places_overlap(&self, recv: &Expr, arg: &Expr) -> bool {
+        let (Some(r), Some(a)) = (self.place_path(recv), self.place_path(arg)) else { return false };
+        let n = r.len().min(a.len());
+        r[..n] == a[..n]
+    }
+
     /// One argument for a lent `mut` parameter of a user-struct method (`is_lent_param`: a
     /// `mut [T]`/`mut {K=V}`/`mut {T}` collection or a `mut` user struct/enum): the caller's own
     /// value as `&mut`, after the `let < mut < var` hierarchy check. A caller binding that already is a
@@ -7211,6 +7265,8 @@ impl Transpiler {
             trait_borrowed_fns: self.trait_borrowed_fns.clone(),
             trait_borrowed_methods: self.trait_borrowed_methods.clone(),
             trait_borrowed_method_by_name: self.trait_borrowed_method_by_name.clone(),
+            borrowed_def_methods: self.borrowed_def_methods.clone(),
+            inferred_borrow_methods: self.inferred_borrow_methods.clone(),
             struct_method_overload_decls: self.struct_method_overload_decls.clone(),
             overloaded_method_keys: self.overloaded_method_keys.clone(),
             arc_qualified_types: self.arc_qualified_types.clone(),

@@ -593,7 +593,11 @@ For `'guard`, a `Counter&` parameter uses `read()` (shared read lock); `mut Coun
 
 #### Struct and enum method parameters
 
-Universal borrow inference is **disabled** for parameters of `req` and `def` methods defined on a struct or enum. Use the explicit `Counter& n` form to get universal borrowing in a method parameter.
+Universal borrow inference applies to a bare, read-only struct/enum/array/dict/set parameter of a `req` or `def` method of a struct or enum exactly as to a free function's: no storage or qualifier-demand signal → `&T`, and every call site lends `&arg` (including calls emitted before the method and from other files). The inferred signature is kept in a per-`Type::method` table (`trait_borrowed_methods`, `src/transpiler/infer_trait_borrow.rs`), shared with bare-trait borrow inference. A `def` call whose argument overlaps the receiver (`self.m(self.items)`, `c.m(c.items)`; disjoint fields do not overlap) passes a copy, since a shared borrow would conflict with `&mut self`.
+
+A call site cannot always resolve its receiver's type (an untyped closure result, a call with no declared return type). Such a call looks the signature up by method **name**, which is sound only when every method bearing that name is a plain struct/enum method and they all borrow the same positions (a free function of the same name is irrelevant: `f(x)` and `x.f(y)` differ). If a trait method, a field, a pipe target or another kind of method shares the name, or the types disagree, every parameter of that name stays by value at every call site, so a `&T` argument is never emitted against a by-value signature or vice versa.
+
+Not candidates (parameters stay by value): methods implementing a trait method (they must match the trait's signature), overloaded, generic, `task`/`stream` or attributed methods, methods called with labeled arguments, and parameters with a storage or qualifier signal. A `mut` parameter is unchanged: always lent as `&mut T`. Use the explicit `Counter& n` form to force the borrow regardless.
 
 #### Error conditions
 

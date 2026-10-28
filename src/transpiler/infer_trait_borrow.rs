@@ -60,6 +60,8 @@ pub(crate) struct TraitBorrowFacts {
     fns: Vec<FnDecl>,
     /// Methods of non-generic structs: `(struct name, decl)`.
     methods: Vec<(String, FnDecl)>,
+    /// Methods of non-generic enums: `(enum name, decl)`.
+    enum_methods: Vec<(String, FnDecl)>,
     /// Types that may implement traits: `(type name, declared trait names, methods)` for every
     /// struct, enum and `ext` of the graph.
     implementers: Vec<(String, Vec<String>, Vec<FnDecl>)>,
@@ -274,6 +276,48 @@ impl Transpiler {
             self.trait_borrowed_method_by_name.insert(m.name.clone(), key);
         }
 
+        // Read-only bare struct/enum/collection parameters of ordinary methods (`req` and `def`):
+        // the same universal-borrow inference free functions get (`infer_qualifiers`,
+        // `auto_ref_param_vars`), run per method. With a resolved receiver the `Type::method`
+        // key identifies the signature. A receiver of unknown type is looked up by method *name*,
+        // which is only sound when every method bearing that name is a plain struct/enum method
+        // and they all borrow the same positions; otherwise (and for a name shared with a trait
+        // method, which an implementer must match, a field, or a value) every parameter of that
+        // name stays by value at every call site. A free function of the same name does not matter:
+        // `f(x)` and `x.f(y)` are different call shapes (a pipe target is a "value name" already).
+        let mut by_name: HashMap<&str, Vec<(&String, &FnDecl)>> = HashMap::new();
+        for (ty, m) in facts.methods.iter().chain(facts.enum_methods.iter()) {
+            by_name.entry(m.name.as_str()).or_default().push((ty, m));
+        }
+        for (name, group) in &by_name {
+            if facts.method_name_count.get(*name) != Some(&group.len())
+                || all_trait_methods.contains(*name)
+                || facts.value_names.contains(*name)
+                || facts.field_names.contains(*name)
+                || *name == "main"
+                || facts.method_call_sites.iter().any(|(n, _, l)| *l && n == *name)
+            { continue; }
+            let flags: Vec<Vec<bool>> = group.iter().map(|(ty, m)| {
+                let ok = m.qualifier.is_none() && self.method_is_trait_borrow_candidate(m)
+                    && !self.overloaded_method_keys.contains(&format!("{}::{}", ty, m.name));
+                if ok { self.infer_method_borrowed_params(ty, m) } else { vec![false; m.params.len()] }
+            }).collect();
+            if flags[0].iter().all(|b| !b) || flags.iter().any(|f| *f != flags[0]) { continue; }
+            for ((ty, m), f) in group.iter().zip(&flags) {
+                let key = format!("{}::{}", ty, m.name);
+                let entry = self.trait_borrowed_methods.entry(key.clone()).or_insert_with(|| vec![None; m.params.len()]);
+                for (i, p) in m.params.iter().enumerate() {
+                    if f[i] && entry[i].is_none() {
+                        entry[i] = p.ty.as_ref().map(|t| borrowed_ty(p, t));
+                    }
+                }
+                self.inferred_borrow_methods.insert(key.clone());
+                if m.mutating { self.borrowed_def_methods.insert(key); }
+            }
+            let (ty0, m0) = group[0];
+            self.trait_borrowed_method_by_name.insert(m0.name.clone(), format!("{}::{}", ty0, m0.name));
+        }
+
         // Contract call-by-name entries (trait/dyn receivers are handled from the trait's own
         // parameter list at the call site; these serve receivers of unknown type).
         for (key, m, flags) in &contract_keys {
@@ -366,6 +410,25 @@ impl Transpiler {
         self.trait_borrow_facts = TraitBorrowFacts::default();
     }
 
+    /// Positions of `f`'s parameters (a method of `self_ty`) whose read-only borrow was decided by
+    /// `infer_method_borrowed_params`: they stay bare in the declaration and are resolved to `&T`
+    /// by the ordinary per-function inference, as for a free function.
+    pub(crate) fn method_borrow_positions(&self, f: &FnDecl, self_ty: Option<&str>) -> Vec<usize> {
+        let Some(t) = self_ty else { return vec![] };
+        let key = format!("{}::{}", t, f.name);
+        if !self.inferred_borrow_methods.contains(&key) { return vec![]; }
+        let Some(tbl) = self.trait_borrowed_methods.get(&key) else { return vec![] };
+        f.params.iter().enumerate()
+            .filter(|(i, p)| matches!(tbl.get(*i), Some(Some(_)))
+                && match p.ty.as_ref() {
+                    Some(Type::Array(_) | Type::Dict(..) | Type::Set(_)) => true,
+                    Some(Type::Named(n)) => !self.trait_method_names.contains_key(n.as_str()),
+                    _ => false,
+                })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// `f` with its borrowed bare-trait params rewritten to `Trait&`, when inference chose any.
     /// `self_ty` is the owning struct for a method.
     pub(crate) fn with_inferred_trait_borrows(&self, f: &FnDecl, self_ty: Option<&str>) -> Option<FnDecl> {
@@ -375,11 +438,19 @@ impl Transpiler {
             Some(t) => self.trait_borrowed_methods.get(&format!("{}::{}", t, f.name))?
                 .iter().map(|o| o.is_some()).collect(),
         };
+        let skip = self.method_borrow_positions(f, self_ty);
         let mut out = f.clone();
         let mut any = false;
-        for (p, borrowed) in out.params.iter_mut().zip(&flags) {
-            if let (true, Some(Type::Named(n))) = (*borrowed, p.ty.as_ref()) {
-                if self.trait_method_names.contains_key(n.as_str()) || self.struct_fields.contains_key(n.as_str()) {
+        for (i, (p, borrowed)) in out.params.iter_mut().zip(&flags).enumerate() {
+            // Left bare: real emission infers the borrow itself (`method_borrow_positions`), so
+            // the body is emitted exactly like a free function's (a moved use clones).
+            if skip.contains(&i) { continue; }
+            if let (true, Some(Type::Array(_) | Type::Dict(..) | Type::Set(_))) = (*borrowed, p.ty.as_ref()) {
+                p.ty = p.ty.take().map(|t| Type::Qualified(Box::new(t), if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow }));
+                any = true;
+            } else if let (true, Some(Type::Named(n))) = (*borrowed, p.ty.as_ref()) {
+                if self.trait_method_names.contains_key(n.as_str()) || self.struct_fields.contains_key(n.as_str())
+                    || self.all_enum_types.contains(n.as_str()) {
                     let q = if p.mutable { OwnerQual::BorrowMut } else { OwnerQual::Borrow };
                     p.ty = p.ty.take().map(|t| Type::Qualified(Box::new(t), q));
                     any = true;
@@ -439,6 +510,35 @@ impl Transpiler {
             && !value_names.contains(&f.name)
             && !called_method_names.contains(&f.name)
             && !self.overloaded_fn_names.contains(&f.name)
+    }
+
+    /// Per parameter of `m` (a method of `ty`): does `infer_qualifiers` resolve it to the
+    /// universal read-only borrow, exactly as it would for the same parameter of a free function?
+    /// Run on a throwaway clone, like `pre_infer_fn_qualifiers`.
+    fn infer_method_borrowed_params(&self, ty: &str, m: &FnDecl) -> Vec<bool> {
+        let eligible = |p: &Param| !p.mutable && !p.rebindable && p.default.is_none()
+            && match p.ty.as_ref() {
+                Some(Type::Named(n)) => self.struct_fields.contains_key(n.as_str())
+                    || self.all_enum_types.contains(n.as_str()),
+                Some(Type::Array(_) | Type::Dict(..) | Type::Set(_)) => true,
+                _ => false,
+            };
+        if !m.params.iter().any(eligible) { return vec![false; m.params.len()]; }
+        let mut sub = self.make_sub();
+        sub.self_type = Some(ty.to_string());
+        sub.fn_current_params = m.params.iter()
+            .filter_map(|p| p.ty.as_ref().map(|t| (p.name.clone(), t.clone())))
+            .collect();
+        sub.fn_current_param_lines = m.params.iter().map(|p| (p.name.clone(), p.line)).collect();
+        sub.fn_current_param_cols = m.params.iter().map(|p| (p.name.clone(), p.col)).collect();
+        sub.fn_current_params_mut = m.params.iter().filter(|p| p.mutable).map(|p| p.name.clone()).collect();
+        sub.fn_current_params_lent = sub.fn_lent_param_names(m, true);
+        sub.fn_return_ty = m.return_ty.clone();
+        // Not `in_struct_method`: that flag is exactly the free-function-only gate being lifted.
+        sub.in_struct_method = false;
+        sub.infer_qualifiers(&m.body);
+        m.params.iter().map(|p| eligible(p)
+            && matches!(sub.inferred_qualifiers.get(&p.name), Some(OwnerQual::Borrow))).collect()
     }
 
     /// A bare parameter of a heap-owning struct type (cloning it is not free) that the body only
@@ -579,6 +679,9 @@ fn collect_items(items: &[Item], facts: &mut TraitBorrowFacts) {
             }
             Item::Enum(e) => {
                 facts.implementers.push((e.name.clone(), e.protocols.clone(), e.methods.clone()));
+                if e.type_params.is_empty() {
+                    for m in &e.methods { facts.enum_methods.push((e.name.clone(), m.clone())); }
+                }
                 count_methods(&e.methods, facts);
                 for m in &e.methods { scan(&m.body, facts); }
                 for t in &e.type_methods { scan(&t.body, facts); }

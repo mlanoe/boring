@@ -1,0 +1,10 @@
+# The importing file calls a method of an imported struct before/without seeing its body:
+# the borrowed signature is known across files, so the call site lends `&arg`.
+use method_param_borrow_xfile_lib
+
+let p = Point(1.0, 2.0)
+let m = Meter(0.5)
+let steps = [1, 2]
+print m.measure(p, steps)
+print m.measure(Point(2.0, 2.0), steps)
+print steps.len()

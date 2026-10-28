@@ -1754,8 +1754,14 @@ impl Transpiler {
                 .map(|p| p.name.clone())
                 .collect();
             let prev_in_struct_method = self.in_struct_method;
-            self.in_struct_method = self_ty.is_some();
+            let forced_borrows = self.method_borrow_positions(f, self_ty);
+            // A method whose parameters were resolved to `&T` is inferred like a free function.
+            self.in_struct_method = self_ty.is_some() && forced_borrows.is_empty();
             self.infer_qualifiers(&f.body);
+            for &i in &forced_borrows {
+                // The signature the call sites were given is authoritative.
+                self.inferred_qualifiers.insert(f.params[i].name.clone(), OwnerQual::Borrow);
+            }
             self.record_cpu_decisions(f);
             self.scan_atomic_promotions(&f.body);
             self.in_struct_method = prev_in_struct_method;
@@ -1918,7 +1924,7 @@ impl Transpiler {
         self.seed_param_locals(&f.params);
         self.in_throws = f.throws;
         self.in_req_fn = !f.mutating;
-        self.in_struct_method = self_ty.is_some();
+        self.in_struct_method = self_ty.is_some() && self.method_borrow_positions(f, self_ty).is_empty();
         self.in_async  = is_async;
         let prev_fn_return_ty = self.fn_return_ty.clone();
         // See `promote_bare_return_ty`'s doc: a bare oversized return type is rewritten
@@ -2329,7 +2335,7 @@ impl Transpiler {
         })
     }
 
-    fn fn_lent_param_names(&self, f: &FnDecl, in_method: bool) -> std::collections::HashSet<String> {
+    pub(crate) fn fn_lent_param_names(&self, f: &FnDecl, in_method: bool) -> std::collections::HashSet<String> {
         let mut names = f.params.iter()
             .filter(|p| self.is_lent_param(p, in_method))
             .map(|p| p.name.clone())

@@ -1233,6 +1233,11 @@ struct Transpiler {
     /// Method name → key in `trait_borrowed_methods`, for receivers of unknown type (the name
     /// is program-wide unique for such methods).
     pub(crate) trait_borrowed_method_by_name: std::collections::HashMap<String, String>,
+    /// `Type::method` keys of `def` methods with an inferred borrowed parameter: a call whose
+    /// argument aliases the receiver (`self.m(self.items)`) clones it instead of borrowing it.
+    pub(crate) borrowed_def_methods: std::collections::HashSet<String>,
+    /// `Type::method` keys whose borrowed parameters were chosen by `infer_method_borrowed_params`.
+    pub(crate) inferred_borrow_methods: std::collections::HashSet<String>,
     /// Per-struct overloaded method declarations: "TypeName::method" → Vec<FnDecl>
     pub(crate) struct_method_overload_decls: std::collections::HashMap<String, Vec<crate::ast::FnDecl>>,
     /// Keys of overloaded struct methods (quick lookup): "TypeName::method"
@@ -1769,6 +1774,8 @@ impl Transpiler {
             trait_borrowed_fns: std::collections::HashMap::new(),
             trait_borrowed_methods: std::collections::HashMap::new(),
             trait_borrowed_method_by_name: std::collections::HashMap::new(),
+            borrowed_def_methods: std::collections::HashSet::new(),
+            inferred_borrow_methods: std::collections::HashSet::new(),
             struct_method_overload_decls: std::collections::HashMap::new(),
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),

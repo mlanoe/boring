@@ -985,6 +985,11 @@ transpile_test!(mut_param_type_method);
 transpile_test!(mut_param_store_clone);
 // A plain value stored into a `'actor` member (implicit-self `kept = p`) is wrapped and independent.
 transpile_test!(mut_param_store_actor);
+// Bare read-only struct/enum/collection params of non-trait methods are lent as `&T` like free
+// functions' (trait methods, shared names and stored params stay by value); also across files.
+transpile_test!(method_param_borrow);
+transpile_test!(method_param_borrow_xfile_main);
+transpile_test!(method_param_borrow_def);
 
 // A `mut` argument lent to a method of a different receiver (`self.a.bump(self.inner)`, `x.bump(y)`)
 // is valid Rust and must keep compiling, as must the documented fix for lending a field to a method

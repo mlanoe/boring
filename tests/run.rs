@@ -650,6 +650,9 @@ error_test_exact!(error_immutable_let);
 error_test!(error_mut_param_store);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
+interp_test!(method_param_borrow);
+interp_test!(method_param_borrow_xfile_main);
+interp_test!(method_param_borrow_def);
 // A bare `var` collection (local or parameter) is rebindable only: `.push()`/`v[i] = x`/`d[k] = x`/
 // `s.add()` need `mut`/`var mut` — same content-mutation rule user structs follow.
 error_test_exact!(error_var_collection_content_mutation);

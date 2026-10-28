@@ -1,0 +1,97 @@
+# Bare read-only struct/enum/collection parameters of ordinary methods are lent as `&T`, like
+# the same parameters of free functions. Methods sharing their name with a trait method or with
+# another type's method keep every parameter by value, at every call site.
+struct Point:
+    float x
+    float y
+
+enum Shape:
+    Circle(float)
+    Sq(float)
+
+    req float scaled(Point p):
+        p.x * 2.0
+
+trait Weigher:
+    req int weigh([int] xs)
+
+struct Scale as Weigher:
+    int k
+
+    req int weigh([int] xs):
+        (xs.len() as int) * k
+
+struct Other:
+    int k
+
+    req int weigh([int] xs):
+        (xs.len() as int) + k
+
+struct Calc:
+    float k
+    var [int] kept = []
+
+    req int total([int] b):
+        var int s = 0
+        for i in b:
+            s += i
+        s + b[0] + (b.len() as int)
+
+    req float sum(Point p):
+        p.x + p.y + k
+
+    req float sumBeforeDecl(Point p):
+        self.later(p) + 1.0
+
+    req float later(Point p):
+        p.y
+
+    req int lookup([int] b, {string=int} d):
+        (b.len() as int) + (d.len() as int)
+
+    req int tally({int} s):
+        s.len() as int
+
+    # stored into a field: stays by value
+    def store([int] b):
+        kept = b.clone()
+
+    req int same([int] b):
+        b.len() as int
+
+struct Twin:
+    req int same([int] b):
+        (b.len() as int) * 2
+
+def main():
+    let b = [1, 2, 3]
+    let p = Point(1.0, 2.0)
+    mut c = Calc(3.0)
+    print c.total(b)
+    print c.sum(p)
+    print c.sum(Point(3.0, 4.0))
+    print c.sumBeforeDecl(p)
+    print c.lookup(b, {"a" = 1})
+    print c.tally({1, 2})
+    c.store(b)
+    print c.kept.len()
+    print c.same(b)
+    print Twin().same(b)
+    print Shape.Circle(1.0).scaled(p)
+    print Scale(2).weigh(b)
+    print Other(2).weigh(b)
+    let Weigher w = Scale(3)
+    print w.weigh(b)
+    # receiver of unknown type (untyped closure parameter)
+    let fixed = Calc(3.0)
+    let getCalc = (): fixed
+    print getCalc().total(b)
+    let calls = [Calc(3.0)]
+    for k in calls:
+        print k.sum(p)
+    print b.len()
+    print p.x
+    # unresolved receiver, name shared by two types: by value at every call site (b is moved)
+    let fixed2 = Calc(3.0)
+    let getCalc2 = (): fixed2
+    print getCalc2().same(b)
