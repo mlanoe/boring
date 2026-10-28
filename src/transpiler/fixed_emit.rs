@@ -50,6 +50,13 @@ impl Transpiler {
             ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, l, r) =>
                 self.fixed_fmt_of_expr_inner(l, visiting).or_else(|| self.fixed_fmt_of_expr_inner(r, visiting)),
             ExprKind::UnaryOp(UnaryOp::Neg, inner) => self.fixed_fmt_of_expr_inner(inner, visiting),
+            // Members returning the receiver's own format (`x.sin()`, `x.min(y)`, `x.wrappingAdd(y)`).
+            // `checked*` return an optional and are handled where they are unwrapped.
+            ExprKind::MethodCall(obj, m, _) if matches!(m.as_str(),
+                "floor" | "ceil" | "round" | "trunc" | "fract" | "abs" | "signum" | "min" | "max" | "clamp"
+                | "sqrt" | "sin" | "cos" | "tan" | "exp" | "ln" | "mulRound" | "divRound")
+                || m.starts_with("wrapping") || m.starts_with("saturating") =>
+                self.fixed_fmt_of_expr_inner(obj, visiting),
             _ => self.resolve_expr_type(e).and_then(|t| Self::fixed_fmt_of_type(&t)),
         }
     }
@@ -102,7 +109,8 @@ impl Transpiler {
             }
         }
         let rust_method = match method {
-            "floor" | "ceil" | "round" | "trunc" | "fract" | "abs" | "signum" | "min" | "max" | "clamp" => method.to_string(),
+            "floor" | "ceil" | "round" | "trunc" | "fract" | "abs" | "signum" | "min" | "max" | "clamp"
+            | "sqrt" | "sin" | "cos" | "tan" | "exp" | "ln" => method.to_string(),
             "mulRound" => "mul_round".to_string(),
             "divRound" => "div_round".to_string(),
             // wrappingAdd -> wrapping_add, checkedDiv -> checked_div, ...
@@ -231,3 +239,7 @@ pub(crate) fn fixed_point_prelude(generated: &str) -> (Option<String>, Vec<Strin
         (Some(out), errors)
     }
 }
+        // Integer math core (sqrt/sin/cos/tan/exp/ln), the very file the Rust interpreter compiles.
+        out.push_str("#[allow(dead_code)]\nmod __fxm {\n");
+        out.push_str(include_str!("../fixed_math_core.rs"));
+        out.push_str("}\n");

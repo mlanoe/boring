@@ -1,6 +1,6 @@
 # `fixedN_M` / `ufixedN_M`: binary fixed-point scalar types
 
-> **Status: Phases 1 and 2 implemented** in the Rust interpreter, the
+> **Status: Phases 1, 2 and 5 implemented** in the Rust interpreter, the
 > transpiler (generated newtype, `W ∈ {8, 16, 32, 64}`) and the self-hosted
 > interpreter, with a shared test corpus (`tests/cases/fixed_point_*.br`).
 > Implemented: the core types, [Members](#members) (`raw`, `fromRaw`,
@@ -8,8 +8,9 @@
 > `signum`/`min`/`max`/`clamp`), and the overflow-policy and rounding
 > variants `wrappingAdd/Sub/Mul/Div`, `saturating…`, `checked…` (returning
 > `T?`) and `mulRound`/`divRound`.
-> Not implemented yet: GPU backends (Phase 3), 128-bit formats (Phase 4),
-> math functions (Phase 5). The former open
+> Also implemented, as **native methods** rather than library code:
+> `sqrt`, `sin`, `cos`, `tan`, `exp`, `ln` (Phase 5 — see below).
+> Not implemented yet: GPU backends (Phase 3), 128-bit formats (Phase 4). The former open
 > questions are resolved in [Decisions](#decisions).
 >
 > **Implementation notes** (where the code differs from, or narrows, the text):
@@ -285,8 +286,21 @@ Buffer fields use the existing integer buffer packing (see wgpu
 3. **GPU**: CUDA first, then Metal, then wgpu (with the limb emulation).
 4. **128-bit formats** (`fixed64_64`, …): needs a 256-bit intermediate for
    `*`/`/` (limb decomposition). Deferred.
-5. **Math functions** (`sqrt`, `sin`/`cos`, `ln`/`exp`) written in Boring
-   itself (CORDIC / Newton), kept out of the compiler.
+5. **Math functions** (`sqrt`, `sin`/`cos`/`tan`, `ln`/`exp`). **Implemented as
+   native methods, not as Boring library code** — the original plan (write
+   them in Boring, out of the compiler) is not possible today: arithmetic on a
+   generic `T` does not compile, and `ext fixed16_16:` is rejected, so one
+   Boring definition cannot serve every `fixedN_M`. They are integer-only
+   (no floats, bit-for-bit identical in all three implementations):
+   `src/fixed_math_core.rs` (pasted into generated programs and compiled into
+   the Rust interpreter) and a line-for-line port in
+   `boring/interpreter/fixedpoint.br`; `tests/cases/fixed_point_math.br` keeps
+   them in agreement. Internal precision is 60 fractional bits (CORDIC for
+   `sin`/`cos`, Taylor for `exp`, an atanh series for `ln`), results are
+   rounded to nearest to the format's `M` bits, i.e. accurate to about 2 ulp of
+   the format and no better than ~2⁻⁵⁴ whatever the format. `sqrt` is the exact
+   floor. A negative `sqrt`, a non-positive `ln`, a `tan` where cos is zero and
+   any result outside the format's range are errors.
 
 ## Decisions
 

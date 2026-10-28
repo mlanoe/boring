@@ -61,3 +61,11 @@ fn build_rejects_128_bit_formats_cleanly() {
     let (ok, text) = run("w128", "let fixed64_64 a = 1.5\nprint \"{a}\"\n", &["build", "--emit-rust"]);
     assert!(!ok && text.contains("128-bit fixed-point formats"), "{text}");
 }
+
+#[test]
+fn math_domain_and_overflow_errors() {
+    fails_run("sqrtneg", "let fixed16_16 a = -1.0\nprint \"{a.sqrt()}\"\n", "square root of a negative value");
+    fails_run("ln0", "let fixed16_16 a = 0.0\nprint \"{a.ln()}\"\n", "logarithm of a non-positive value");
+    fails_run("expovf", "let fixed16_16 a = 20.0\nprint \"{a.exp()}\"\n", "fixed-point overflow in fixed16_16.exp()");
+    fails_run("lnneg_unsigned", "let ufixed8_8 a = 0.5\nprint \"{a.ln()}\"\n", "fixed-point overflow in ufixed8_8.ln()");
+}

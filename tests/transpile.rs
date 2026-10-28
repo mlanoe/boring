@@ -606,6 +606,7 @@ transpile_test!(fixed_point_struct_fn);
 transpile_test!(fixed_point_members);
 transpile_test!(fixed_point_policies);
 transpile_test!(float32_array_literal_width_and_cast);
+transpile_test!(fixed_point_math);
 transpile_test!(float64_array_literal_width_and_cast);
 transpile_test!(optional_interp_numeric);
 // Top-level `let` constants referenced from a free function, a struct method, AND an

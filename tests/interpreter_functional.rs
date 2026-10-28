@@ -468,6 +468,7 @@ itest!(fixed_point_members);
 itest!(fixed_point_policies);
 itest!(float64_array_literal_width_and_cast);
 itest!(optional_interp_numeric);
+itest!(fixed_point_math);
 itest!(if_else_cast_numeric);
 itest!(unresolved_field_cast_numeric);
 

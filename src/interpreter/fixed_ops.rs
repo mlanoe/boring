@@ -116,6 +116,22 @@ impl Interpreter {
                     .ok_or_else(|| err(format!("fixed-point overflow in {}.{}()", fmt.name(), method), line))
             })());
         }
+        // sqrt / sin / cos / tan / exp / ln (integer algorithms: src/fixed_math_core.rs)
+        if let (Some(f), []) = (crate::fixed::math_fn(method), args) {
+            return Some((|| {
+                let m = fmt.m;
+                match f(raw, m) {
+                    Some(v) => fmt.checked(v).map(|r| Value::Fixed(r, *fmt))
+                        .ok_or_else(|| err(format!("fixed-point overflow in {}.{}()", fmt.name(), method), line)),
+                    None => Err(err(match method {
+                        "sqrt" => format!("{}.sqrt(): square root of a negative value", fmt.name()),
+                        "ln" => format!("{}.ln(): logarithm of a non-positive value", fmt.name()),
+                        "tan" => format!("{}.tan(): cos is zero here", fmt.name()),
+                        _ => format!("fixed-point overflow in {}.{}()", fmt.name(), method),
+                    }, line)),
+                }
+            })());
+        }
         Some(match (method, args) {
             ("floor", []) => wrap(fmt.floor(raw), "floor"),
             ("ceil", []) => wrap(fmt.ceil(raw), "ceil"),

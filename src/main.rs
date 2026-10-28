@@ -16,6 +16,7 @@ pub mod errors;
 pub mod lexer;
 pub mod ast;
 pub mod fixed;
+pub mod fixed_math_core;
 pub mod parser;
 pub mod desugar_labeled_array;
 pub mod desugar_inline_kernel;

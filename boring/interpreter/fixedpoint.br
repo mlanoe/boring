@@ -393,3 +393,186 @@ int128 fixed_saturating_from(FixedFmt f, uint128 mag, bool neg):
         fixed_min_raw(f)
     else:
         fixed_max_raw(f)
+
+# ---- integer math: sqrt / sin / cos / tan / exp / ln (Phase 5) ----
+#
+# Port of src/fixed_math_core.rs (same algorithms, same constants, bit-for-bit the
+# same results): 60 internal fractional bits, CORDIC for sin/cos, a Taylor series for
+# exp, an atanh series for ln, then rounded to the target format's m bits.
+
+int128 fxm_one():
+    (1 as int128) << 60
+
+int128 fxm_half_pi():
+    1811004864519280711 as int128
+
+int128 fxm_ln2():
+    799144290325165979 as int128
+
+int128 fxm_cordic_k():
+    700114967507363238 as int128
+
+[int128] fxm_atan_table():
+    [
+        905502432259640355 as int128, 534549298976576474 as int128, 282441168888798124 as int128,
+        143371547418228444 as int128, 71963988336308046 as int128, 36017075762092179 as int128,
+        18012932708689205 as int128, 9007016009513623 as int128, 4503576721087964 as int128,
+        2251796950380271 as int128, 1125899548928887 as int128, 562949908682076 as int128,
+        281474971118251 as int128, 140737487656277 as int128, 70368744090283 as int128,
+        35184372077909 as int128, 17592186043051 as int128, 8796093022037 as int128,
+        4398046511083 as int128, 2199023255549 as int128, 1099511627776 as int128,
+        549755813888 as int128, 274877906944 as int128, 137438953472 as int128,
+        68719476736 as int128, 34359738368 as int128, 17179869184 as int128,
+        8589934592 as int128, 4294967296 as int128, 2147483648 as int128,
+        1073741824 as int128, 536870912 as int128, 268435456 as int128,
+        134217728 as int128, 67108864 as int128, 33554432 as int128,
+        16777216 as int128, 8388608 as int128, 4194304 as int128,
+        2097152 as int128, 1048576 as int128, 524288 as int128,
+        262144 as int128, 131072 as int128, 65536 as int128,
+        32768 as int128, 16384 as int128, 8192 as int128,
+        4096 as int128, 2048 as int128, 1024 as int128,
+        512 as int128, 256 as int128, 128 as int128,
+        64 as int128, 32 as int128, 16 as int128,
+        8 as int128, 4 as int128, 2 as int128
+    ]
+
+# floor(a / b) for b > 0 (the integer `/` truncates toward zero).
+int128 fxm_floor_div(int128 a, int128 b):
+    var q = a / b
+    if a % b < 0:
+        q = q - 1
+    q
+
+int128 fxm_up(int128 raw, int m):
+    if m <= 60:
+        raw << (60 - m)
+    else:
+        raw >> (m - 60)
+
+# F-bit value -> m fractional bits, rounded to nearest (ties away from zero); nil on overflow.
+int128? fxm_down(int128 v, int m):
+    if m >= 60:
+        let lim = (1 as int128) << (127 - (m - 60))
+        if v >= lim or v < 0 - lim:
+            return nil
+        return v << (m - 60)
+    let s = 60 - m
+    let q = ((fixed_abs(v) + ((1 as uint128) << (s - 1))) >> s) as int128
+    if v < 0:
+        0 - q
+    else:
+        q
+
+uint128 fxm_isqrt(uint128 n0):
+    var n = n0
+    var x = 0 as uint128
+    var bit = (1 as uint128) << 126
+    while bit > n:
+        bit = bit >> 2
+    while bit != (0 as uint128):
+        if n >= x + bit:
+            n = n - (x + bit)
+            x = (x >> 1) + bit
+        else:
+            x = x >> 1
+        bit = bit >> 2
+    x
+
+int128? fxm_sqrt(int128 raw, int m):
+    if raw < 0:
+        return nil
+    (fxm_isqrt((raw as uint128) << m)) as int128
+
+# (sin, cos) of raw / 2^m radians in 60 fractional bits.
+(int128, int128) fxm_sincos(int128 raw, int m):
+    let a = fxm_up(raw, m)
+    let hp = fxm_half_pi()
+    let q = fxm_floor_div(a + hp / 2, hp)
+    let table = fxm_atan_table()
+    var x = fxm_cordic_k()
+    var y = 0 as int128
+    var z = a - q * hp
+    var i = 0
+    while i < 60:
+        let dx = y >> i
+        let dy = x >> i
+        if z >= 0:
+            x = x - dx
+            y = y + dy
+            z = z - table[i]
+        else:
+            x = x + dx
+            y = y - dy
+            z = z + table[i]
+        i += 1
+    var qm = q % 4
+    if qm < 0:
+        qm = qm + 4
+    if qm == 0:
+        (y, x)
+    elif qm == 1:
+        (x, 0 - y)
+    elif qm == 2:
+        (0 - y, 0 - x)
+    else:
+        (0 - x, y)
+
+int128? fxm_sin(int128 raw, int m):
+    fxm_down(fxm_sincos(raw, m).0, m)
+
+int128? fxm_cos(int128 raw, int m):
+    fxm_down(fxm_sincos(raw, m).1, m)
+
+int128? fxm_tan(int128 raw, int m):
+    let sc = fxm_sincos(raw, m)
+    if sc.1 == 0:
+        return nil
+    fxm_down((sc.0 << 60) / sc.1, m)
+
+int128? fxm_exp(int128 raw, int m):
+    let x = fxm_up(raw, m)
+    if x > ((45 as int128) << 60):
+        return nil
+    if x < 0 - ((43 as int128) << 60):
+        return 0 as int128
+    let ln2 = fxm_ln2()
+    let k = fxm_floor_div(x + ln2 / 2, ln2)
+    let r = x - k * ln2
+    var term = fxm_one()
+    var sum = fxm_one()
+    var n = 1 as int128
+    while n <= 24:
+        term = (term * r) >> 60
+        term = term / n
+        sum = sum + term
+        n = n + 1
+    var v = sum
+    if k >= 0:
+        v = sum << (k as int)
+    else:
+        v = sum >> ((0 - k) as int)
+    fxm_down(v, m)
+
+int128? fxm_ln(int128 raw, int m):
+    let x = fxm_up(raw, m)
+    if x <= 0:
+        return nil
+    let one = fxm_one()
+    var e = 0 as int128
+    var v = x
+    while v >= ((2 as int128) << 60):
+        v = v >> 1
+        e = e + 1
+    while v < one:
+        v = v << 1
+        e = e - 1
+    let z = ((v - one) << 60) / (v + one)
+    let z2 = (z * z) >> 60
+    var term = z
+    var sum = z
+    var n = 3 as int128
+    while n <= 61:
+        term = (term * z2) >> 60
+        sum = sum + term / n
+        n = n + 2
+    fxm_down(e * fxm_ln2() + 2 * sum, m)

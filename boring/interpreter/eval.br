@@ -1608,6 +1608,28 @@ int128 fixed_operand(FixedFmt f, string method, Value v):
 Value? fixed_method(int128 raw, FixedFmt f, string method, [Value] args):
     var int128? res = nil
     if args.length == 0:
+        # sqrt / sin / cos / tan / exp / ln (fixedpoint.br, integer algorithms)
+        var int128? mres = nil
+        var is_math = true
+        if method == "sqrt": mres = fxm_sqrt(raw, f.m)
+        elif method == "sin": mres = fxm_sin(raw, f.m)
+        elif method == "cos": mres = fxm_cos(raw, f.m)
+        elif method == "tan": mres = fxm_tan(raw, f.m)
+        elif method == "exp": mres = fxm_exp(raw, f.m)
+        elif method == "ln": mres = fxm_ln(raw, f.m)
+        else: is_math = false
+        if is_math:
+            if let mv = mres:
+                if let mc = fixed_checked(f, mv):
+                    return fixed_make(f, mc)
+                throw "fixed-point overflow in {f.name()}.{method}()"
+            if method == "sqrt":
+                throw "{f.name()}.sqrt(): square root of a negative value"
+            if method == "ln":
+                throw "{f.name()}.ln(): logarithm of a non-positive value"
+            if method == "tan":
+                throw "{f.name()}.tan(): cos is zero here"
+            throw "fixed-point overflow in {f.name()}.{method}()"
         if method == "floor": res = fixed_floor(f, raw)
         elif method == "ceil": res = fixed_ceil(f, raw)
         elif method == "round": res = fixed_round(f, raw)

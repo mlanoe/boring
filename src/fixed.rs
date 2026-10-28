@@ -12,6 +12,21 @@
 /// checker but not implemented by any backend yet (docs, Phasing §4).
 pub const VALID_WIDTHS: [u32; 5] = [8, 16, 32, 64, 128];
 
+/// The integer math function named `name` (`sqrt`, `sin`, ...) from
+/// `fixed_math_core.rs`, as `fn(raw, m) -> Option<raw at m fractional bits>`.
+pub fn math_fn(name: &str) -> Option<fn(i128, u32) -> Option<i128>> {
+    use crate::fixed_math_core as c;
+    Some(match name {
+        "sqrt" => c::__fxm_sqrt,
+        "sin" => c::__fxm_sin,
+        "cos" => c::__fxm_cos,
+        "tan" => c::__fxm_tan,
+        "exp" => c::__fxm_exp,
+        "ln" => c::__fxm_ln,
+        _ => return None,
+    })
+}
+
 /// The four arithmetic operations the overflow-policy variants exist for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FxOp { Add, Sub, Mul, Div }
@@ -154,7 +169,7 @@ impl FixedFmt {
 
     // ---- reference arithmetic (all results range-checked: `None` = overflow) ----
 
-    fn checked(&self, raw: i128) -> Option<i128> {
+    pub fn checked(&self, raw: i128) -> Option<i128> {
         self.in_range(raw).then_some(raw)
     }
 
@@ -502,6 +517,21 @@ impl FixedFmt {
                  }}\n\
                  pub fn mul_round(self, o: Self) -> Self {{ let (m, n) = self.__ex(2, o, true); Self::__round_result(m, n) }}\n\
                  pub fn div_round(self, o: Self) -> Self {{ let (m, n) = self.__ex(3, o, true); Self::__round_result(m, n) }}\n");
+        policy.push_str(&format!(
+            "    fn __fxm_fin(v: Option<i128>, what: &str) -> Self {{\n\
+                     match v {{\n\
+                         Some(v) => if cfg!(debug_assertions) {{ Self(<{s}>::try_from(v).expect(\"fixed-point overflow\")) }} else {{ Self(v as {s}) }},\n\
+                         None => panic!(\"{{}}\", what),\n\
+                     }}\n\
+                 }}\n"));
+        for (name, msg) in [
+            ("sqrt", "square root of a negative value"), ("sin", "fixed-point overflow"),
+            ("cos", "fixed-point overflow"), ("tan", "tan: cos is zero here"),
+            ("exp", "fixed-point overflow"), ("ln", "logarithm of a non-positive value"),
+        ] {
+            policy.push_str(&format!(
+                "    pub fn {name}(self) -> Self {{ Self::__fxm_fin(__fxm::__fxm_{name}(self.0 as i128, {m}), \"{msg}\") }}\n"));
+        }
         for (opn, code) in [("add", 0), ("sub", 1), ("mul", 2), ("div", 3)] {
             policy.push_str(&format!(
                 "    pub fn wrapping_{opn}(self, o: Self) -> Self {{ let (m, n) = self.__ex({code}, o, false); Self(__fx_wrap(m, n, {w}, {sg}) as {s}) }}\n\
@@ -867,6 +897,41 @@ mod tests {
         let (m, n) = u.exact(FxOp::Sub, 1, 2, false).unwrap();
         assert_eq!(u.wrapping_from(m, n), 65535);
         assert_eq!(u.saturating_from(m, n), 0);
+    }
+
+    /// Compares the integer math against f64 at `m` fractional bits (<= 2 ulp).
+    fn close(got: Option<i128>, want: f64, m: u32, what: &str) {
+        let got = got.unwrap_or_else(|| panic!("{what}: None"));
+        let want_raw = (want * (1u128 << m) as f64).round() as i128;
+        assert!((got - want_raw).abs() <= 2, "{what}: got {got}, want {want_raw}");
+    }
+
+    #[test]
+    fn integer_math_matches_f64() {
+        use crate::fixed_math_core::*;
+        let m = 32u32;
+        let raw = |x: f64| (x * (1u128 << m) as f64).round() as i128;
+        // The reference is evaluated at the quantized input, like the integer code sees it.
+        let q = |x: f64| raw(x) as f64 / (1u128 << m) as f64;
+        for x in [0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 3.14159, 10.0, 100.5, 1234.5678] {
+            close(__fxm_sqrt(raw(x), m), q(x).sqrt(), m, "sqrt");
+        }
+        for x in [0.0, 0.3, 1.0, 1.5707963, 2.0, 3.0, 3.14159, 6.0, 7.5, -0.5, -2.0, -100.0, 300.0] {
+            close(__fxm_sin(raw(x), m), q(x).sin(), m, &format!("sin {x}"));
+            close(__fxm_cos(raw(x), m), q(x).cos(), m, &format!("cos {x}"));
+        }
+        for x in [0.0, 0.5, 1.0, -1.0, 1.4, -1.4, 3.0] {
+            close(__fxm_tan(raw(x), m), q(x).tan(), m, &format!("tan {x}"));
+        }
+        for x in [0.0, 0.5, 1.0, -1.0, 2.5, -3.7, 10.0, -20.0] {
+            close(__fxm_exp(raw(x), m), q(x).exp(), m, &format!("exp {x}"));
+        }
+        for x in [0.001, 0.5, 1.0, 2.0, 2.718281828, 10.0, 1234.5, 1.0e6] {
+            close(__fxm_ln(raw(x), m), q(x).ln(), m, &format!("ln {x}"));
+        }
+        assert_eq!(__fxm_sqrt(-1, m), None);
+        assert_eq!(__fxm_ln(0, m), None);
+        assert_eq!(__fxm_exp(raw(50.0), m), None);
     }
 
     #[test]

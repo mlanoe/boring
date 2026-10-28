@@ -1,0 +1,23 @@
+let fixed16_16 two = 2.0
+let fixed32_32 big = 2.0
+print "sqrt {two.sqrt()} {big.sqrt()} {(0.25 as fixed16_16).sqrt()} {(0.0 as fixed32_32).sqrt()}"
+let fixed16_16 a = 1.0
+print "16_16 sin {a.sin()} cos {a.cos()} tan {a.tan()} exp {a.exp()} ln {two.ln()}"
+let fixed32_32 b = 1.0
+print "32_32 sin {b.sin()} cos {b.cos()} tan {b.tan()} exp {b.exp()} ln {big.ln()}"
+print "{(3.14159265 as fixed32_32).sin()} {(10.0 as fixed32_32).sin()} {(-7.5 as fixed32_32).cos()}"
+print "{(100.0 as fixed32_32).ln()} {(0.001 as fixed32_32).ln()} {(20.0 as fixed32_32).exp()} {(-20.0 as fixed32_32).exp()}"
+let ufixed8_8 u = 2.0
+print "{u.sqrt()} {(1.5 as fixed8_8).exp()} {(0.5 as fixed8_8).sin()} {(0.5 as fixed8_8).ln()}"
+
+var fixed32_32 acc = 0.0
+var fixed32_32 acc2 = 0.0
+for i in 0..<200:
+    let x = (i as fixed32_32) * 0.37 - 20.0
+    acc = acc + x.sin() * 0.001 + x.cos() * 0.001
+    if i > 0:
+        let p = (i as fixed32_32) * 0.5
+        acc2 = acc2 + p.ln() * 0.01 + (p * 0.05).exp() * 0.001 + p.sqrt() * 0.01
+print "sweep {acc} {acc2}"
+let fixed32_32 huge = 1000.0
+print "{huge.sin()} {huge.cos()} {(-huge).sin()}"
