@@ -3045,6 +3045,31 @@ impl Transpiler {
     /// panic at runtime ("no reactor running") even if this function were made `async`
     /// and awaited. Fail at transpile time instead of generating code that compiles
     /// but panics the first time it actually runs.
+    /// Type of `Name(args)` for a generic struct `Name<T..>`: each type parameter is taken from
+    /// the argument that initializes a field declared as that bare parameter (`Slot(value = 0.0)`
+    /// is `Slot<float>`). `None` when some parameter cannot be determined.
+    fn generic_construction_type(&self, callee: &Expr, args: &[Arg]) -> Option<Type> {
+        let ExprKind::Var(name) = &callee.kind else { return None };
+        let params = self.struct_type_param_names.get(name)?;
+        let fields = self.struct_fields.get(name)?;
+        let mut targs = Vec::new();
+        for p in params {
+            let ty = fields.iter().enumerate().find_map(|(i, (fname, fty))| {
+                if !matches!(fty.without_mut(), Type::TypeParam(n) | Type::Named(n) if n == p) { return None; }
+                let arg = args.iter().find(|a| a.label.as_deref() == Some(fname.as_str()))
+                    .or_else(|| args.get(i).filter(|a| a.label.is_none() && !a.spread))?;
+                match &arg.value.kind {
+                    ExprKind::Bool(_) => Some(Type::Bool),
+                    ExprKind::Int(_) => Some(Type::Int),
+                    ExprKind::Float(_) => Some(Type::Float64),
+                    _ => self.resolve_expr_type(&arg.value),
+                }
+            })?;
+            targs.push(ty.without_mut().clone());
+        }
+        Some(Type::Generic(name.clone(), targs))
+    }
+
     /// `fn __boring_screen_setup()`: a wgpu Screen program's top-level `let`s/statements (see
     /// `TranspileConfig::screen_setup`), run in order once before the window opens, returning the
     /// values the host keeps (kernels and whatever the render loop reads) as a tuple.
@@ -3093,6 +3118,10 @@ impl Transpiler {
                             (None, Some(ExprKind::Bool(_))) => Some("bool".to_string()),
                             (None, Some(ExprKind::Int(_))) => Some("isize".to_string()),
                             (None, Some(ExprKind::Float(_))) => Some("f64".to_string()),
+                            // `Slot(value = 0.0)`: a generic struct's arguments fix its type parameters
+                            (None, Some(ExprKind::Call(c, args))) if matches!(&c.kind, ExprKind::Var(n) if self.struct_type_param_names.contains_key(n)) => {
+                                self.generic_construction_type(c, args).map(|t| self.emit_type(&t))
+                            }
                             (None, Some(_)) => s.value.as_ref()
                                 .and_then(|v| self.resolve_expr_type(v))
                                 .map(|t| self.emit_type(&t)),
