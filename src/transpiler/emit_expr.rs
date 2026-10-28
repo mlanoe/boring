@@ -3461,29 +3461,6 @@ impl Transpiler {
                 return format!("{{ let __v = {}; let mut __g = {}; __g.{} = __v; }}", val_s, guard, field);
             }
         }
-        // Whole-field reassignment of an 'actor/'guard(/'observed)-qualified field:
-        // `self.field = expr` (or `outer_var.field = expr` for a mut/var mut struct
-        // param/local) — `field` itself IS the wrapped value being replaced, unlike
-        // the "self.worker.field = v" / "self.data.field = v" branches above (which
-        // write into a field *reached through* an already-locked mutex/rwlock field)
-        // or the `.value`-escape-hatch branch below (which writes into an 'observed
-        // field's *inner* field). Without this, the RHS falls through to a plain,
-        // unwrapped assignment that doesn't type-check against the field's real
-        // `Arc<Mutex<T>>`/`Arc<RwLock<T>>`/`BoringObserved<V>` Rust type — confirmed
-        // via a real `cargo build` E0308 (`self.model = FormModel::new();` against a
-        // field whose Rust type is `Arc<Mutex<FormModel>>`). Wrap the RHS the same way
-        // construction already does (`emit_actor_new`/`emit_guard_new`/
-        // `wrap_observed_base` — see emit_struct.rs's per-field-default init).
-        //
-        // Guarded against double-wrapping the one case that already worked before
-        // this fix: assigning an existing actor/guard/observed-typed *variable*
-        // straight into the field (`self.model = otherActorVar`) — that RHS is
-        // already the wrapped handle, not a raw base value, and the generic fallback
-        // further below already special-cases it (auto-`.clone()` for the mutex-var
-        // case; observed-local reassignment isn't otherwise supported yet either way).
-        if let ExprKind::Field(obj, field) = &target.kind {
-            if let Some(sn) = self.resolve_struct_name(obj) {
-                let key = format!("{}::{}", sn, field);
         // Implicit-self whole-field reassignment (`kept = p` inside a method): same as
         // `self.kept = p`, so the actor/guard/observed wrapping below applies too.
         if let ExprKind::Var(n) = &target.kind {
@@ -3509,6 +3486,29 @@ impl Transpiler {
                 }
             }
         }
+        // Whole-field reassignment of an 'actor/'guard(/'observed)-qualified field:
+        // `self.field = expr` (or `outer_var.field = expr` for a mut/var mut struct
+        // param/local) — `field` itself IS the wrapped value being replaced, unlike
+        // the "self.worker.field = v" / "self.data.field = v" branches above (which
+        // write into a field *reached through* an already-locked mutex/rwlock field)
+        // or the `.value`-escape-hatch branch below (which writes into an 'observed
+        // field's *inner* field). Without this, the RHS falls through to a plain,
+        // unwrapped assignment that doesn't type-check against the field's real
+        // `Arc<Mutex<T>>`/`Arc<RwLock<T>>`/`BoringObserved<V>` Rust type — confirmed
+        // via a real `cargo build` E0308 (`self.model = FormModel::new();` against a
+        // field whose Rust type is `Arc<Mutex<FormModel>>`). Wrap the RHS the same way
+        // construction already does (`emit_actor_new`/`emit_guard_new`/
+        // `wrap_observed_base` — see emit_struct.rs's per-field-default init).
+        //
+        // Guarded against double-wrapping the one case that already worked before
+        // this fix: assigning an existing actor/guard/observed-typed *variable*
+        // straight into the field (`self.model = otherActorVar`) — that RHS is
+        // already the wrapped handle, not a raw base value, and the generic fallback
+        // further below already special-cases it (auto-`.clone()` for the mutex-var
+        // case; observed-local reassignment isn't otherwise supported yet either way).
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let Some(sn) = self.resolve_struct_name(obj) {
+                let key = format!("{}::{}", sn, field);
                 let rhs_already_wrapped = matches!(&value.kind, ExprKind::Var(vn)
                     if self.var_mutex_types.contains(vn.as_str())
                         || self.var_mutex_task_types.contains(vn.as_str())
