@@ -755,7 +755,7 @@ impl Transpiler {
                 return;
             }
         };
-        let program = match crate::lower_view::lower_module(program) {
+        let program = match crate::lower_view::lower_module_with_imports(program, canonical.parent(), &self.deps) {
             Ok(p) => p,
             Err(e) => {
                 self.push_error(use_line, use_col, format!("in '{}': {}", canonical.display(), e.msg()));
@@ -816,7 +816,7 @@ impl Transpiler {
                 return;
             }
         };
-        let program = match crate::lower_view::lower_module(program) {
+        let program = match crate::lower_view::lower_module_with_imports(program, None, &self.deps) {
             Ok(p) => p,
             Err(e) => {
                 self.push_error(use_line, use_col, format!("in boring.{module}: {}", e.msg()));

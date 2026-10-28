@@ -143,7 +143,7 @@ fn desugar_inject_or_exit(
     deps: &std::collections::HashMap<String, PathBuf>,
 ) -> ast::Program {
     match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), deps)
-        .and_then(lower_view::lower_module)
+        .and_then(|p| lower_view::lower_module_with_imports(p, path.parent(), &deps))
     {
         Ok(p) => p,
         Err(e) => {
@@ -2929,7 +2929,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
         }
     };
     match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), &deps)
-        .and_then(lower_view::lower_module)
+        .and_then(|p| lower_view::lower_module_with_imports(p, path.parent(), &deps))
     {
         Ok(p) => escape_keyword_fields::escape_keyword_fields(p),
         Err(e) => {

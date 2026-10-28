@@ -3148,7 +3148,7 @@ impl Interpreter {
         // Array-block sugar (`Column:` + indented items) in the imported module, resolved against
         // its own imports and this project's `[deps]` like the entry file's.
         let program = crate::desugar_array_block::desugar_array_block_with_imports(program, canonical.parent(), &self.deps).map_err(|e| err(e.msg(), decl.line))?;
-        let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
+        let program = crate::lower_view::lower_module_with_imports(program, Some(canonical.parent().unwrap_or(std::path::Path::new("."))), &self.deps).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
         self.module_files.push((Rc::clone(&module_env), canonical.clone()));
@@ -3257,7 +3257,7 @@ impl Interpreter {
         // Array-block sugar (`Column:` + indented items) in the imported module, resolved against
         // its own imports and this project's `[deps]` like the entry file's.
         let program = crate::desugar_array_block::desugar_array_block_with_imports(program, None, &self.deps).map_err(|e| err(e.msg(), decl.line))?;
-        let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
+        let program = crate::lower_view::lower_module_with_imports(program, None, &self.deps).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
         self.pre_register_free_functions(&program.items, Rc::clone(&module_env))?;
@@ -3323,7 +3323,7 @@ impl Interpreter {
         // Array-block sugar (`Column:` + indented items) in the imported module, resolved against
         // its own imports and this project's `[deps]` like the entry file's.
         let program = crate::desugar_array_block::desugar_array_block_with_imports(program, canonical.parent(), &self.deps).map_err(|e| err(e.msg(), decl.line))?;
-        let program = crate::lower_view::lower_module(program).map_err(|e| err(e.msg(), decl.line))?;
+        let program = crate::lower_view::lower_module_with_imports(program, Some(canonical.parent().unwrap_or(std::path::Path::new("."))), &self.deps).map_err(|e| err(e.msg(), decl.line))?;
 
         let module_env = Env::child(Rc::clone(&env));
         self.module_files.push((Rc::clone(&module_env), canonical.clone()));

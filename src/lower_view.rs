@@ -145,6 +145,41 @@ fn collect_bind_views(items: &[Item], out: &mut BindViews) {
     }
 }
 
+/// `collect_bind_views` over the files `items` `use` (same resolution as the array-block signatures: a bare `use` is a
+/// sibling file, `use <dep>.<mod>` a `[deps]` project, `use boring.*` the embedded stdlib, read by `collect_bind_views`).
+fn collect_imported_bind_views(
+    items: &[Item],
+    dir: &std::path::Path,
+    deps: &HashMap<String, std::path::PathBuf>,
+    visited: &mut HashSet<std::path::PathBuf>,
+    out: &mut BindViews,
+) {
+    for item in items {
+        let Item::Use(u) = item else {
+            if let Item::Mod(m) = item { collect_imported_bind_views(&m.items, dir, deps, visited, out); }
+            continue;
+        };
+        let Some(first) = u.path.first() else { continue };
+        if first == "boring" { continue; }
+        let path = if let Some(root) = deps.get(first.as_str()) {
+            let rel: std::path::PathBuf = u.path[1..].iter().collect();
+            root.join(rel).with_extension("br")
+        } else {
+            let rel: std::path::PathBuf = u.path.iter().collect();
+            dir.join(rel).with_extension("br")
+        };
+        let Ok(path) = path.canonicalize() else { continue };
+        if !visited.insert(path.clone()) { continue; }
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let Ok(tokens) = crate::lexer::lex_all(&src) else { continue };
+        let Ok(file) = crate::parser::parse(tokens) else { continue };
+        collect_bind_views(&file.items, out);
+        if let Some(file_dir) = path.parent() {
+            collect_imported_bind_views(&file.items, file_dir, deps, visited, out);
+        }
+    }
+}
+
 fn declares(items: &[Item], is_it: &dyn Fn(&Item) -> bool) -> bool {
     items.iter().any(|i| match i {
         Item::Mod(m) => declares(&m.items, is_it),
@@ -1002,7 +1037,17 @@ fn rewrite_body(body: &mut [Stmt], ctx: &Ctx, view: &str, failure: &mut Option<P
 }
 
 /// Lowers every `view` (state, `bind`, `env`, native facades) to ordinary structs.
-pub fn lower_views(mut program: Program) -> Result<Program, ParseError> {
+pub fn lower_views(program: Program) -> Result<Program, ParseError> {
+    lower_views_with_imports(program, None, &HashMap::new())
+}
+
+/// `lower_views`, also reading the `bind` signatures of views declared in the files this program `use`s (a sibling file,
+/// a `[deps]` project), so a call site there hands a `bind` argument over as a slot, not a copied value.
+pub fn lower_views_with_imports(
+    mut program: Program,
+    source_dir: Option<&std::path::Path>,
+    deps: &HashMap<String, std::path::PathBuf>,
+) -> Result<Program, ParseError> {
     if let Some(e) = crate::checker::check_view_declarations(&program).into_iter().next() {
         return Err(err(e.message, e.line, e.col));
     }
@@ -1011,6 +1056,11 @@ pub fn lower_views(mut program: Program) -> Result<Program, ParseError> {
         rewrite_seed_calls(&mut program.items);
     }
     let mut bind_views = BindViews::new();
+    if let Some(dir) = source_dir {
+        let mut visited = HashSet::new();
+        collect_imported_bind_views(&program.items, dir, deps, &mut visited, &mut bind_views);
+    }
+    // Local declarations last, so they override any imported view of the same name.
     collect_bind_views(&program.items, &mut bind_views);
     let env = Env {
         view_trait: declares(&program.items, &|i| matches!(i, Item::Trait(t) if t.name == "View"))
@@ -1036,7 +1086,17 @@ fn has_ui_use(items: &[Item]) -> bool {
 /// permissions, then view lowering. The main pipeline calls the two passes itself; module
 /// loaders (`use` of a sibling file or `boring.*`) call this right after parsing.
 pub fn lower_module(program: Program) -> Result<Program, ParseError> {
-    crate::view_perm::resolve_view_permissions(program).and_then(lower_views)
+    lower_module_with_imports(program, None, &HashMap::new())
+}
+
+/// `lower_module` for a module that has a place on disk: its `use`d sibling files and `[deps]` projects are read for the
+/// `bind` signatures of their views.
+pub fn lower_module_with_imports(
+    program: Program,
+    source_dir: Option<&std::path::Path>,
+    deps: &HashMap<String, std::path::PathBuf>,
+) -> Result<Program, ParseError> {
+    crate::view_perm::resolve_view_permissions(program).and_then(|p| lower_views_with_imports(p, source_dir, deps))
 }
 
 // ── parent-supplied state seeds ────────────────────────────────────────────────────────────────
