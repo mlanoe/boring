@@ -1,0 +1,18 @@
+struct Calc:
+    float v
+    req int sameName([int] b):
+        b.len()
+
+struct Twin:
+    float w
+    req int sameName([int] b):
+        b.len() as int + 1
+
+let b = [1, 2, 3]
+let fixed = Calc(3.0)
+let g = (): Calc(3.0)
+print fixed.sameName(b)
+print g().sameName(b)
+let t = Twin(1.0)
+print t.sameName(b)
+print b.len()

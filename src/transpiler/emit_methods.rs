@@ -4652,7 +4652,8 @@ impl Transpiler {
             // closure param, ...) must not lose the casing of a method some `trait` declares:
             // the generic camel→snake fallback would call a method that doesn't exist.
             if w.is_none() && m == camel_to_snake(method) && m != method
-                && self.trait_method_names.values().any(|ms| ms.contains(method))
+                && (self.trait_method_names.values().any(|ms| ms.contains(method))
+                    || self.unresolved_user_method_call(obj, method))
                 && !self.receiver_is_external_value(obj)
             {
                 (method.to_string(), None)
@@ -4849,6 +4850,12 @@ impl Transpiler {
             // A call to a method the receiver's trait declares (`self.width(s, size)` from a
             // trait default body): the trait's own signature takes `string` as the owned
             // `Rc<str>`/`Arc<str>`, so pass it that way, not as the external `(&*s)` `&str`.
+            args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
+        } else if self.unresolved_user_method_call(obj, method)
+            && !self.receiver_is_external_value(obj)
+        {
+            // Unresolved receiver, user-declared method name: the callee takes owned
+            // (by-value) parameters like every resolved user-method call, not external `&str`s.
             args.iter().map(|a| self.emit_expr_owned(&a.value)).collect()
         } else {
             args.iter().map(|a| self.emit_external_fallback_arg(&a.value)).collect()
@@ -6017,6 +6024,23 @@ impl Transpiler {
         } else {
             emitted
         }
+    }
+
+    /// Whether any user struct/enum declares a method named `method` (`Type::method` key in
+    /// `struct_method_overload_decls`). Lets a call on a receiver of unresolved type keep the
+    /// declared (camelCase) emitted name instead of the external camel→snake fallback.
+    fn user_type_declares_method(&self, method: &str) -> bool {
+        let suffix = format!("::{}", method);
+        self.struct_method_overload_decls.keys().any(|k| k.ends_with(&suffix))
+    }
+
+    /// `user_type_declares_method`, restricted to receivers that are a call result or a plain
+    /// variable of unresolved type — a field/index receiver is typically a builtin collection
+    /// (`self.items.isEmpty()`) whose camel→snake builtin mapping must stay.
+    fn unresolved_user_method_call(&self, obj: &Expr, method: &str) -> bool {
+        matches!(&obj.kind, ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Var(_))
+            && self.resolve_expr_type(obj).is_none()
+            && self.user_type_declares_method(method)
     }
 
     /// The declared parameters of `method` on the trait that `obj`'s static type names, if `obj`

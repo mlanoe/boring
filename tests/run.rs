@@ -909,3 +909,4 @@ interp_test!(bytes_array_field_and_param_reuse);
 // Multi-line closure whose body is only `pass`, as a struct-ctor argument: `// pass` used to
 // swallow the closing delimiters on the flattened closure line.
 interp_test!(closure_pass_body_struct_arg);
+interp_test!(unresolved_receiver_user_method_name);

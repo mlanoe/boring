@@ -1543,3 +1543,4 @@ transpile_test!(bytes_array_field_and_param_reuse);
 
 // See tests/cases/closure_pass_body_struct_arg.br (`pass` emitted as a `//` comment).
 transpile_test!(closure_pass_body_struct_arg);
+transpile_test!(unresolved_receiver_user_method_name);
