@@ -285,6 +285,10 @@ pub(crate) fn fixed_point_prelude(generated: &str) -> (Option<String>, Vec<Strin
         let mut errors = Vec::new();
         fmts.sort_by_key(|f| (f.width(), !f.signed, f.n));
         let mut out = String::from(crate::fixed::RUST_SHARED_PRELUDE);
+        // Integer math core (sqrt/sin/cos/tan/exp/ln), the very file the Rust interpreter compiles.
+        out.push_str("#[allow(dead_code)]\nmod __fxm {\n");
+        out.push_str(include_str!("../fixed_math_core.rs"));
+        out.push_str("}\n");
         for f in &fmts {
             if f.width() > 64 {
                 errors.push(format!(
@@ -297,7 +301,3 @@ pub(crate) fn fixed_point_prelude(generated: &str) -> (Option<String>, Vec<Strin
         (Some(out), errors)
     }
 }
-        // Integer math core (sqrt/sin/cos/tan/exp/ln), the very file the Rust interpreter compiles.
-        out.push_str("#[allow(dead_code)]\nmod __fxm {\n");
-        out.push_str(include_str!("../fixed_math_core.rs"));
-        out.push_str("}\n");
