@@ -4200,3 +4200,109 @@ fn rust_keyword_struct_fields_build_and_run_on_metal() {
     assert!(run.status.success(), "program failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(stdout.trim_end(), KEYWORD_FIELDS_OUTPUT);
 }
+
+// ── Fixed-point types in kernels (docs/fixed-point-types.md, "GPU backends") ─────
+
+const FIXED_KERNEL: &str = r#"
+kernel Fx:
+    let fixed16_16 k
+    let [fixed16_16]'unified a
+    mut [fixed16_16]'unified out
+    mut [fixed8_8]'unified small
+    mut [ufixed8_24]'unified frac
+
+    init(fixed16_16 kk, [fixed16_16]'unified aa, [fixed16_16]'unified oo, [fixed8_8]'unified ss, [ufixed8_24]'unified ff):
+        k = kk
+        a = aa
+        out = oo
+        small = ss
+        frac = ff
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        let fixed16_16 p = a[i] * k
+        let fixed16_16 q = a[i] / (k + 1.0)
+        out[i] = p + q - 0.5
+        small[i] = (a[i] as fixed8_8) * 2.5
+        frac[i] = (small[i] as ufixed8_24) / 3
+"#;
+
+#[test]
+fn fixed_point_kernel_lowers_to_raw_integers() {
+    let (msl, _) = metal_codegen("fixed_point_lowering", FIXED_KERNEL);
+    // Storage: raw integer types, buffers included.
+    assert!(msl.contains("device const int* a"), "{msl}");
+    assert!(msl.contains("device short* small"), "{msl}");
+    assert!(msl.contains("device uint* frac"), "{msl}");
+    assert!(msl.contains("const int k = *__k;"), "{msl}");
+    // `*` widens and divides (truncating toward zero); never a shift. `/` scales the dividend.
+    assert!(msl.contains("((int)(((int64_t)(a[i]) * (int64_t)(k)) / (int64_t)65536))"), "{msl}");
+    assert!(msl.contains("(int64_t)65536) / (int64_t)"), "{msl}");
+    assert!(!msl.contains(">> 16"), "{msl}");
+    // Untyped literals next to fixed operands fold to the raw integer (0.5 -> 32768, 1.0 -> 65536).
+    assert!(msl.contains("((int)32768)") && msl.contains("((int)65536)"), "{msl}");
+    // fixed8_8 literal 2.5 -> 640.
+    assert!(msl.contains("((short)640)"), "{msl}");
+    assert!(!msl.contains("ERROR"), "{msl}");
+}
+
+fn metal_codegen_fails(test_name: &str, src: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join(test_name);
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, src).unwrap();
+    let result = Command::new(bin).args(["build", "--target", "metal"]).arg(&br_file).output().unwrap();
+    assert!(!result.status.success(), "[{test_name}] expected a compile error");
+    String::from_utf8_lossy(&result.stderr).into_owned()
+}
+
+#[test]
+fn fixed_point_64_bit_format_is_a_compile_error_on_metal() {
+    let err = metal_codegen_fails("fixed_point_w64", r#"
+kernel Wide:
+    mut [fixed32_32]'unified out
+    init([fixed32_32]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        out[i] = out[i] * out[i]
+"#);
+    assert!(err.contains("fixed32_32") && err.contains("not supported on --target metal"), "{err}");
+}
+
+#[test]
+fn fixed_point_math_member_is_a_compile_error_on_metal() {
+    let err = metal_codegen_fails("fixed_point_sqrt", r#"
+kernel Roots:
+    mut [fixed16_16]'unified out
+    init([fixed16_16]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        out[i] = out[i].sqrt()
+"#);
+    assert!(err.contains("sqrt") && err.contains("not supported on --target metal"), "{err}");
+}
+
+/// The full example (fixed16_16, fixed8_8, fixed8_24, ufixed16_16, members, helper fns) built
+/// for Metal and run on the device prints exactly what `boring run` prints.
+#[test]
+fn fixed_point_kernel_runs_on_metal_and_matches_interpreter() {
+    let src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/fixed_point_kernel.br")).unwrap();
+    let test_name = "fixed_point_run";
+    run_metal(test_name, &src);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join(test_name);
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(dir.join("test_metal").join("Cargo.toml"))
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "generated Metal program failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    let reference = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(dir.join("test.br")).output().unwrap();
+    assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+    assert_eq!(stdout.trim_end(), String::from_utf8_lossy(&reference.stdout).trim_end());
+}

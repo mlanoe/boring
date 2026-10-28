@@ -1817,3 +1817,175 @@ fn rust_keyword_struct_fields_are_escaped_in_rocm_host_code() {
     let (_dev, rs) = rocm_codegen("keyword_fields", KEYWORD_FIELDS);
     assert_keyword_fields_escaped(&rs);
 }
+
+// ── binary fixed-point types in kernels (docs/fixed-point-types.md, GPU backends) ──
+
+fn rocm_codegen_err(test_name: &str, src: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("rocm_codegen").join(test_name);
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, src).unwrap();
+    let result = Command::new(bin).args(["build", "--target", "rocm"]).arg(&br_file).output().unwrap();
+    assert!(!result.status.success(), "[{test_name}] build must fail");
+    String::from_utf8_lossy(&result.stderr).into_owned()
+}
+
+#[test]
+fn fixed16_16_kernel_lowers_to_raw_int32_arithmetic() {
+    let (dev, rs) = rocm_codegen("fixed_16_16", r#"
+kernel Fx:
+    let [fixed16_16]'global a
+    let [fixed16_16]'global b
+    mut [fixed16_16]'unified out
+    init([fixed16_16]'global ai, [fixed16_16]'global bi):
+        a = ai
+        b = bi
+        out = [0.0 as fixed16_16 for ..<4]
+    def ():
+        let i = .thread.x
+        let x = a[i] * b[i]
+        let y = x / b[i] + 0.25
+        var fixed16_16 acc = 1.5
+        acc = acc - a[i]
+        acc += 2
+        out[i] = -(y + acc) % 3
+pub req [fixed16_16]'kernel'unified build([fixed16_16]'global x, [fixed16_16]'global y) throws:
+    mut k = Fx(x, y)
+    k.out
+"#);
+    // fields lower to the raw integer; buffers use the raw type on the host too
+    assert!(dev.contains("const int32_t* a, const int32_t* b, int32_t* out"), "{dev}");
+    assert!(rs.contains("DeviceBuffer<i32>"), "{rs}");
+    assert!(!rs.contains("fixed16_16"), "{rs}");
+    // `*` widens to long long and divides (truncation toward zero), never `>>`
+    assert!(dev.contains("((int32_t)((long long)a[i] * (long long)b[i] / (1LL << 16)))"), "{dev}");
+    // `/` shifts the dividend first; the untyped literal folds to raw 0.25 * 65536
+    assert!(dev.contains("(((long long)x << 16) / (long long)b[i])"), "{dev}");
+    assert!(dev.contains("((int32_t)16384)"), "{dev}");
+    // typed `var` with a literal initializer, `-=`-style assign, compound `+= 2` -> raw 2.0
+    assert!(dev.contains("int32_t acc = ((int32_t)98304);"), "{dev}");
+    assert!(dev.contains("acc = ((int32_t)(acc - a[i]));"), "{dev}");
+    assert!(dev.contains("((int32_t)(acc + ((int32_t)131072)))"), "{dev}");
+    // `%` and negation are plain integer ops, `3` folds to raw 3.0
+    assert!(dev.contains("% ((int32_t)196608)"), "{dev}");
+    assert!(dev.contains("(-((int32_t)(y + acc)))"), "{dev}");
+    assert!(!dev.contains(">> 16"), "{dev}");
+}
+
+#[test]
+fn fixed8_8_and_unsigned_formats_use_matching_raw_types() {
+    let (dev, _) = rocm_codegen("fixed_8_8", r#"
+kernel Fx:
+    let [fixed8_8]'global a
+    let [ufixed8_24]'global u
+    mut [fixed8_8]'unified out
+    init([fixed8_8]'global ai, [ufixed8_24]'global ui):
+        a = ai
+        u = ui
+        out = [0.0 as fixed8_8 for ..<2]
+    def ():
+        let i = .thread.x
+        let big = a[i] * a[i] > 1.5
+        out[i] = a[i] / 2
+        let t = u[i] * u[i]
+"#);
+    assert!(dev.contains("const int16_t* a, const uint32_t* u, int16_t* out"), "{dev}");
+    assert!(dev.contains("((int16_t)((long long)a[i] * (long long)a[i] / (1LL << 8)))"), "{dev}");
+    assert!(dev.contains("> ((int16_t)384)"), "{dev}");
+    assert!(dev.contains("(((long long)a[i] << 8) / (long long)((int16_t)512))"), "{dev}");
+    // unsigned: unsigned wide intermediate
+    assert!(dev.contains("((uint32_t)((unsigned long long)u[i] * (unsigned long long)u[i] / (1ULL << 24)))"), "{dev}");
+}
+
+#[test]
+fn fixed32_32_uses_128_bit_intermediate() {
+    let (dev, _) = rocm_codegen("fixed_32_32", r#"
+kernel Fx:
+    let [fixed32_32]'global a
+    mut [fixed32_32]'unified out
+    init([fixed32_32]'global ai):
+        a = ai
+        out = [0.0 as fixed32_32 for ..<2]
+    def ():
+        let i = .thread.x
+        out[i] = a[i] * a[i] + a[i] / 3
+"#);
+    assert!(dev.contains("const int64_t* a, int64_t* out"), "{dev}");
+    assert!(dev.contains("((int64_t)((__int128)a[i] * (__int128)a[i] / ((__int128)1 << 32)))"), "{dev}");
+    assert!(dev.contains("(((__int128)a[i] << 32) / (__int128)((int64_t)12884901888LL))"), "{dev}");
+}
+
+#[test]
+fn fixed_point_casts_members_and_raw() {
+    let (dev, _) = rocm_codegen("fixed_casts", r#"
+kernel Fx:
+    let [fixed16_16]'global a
+    mut [fixed16_16]'unified out
+    mut [int32]'unified ints
+    init([fixed16_16]'global ai):
+        a = ai
+        out = [0.0 as fixed16_16 for ..<2]
+        ints = [0 for ..<2]
+    def ():
+        let i = .thread.x
+        let n = a[i] as int32
+        let f = a[i] as float32
+        let back = n as fixed16_16
+        let wide = a[i] as fixed8_24
+        out[i] = a[i].abs().max(back).floor()
+        ints[i] = a[i].raw + fixed16_16.fromRaw(5).raw
+"#);
+    assert!(dev.contains("((int32_t)((long long)a[i] / (1LL << 16)))"), "{dev}");
+    assert!(dev.contains("((float)((double)a[i] / 65536.0))"), "{dev}");
+    assert!(dev.contains("((int32_t)((long long)n << 16))"), "{dev}");
+    // fixed16_16 -> fixed8_24 shifts the fraction by 8 bits
+    assert!(dev.contains("((int32_t)((long long)a[i] << 8))"), "{dev}");
+    assert!(dev.contains(">> 16) << 16"), "{dev}");
+    assert!(dev.contains("(a[i] + ((int32_t)(5)))"), "{dev}");
+}
+
+#[test]
+fn fixed_128_bit_format_is_a_compile_error_on_gpu() {
+    let err = rocm_codegen_err("fixed_128", r#"
+kernel Fx:
+    mut [fixed64_64]'unified out
+    init():
+        out = [0.0 as fixed64_64 for ..<2]
+    def ():
+        out[.thread.x] = out[.thread.x]
+"#);
+    assert!(err.contains("fixed64_64") && err.contains("not supported"), "{err}");
+}
+
+#[test]
+fn fixed_math_member_is_a_compile_error_on_gpu() {
+    let err = rocm_codegen_err("fixed_sqrt", r#"
+kernel Fx:
+    let [fixed16_16]'global a
+    mut [fixed16_16]'unified out
+    init([fixed16_16]'global ai):
+        a = ai
+        out = [0.0 as fixed16_16 for ..<2]
+    def ():
+        out[.thread.x] = a[.thread.x].sqrt()
+"#);
+    assert!(err.contains("sqrt") && err.contains("not supported"), "{err}");
+}
+
+#[test]
+fn fixed_point_value_prints_as_decimal_in_kernel() {
+    let (dev, _) = rocm_codegen("fixed_print", r#"
+kernel Fx:
+    let [fixed16_16]'global a
+    mut [fixed16_16]'unified out
+    init([fixed16_16]'global ai):
+        a = ai
+        out = [0.0 as fixed16_16 for ..<2]
+    def ():
+        let i = .thread.x
+        print "v = {a[i] * a[i]}"
+"#);
+    assert!(dev.contains("printf(\"v = %f\\n\", ((double)((int32_t)((long long)a[i] * (long long)a[i] / (1LL << 16))) / 65536.0));"), "{dev}");
+}

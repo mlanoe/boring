@@ -57,9 +57,15 @@ fn overflow_and_division_by_zero() {
 }
 
 #[test]
-fn build_rejects_128_bit_formats_cleanly() {
-    let (ok, text) = run("w128", "let fixed64_64 a = 1.5\nprint \"{a}\"\n", &["build", "--emit-rust"]);
-    assert!(!ok && text.contains("128-bit fixed-point formats"), "{text}");
+fn unsigned_128_bit_formats_are_rejected_with_a_reason() {
+    fails_run("u128", "let ufixed64_64 a = 1.5\nprint \"{a}\"\n", "unsigned 128-bit fixed-point formats are not supported");
+    fails_run("frac127", "let fixed1_127 a = 0.5\nprint \"{a}\"\n", "at most 126 fractional bits");
+}
+
+#[test]
+fn wide_math_and_overflow_errors() {
+    fails_run("wmath", "let fixed64_64 a = 4.0\nprint \"{a.sqrt()}\"\n", "not supported for 128-bit fixed-point formats");
+    fails_run("wovf", "let fixed64_64 a = fixed64_64.max\nprint \"{a * 2.0}\"\n", "fixed-point overflow");
 }
 
 #[test]

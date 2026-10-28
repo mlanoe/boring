@@ -146,6 +146,7 @@ A `mut` kernel field initialized from a constructor argument always takes the in
 | Warp intrinsics | full support | SIMD-group operations (different API) |
 | `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
 | Windows / Linux | yes | macOS only |
+| Fixed-point types (`fixedN_M` / `ufixedN_M`) | `W ≤ 64` | `W ≤ 32` (raw `char`/`short`/`int`, `int64_t` intermediate for `*` `/`); 64-bit formats, math functions and overflow-policy members are compile errors — see [fixed-point types](fixed-point-types.html#gpu-backends) |
 | Tensor operations (`kernel.tensors.*`) | portable and selected native paths | portable scalar/tiled paths plus `simdgroup_matrix` for eligible float operations and selected native quantized schedules — see [tensor operations](tensor-operations.html) |
 
 ---

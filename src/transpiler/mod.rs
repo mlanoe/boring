@@ -38,6 +38,7 @@ mod last_use;
 mod promote_atomic;
 pub(crate) mod monomorphize;
 pub(crate) mod helpers;
+pub(crate) mod fixed_gpu;
 pub(crate) use helpers::*;
 pub mod kernel;
 pub mod cuda;

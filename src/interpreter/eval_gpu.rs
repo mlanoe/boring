@@ -375,6 +375,7 @@ pub(crate) enum ThreadValue {
     Float16(half::f16),
     Float32(f32),
     Float64(f64),
+    Fixed(i128, crate::fixed::FixedFmt),
     Str(String),
     Array(Vec<ThreadValue>),
     Object { type_name: String, fields: Vec<(String, ThreadValue)> },
@@ -403,6 +404,7 @@ impl PartialEq for ThreadValue {
             (ThreadValue::Float16(a), ThreadValue::Float16(b)) => a == b,
             (ThreadValue::Float32(a), ThreadValue::Float32(b)) => a == b,
             (ThreadValue::Float64(a), ThreadValue::Float64(b)) => a == b,
+            (ThreadValue::Fixed(a, fa), ThreadValue::Fixed(b, fb)) => a == b && fa == fb,
             (ThreadValue::Str(a),   ThreadValue::Str(b))   => a == b,
             (ThreadValue::Array(a), ThreadValue::Array(b)) => a == b,
             (ThreadValue::Object { type_name: tn1, fields: f1 },
@@ -437,6 +439,7 @@ pub(crate) fn to_thread_value(v: &Value) -> Option<ThreadValue> {
         Value::Float16(f)         => Some(ThreadValue::Float16(*f)),
         Value::Float32(f)           => Some(ThreadValue::Float32(*f)),
         Value::Float64(f)           => Some(ThreadValue::Float64(*f)),
+        Value::Fixed(raw, fmt)    => Some(ThreadValue::Fixed(*raw, *fmt)),
         Value::Str(s)             => Some(ThreadValue::Str(s.clone())),
         Value::Fn { decl, .. }    => Some(ThreadValue::Fn(decl.clone())),
         Value::Array(arr)         => {
@@ -485,6 +488,7 @@ pub(crate) fn from_thread_value(v: ThreadValue, captured: &EnvRef) -> Value {
         ThreadValue::Float16(f)       => Value::Float16(f),
         ThreadValue::Float32(f)         => Value::Float32(f),
         ThreadValue::Float64(f)         => Value::Float64(f),
+        ThreadValue::Fixed(raw, fmt)  => Value::Fixed(raw, fmt),
         ThreadValue::Str(s)           => Value::Str(s),
         ThreadValue::Fn(decl)         => Value::Fn { decl: Box::new(*decl), captured: Rc::clone(captured) },
         ThreadValue::Array(arr)       => Value::Array(
@@ -2349,6 +2353,7 @@ fn zero_value(ty: &crate::ast::Type) -> Value {
         Type::Named(name) if matches!(name.as_str(), "float" | "float64" | "f64" | "Float" | "Float64") =>
             Value::Float64(0.0),
         Type::Qualified(inner, _) => zero_value(inner),
+        Type::Fixed(fmt) => Value::Fixed(0, *fmt),
         Type::Bool => Value::Bool(false),
         Type::Uint => Value::Uint(0),
         Type::Uint8 => Value::Uint8(0),

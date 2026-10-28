@@ -1,0 +1,71 @@
+# fixed_point_kernel.br — binary fixed-point arithmetic inside a GPU kernel
+#
+#   boring run fixed_point_kernel.br                    # interpreted simulation
+#   boring build --target metal fixed_point_kernel.br   # Metal (macOS)
+#
+# Fixed-point values lower to their raw integer on the device: `+ - %` and compares are
+# plain integer ops, `*` / `/` widen to a 64-bit intermediate and truncate toward zero
+# (docs/fixed-point-types.md, "GPU backends"). Formats up to 32 bits wide work on Metal.
+
+let N = 8
+
+mut [fixed16_16]'kernel'unified a = [0.0 as fixed16_16 for ..<N]
+mut [fixed16_16]'kernel'unified b = [0.0 as fixed16_16 for ..<N]
+mut [fixed16_16]'kernel'unified out = [0.0 as fixed16_16 for ..<N]
+mut [fixed8_8]'kernel'unified small = [0.0 as fixed8_8 for ..<N]
+mut [fixed8_24]'kernel'unified fine = [0.0 as fixed8_24 for ..<N]
+mut [ufixed16_16]'kernel'unified pos = [0.0 as ufixed16_16 for ..<N]
+mut [int]'kernel'unified raws = [0 for ..<N]
+for i in 0..<N:
+    a[i] = (i as fixed16_16) * 1.5 - 3.25
+    b[i] = (i as fixed16_16) / 3 + 0.125
+
+fixed16_16 lerp(fixed16_16 x, fixed16_16 y, fixed16_16 t):
+    x + (y - x) * t
+
+fixed16_16 halfStep():
+    0.5
+
+kernel Fx:
+    let fixed16_16 k
+    let [fixed16_16]'unified a
+    let [fixed16_16]'unified b
+    mut [fixed16_16]'unified out
+    mut [fixed8_8]'unified small
+    mut [fixed8_24]'unified fine
+    mut [ufixed16_16]'unified pos
+    mut [int]'unified raws
+
+    init(fixed16_16 kk, [fixed16_16]'unified aa, [fixed16_16]'unified bb, [fixed16_16]'unified oo,
+         [fixed8_8]'unified ss, [fixed8_24]'unified ff, [ufixed16_16]'unified pp, [int]'unified rr):
+        k = kk
+        a = aa
+        b = bb
+        out = oo
+        small = ss
+        fine = ff
+        pos = pp
+        raws = rr
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        let fixed16_16 p = a[i] * b[i]
+        let fixed16_16 q = a[i] / (b[i] + 1.0)
+        # truncation toward zero: a negative product must not floor
+        let r = a[i] % 1.25
+        var fixed16_16 acc = p + q * k - 0.5
+        if acc < 0.0:
+            acc = acc - halfStep()
+        out[i] = lerp(acc, r, 0.25)
+        let fixed8_8 s = (a[i] as fixed8_8) * 2.5
+        small[i] = s / 3 + 1
+        fine[i] = ((s as fixed8_24) / 7) * (b[i] as fixed8_24)
+        pos[i] = (b[i] as ufixed16_16) * 1.5
+        raws[i] = out[i].raw + (a[i].abs().floor() as int) + (b[i].ceil() as int) + (p.max(q) as int)
+
+mut kk = Fx(0.75 as fixed16_16, a, b, out, small, fine, pos, raws)
+kernel:
+    kk(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{i}: {kk.out[i]} {kk.small[i]} {kk.fine[i]} {kk.pos[i]} {kk.raws[i]}"

@@ -1563,7 +1563,8 @@ Value fixed_raw_value(FixedFmt f, int128 raw):
         if w == 8: Value.Int8(raw as int8)
         elif w == 16: Value.Int16(raw as int16)
         elif w == 32: Value.Int32(raw as int32)
-        else: Value.Int64(raw as int64)
+        elif w == 64: Value.Int64(raw as int64)
+        else: Value.Int128(raw)
     else:
         if w == 8: Value.Uint8(raw as uint8)
         elif w == 16: Value.Uint16(raw as uint16)
@@ -1608,6 +1609,8 @@ int128 fixed_operand(FixedFmt f, string method, Value v):
 Value? fixed_method(int128 raw, FixedFmt f, string method, [Value] args):
     var int128? res = nil
     if args.length == 0:
+        if f.width() >= 128 and (method == "sqrt" or method == "sin" or method == "cos" or method == "tan" or method == "exp" or method == "ln"):
+            throw "{f.name()}.{method}() is not supported for 128-bit fixed-point formats"
         # sqrt / sin / cos / tan / exp / ln (fixedpoint.br, integer algorithms)
         var int128? mres = nil
         var is_math = true
@@ -1678,15 +1681,14 @@ Value? fixed_method(int128 raw, FixedFmt f, string method, [Value] args):
                 if policy == "checked":
                     return Value.Nil
                 throw "division by zero"
-            if not fixed_supported(f):
-                throw "{f.name()} `{method}` is not supported for 128-bit fixed-point formats"
             let ex = fixed_exact(f, code, raw, b, round)
             if policy == "wrapping":
                 return fixed_make(f, fixed_wrapping_from(f, ex.0, ex.1))
             if policy == "saturating":
-                return fixed_make(f, fixed_saturating_from(f, ex.0, ex.1))
-            if let v = fixed_apply_sign(f, ex.0, ex.1):
-                return fixed_make(f, v)
+                return fixed_make(f, fixed_saturating_from(f, ex.0, ex.1, ex.2))
+            if not ex.2:
+                if let v = fixed_apply_sign(f, ex.0, ex.1):
+                    return fixed_make(f, v)
             if policy == "checked":
                 return Value.Nil
             throw "fixed-point overflow in {f.name()}.{method}()"
@@ -1746,8 +1748,6 @@ Value apply_binop_fixed(BinOp op, Value l, Value r):
                     if sa != sb or na != nb or ma != mb:
                         throw "cannot mix {FixedFmt(signed = sa, n = na, m = ma).name()} and {FixedFmt(signed = sb, n = nb, m = mb).name()}; cast one with `as`"
                     let f = FixedFmt(signed = sa, n = na, m = ma)
-                    if not fixed_supported(f):
-                        throw "{f.name()} is not supported yet: 128-bit fixed-point formats"
                     var int128? res = nil
                     match op:
                         BinOp.Add: res = fixed_add(f, a, b)

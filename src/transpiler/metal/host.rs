@@ -4,6 +4,7 @@
 // Rust host-side code emitter for the Metal backend.
 // Uses the `metal` crate (objc2-metal migration planned).
 
+use crate::fixed::FixedFmt;
 use crate::ast::*;
 use crate::transpiler::helpers::{
     camel_to_snake, desugared_labeled_array_shadow_fields, labeled_array_grid_dim_expr,
@@ -120,6 +121,10 @@ struct HostEmitter {
     self_type: Option<String>,
     /// Receiver-type resolution for the `.count`/`.length` guard (see `host_types`).
     tenv: crate::transpiler::host_types::HostTypeEnv,
+    /// Declared types of every named binding in the program (flat by name) and the initializers
+    /// of unannotated lets: see `fixed_fmt_of`.
+    fixed_var_types: std::collections::HashMap<String, Type>,
+    fixed_var_inits: std::collections::HashMap<String, Expr>,
     /// The currently-being-emitted function's own by-ref-typed parameter names.
     /// See `cuda::host`'s identical field.
     ref_params: std::collections::HashSet<String>,
@@ -273,6 +278,8 @@ impl HostEmitter {
             struct_method_names: std::collections::HashMap::new(),
             self_type: None,
             tenv: Default::default(),
+            fixed_var_types: Default::default(),
+            fixed_var_inits: Default::default(),
             ref_params: std::collections::HashSet::new(),
             in_resident_return: None,
             fn_returns_resident: std::collections::HashMap::new(),
@@ -390,6 +397,17 @@ impl HostEmitter {
         // so `&T` and `&mut T` arguments keep their borrow convention.
         self.general_code_text = general_code.to_string();
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
+        for item in &program.items {
+            match item {
+                Item::Let(s) => self.collect_fixed_binding(s),
+                Item::Stmt(st) => self.collect_fixed_stmt(st),
+                Item::Fn(f) => {
+                    for p in &f.params { if let Some(t) = &p.ty { self.fixed_var_types.insert(p.name.clone(), t.clone()); } }
+                    for st in &f.body { self.collect_fixed_stmt(st); }
+                }
+                _ => {}
+            }
+        }
         {
             let mut fn_used: Vec<String> = Vec::new();
             for item in &program.items {
@@ -587,7 +605,7 @@ impl HostEmitter {
                                 self.track_kernel_var(&s.name, val);
                                 self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                                 self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
-                                let rhs = self.expr(val);
+                                let rhs = self.expr_for_type(s.ty.as_ref(), val);
                                 let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                                 // A mutable scalar a helper function also reads is a module `static` emitted by the
                                 // general pass: `main` must go through it too, not shadow it with a local.
@@ -1618,6 +1636,9 @@ impl HostEmitter {
     /// `emit_kernel_field_value`'s doc for why a mirroring kernel-field RHS needs
     /// its own, non-materializing emission instead of the ordinary `self.expr()`.
     fn emit_assign_rhs(&mut self, lhs: &Expr, rhs: &Expr) -> String {
+        if let Some(f) = self.fixed_fmt_of(lhs) {
+            return self.fixed_operand(rhs, &f);
+        }
         let lhs_is_float16 = match &lhs.kind {
             ExprKind::Field(obj, field) => match &obj.kind {
                 ExprKind::Var(obj_name) => self.var_kernel_type.get(obj_name.as_str())
@@ -2062,7 +2083,7 @@ impl HostEmitter {
                 self.tenv.track_local(&s.name, s.ty.as_ref(), s.value.as_ref(), self.self_type.as_deref());
                 let binding = if s.binding.is_mutable() { "let mut" } else { "let" };
                 if let Some(val) = &s.value {
-                    let rhs = self.expr(val);
+                    let rhs = self.expr_for_type(s.ty.as_ref(), val);
                     self.line(&format!("{} {} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), rhs));
                 }
             }
@@ -2452,6 +2473,124 @@ impl HostEmitter {
         self.line("}");
     }
 
+    // ── Fixed-point host values (docs/fixed-point-types.md) ───────────────────────────
+    // The host side of a fixed-point kernel program: arrays/scalars are the generated
+    // `FixedN_M` newtype, and an untyped literal next to one folds to its raw integer
+    // (the same rule as `transpiler::fixed_emit`, which the general pass uses).
+
+    /// Fixed-point format of an expression, from declared types (any scope, by name) and
+    /// the initializers of unannotated lets.
+    fn collect_fixed_binding(&mut self, s: &LetStmt) {
+        match (&s.ty, &s.value) {
+            (Some(t), _) => { self.fixed_var_types.insert(s.name.clone(), t.clone()); }
+            (None, Some(v)) => { self.fixed_var_inits.insert(s.name.clone(), v.clone()); }
+            _ => {}
+        }
+    }
+
+    fn collect_fixed_stmt(&mut self, st: &Stmt) {
+        match st {
+            Stmt::Let(s) => self.collect_fixed_binding(s),
+            Stmt::If(i) => {
+                for (_, b) in &i.branches { for x in b { self.collect_fixed_stmt(x); } }
+                if let Some(b) = &i.else_body { for x in b { self.collect_fixed_stmt(x); } }
+            }
+            Stmt::While(w) => for x in &w.body { self.collect_fixed_stmt(x); },
+            Stmt::For(f) => for x in &f.body { self.collect_fixed_stmt(x); },
+            _ => {}
+        }
+    }
+
+    fn fixed_fmt_of(&self, e: &Expr) -> Option<FixedFmt> {
+        self.fixed_ty_of(e, 0).as_ref().and_then(fixed_fmt_of_type)
+    }
+
+    fn fixed_ty_of(&self, e: &Expr, depth: usize) -> Option<Type> {
+        if depth > 8 { return None; }
+        match &e.kind {
+            ExprKind::Var(n) => self.fixed_var_types.get(n).cloned()
+                .or_else(|| self.fixed_var_inits.get(n).and_then(|i| self.fixed_ty_of(i, depth + 1))),
+            ExprKind::Index(arr, _) => self.fixed_ty_of(arr, depth + 1).and_then(|t| match t.without_mut() {
+                Type::Array(t) | Type::ArrayN(t, _) | Type::ArrayNExpr(t, _) | Type::LabeledArray(t, _) => Some((**t).clone()),
+                Type::Qualified(inner, _) => match inner.without_mut() {
+                    Type::Array(t) | Type::ArrayN(t, _) | Type::ArrayNExpr(t, _) | Type::LabeledArray(t, _) => Some((**t).clone()),
+                    _ => None,
+                },
+                _ => None,
+            }),
+            ExprKind::Field(obj, field) => {
+                let ExprKind::Var(v) = &obj.kind else { return None };
+                let kernel = self.var_kernel_type.get(v.as_str())?;
+                let decl = self.kernel_decls.get(kernel)?;
+                decl.fields.iter().find(|f| f.name == *field).map(|f| f.ty.clone())
+            }
+            ExprKind::Cast(_, ty) => Some(ty.clone()),
+            ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, l, r) =>
+                self.fixed_ty_of(l, depth + 1).filter(|t| fixed_fmt_of_type(t).is_some())
+                    .or_else(|| self.fixed_ty_of(r, depth + 1).filter(|t| fixed_fmt_of_type(t).is_some())),
+            ExprKind::UnaryOp(UnaryOp::Neg, inner) => self.fixed_ty_of(inner, depth + 1),
+            _ => None,
+        }
+    }
+
+    fn fixed_binop_fmt(&self, op: &BinOp, l: &Expr, r: &Expr) -> Option<FixedFmt> {
+        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            | BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
+            return None;
+        }
+        if matches!(l.kind, ExprKind::Nil) || matches!(r.kind, ExprKind::Nil) { return None; }
+        self.fixed_fmt_of(l).or_else(|| self.fixed_fmt_of(r))
+    }
+
+    /// `Some(raw)` for an untyped numeric literal (optionally negated); the inner option is "fits".
+    fn fixed_literal_expr(&self, e: &Expr, f: &FixedFmt) -> Option<String> {
+        let raw = match &e.kind {
+            ExprKind::Int(n) => f.from_int(*n as i128),
+            ExprKind::Float(x) => f.from_f64_literal(*x),
+            ExprKind::UnaryOp(UnaryOp::Neg, inner) => match &inner.kind {
+                ExprKind::Int(n) => f.from_int(-(*n as i128)),
+                ExprKind::Float(x) => f.from_f64_literal(-*x),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(match raw {
+            Some(r) => format!("{}::from_raw({})", f.rust_name(), r),
+            None => {
+                crate::transpiler::helpers::report_unsupported(e.line, e.col, &format!(
+                    "literal out of range for {} (range [{}, {}])",
+                    f.name(), f.format_exact(f.min_raw()), f.format_exact(f.max_raw())));
+                format!("{}::default()", f.rust_name())
+            }
+        })
+    }
+
+    fn fixed_operand(&mut self, e: &Expr, f: &FixedFmt) -> String {
+        self.fixed_literal_expr(e, f).unwrap_or_else(|| self.expr(e))
+    }
+
+    /// Value of a `let` declared as `ty`: a literal folds when `ty` is fixed-point.
+    fn expr_for_type(&mut self, ty: Option<&Type>, val: &Expr) -> String {
+        match ty.and_then(fixed_fmt_of_type) {
+            Some(f) => self.fixed_operand(val, &f),
+            None => self.expr(val),
+        }
+    }
+
+    fn fixed_cast(&mut self, inner: &Expr, ty: &Type) -> String {
+        let src = self.fixed_fmt_of(inner);
+        if let Some(to) = fixed_fmt_of_type(ty) {
+            if let Some(lit) = self.fixed_literal_expr(inner, &to) { return lit; }
+            return format!("__FixedCast::__to_fixed::<{}>({}).expect(\"fixed-point cast out of range\")",
+                to.rust_name(), self.expr(inner));
+        }
+        let v = self.expr(inner);
+        let dst = rust_type(ty);
+        let _ = src;
+        if dst.starts_with('f') { format!("(__FixedFormat::__to_f64({}) as {})", v, dst) }
+        else { format!("(__FixedFormat::__to_i128({}) as {})", v, dst) }
+    }
+
     // ── Statements ─────────────────────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
@@ -2493,7 +2632,7 @@ impl HostEmitter {
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
-                    let rhs = if is_resident_preserving && !is_materializing_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr(val) };
+                    let rhs = if is_resident_preserving && !is_materializing_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr_for_type(s.ty.as_ref(), val) };
                     self.line(&format!("{} {}{} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
@@ -2982,6 +3121,8 @@ impl HostEmitter {
             struct_method_names: self.struct_method_names.clone(),
             self_type: self.self_type.clone(),
             tenv: self.tenv.clone(),
+            fixed_var_types: self.fixed_var_types.clone(),
+            fixed_var_inits: self.fixed_var_inits.clone(),
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
@@ -3047,6 +3188,11 @@ impl HostEmitter {
                 self.top_level_scalars.get(name).cloned().unwrap_or_else(|| crate::transpiler::helpers::escape_rust_keyword(name))
             }
 
+            ExprKind::BinOp(op, lhs, rhs) if self.fixed_binop_fmt(op, lhs, rhs).is_some() => {
+                // An untyped literal next to a fixed-point operand folds to the raw integer.
+                let f = self.fixed_binop_fmt(op, lhs, rhs).unwrap();
+                format!("({} {} {})", self.fixed_operand(lhs, &f), binop_rust(op), self.fixed_operand(rhs, &f))
+            }
             ExprKind::BinOp(op, lhs, rhs) => {
                 let mut l = self.expr(lhs);
                 let mut r = self.expr(rhs);
@@ -3793,6 +3939,9 @@ impl HostEmitter {
                 let hi = self.expr(end);
                 if *inclusive { format!("({}..={})", lo, hi) } else { format!("({}..{})", lo, hi) }
             }
+            ExprKind::Cast(inner, ty) if fixed_fmt_of_type(ty).is_some() || self.fixed_fmt_of(inner).is_some() => {
+                self.fixed_cast(inner, ty)
+            }
             ExprKind::Cast(inner, ty) => {
                 // Host floats in the render loop are `f64` (`screen.time`); `float` means `f64` there.
                 if self.in_render_loop && matches!(ty, Type::Named(n) if n == "float" || n == "float64") {
@@ -4233,6 +4382,11 @@ fn general_host_elem_type(ty: &Type) -> String {
 }
 
 pub(super) fn rust_type(ty: &Type) -> String {
+    if let Some(f) = fixed_fmt_of_type(ty) {
+        // The generated newtype (`Fixed16_16(pub i32)`, `repr(transparent)`), so a `Vec` of
+        // it is bit-identical to the device buffer of raw integers.
+        return f.rust_name();
+    }
     match ty {
         Type::Int            => "isize".into(),
         Type::Uint           => "usize".into(),
@@ -4399,5 +4553,14 @@ fn unaryop_rust(op: &UnaryOp) -> &'static str {
         UnaryOp::Neg    => "-",
         UnaryOp::Not    => "!",
         UnaryOp::BitNot => "!",
+    }
+}
+
+fn fixed_fmt_of_type(ty: &Type) -> Option<FixedFmt> {
+    match ty {
+        Type::Fixed(f) => Some(*f),
+        Type::Named(n) => FixedFmt::from_name(n),
+        Type::Mut(t) | Type::Qualified(t, _) => fixed_fmt_of_type(t),
+        _ => None,
     }
 }

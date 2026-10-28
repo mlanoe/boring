@@ -474,6 +474,7 @@ itest!(typed_tuple_idents);
 itest!(fixed_point_struct_fn);
 itest!(fixed_point_members);
 itest!(fixed_point_policies);
+itest!(fixed_point_wide);
 itest!(fixed_point_math);
 itest!(float64_array_literal_width_and_cast);
 itest!(optional_interp_numeric);

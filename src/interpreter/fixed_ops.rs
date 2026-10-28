@@ -94,12 +94,12 @@ impl Interpreter {
                 if op == FxOp::Div && b == 0 {
                     return if policy == "checked" { Ok(Value::Nil) } else { Err(err("division by zero", line)) };
                 }
-                let (mag, neg) = fmt.exact(op, raw, b, false)
-                    .ok_or_else(|| err(format!("{} `{}` is not supported for 128-bit fixed-point formats", fmt.name(), method), line))?;
+                let (mag, neg, ovf) = fmt.exact(op, raw, b, false)
+                    .ok_or_else(|| err("division by zero", line))?;
                 Ok(match policy {
                     "wrapping" => Value::Fixed(fmt.wrapping_from(mag, neg), *fmt),
-                    "saturating" => Value::Fixed(fmt.saturating_from(mag, neg), *fmt),
-                    _ => fmt.checked_from(mag, neg).map(|r| Value::Fixed(r, *fmt)).unwrap_or(Value::Nil),
+                    "saturating" => Value::Fixed(fmt.saturating_from(mag, neg, ovf), *fmt),
+                    _ => (if ovf { None } else { fmt.checked_from(mag, neg) }).map(|r| Value::Fixed(r, *fmt)).unwrap_or(Value::Nil),
                 })
             })());
         }
@@ -110,15 +110,18 @@ impl Interpreter {
                 if op == FxOp::Div && b == 0 {
                     return Err(err("division by zero", line));
                 }
-                let (mag, neg) = fmt.exact(op, raw, b, true)
-                    .ok_or_else(|| err(format!("{} `{}` is not supported for 128-bit fixed-point formats", fmt.name(), method), line))?;
-                fmt.checked_from(mag, neg).map(|r| Value::Fixed(r, *fmt))
+                let (mag, neg, ovf) = fmt.exact(op, raw, b, true)
+                    .ok_or_else(|| err("division by zero", line))?;
+                (if ovf { None } else { fmt.checked_from(mag, neg) }).map(|r| Value::Fixed(r, *fmt))
                     .ok_or_else(|| err(format!("fixed-point overflow in {}.{}()", fmt.name(), method), line))
             })());
         }
         // sqrt / sin / cos / tan / exp / ln (integer algorithms: src/fixed_math_core.rs)
         if let (Some(f), []) = (crate::fixed::math_fn(method), args) {
             return Some((|| {
+                if fmt.width() >= 128 {
+                    return Err(err(format!("{}.{}() is not supported for 128-bit fixed-point formats", fmt.name(), method), line));
+                }
                 let m = fmt.m;
                 match f(raw, m) {
                     Some(v) => fmt.checked(v).map(|r| Value::Fixed(r, *fmt))

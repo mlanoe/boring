@@ -4,14 +4,15 @@
 # (docs/fixed-point-types.md). A fixed-point value is `Value.Fixed(raw, signed, n, m)`:
 # a raw storage integer `raw` of width `n + m` bits whose real value is `raw / 2^m`.
 #
-# Supported widths are 8/16/32/64 (the 128-bit formats need a 256-bit intermediate
-# for `*` and `/`, docs Phasing §4). Every operation returns `nil` on overflow and
-# the caller turns that into a runtime error.
+# Supported widths are 8/16/32/64 and, for SIGNED formats with at most 126 fractional
+# bits, 128 (docs Phase 4). Every operation returns `nil` on overflow and the caller
+# turns that into a runtime error.
 #
-# The 2W-bit intermediate of `*` and `/` is computed on *magnitudes* in `uint128`
-# (|ra| * |rb| < 2^128 for every width up to 64), then the sign is re-applied, so
-# the result truncates toward zero exactly like the Rust interpreter and the
-# generated Rust newtype.
+# `*`, `/`, `+`, `-` and the literal/format helpers work on *magnitudes* in `uint128`
+# (plus a sign flag and an "overflowed 128 bits" flag) through the 256-bit helpers
+# `fxw_*` below, a line-for-line port of src/fixed_wide_core.rs. The sign is
+# re-applied at the end, so results truncate toward zero exactly like the Rust
+# interpreter and the generated Rust newtype.
 
 struct FixedFmt:
     bool signed
@@ -77,6 +78,8 @@ FixedFmt? fixed_fmt_of_name(string name):
         return nil
     if signed and n == 0:
         return nil
+    if w == 128 and (not signed or m > 126):
+        return nil
     FixedFmt(signed = signed, n = n, m = m)
 
 int128 fixed_one():
@@ -85,21 +88,29 @@ int128 fixed_one():
 int128 fixed_pow2(int k):
     fixed_one() << k
 
-# The widest supported storage is 64 bits: min/max always fit an int128.
+int128 fixed_i128_min():
+    let half = fixed_pow2(126)
+    (0 - half) - half
+
+int128 fixed_i128_max():
+    let half = fixed_pow2(126)
+    (half - fixed_one()) + half
+
 int128 fixed_min_raw(FixedFmt f):
     if f.signed:
+        if f.width() == 128:
+            return fixed_i128_min()
         0 - fixed_pow2(f.width() - 1)
     else:
         0 as int128
 
 int128 fixed_max_raw(FixedFmt f):
     if f.signed:
+        if f.width() == 128:
+            return fixed_i128_max()
         fixed_pow2(f.width() - 1) - fixed_one()
     else:
         fixed_pow2(f.width()) - fixed_one()
-
-bool fixed_supported(FixedFmt f):
-    f.width() <= 64
 
 int128? fixed_checked(FixedFmt f, int128 raw):
     if raw < fixed_min_raw(f) or raw > fixed_max_raw(f):
@@ -108,51 +119,66 @@ int128? fixed_checked(FixedFmt f, int128 raw):
 
 uint128 fixed_abs(int128 a):
     if a < 0:
-        (0 - a) as uint128
+        ((0 - (a + 1)) as uint128) + (1 as uint128)
     else:
         a as uint128
 
 # magnitude + sign -> int128, nil if it cannot be represented or is out of range.
 int128? fixed_apply_sign(FixedFmt f, uint128 mag, bool neg):
-    let limit = (fixed_one() << 126) as uint128
-    if mag > limit:
-        return nil
-    let v = mag as int128
+    let half = (fixed_one() << 126) as uint128
+    let limit = half + half
     if neg:
-        fixed_checked(f, 0 - v)
+        if mag > limit:
+            return nil
+        if mag == limit:
+            return fixed_checked(f, fixed_i128_min())
+        fixed_checked(f, 0 - (mag as int128))
     else:
-        fixed_checked(f, v)
+        if mag >= limit:
+            return nil
+        fixed_checked(f, mag as int128)
 
 int128? fixed_add(FixedFmt f, int128 a, int128 b):
-    fixed_checked(f, a + b)
+    let r = fxw_add(a, b)
+    if r.2:
+        return nil
+    fixed_apply_sign(f, r.0, r.1)
 
 int128? fixed_sub(FixedFmt f, int128 a, int128 b):
-    fixed_checked(f, a - b)
+    let r = fxw_sub(a, b)
+    if r.2:
+        return nil
+    fixed_apply_sign(f, r.0, r.1)
 
 int128? fixed_neg(FixedFmt f, int128 a):
-    fixed_checked(f, 0 - a)
+    fixed_apply_sign(f, fixed_abs(a), a >= 0)
 
 # (ra * rb) >> m, truncating toward zero.
 int128? fixed_mul(FixedFmt f, int128 a, int128 b):
-    let neg = (a < 0) != (b < 0)
-    let prod = fixed_abs(a) * fixed_abs(b)
-    fixed_apply_sign(f, prod >> f.m, neg)
+    let r = fxw_mul(a, b, f.m, false)
+    if r.2:
+        return nil
+    fixed_apply_sign(f, r.0, r.1)
 
 # (ra << m) / rb, truncating toward zero. The caller reports division by zero.
 int128? fixed_div(FixedFmt f, int128 a, int128 b):
-    let neg = (a < 0) != (b < 0)
-    let num = fixed_abs(a) << f.m
-    fixed_apply_sign(f, num / fixed_abs(b), neg)
+    let r = fxw_div(a, b, f.m, false)
+    if r.2:
+        return nil
+    fixed_apply_sign(f, r.0, r.1)
 
 int128? fixed_rem(FixedFmt f, int128 a, int128 b):
+    if a == fixed_i128_min() and b == (0 - 1) as int128:
+        return nil
     fixed_checked(f, a % b)
 
 # integer -> raw, exact; nil if it does not fit.
 int128? fixed_from_int(FixedFmt f, int128 i):
-    let bound = fixed_pow2(64)
-    if i > bound or i < 0 - bound:
+    let mag = fixed_abs(i)
+    let sh = mag << f.m
+    if (sh >> f.m) != mag:
         return nil
-    fixed_checked(f, i * fixed_pow2(f.m))
+    fixed_apply_sign(f, sh, i < 0)
 
 # A decimal literal as written, rounded to nearest (ties away from zero) with
 # exact integer arithmetic — never through an f64.
@@ -174,12 +200,11 @@ int128? fixed_from_decimal(FixedFmt f, string text):
         int_part = body
     if int_part.length == 0 and frac_part.length == 0:
         return nil
-    if frac_part.length > 36:
+    if frac_part.length > 38:
         return nil
     let digits = int_part + frac_part
     let half_range = (fixed_one() << 126) as uint128
     let u128_max = half_range + half_range + half_range + (half_range - (1 as uint128))
-    let scale = (fixed_one() << f.m) as uint128
     var num = 0 as uint128
     for c in digits.chars():
         let d = ((c as int) else -1)
@@ -188,27 +213,23 @@ int128? fixed_from_decimal(FixedFmt f, string text):
         if num > (u128_max - (d as uint128)) / (10 as uint128):
             return nil
         num = num * (10 as uint128) + (d as uint128)
-    if num > u128_max / scale:
-        return nil
     var den = 1 as uint128
     var k = 0
     while k < frac_part.length:
         den = den * (10 as uint128)
         k += 1
-    let scaled = num * scale
-    var q = scaled / den
-    let r = scaled % den
-    if r >= den - r:
-        q = q + (1 as uint128)
+    guard let q = fxw_scale_decimal(num, den, f.m) else: return nil
     fixed_apply_sign(f, q, neg)
 
 # fixed -> int, truncating toward zero.
 int128 fixed_to_int(FixedFmt f, int128 raw):
-    let mag = (fixed_abs(raw) >> f.m) as int128
+    let mag = fixed_abs(raw) >> f.m
     if raw < 0:
-        0 - mag
+        if mag == ((fixed_one() << 126) as uint128) + ((fixed_one() << 126) as uint128):
+            return fixed_i128_min()
+        0 - (mag as int128)
     else:
-        mag
+        mag as int128
 
 float64 fixed_pow2_f64(int k):
     var r = 1.0
@@ -225,9 +246,10 @@ float64 fixed_to_f64(FixedFmt f, int128 raw):
 int128? fixed_from_f64_trunc(FixedFmt f, float64 x):
     if x != x:
         return nil
-    if x > 1.0e30 or x < -1.0e30:
-        return nil
     let scaled = x * fixed_pow2_f64(f.m)
+    let lim = fixed_pow2_f64(127)
+    if scaled >= lim or scaled < 0.0 - lim:
+        return nil
     fixed_checked(f, scaled as int128)
 
 # fixed -> other fixed: shift by the difference of m, truncating toward zero;
@@ -237,10 +259,10 @@ int128? fixed_convert(FixedFmt from, int128 raw, FixedFmt to):
     let neg = raw < 0
     if to.m >= from.m:
         let k = to.m - from.m
-        # |raw| < 2^64, so anything under 2^(127-k) cannot overflow the shift.
-        if mag >= (fixed_one() << (127 - k)) as uint128:
+        let sh = mag << k
+        if (sh >> k) != mag:
             return nil
-        fixed_apply_sign(to, mag << k, neg)
+        fixed_apply_sign(to, sh, neg)
     else:
         fixed_apply_sign(to, mag >> (from.m - to.m), neg)
 
@@ -250,53 +272,28 @@ string fixed_digit_str(int d):
 # Exact decimal expansion with trailing zeros trimmed (`1.5`, `-3`), or rounded to
 # `places` decimals (ties away from zero) when `places >= 0`.
 string fixed_format(FixedFmt f, int128 raw, int places):
-    let neg = raw < 0
-    let mag = fixed_abs(raw)
-    let mask = (fixed_pow2(f.m) - fixed_one()) as uint128
-    var int_part = mag >> f.m
-    var frac = mag & mask
-    mut [int] digits = []
-    var round_up = false
-    let ten = 10 as uint128
-    if places >= 0:
-        var count = 0
-        while count < places:
-            frac = frac * ten
-            digits.push((frac >> f.m) as int)
-            frac = frac & mask
-            count += 1
-        round_up = f.m > 0 and frac >= (fixed_pow2(f.m - 1) as uint128)
-    else:
-        while frac != (0 as uint128):
-            frac = frac * ten
-            digits.push((frac >> f.m) as int)
-            frac = frac & mask
-    if round_up:
-        var i = digits.length
-        var carrying = true
-        while carrying:
-            if i == 0:
-                int_part = int_part + (1 as uint128)
-                carrying = false
-            else:
-                i -= 1
-                if digits[i] == 9:
-                    digits[i] = 0
-                else:
-                    digits[i] = digits[i] + 1
-                    carrying = false
+    let parts = fxw_digits(fixed_abs(raw), f.m, places)
+    let int_part = parts.0
+    let digits = parts.1
     var all_zero = int_part == (0 as uint128)
     for d in digits:
         if d != 0:
             all_zero = false
     var out = ""
-    if neg and not all_zero:
+    if raw < 0 and not all_zero:
         out = "-"
     out = out + "{int_part}"
-    if digits.length > 0:
+    var want = digits.length
+    if places >= 0:
+        want = places
+    if want > 0:
         out = out + "."
         for d in digits:
             out = out + fixed_digit_str(d)
+        var extra = digits.length
+        while extra < want:
+            out = out + "0"
+            extra += 1
     out
 
 # ---- rounding / sign helpers (docs: Members); nil = not representable ----
@@ -314,6 +311,8 @@ int128? fixed_floor(FixedFmt f, int128 raw):
 int128? fixed_ceil(FixedFmt f, int128 raw):
     guard let t = fixed_trunc(f, raw) else: return nil
     if raw > t:
+        if t > fixed_max_raw(f) - fixed_pow2(f.m):
+            return nil
         fixed_checked(f, t + fixed_pow2(f.m))
     else:
         t
@@ -335,7 +334,7 @@ int128? fixed_fract(FixedFmt f, int128 raw):
 
 int128? fixed_abs_checked(FixedFmt f, int128 raw):
     if raw < 0:
-        fixed_checked(f, 0 - raw)
+        fixed_apply_sign(f, fixed_abs(raw), false)
     else:
         raw
 
@@ -349,33 +348,26 @@ int128? fixed_signum(FixedFmt f, int128 raw):
 
 # ---- overflow policies: wrapping / saturating / checked, mulRound / divRound ----
 
-# Exact `a op b` as (magnitude, negative), truncated toward zero or rounded to
-# nearest (ties away from zero) when `round`. op: 0 add, 1 sub, 2 mul, 3 div.
-(uint128, bool) fixed_exact(FixedFmt f, int op, int128 a, int128 b, bool round):
+# Exact `a op b` as (magnitude, negative, overflowed 128 bits), truncated toward zero
+# or rounded to nearest (ties away from zero) when `round`. op: 0 add, 1 sub, 2 mul,
+# 3 div. The magnitude is the low 128 bits when the flag is set.
+(uint128, bool, bool) fixed_exact(FixedFmt f, int op, int128 a, int128 b, bool round):
     if op == 0:
-        let v = a + b
-        return (fixed_abs(v), v < 0)
+        return fxw_add(a, b)
     if op == 1:
-        let v = a - b
-        return (fixed_abs(v), v < 0)
-    let neg = (a < 0) != (b < 0)
+        return fxw_sub(a, b)
     if op == 2:
-        let prod = fixed_abs(a) * fixed_abs(b)
-        var q = prod >> f.m
-        let mask = (fixed_pow2(f.m) - fixed_one()) as uint128
-        if round and f.m > 0 and (prod & mask) >= (fixed_pow2(f.m - 1) as uint128):
-            q = q + (1 as uint128)
-        return (q, neg)
-    let den = fixed_abs(b)
-    let num = fixed_abs(a) << f.m
-    var q = num / den
-    if round and (num % den) * (2 as uint128) >= den:
-        q = q + (1 as uint128)
-    (q, neg)
+        return fxw_mul(a, b, f.m, round)
+    fxw_div(a, b, f.m, round)
 
 # Two's-complement truncation to the storage width.
 int128 fixed_wrapping_from(FixedFmt f, uint128 mag, bool neg):
     let w = f.width()
+    if w == 128:
+        var whole = mag
+        if neg and mag != (0 as uint128):
+            whole = (fxw_umax() - mag) + (1 as uint128)
+        return whole as int128
     let modulus = fixed_pow2(w) as uint128
     let mask = modulus - (1 as uint128)
     var low = mag & mask
@@ -386,13 +378,180 @@ int128 fixed_wrapping_from(FixedFmt f, uint128 mag, bool neg):
         out = out - fixed_pow2(w)
     out
 
-int128 fixed_saturating_from(FixedFmt f, uint128 mag, bool neg):
-    if let v = fixed_apply_sign(f, mag, neg):
-        v
-    elif neg:
+int128 fixed_saturating_from(FixedFmt f, uint128 mag, bool neg, bool ovf):
+    if not ovf:
+        if let v = fixed_apply_sign(f, mag, neg):
+            return v
+    if neg:
         fixed_min_raw(f)
     else:
         fixed_max_raw(f)
+
+# ---- 256-bit intermediates (128-bit formats): port of src/fixed_wide_core.rs ----
+
+uint128 fxw_umax():
+    let half = (1 as uint128) << 127
+    (half - (1 as uint128)) + half
+
+uint128 fxw_m64():
+    ((1 as uint128) << 64) - (1 as uint128)
+
+# Full 256-bit product (hi, lo).
+(uint128, uint128) fxw_mul_full(uint128 a, uint128 b):
+    let mk = fxw_m64()
+    let a0 = a & mk
+    let a1 = a >> 64
+    let b0 = b & mk
+    let b1 = b >> 64
+    let p00 = a0 * b0
+    let p01 = a0 * b1
+    let p10 = a1 * b0
+    let p11 = a1 * b1
+    let mid = (p00 >> 64) + (p01 & mk) + (p10 & mk)
+    let lo = (p00 & mk) | ((mid & mk) << 64)
+    let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64)
+    (hi, lo)
+
+# (hi, lo) >> s for s < 128.
+(uint128, uint128) fxw_shr(uint128 hi, uint128 lo, int s):
+    if s == 0:
+        (hi, lo)
+    else:
+        (hi >> s, (lo >> s) | (hi << (128 - s)))
+
+# x << s as 256 bits, for s < 128.
+(uint128, uint128) fxw_shl(uint128 x, int s):
+    if s == 0:
+        (0 as uint128, x)
+    else:
+        (x >> (128 - s), x << s)
+
+(uint128, uint128) fxw_inc(uint128 hi, uint128 lo):
+    if lo == fxw_umax():
+        (hi + (1 as uint128), 0 as uint128)
+    else:
+        (hi, lo + (1 as uint128))
+
+# 256-by-128-bit long division: (quotient hi, quotient lo, remainder).
+(uint128, uint128, uint128) fxw_divrem(uint128 hi, uint128 lo, uint128 den):
+    if den == (0 as uint128):
+        throw "division by zero"
+    if hi == (0 as uint128):
+        return (0 as uint128, lo / den, lo % den)
+    var qh = 0 as uint128
+    var ql = 0 as uint128
+    var r = 0 as uint128
+    var i = 256
+    while i > 0:
+        i -= 1
+        var bit = 0 as uint128
+        if i >= 128:
+            bit = (hi >> (i - 128)) & (1 as uint128)
+        else:
+            bit = (lo >> i) & (1 as uint128)
+        let carry = r >> 127
+        r = (r << 1) | bit
+        qh = (qh << 1) | (ql >> 127)
+        ql = ql << 1
+        if carry == (1 as uint128):
+            r = r + ((fxw_umax() - den) + (1 as uint128))
+            ql = ql | (1 as uint128)
+        elif r >= den:
+            r = r - den
+            ql = ql | (1 as uint128)
+    (qh, ql, r)
+
+# Sign-magnitude a + b: (low 128 bits of the magnitude, negative, overflowed).
+(uint128, bool, bool) fxw_addsm(uint128 ma, bool na, uint128 mb, bool nb):
+    if na == nb:
+        if ma > fxw_umax() - mb:
+            return ((ma - (fxw_umax() - mb)) - (1 as uint128), na, true)
+        return (ma + mb, na, false)
+    if ma >= mb:
+        return (ma - mb, na and ma != mb, false)
+    (mb - ma, nb, false)
+
+(uint128, bool, bool) fxw_add(int128 a, int128 b):
+    fxw_addsm(fixed_abs(a), a < 0, fixed_abs(b), b < 0)
+
+(uint128, bool, bool) fxw_sub(int128 a, int128 b):
+    fxw_addsm(fixed_abs(a), a < 0, fixed_abs(b), not (b < 0))
+
+(uint128, bool, bool) fxw_mul(int128 a, int128 b, int m, bool round):
+    let pr = fxw_mul_full(fixed_abs(a), fixed_abs(b))
+    var q = fxw_shr(pr.0, pr.1, m)
+    if round and m > 0 and ((pr.1 >> (m - 1)) & (1 as uint128)) == (1 as uint128):
+        q = fxw_inc(q.0, q.1)
+    (q.1, (a < 0) != (b < 0), q.0 != (0 as uint128))
+
+# b must be non-zero.
+(uint128, bool, bool) fxw_div(int128 a, int128 b, int m, bool round):
+    let den = fixed_abs(b)
+    let nm = fxw_shl(fixed_abs(a), m)
+    let dr = fxw_divrem(nm.0, nm.1, den)
+    var q = (dr.0, dr.1)
+    if round and dr.2 >= den - dr.2:
+        q = fxw_inc(q.0, q.1)
+    (q.1, (a < 0) != (b < 0), q.0 != (0 as uint128))
+
+# round(num * 2^m / den) (ties up); nil if it does not fit 128 bits.
+uint128? fxw_scale_decimal(uint128 num, uint128 den, int m):
+    let nm = fxw_shl(num, m)
+    let dr = fxw_divrem(nm.0, nm.1, den)
+    var q = (dr.0, dr.1)
+    if dr.2 >= den - dr.2:
+        q = fxw_inc(q.0, q.1)
+    if q.0 != (0 as uint128):
+        return nil
+    q.1
+
+int fxw_digit(uint128 h, uint128 l, int m):
+    if m == 0:
+        0
+    else:
+        ((h << (128 - m)) | (l >> m)) as int
+
+# Decimal digits of mag / 2^m: (integer part, fraction digits). `places < 0` is the
+# exact expansion with trailing zeros trimmed; otherwise cut to `places` digits
+# (at most 128) and rounded to nearest, ties away from zero.
+(uint128, [int]) fxw_digits(uint128 mag, int m, int places):
+    let mask = ((1 as uint128) << m) - (1 as uint128)
+    var int_part = mag >> m
+    var frac = mag & mask
+    mut [int] digits = []
+    var round_up = false
+    let ten = 10 as uint128
+    if places >= 0:
+        var p = places
+        if p > 128:
+            p = 128
+        var count = 0
+        while count < p:
+            let hl = fxw_mul_full(frac, ten)
+            digits.push(fxw_digit(hl.0, hl.1, m))
+            frac = hl.1 & mask
+            count += 1
+        round_up = m > 0 and frac >= ((1 as uint128) << (m - 1))
+    else:
+        while frac != (0 as uint128):
+            let hl = fxw_mul_full(frac, ten)
+            digits.push(fxw_digit(hl.0, hl.1, m))
+            frac = hl.1 & mask
+    if round_up:
+        var i = digits.length
+        var carrying = true
+        while carrying:
+            if i == 0:
+                int_part = int_part + (1 as uint128)
+                carrying = false
+            else:
+                i -= 1
+                if digits[i] == 9:
+                    digits[i] = 0
+                else:
+                    digits[i] = digits[i] + 1
+                    carrying = false
+    (int_part, digits)
 
 # ---- integer math: sqrt / sin / cos / tan / exp / ln (Phase 5) ----
 #

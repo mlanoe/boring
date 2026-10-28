@@ -259,6 +259,13 @@ impl Transpiler {
 /// (128-bit) format. A free function: it runs after the transpiler's output has
 /// been moved out of `Transpiler`.
 pub(crate) fn fixed_point_prelude(generated: &str) -> (Option<String>, Vec<String>) {
+    fixed_point_prelude_ext(generated, false)
+}
+
+/// Like [`fixed_point_prelude`]. With `shared_present`, `generated` already carries a prelude
+/// (the shared helpers, `__fxm`, and some formats — e.g. the general pass's code spliced into
+/// a GPU host): only the formats it does not define yet are emitted.
+pub(crate) fn fixed_point_prelude_ext(generated: &str, shared_present: bool) -> (Option<String>, Vec<String>) {
     {
         let mut fmts: Vec<FixedFmt> = Vec::new();
         let bytes = generated.as_bytes();
@@ -279,23 +286,25 @@ pub(crate) fn fixed_point_prelude(generated: &str) -> (Option<String>, Vec<Strin
                 }
             }
         }
+        if shared_present {
+            fmts.retain(|f| !generated.contains(&format!("pub struct {}(", f.rust_name())));
+        }
         if fmts.is_empty() {
             return (None, Vec::new());
         }
-        let mut errors = Vec::new();
+        let errors = Vec::new();
         fmts.sort_by_key(|f| (f.width(), !f.signed, f.n));
-        let mut out = String::from(crate::fixed::RUST_SHARED_PRELUDE);
-        // Integer math core (sqrt/sin/cos/tan/exp/ln), the very file the Rust interpreter compiles.
-        out.push_str("#[allow(dead_code)]\nmod __fxm {\n");
-        out.push_str(include_str!("../fixed_math_core.rs"));
-        out.push_str("}\n");
+        let mut out = if shared_present { String::new() } else { String::from(crate::fixed::RUST_SHARED_PRELUDE) };
+        if !shared_present {
+            // Integer math core (sqrt/sin/cos/tan/exp/ln), the very file the Rust interpreter compiles.
+            out.push_str("#[allow(dead_code)]\nmod __fxm {\n");
+            out.push_str(include_str!("../fixed_math_core.rs"));
+            out.push_str("}\n");
+            out.push_str("#[allow(dead_code)]\nmod __fxw {\n");
+            out.push_str(include_str!("../fixed_wide_core.rs"));
+            out.push_str("}\n");
+        }
         for f in &fmts {
-            if f.width() > 64 {
-                errors.push(format!(
-                    "{} is not supported yet: 128-bit fixed-point formats need a 256-bit intermediate \
-                     for `*` and `/` (docs/fixed-point-types.md, Phasing)", f.name()));
-                continue;
-            }
             out.push_str(&f.rust_definition());
         }
         (Some(out), errors)

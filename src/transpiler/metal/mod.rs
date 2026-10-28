@@ -206,8 +206,14 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
         routes = covered;
     }
     crate::transpiler::screen_input::add_clipboard(&mut host_rs, &mut cargo_toml);
+    // Fixed-point newtypes the host code uses (docs/fixed-point-types.md). The general pass's
+    // spliced code carries its own prelude when it uses any format: only add what is missing.
+    let (fixed_prelude, fixed_errors) =
+        crate::transpiler::fixed_emit::fixed_point_prelude_ext(&host_rs, host_rs.contains("mod __fxm {"));
+    if let Some(prelude) = fixed_prelude { host_rs.push_str(&prelude); }
 
     let mut errors = general_out.errors;
+    errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);

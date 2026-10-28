@@ -3,6 +3,7 @@
 //
 // MSL (Metal Shading Language) device code emitter.
 
+use crate::fixed::FixedFmt;
 use crate::ast::*;
 use crate::transpiler::tensor_host::{Q4K_ROWS_PER_SIMDGROUP, Q8_ROWS_PER_SIMDGROUP};
 use crate::transpiler::helpers::{
@@ -129,6 +130,12 @@ struct DeviceEmitter {
     /// the tail statement of such a body must stay a bare expression statement
     /// (nothing to return), unlike a non-void function's tail expression.
     current_fn_is_void: bool,
+    /// Fixed-point format of the device function being emitted's return type, so an untyped
+    /// literal in a `return`/tail position folds to the raw integer.
+    current_ret_fmt: Option<FixedFmt>,
+    /// Fixed-point formats of each device function's parameters (free functions by name,
+    /// kernel methods as `self::name`), so an untyped literal argument folds to the raw integer.
+    fn_param_fmts: std::collections::HashMap<String, Vec<Option<FixedFmt>>>,
     errors: Vec<crate::transpiler::TranspileError>,
 }
 
@@ -143,6 +150,8 @@ impl DeviceEmitter {
             top_level_scalars: std::collections::HashMap::new(),
             locals: std::collections::HashMap::new(),
             current_fn_is_void: true,
+            current_ret_fmt: None,
+            fn_param_fmts: std::collections::HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -157,6 +166,19 @@ impl DeviceEmitter {
     fn blank(&mut self) { self.out.push('\n'); }
 
     fn emit_program(&mut self, program: &Program) {
+        for item in &program.items {
+            match item {
+                Item::Fn(decl) => {
+                    self.fn_param_fmts.insert(decl.name.clone(),
+                        decl.params.iter().map(|p| p.ty.as_ref().and_then(fixed_fmt_of_type)).collect());
+                }
+                Item::Kernel(k) => for m in &k.methods {
+                    self.fn_param_fmts.insert(format!("self::{}", m.name),
+                        m.params.iter().map(|p| p.ty.as_ref().and_then(fixed_fmt_of_type)).collect());
+                },
+                _ => {}
+            }
+        }
         // Pre-pass: collect top-level scalar lets for inlining in MSL kernel bodies.
         for item in &program.items {
             if let Item::Let(s) = item {
@@ -225,6 +247,7 @@ impl DeviceEmitter {
         self.line(&format!("inline {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
+        self.current_ret_fmt = decl.return_ty.as_ref().and_then(fixed_fmt_of_type);
         self.locals.clear();
         for p in &decl.params {
             if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
@@ -270,6 +293,7 @@ impl DeviceEmitter {
         self.line(&format!("static {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
+        self.current_ret_fmt = method.return_ty.as_ref().and_then(fixed_fmt_of_type);
         self.locals.clear();
         for p in &method.params {
             if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
@@ -283,6 +307,7 @@ impl DeviceEmitter {
     fn emit_entry_point(&mut self, decl: &KernelDecl, entry: &FnDecl) {
         // The entry point is always `void` (a GPU kernel entry has no return value).
         self.current_fn_is_void = true;
+        self.current_ret_fmt = None;
         self.locals.clear();
         let fn_name = format!("{}_kernel", decl.name);
 
@@ -1811,6 +1836,7 @@ impl DeviceEmitter {
                     Some(ExprKind::Int(_)) => Some(Type::Int),
                     Some(ExprKind::Float(_)) => Some(Type::Float64),
                     Some(ExprKind::Cast(_, ty)) => Some(ty.clone()),
+                    Some(_) => s.value.as_ref().and_then(|v| self.ty_of(v)),
                     _ => None,
                 });
                 if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
@@ -1821,7 +1847,14 @@ impl DeviceEmitter {
                     return;
                 }
                 if let Some(val) = &s.value {
-                    let rhs = self.expr(val);
+                    let rhs = match s.ty.as_ref().and_then(fixed_fmt_of_type) {
+                        Some(f) => self.fixed_operand(val, &f),
+                        None => self.expr(val),
+                    };
+                    let ty = match (&s.ty, inferred_fixed_ty(self.locals.get(&s.name))) {
+                        (None, Some(f)) => msl_fixed_raw_type(&f),
+                        _ => ty,
+                    };
                     self.line(&format!("{}{} {} = {};", kw, ty, msl_safe_ident(&s.name), rhs));
                 } else {
                     self.line(&format!("{}{};", kw, ty));
@@ -1867,12 +1900,18 @@ impl DeviceEmitter {
                             self.line(&line);
                         } else {
                             let l = self.expr(lhs);
-                            let r = self.expr(rhs);
+                            let r = match self.fixed_fmt_of(lhs) {
+                                Some(f) => self.fixed_operand(rhs, &f),
+                                None => self.expr(rhs),
+                            };
                             self.line(&format!("{} = {};", l, r));
                         }
                     }
                     _ => {
-                        let s = self.expr(e);
+                        let s = match self.current_ret_fmt {
+                            Some(f) if is_last && !self.current_fn_is_void => self.fixed_operand(e, &f),
+                            _ => self.expr(e),
+                        };
                         if is_last && !self.current_fn_is_void {
                             self.line(&format!("return {};", s));
                         } else {
@@ -1883,7 +1922,10 @@ impl DeviceEmitter {
             }
             Stmt::Return(r) => {
                 if let Some(val) = &r.value {
-                    let s = self.expr(val);
+                    let s = match self.current_ret_fmt {
+                        Some(f) => self.fixed_operand(val, &f),
+                        None => self.expr(val),
+                    };
                     self.line(&format!("return {};", s));
                 } else {
                     self.line("return;");
@@ -2194,6 +2236,16 @@ impl DeviceEmitter {
                 }
             }
 
+            ExprKind::BinOp(op, lhs, rhs) if self.fixed_binop_fmt(op, lhs, rhs).is_some() => {
+                let f = self.fixed_binop_fmt(op, lhs, rhs).unwrap();
+                self.fixed_binop(op, lhs, rhs, &f, e)
+            }
+            ExprKind::UnaryOp(UnaryOp::Neg, operand) if self.fixed_fmt_of(operand).is_some() => {
+                let f = self.fixed_fmt_of(operand).unwrap();
+                self.fixed_supported(&f, e);
+                let v = self.expr(operand);
+                format!("(({})(-({})))", msl_fixed_raw_type(&f), v)
+            }
             ExprKind::BinOp(op, lhs, rhs) => {
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
@@ -2239,6 +2291,9 @@ impl DeviceEmitter {
                     "0".to_string()
                 })
             }
+            ExprKind::Field(obj, field) if self.fixed_field(obj, field, e).is_some() => {
+                self.fixed_field(obj, field, e).unwrap()
+            }
             ExprKind::Field(obj, field) => {
                 if let Some(msl) = self.try_labeled_array_field_access(obj, field) {
                     msl
@@ -2248,15 +2303,35 @@ impl DeviceEmitter {
                 }
             }
             ExprKind::Call(callee, args) => {
-                let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                let fmts = match &callee.kind {
+                    ExprKind::Var(n) => self.fn_param_fmts.get(n).cloned(),
+                    _ => None,
+                };
+                let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    match fmts.as_ref().and_then(|v| v.get(i).copied().flatten()) {
+                        Some(f) => self.fixed_operand(&a.value, &f),
+                        None => self.expr(&a.value),
+                    }
+                }).collect();
                 let fn_s = match &callee.kind {
                     ExprKind::Var(n) => map_builtin_fn(n),
                     _ => self.expr(callee),
                 };
                 format!("{}({})", fn_s, args_s.join(", "))
             }
+            ExprKind::MethodCall(obj, method, args) if self.fixed_method_applies(obj) => {
+                self.fixed_method(obj, method, args, e)
+            }
             ExprKind::MethodCall(obj, method, args) => {
-                let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                let self_fmts = if matches!(&obj.kind, ExprKind::Var(n) if n == "self") {
+                    self.fn_param_fmts.get(&format!("self::{}", method)).cloned()
+                } else { None };
+                let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    match self_fmts.as_ref().and_then(|v| v.get(i).copied().flatten()) {
+                        Some(f) => self.fixed_operand(&a.value, &f),
+                        None => self.expr(&a.value),
+                    }
+                }).collect();
                 if is_gpu_warp_receiver(obj) {
                     let operand_ty = args.first().and_then(|a| self.infer_shuffle_operand_type(&a.value));
                     if let Some(msl) = gpu_warp_method_call(method, &args_s, operand_ty.as_ref()) {
@@ -2289,6 +2364,9 @@ impl DeviceEmitter {
                     "0".to_string()
                 }
             }
+            ExprKind::Cast(inner, ty) if fixed_fmt_of_type(ty).is_some() || self.fixed_fmt_of(inner).is_some() => {
+                self.fixed_cast(inner, ty, e)
+            }
             ExprKind::Cast(inner, ty) => {
                 format!("(({})({})) ", msl_type(ty), self.expr(inner))
             }
@@ -2320,6 +2398,233 @@ impl DeviceEmitter {
                 ));
                 "0".into()
             }
+        }
+    }
+
+    // ── Fixed-point lowering (docs/fixed-point-types.md, "GPU backends") ──────────────
+
+    /// Best-effort static type of a scalar expression: just enough to find a fixed-point
+    /// format (or tell a float from an integer) for the lowering below.
+    fn ty_of(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Var(n) => self.local_or_field_type(n),
+            ExprKind::Field(obj, n) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => self.local_or_field_type(n),
+            ExprKind::Index(arr, _) => self.ty_of(arr).and_then(|t| array_elem_type(&t).cloned()),
+            ExprKind::Cast(_, ty) => Some(ty.clone()),
+            ExprKind::Int(_) => Some(Type::Int),
+            ExprKind::Float(_) => Some(Type::Float64),
+            ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, l, r) =>
+                self.ty_of(l).filter(|t| fixed_fmt_of_type(t).is_some() || is_float_ty(t))
+                    .or_else(|| self.ty_of(r).filter(|t| fixed_fmt_of_type(t).is_some() || is_float_ty(t)))
+                    .or_else(|| self.ty_of(l)),
+            ExprKind::UnaryOp(UnaryOp::Neg, inner) => self.ty_of(inner),
+            ExprKind::MethodCall(obj, m, _) if matches!(m.as_str(), "floor" | "ceil" | "trunc" | "fract" | "abs" | "min" | "max")
+                && self.fixed_fmt_of(obj).is_some() => self.ty_of(obj),
+            _ => None,
+        }
+    }
+
+    fn fixed_fmt_of(&self, e: &Expr) -> Option<FixedFmt> {
+        self.ty_of(e).as_ref().and_then(fixed_fmt_of_type)
+    }
+
+    /// A formats this backend can do; anything else is a compile error (never a silent narrowing).
+    fn fixed_supported(&mut self, f: &FixedFmt, e: &Expr) {
+        if f.width() > 32 {
+            self.errors.push(crate::transpiler::TranspileError::at(
+                format!("`{}` is not supported on --target metal: fixed-point `*` and `/` on a 64-bit \
+                         format need `mulhi`-based emulation, which this backend does not have \
+                         (use a format of at most 32 bits, e.g. `fixed16_16`)", f.name()),
+                e.line, e.col));
+        }
+    }
+
+    fn fixed_scale(f: &FixedFmt, m: u32) -> String {
+        let _ = f;
+        format!("{}", 1u64 << m)
+    }
+
+    /// `long` for a signed format, `ulong` for an unsigned one.
+    fn fixed_wide(f: &FixedFmt) -> &'static str { if f.signed { "int64_t" } else { "uint64_t" } }
+
+    /// An untyped numeric literal (optionally negated) as the raw integer of `f`.
+    fn fixed_literal(&mut self, e: &Expr, f: &FixedFmt) -> Option<String> {
+        let raw = match &e.kind {
+            ExprKind::Int(n) => f.from_int(*n as i128),
+            ExprKind::Float(x) => f.from_f64_literal(*x),
+            ExprKind::UnaryOp(UnaryOp::Neg, inner) => match &inner.kind {
+                ExprKind::Int(n) => f.from_int(-(*n as i128)),
+                ExprKind::Float(x) => f.from_f64_literal(-*x),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(match raw {
+            Some(r) => {
+                let suffix = if r > i32::MAX as i128 { "u" } else { "" };
+                format!("(({}){}{})", msl_fixed_raw_type(f), r, suffix)
+            }
+            None => {
+                self.errors.push(crate::transpiler::TranspileError::at(
+                    format!("literal out of range for {} (range [{}, {}])",
+                        f.name(), f.format_exact(f.min_raw()), f.format_exact(f.max_raw())),
+                    e.line, e.col));
+                "0".to_string()
+            }
+        })
+    }
+
+    /// Operand of a fixed-point operation: a bare literal folds to the raw integer.
+    fn fixed_operand(&mut self, e: &Expr, f: &FixedFmt) -> String {
+        match self.fixed_literal(e, f) {
+            Some(s) => s,
+            None => self.expr(e),
+        }
+    }
+
+    fn fixed_binop_fmt(&self, op: &BinOp, l: &Expr, r: &Expr) -> Option<FixedFmt> {
+        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            | BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
+            return None;
+        }
+        self.fixed_fmt_of(l).or_else(|| self.fixed_fmt_of(r))
+    }
+
+    fn fixed_binop(&mut self, op: &BinOp, l: &Expr, r: &Expr, f: &FixedFmt, e: &Expr) -> String {
+        self.fixed_supported(f, e);
+        let a = self.fixed_operand(l, f);
+        let b = self.fixed_operand(r, f);
+        let raw = msl_fixed_raw_type(f);
+        let wide = Self::fixed_wide(f);
+        let scale = Self::fixed_scale(f, f.m);
+        match op {
+            BinOp::Add => format!("(({})(({}) + ({})))", raw, a, b),
+            BinOp::Sub => format!("(({})(({}) - ({})))", raw, a, b),
+            BinOp::Rem => format!("(({})(({}) % ({})))", raw, a, b),
+            // `/`, never `>>`: the quotient truncates toward zero, an arithmetic shift would floor.
+            BinOp::Mul => format!("(({})((({}){} * ({}){}) / ({}){}))", raw, wide, wrap(&a), wide, wrap(&b), wide, scale),
+            BinOp::Div => format!("(({})((({}){} * ({}){}) / ({}){}))", raw, wide, wrap(&a), wide, scale, wide, wrap(&b)),
+            cmp => format!("({} {} {})", a, binop_msl(cmp), b),
+        }
+    }
+
+    /// `x.raw`, `fixed16_16.epsilon` / `.min` / `.max`.
+    fn fixed_field(&mut self, obj: &Expr, field: &str, e: &Expr) -> Option<String> {
+        if let ExprKind::Var(v) = &obj.kind {
+            if let Some(f) = FixedFmt::from_name(v) {
+                if self.local_or_field_type(v).is_some() { return None; }
+                self.fixed_supported(&f, e);
+                let raw = match field {
+                    "epsilon" => 1,
+                    "min" => f.min_raw(),
+                    "max" => f.max_raw(),
+                    _ => return None,
+                };
+                let suffix = if raw > i32::MAX as i128 { "u" } else { "" };
+                return Some(format!("(({}){}{})", msl_fixed_raw_type(&f), raw, suffix));
+            }
+        }
+        if field == "raw" {
+            if let Some(f) = self.fixed_fmt_of(obj) {
+                self.fixed_supported(&f, e);
+                return Some(format!("(({})({}))", Self::fixed_wide(&f), self.expr(obj)));
+            }
+        }
+        None
+    }
+
+    fn fixed_method_applies(&self, obj: &Expr) -> bool {
+        if let ExprKind::Var(v) = &obj.kind {
+            if FixedFmt::from_name(v).is_some() && self.local_or_field_type(v).is_none() { return true; }
+        }
+        self.fixed_fmt_of(obj).is_some()
+    }
+
+    fn fixed_method(&mut self, obj: &Expr, method: &str, args: &[Arg], e: &Expr) -> String {
+        // `fixed16_16.fromRaw(n)`
+        if let ExprKind::Var(v) = &obj.kind {
+            if let Some(f) = FixedFmt::from_name(v) {
+                if self.local_or_field_type(v).is_none() {
+                    self.fixed_supported(&f, e);
+                    if let ("fromRaw", [a]) = (method, args) {
+                        return format!("(({})({}))", msl_fixed_raw_type(&f), self.expr(&a.value));
+                    }
+                    return self.fixed_gpu_error(&f, method, e);
+                }
+            }
+        }
+        let f = self.fixed_fmt_of(obj).unwrap();
+        self.fixed_supported(&f, e);
+        let raw = msl_fixed_raw_type(&f);
+        let wide = Self::fixed_wide(&f);
+        let scale = Self::fixed_scale(&f, f.m);
+        let mask = (1u64 << f.m) - 1;
+        let o = self.expr(obj);
+        match (method, args) {
+            ("floor", []) => format!("(({})(({}) & ~(({}){}u)))", raw, o, wide, mask),
+            ("trunc", []) => format!("(({})((({}){} / ({}){}) * ({}){}))", raw, wide, wrap(&o), wide, scale, wide, scale),
+            ("fract", []) => format!("(({})(({}) - ({})(({}){} / ({}){}) * ({}){}))", raw, o, wide, wide, wrap(&o), wide, scale, wide, scale),
+            ("ceil", []) => format!("(({})((({}){} + ({}){}u) & ~(({}){}u)))", raw, wide, wrap(&o), wide, mask, wide, mask),
+            ("abs", []) if f.signed => format!("(({})(({}) < 0 ? -({}) : ({})))", raw, o, o, o),
+            ("abs", []) => o,
+            ("min" | "max", [a]) => {
+                let b = self.fixed_operand(&a.value, &f);
+                let p = if f.width() < 32 { "int" } else { raw.as_str() };
+                format!("(({})({}(({}){}, ({}){})))", raw, method, p, wrap(&o), p, wrap(&b))
+            }
+            _ => self.fixed_gpu_error(&f, method, e),
+        }
+    }
+
+    fn fixed_gpu_error(&mut self, f: &FixedFmt, method: &str, e: &Expr) -> String {
+        self.errors.push(crate::transpiler::TranspileError::at(
+            format!("`{}.{}(..)` is not supported on --target metal: fixed-point kernels support \
+                     `+ - * / %`, comparisons, `as` casts, `.raw`, `fromRaw`, `floor`, `ceil`, `trunc`, `fract`, \
+                     `abs`, `min` and `max`; math functions (`sqrt`, `sin`, ...), `round`, `signum`, `clamp` and \
+                     the `wrapping*`/`saturating*`/`checked*`/`mulRound`/`divRound` variants are CPU-only", f.name(), method),
+            e.line, e.col));
+        "0".to_string()
+    }
+
+    /// `x as T` where `x` or `T` is fixed-point.
+    fn fixed_cast(&mut self, inner: &Expr, ty: &Type, e: &Expr) -> String {
+        let src = self.fixed_fmt_of(inner);
+        if let Some(to) = fixed_fmt_of_type(ty) {
+            self.fixed_supported(&to, e);
+            let raw = msl_fixed_raw_type(&to);
+            if let Some(lit) = self.fixed_literal(inner, &to) {
+                return lit;
+            }
+            let v = self.expr(inner);
+            if let Some(from) = src {
+                self.fixed_supported(&from, e);
+                let wide = if from.signed || to.signed { "int64_t" } else { "uint64_t" };
+                return if to.m >= from.m {
+                    format!("(({})(({}){} * ({}){}))", raw, wide, wrap(&v), wide, Self::fixed_scale(&to, to.m - from.m))
+                } else {
+                    format!("(({})(({}){} / ({}){}))", raw, wide, wrap(&v), wide, Self::fixed_scale(&to, from.m - to.m))
+                };
+            }
+            let is_float = self.ty_of(inner).as_ref().map(is_float_ty).unwrap_or(false)
+                || matches!(inner.kind, ExprKind::Float(_));
+            return if is_float {
+                // float -> fixed truncates toward zero (a float -> int conversion in MSL does too).
+                format!("(({})(({}) * (float){}))", raw, v, Self::fixed_scale(&to, to.m))
+            } else {
+                let wide = Self::fixed_wide(&to);
+                format!("(({})(({}){} * ({}){}))", raw, wide, wrap(&v), wide, Self::fixed_scale(&to, to.m))
+            };
+        }
+        // fixed -> int / float
+        let from = src.unwrap();
+        self.fixed_supported(&from, e);
+        let v = self.expr(inner);
+        let dst = msl_type(ty);
+        if is_float_ty(ty) {
+            format!("(({})(({}){}) / ({}){})", dst, dst, wrap(&v), dst, Self::fixed_scale(&from, from.m))
+        } else {
+            let wide = Self::fixed_wide(&from);
+            format!("(({})(({}){} / ({}){}))", dst, wide, wrap(&v), wide, Self::fixed_scale(&from, from.m))
         }
     }
 
@@ -2408,7 +2713,45 @@ fn msl_unsupported_f64(fallback: &str) -> String {
     format!("{} /* ERROR: `float64` is not supported on --target metal (MSL has no native double — use float32) */", fallback)
 }
 
+/// MSL storage type of a fixed-point format's raw integer (docs/fixed-point-types.md,
+/// "GPU backends"). `W = 64` needs `mulhi`-based emulation for `*` / `/`, which this
+/// backend does not have, so it is flagged like the other unsupported 64-bit widths
+/// rather than silently narrowed.
+fn msl_fixed_raw_type(f: &FixedFmt) -> String {
+    match (f.signed, f.width()) {
+        (true, 8) => "char".into(),
+        (false, 8) => "uchar".into(),
+        (true, 16) => "short".into(),
+        (false, 16) => "ushort".into(),
+        (true, 32) => "int".into(),
+        (false, 32) => "uint".into(),
+        _ => format!("{} /* ERROR: `{}` is not supported on --target metal (fixed-point formats are limited to 8, 16 or 32 bits here) */",
+            if f.signed { "int64_t" } else { "uint64_t" }, f.name()),
+    }
+}
+
+fn fixed_fmt_of_type(ty: &Type) -> Option<FixedFmt> {
+    match ty {
+        Type::Fixed(f) => Some(*f),
+        Type::Named(n) => FixedFmt::from_name(n),
+        Type::Mut(t) | Type::Qualified(t, _) => fixed_fmt_of_type(t),
+        _ => None,
+    }
+}
+
+/// Element type of an array-shaped type (`[T]`, `[T, N]`, labeled arrays, qualified).
+fn array_elem_type(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Array(t) | Type::ArrayN(t, _) | Type::ArrayNExpr(t, _) | Type::LabeledArray(t, _) => Some(t),
+        Type::Mut(t) | Type::Qualified(t, _) => array_elem_type(t),
+        _ => None,
+    }
+}
+
 fn msl_type(ty: &Type) -> String {
+    if let Some(f) = fixed_fmt_of_type(ty) {
+        return msl_fixed_raw_type(&f);
+    }
     match ty {
         Type::Int              => "int64_t".into(),
         Type::Uint             => "uint64_t".into(),
@@ -2801,3 +3144,17 @@ fn rows_decode_marker(expr: &Expr) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// `((T)(x))` -> as is; anything else gets parenthesized so a cast applies to the whole of it.
+fn wrap(s: &str) -> String { format!("({})", s) }
+
+fn is_float_ty(t: &Type) -> bool {
+    match t.without_mut() {
+        Type::Float16 | Type::Float32 | Type::Float64 => true,
+        Type::Named(n) => matches!(n.as_str(), "float" | "float16" | "float32" | "float64" | "f16" | "f32" | "f64"),
+        Type::Qualified(inner, _) => is_float_ty(inner),
+        _ => false,
+    }
+}
+
+fn inferred_fixed_ty(t: Option<&Type>) -> Option<FixedFmt> { t.and_then(fixed_fmt_of_type) }

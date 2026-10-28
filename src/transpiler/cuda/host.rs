@@ -3863,6 +3863,8 @@ pub(super) fn rust_type(ty: &Type) -> String {
         Type::Uint32          => "u32".into(),
         Type::Uint64          => "u64".into(),
         Type::Uint128         => "u128".into(),
+        // Fixed-point buffers cross the host/device boundary as their raw integers.
+        Type::Fixed(f)         => f.rust_int(),
         Type::Float16          => "half::f16".into(),
         Type::Float32          => "f32".into(),
         Type::Float64          => "f64".into(),
@@ -3910,7 +3912,8 @@ pub(super) fn rust_type(ty: &Type) -> String {
             "uint128"       => "u128",
             "bool"          => "bool",
             "string"        => "String",
-            other           => return other.to_string(),
+            other           => return crate::fixed::FixedFmt::from_name(other)
+                .map(|f| f.rust_int()).unwrap_or_else(|| other.to_string()),
         }.into(),
         Type::TypeParam(p)     => p.clone(),
         Type::Mut(inner)       => rust_type(inner),
@@ -3980,8 +3983,9 @@ fn elem_size_bytes(ty: &Type) -> usize {
             "int128" | "uint128"    => 16,
             "i32"                   => 4,
             "u32"                   => 4,
-            _                       => 8, // conservative default
+            other                   => crate::fixed::FixedFmt::from_name(other).map_or(8, |f| (f.width() / 8) as usize),
         },
+        Type::Fixed(f)                       => (f.width() / 8) as usize,
         Type::Qualified(inner, _)            => elem_size_bytes(inner),
         Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => elem_size_bytes(inner),
         _                                    => 8,

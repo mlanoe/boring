@@ -389,6 +389,7 @@ interp_test!(typed_tuple_idents);
 interp_test!(fixed_point_struct_fn);
 interp_test!(fixed_point_members);
 interp_test!(fixed_point_policies);
+interp_test!(fixed_point_wide);
 interp_test!(fixed_point_math);
 interp_test!(float32_array_literal_width_and_cast);
 interp_test!(float64_array_literal_width_and_cast);

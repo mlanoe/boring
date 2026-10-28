@@ -58,6 +58,8 @@ struct DeviceEmitter {
     /// see `metal::device`'s identical field.
     current_fn_is_void: bool,
     errors: Vec<crate::transpiler::TranspileError>,
+    /// Names whose type is a binary fixed-point format (lowered to the raw integer).
+    fixed: crate::transpiler::fixed_gpu::FixedScope,
     /// Opt-in `matrix.algorithm = "tf32"`: eligible tensor tiles use WMMA TF32.
     tf32: bool,
     /// Opt-in half WMMA quantized prefill (`prefill.precision = "half"`).
@@ -71,6 +73,7 @@ impl DeviceEmitter {
             auto_sync: false, top_level_scalars: std::collections::HashMap::new(),
             current_fn_is_void: true,
             errors: Vec::new(),
+            fixed: Default::default(),
             tf32: false,
             half_wmma: false,
         }
@@ -157,6 +160,7 @@ impl DeviceEmitter {
             let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
             format!("{} {}", ty, c_gpu_safe_ident(&p.name))
         }).collect();
+        self.fx_enter(&[], &decl.params, decl.return_ty.as_ref());
         self.line(&format!("__device__ {} {}({}) {{", ret, decl.name, params.join(", ")));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
@@ -214,6 +218,7 @@ impl DeviceEmitter {
             let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
             params.push(format!("{} {}", ty, c_gpu_safe_ident(&p.name)));
         }
+        self.fx_enter(fields, &method.params, method.return_ty.as_ref());
         self.line(&format!("__device__ {} {}({}) {{", ret, fn_name, params.join(", ")));
         self.indent += 1;
         self.current_fn_is_void = ret == "void";
@@ -227,6 +232,7 @@ impl DeviceEmitter {
         // The entry point is always `void` (a GPU kernel entry has no return value).
         self.current_fn_is_void = true;
         let fn_name = format!("{}_kernel", decl.name);
+        self.fx_enter(&decl.fields, &entry.params, None);
         let params = field_params(&decl.fields);
         self.line(&format!("__global__ void {}({}) {{", fn_name, params.join(", ")));
         self.indent += 1;
@@ -385,7 +391,10 @@ impl DeviceEmitter {
                     return;
                 }
                 if let Some(val) = &s.value {
-                    let rhs = self.expr(val);
+                    let fx_fmt = s.ty.as_ref().and_then(crate::transpiler::fixed_gpu::fmt_of_type).or_else(|| self.fixed.fmt_of(val));
+                    if let Some(t) = &s.ty { crate::transpiler::fixed_gpu::check_type(t, val.line, val.col, &mut self.errors); }
+                    let rhs = self.expr_expect(val, fx_fmt);
+                    self.fixed.declare(&s.name, fx_fmt);
                     self.line(&format!("{}{} {} = {};", kw, ty, c_gpu_safe_ident(&s.name), rhs));
                 } else {
                     self.line(&format!("{}{} {};", kw, ty, c_gpu_safe_ident(&s.name)));
@@ -419,7 +428,8 @@ impl DeviceEmitter {
                             self.line(&line);
                         } else {
                             let l = self.expr(lhs);
-                            let r = self.expr(rhs);
+                            let fx_fmt = self.fixed.fmt_of(lhs);
+                            let r = self.expr_expect(rhs, fx_fmt);
                             self.line(&format!("{} = {};", l, r));
                         }
                     }
@@ -623,8 +633,9 @@ impl DeviceEmitter {
                     match seg {
                         StringSegment::Lit(s) => fmt.push_str(s),
                         StringSegment::Expr(e) | StringSegment::FormattedExpr(e, _) => {
-                            fmt.push_str(self.printf_spec(e));
-                            call_args.push(self.expr(e));
+                            let (spec, arg) = self.printf_arg(e);
+                            fmt.push_str(spec);
+                            call_args.push(arg);
                         }
                     }
                 }
@@ -640,8 +651,7 @@ impl DeviceEmitter {
             }
             other => {
                 let _ = other;
-                let spec = self.printf_spec(&first.value);
-                let v = self.expr(&first.value);
+                let (spec, v) = self.printf_arg(&first.value);
                 self.line(&format!("printf(\"{}\\n\", {});", spec, v));
             }
         }
@@ -700,6 +710,7 @@ impl DeviceEmitter {
             }
 
             ExprKind::BinOp(op, lhs, rhs) => {
+                if let Some(s) = self.fx_binop(op, lhs, rhs) { return s; }
                 let l = self.expr(lhs);
                 let r = self.expr(rhs);
                 {
@@ -712,11 +723,18 @@ impl DeviceEmitter {
                 }
             }
             ExprKind::UnaryOp(op, operand) => {
+                if matches!(op, UnaryOp::Neg) {
+                    if let Some(f) = self.fixed.fmt_of(operand) {
+                        let v = self.expr(operand);
+                        return crate::transpiler::fixed_gpu::neg(&f, &v);
+                    }
+                }
                 let v = self.expr(operand);
                 format!("({}{})", unaryop_c(op), v)
             }
             ExprKind::Assign(lhs, rhs) => {
-                format!("({} = {})", self.expr(lhs), self.expr(rhs))
+                let fx_fmt = self.fixed.fmt_of(lhs);
+                format!("({} = {})", self.expr(lhs), self.expr_expect(rhs, fx_fmt))
             }
             ExprKind::Index(arr, idx) => {
                 format!("{}[{}]", self.expr(arr), self.expr(idx))
@@ -745,6 +763,7 @@ impl DeviceEmitter {
                 })
             }
             ExprKind::Field(obj, field) => {
+                if field == "raw" && self.fixed.fmt_of(obj).is_some() { return self.expr(obj); }
                 if let Some(s) = self.try_labeled_array_field_access(obj, field) {
                     s
                 } else {
@@ -765,6 +784,7 @@ impl DeviceEmitter {
                 format!("{}({})", fn_s, args_s.join(", "))
             }
             ExprKind::MethodCall(obj, method, args) => {
+                if let Some(s) = self.fx_method(obj, method, args, e) { return s; }
                 let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
                 if is_gpu_warp_receiver(obj) {
                     if let Some(call) = gpu_warp_method_call(method, &args_s) {
@@ -798,6 +818,7 @@ impl DeviceEmitter {
                 }
             }
             ExprKind::Cast(inner, ty) => {
+                if let Some(s) = self.fx_cast(inner, ty, e) { return s; }
                 format!("(({})({})) ", c_type(ty), self.expr(inner))
             }
             ExprKind::If(i) => {
@@ -943,6 +964,7 @@ fn c_type(ty: &Type) -> String {
         Type::Uint32             => "uint32_t".into(),
         Type::Uint64             => "uint64_t".into(),
         Type::Uint128             => "unsigned __int128 /* GCC/NVCC extension */".into(),
+        Type::Fixed(f)           => crate::transpiler::fixed_gpu::raw_c_type(f),
         Type::Float16            => "__half".into(),
         Type::Float32            => "float".into(),
         Type::Float64            => "double".into(),
@@ -974,7 +996,8 @@ fn c_type(ty: &Type) -> String {
             "uint64"                 => "uint64_t".to_string(),
             "uint128"                => "unsigned __int128 /* GCC/NVCC extension */".to_string(),
             "bool"                  => "int".to_string(),
-            other                   => other.to_string(),
+            other                   => crate::fixed::FixedFmt::from_name(other)
+                .map(|f| crate::transpiler::fixed_gpu::raw_c_type(&f)).unwrap_or_else(|| other.to_string()),
         },
         Type::Qualified(inner, _) => c_type(inner),
         Type::Optional(inner)  => c_type(inner),
@@ -1167,5 +1190,85 @@ fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
         ExprKind::Assign(l, r)     => expr_references_any(l, names) || expr_references_any(r, names),
         ExprKind::Call(f, args)    => expr_references_any(f, names) || args.iter().any(|a| expr_references_any(&a.value, names)),
         _ => false,
+    }
+}
+
+// ── fixed-point (docs/fixed-point-types.md, GPU backends) ────────────────────
+impl DeviceEmitter {
+    /// Starts a device function: tracks which fields/params are fixed-point and
+    /// rejects 128-bit formats.
+    fn fx_enter(&mut self, fields: &[KernelFieldDecl], params: &[Param], ret: Option<&Type>) {
+        use crate::transpiler::fixed_gpu as fx;
+        self.fixed.clear();
+        for f in fields {
+            fx::check_type(&f.ty, f.line, f.col, &mut self.errors);
+            self.fixed.declare(&f.name, fx::fmt_of_type(&f.ty));
+        }
+        for p in params {
+            if let Some(t) = &p.ty { fx::check_type(t, 0, 0, &mut self.errors); }
+            self.fixed.declare(&p.name, p.ty.as_ref().and_then(fx::fmt_of_type));
+        }
+        if let Some(t) = ret { fx::check_type(t, 0, 0, &mut self.errors); }
+    }
+
+    /// `e` where a value of format `expect` is wanted: an untyped literal folds to the raw integer.
+    fn expr_expect(&mut self, e: &Expr, expect: Option<crate::fixed::FixedFmt>) -> String {
+        if let Some(f) = expect {
+            if let Some(s) = crate::transpiler::fixed_gpu::literal(e, &f, &mut self.errors) { return s; }
+        }
+        self.expr(e)
+    }
+
+    /// printf specifier and argument for an interpolated value; a fixed-point value
+    /// prints as its decimal approximation `(double)raw / 2^M` through `%f`.
+    fn printf_arg(&mut self, e: &Expr) -> (&'static str, String) {
+        if let Some(f) = self.fixed.fmt_of(e) {
+            let raw = self.expr(e);
+            return ("%f", format!("((double){} / {}.0)", raw, 1u128 << f.m));
+        }
+        (self.printf_spec(e), self.expr(e))
+    }
+
+    fn fx_binop(&mut self, op: &BinOp, lhs: &Expr, rhs: &Expr) -> Option<String> {
+        let f = self.fixed.fmt_of(lhs).or_else(|| self.fixed.fmt_of(rhs))?;
+        let (l, r) = (self.expr_expect(lhs, Some(f)), self.expr_expect(rhs, Some(f)));
+        crate::transpiler::fixed_gpu::binop(op, &f, &l, &r)
+    }
+
+    fn fx_cast(&mut self, inner: &Expr, ty: &Type, at: &Expr) -> Option<String> {
+        use crate::transpiler::fixed_gpu as fx;
+        let (src, to) = (self.fixed.fmt_of(inner), fx::fmt_of_type(ty));
+        if src.is_none() && to.is_none() { return None; }
+        fx::check_type(ty, at.line, at.col, &mut self.errors);
+        if let Some(t) = &to {
+            if let Some(lit) = fx::literal(inner, t, &mut self.errors) { return Some(lit); }
+        }
+        let v = self.expr(inner);
+        let target_c = c_type(ty);
+        let is_float = matches!(ty.without_mut(), Type::Float16 | Type::Float32 | Type::Float64)
+            || matches!(ty.without_mut(), Type::Named(n) if matches!(n.as_str(), "float" | "float16" | "float32" | "float64" | "f16" | "f32" | "f64"));
+        fx::cast(src.as_ref(), to.as_ref(), &v, &target_c, is_float)
+    }
+
+    /// `x.abs()`, `x.min(y)`, `fixed16_16.fromRaw(n)`, ... Reports the unsupported members.
+    fn fx_method(&mut self, obj: &Expr, method: &str, args: &[Arg], at: &Expr) -> Option<String> {
+        use crate::transpiler::fixed_gpu as fx;
+        if let ExprKind::Var(t) = &obj.kind {
+            if let Some(f) = crate::fixed::FixedFmt::from_name(t) {
+                if method == "fromRaw" && args.len() == 1 {
+                    let a = self.expr(&args[0].value);
+                    return Some(format!("(({})({}))", fx::raw_c_type(&f), a));
+                }
+                fx::unsupported(&format!("{t}.{method}"), at.line, at.col, &mut self.errors);
+                return Some("0".into());
+            }
+        }
+        let f = self.fixed.fmt_of(obj)?;
+        let recv = self.expr(obj);
+        let a: Vec<String> = args.iter().map(|x| self.expr_expect(&x.value, Some(f))).collect();
+        match fx::method(&f, method, &recv, &a) {
+            Ok(s) => Some(s),
+            Err(()) => { fx::unsupported(method, at.line, at.col, &mut self.errors); Some("0".into()) }
+        }
     }
 }

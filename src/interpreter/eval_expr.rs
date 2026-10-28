@@ -243,8 +243,6 @@ fn eval_fixed_arith(op: &BinOp, l: &Value, r: &Value, line: usize, rcol: usize, 
     };
     Some(match res {
         Some(raw) => Ok(Value::Fixed(raw, *fa)),
-        None if fa.width() > 64 && matches!(op, BinOp::Mul | BinOp::Div) =>
-            Err(err_span(format!("{} `{sym}` is not supported yet for 128-bit fixed-point formats", fa.name()), line, rcol, rlen)),
         None => Err(err_span(format!("fixed-point overflow in {} `{sym}`", fa.name()), line, rcol, rlen)),
     })
 }

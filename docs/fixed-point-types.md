@@ -1,7 +1,8 @@
 # `fixedN_M` / `ufixedN_M`: binary fixed-point scalar types
 
-> **Status: Phases 1, 2 and 5 implemented** in the Rust interpreter, the
-> transpiler (generated newtype, `W ∈ {8, 16, 32, 64}`) and the self-hosted
+> **Status: Phases 1, 2, 4 and 5 implemented** in the Rust interpreter, the
+> transpiler (generated newtype, `W ∈ {8, 16, 32, 64}`, and signed `W = 128`,
+> see [Phasing](#phasing) §4) and the self-hosted
 > interpreter, with a shared test corpus (`tests/cases/fixed_point_*.br`).
 > Implemented: the core types, [Members](#members) (`raw`, `fromRaw`,
 > `epsilon`/`min`/`max`, `floor`/`ceil`/`round`/`trunc`/`fract`/`abs`/
@@ -10,7 +11,9 @@
 > `T?`) and `mulRound`/`divRound`.
 > Also implemented, as **native methods** rather than library code:
 > `sqrt`, `sin`, `cos`, `tan`, `exp`, `ln` (Phase 5 — see below).
-> Not implemented yet: GPU backends (Phase 3), 128-bit formats (Phase 4). The former open
+> GPU backends: **CUDA, ROCm/HIP and Metal (`W ≤ 32`) are implemented** (see [GPU backends](#gpu-backends);
+> CUDA/ROCm verified by codegen tests only, no NVIDIA/AMD hardware was available; Metal
+> is also verified on the device). wgpu is not yet covered here. 128-bit formats (Phase 4) are signed-only. The former open
 > questions are resolved in [Decisions](#decisions).
 >
 > **Implementation notes** (where the code differs from, or narrows, the text):
@@ -177,7 +180,8 @@ For `fixedN_M` stored in `intW` (`W = N + M`), with raw values `ra`, `rb`:
   `a.wrappingMul(b)`, `a.saturatingMul(b)`, `a.checkedMul(b)` (→ `T?`).
 - Division by zero: panic, as for integers.
 - The 2W-bit intermediate for `W = 128` (`fixed64_64`, …) does not exist
-  natively. See [Phasing](#phasing): 128-bit formats are not in the first cut.
+  natively; it is emulated by `src/fixed_wide_core.rs`. See [Phasing](#phasing) §4
+  (signed only, at most 126 fractional bits, no math functions).
 
 ### Members
 
@@ -263,6 +267,66 @@ target** (same stance as `float64` on Metal in
 Buffer fields use the existing integer buffer packing (see wgpu
 `uint8`/`int16` packing) on the raw type.
 
+### CUDA / ROCm (implemented)
+
+`src/transpiler/fixed_gpu.rs`, shared by `cuda::device` and `rocm::device`
+(HIP C++ is source-compatible). Tracking is by declared type: kernel fields,
+device-fn parameters and `let`s (typed, or inferred from a fixed-point
+initializer) are fixed-point names; everything else is untouched.
+
+| Boring | Emitted C |
+|---|---|
+| field / buffer `fixed16_16` | `int32_t` (`const int32_t*` buffers; the host side sees `i32` / `Vec<i32>` — fixed-point buffers cross the host boundary as raw integers) |
+| `a + b`, `a - b`, `a % b` | `((int32_t)(a + b))` (wraps, no overflow check) |
+| `a < b` etc. | plain integer comparison |
+| `a * b` | `((int32_t)((long long)a * (long long)b / (1LL << M)))` — `/`, truncating toward zero, never `>>` |
+| `a / b` | `((int32_t)(((long long)a << M) / (long long)b))` |
+| untyped literal `0.25` next to a fixed operand, or assigned / used as initializer | folded to the raw constant `((int32_t)16384)` (round to nearest on the written decimal; out of range is a compile error) |
+| `-x` | `((int32_t)(-x))` |
+| `x as int32` / `as float32` | `(long long)x / (1LL << M)` / `(double)x / 2^M` |
+| `n as fixed16_16` / `f as fixed16_16` | `n << M` / `(double)f * 2^M` truncated |
+| `x as fixed8_24` | shift by the fraction-bit difference (left exact, right truncates) |
+| `x.raw`, `T.fromRaw(n)`, `abs`, `min`, `max`, `floor` | raw integer / ternary / `(x >> M) << M` |
+
+- `W ≤ 32` uses `long long` (unsigned formats `unsigned long long`); `W = 64`
+  uses `__int128` for the intermediate (NVCC ≥ 11.5 and HIP/clang both support
+  it in device code; the same extension already backs `int128` fields) instead
+  of a hand-written `__mul64hi` emulation.
+- **Compile errors** on the GPU target, never a silent narrowing: 128-bit
+  formats, and `sqrt/sin/cos/tan/exp/ln`, `ceil/round/fract/trunc/signum/clamp`,
+  `wrapping*`/`saturating*`/`checked*`, `mulRound/divRound`, `T.epsilon/min/max`.
+- **Semantics differences vs. `boring run`** (same as every GPU integer op):
+  overflow wraps instead of erroring, and division by zero is undefined.
+- `boring run` simulates kernels with the same `Value::Fixed` semantics
+  (`ThreadValue::Fixed` in `src/interpreter/eval_gpu.rs`; test
+  `tests/fixed_point_gpu_sim.rs`). Codegen tests: `fixed*` in
+  `tests/cuda_codegen.rs` and `tests/rocm_codegen.rs`.
+- `print "{x}"` of a fixed-point value in a kernel goes through `printf("%f", (double)raw / 2^M)`
+  (decimal approximation; format specs like `:.3f` are not applied).
+- Not handled: fixed-point `tensor` fields.
+
+### Metal (implemented, `W ≤ 32`)
+
+`src/transpiler/metal/device.rs` (kernel code) and `metal/host.rs` (host). Same rules as
+CUDA above, with MSL types: `fixedN_M` fields, buffers, parameters and locals are `char`/`short`/`int`
+(`uchar`/`ushort`/`uint` for `ufixed`); `*` is `(int)(((int64_t)a * (int64_t)b) / (int64_t)2^M)` and
+`/` is `(int)(((int64_t)a * (int64_t)2^M) / (int64_t)b)` (`uint64_t` for unsigned formats), both
+truncating toward zero. Untyped literals fold to the raw constant (also in function arguments and
+`return` position); `as` casts between fixed/int/float and other fixed formats, `.raw`, `fromRaw`,
+`epsilon`/`min`/`max`, `floor`, `ceil`, `trunc`, `fract`, `abs`, `min` and `max` are lowered.
+On the host the generated `FixedN_M` newtype is `repr(transparent)`, so a `Vec<FixedN_M>` is
+bit-identical to the device buffer, and literals/casts fold as in the general pass.
+
+- **Compile errors on Metal**, never a silent narrowing: any 64-bit format (`W = 64` would need
+  `mulhi`-based emulation of the 128-bit product, not implemented), 128-bit formats,
+  `sqrt/sin/cos/tan/exp/ln`, `round`, `signum`, `clamp`, `wrapping*`/`saturating*`/`checked*`,
+  `mulRound`/`divRound`.
+- Overflow wraps and division by zero is undefined, as for any GPU integer op. `fixed -> float`
+  goes through the device float (`float32`), so a 32-bit raw above 2^24 may round.
+- Verified on an Apple GPU: `tests/metal_codegen.rs::fixed_point_kernel_runs_on_metal_and_matches_interpreter`
+  runs `examples/fixed_point_kernel.br` (`fixed16_16`, `fixed8_8`, `fixed8_24`, `ufixed16_16`,
+  members, helper functions) on the device and compares with `boring run` byte for byte.
+
 ## Checker / grammar changes
 
 - `spec/grammar.bnf`: extend `numeric_type` with
@@ -284,8 +348,33 @@ Buffer fields use the existing integer buffer packing (see wgpu
 2. **Members**: `floor/ceil/round/fract/abs/min/max/clamp`, `wrapping*`/
    `saturating*`/`checked*`, and `mulRound`/`divRound` (round to nearest).
 3. **GPU**: CUDA first, then Metal, then wgpu (with the limb emulation).
-4. **128-bit formats** (`fixed64_64`, …): needs a 256-bit intermediate for
-   `*`/`/` (limb decomposition). Deferred.
+4. **128-bit formats** (`fixed64_64`, `fixed32_96`, `fixed128_0`, …).
+   **Implemented for signed formats with at most 126 fractional bits.**
+   - `src/fixed_wide_core.rs` (dual-use like `fixed_math_core.rs`: compiled into the
+     Rust interpreter, pasted as `mod __fxw` into generated programs; ported line
+     for line to `fxw_*` in `boring/interpreter/fixedpoint.br`) provides the
+     256-bit intermediates: `128×128 → 256` product then `>> M`, and
+     `(|a| << M) / |b|` as 256/128-bit long division, both truncating toward zero
+     (or rounding to nearest for `mulRound`/`divRound`). Every helper returns
+     `(magnitude, negative, overflowed)`; when `overflowed` the magnitude is the low
+     128 bits, which is what `wrapping*` needs, while `checked*`/`saturating*`/plain
+     operators treat it as overflow. The same helpers serve all widths. Literals
+     (`num · 2^M / 10^k`) and the exact/`{:.Nf}` formatting (`frac · 10` overflows
+     `u128` for large `M`) also go through them. Unit tests compare the helpers with
+     Python big-integer reference vectors (`src/fixed_wide_vectors.rs`).
+   - **Unsigned 128-bit formats (`ufixedN_M`, `N + M = 128`) are rejected** with a
+     clear error: the raw value is stored in an `i128` / `int128` in both
+     interpreters (`Value::Fixed`, `Value.Fixed`), which cannot hold a raw value
+     above 2¹²⁷, and the 256-bit helpers work on `i128` operands.
+   - **At most 126 fractional bits** (`fixed1_127` is rejected): keeps `2^M` an
+     in-range positive `i128`, which the rounding members and conversions rely on.
+   - **`sqrt/sin/cos/tan/exp/ln` are not supported for 128-bit formats**: the
+     60-bit-internal-precision core computes `raw << (60 - M)` (and 120-bit
+     products) on an `i128`, which overflows. They are a runtime error
+     (`… is not supported for 128-bit fixed-point formats`) in all three
+     implementations.
+   - Not covered: GPU backends (still a compile error for `W = 128`).
+   - Corpus case: `tests/cases/fixed_point_wide.br`.
 5. **Math functions** (`sqrt`, `sin`/`cos`/`tan`, `ln`/`exp`). **Implemented as
    native methods, not as Boring library code** — the original plan (write
    them in Boring, out of the compiler) is not possible today: arithmetic on a

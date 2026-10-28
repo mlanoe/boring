@@ -8,8 +8,10 @@
 //! A value of format `(signed, n, m)` is stored as a raw integer `r` of width
 //! `w = n + m` bits; its real value is `r / 2^m`.
 
-/// Widths a fixed-point format may occupy (`n + m`). 128 is accepted by the
-/// checker but not implemented by any backend yet (docs, Phasing §4).
+use crate::fixed_wide_core as w;
+
+/// Widths a fixed-point format may occupy (`n + m`). 128 is accepted only for
+/// signed formats with at most 126 fractional bits (docs, Phase 4).
 pub const VALID_WIDTHS: [u32; 5] = [8, 16, 32, 64, 128];
 
 /// The integer math function named `name` (`sqrt`, `sin`, ...) from
@@ -47,6 +49,10 @@ pub enum FixedNameError {
     BadWidth { n: u32, m: u32 },
     /// A signed format needs at least the sign bit.
     NoSignBit,
+    /// `ufixedN_M` with `N + M = 128`: the raw value is stored in an `i128`.
+    Unsigned128,
+    /// A 128-bit format with more than 126 fractional bits.
+    TooManyFracBits128 { m: u32 },
 }
 
 impl FixedNameError {
@@ -60,6 +66,16 @@ impl FixedNameError {
             FixedNameError::NoSignBit => format!(
                 "invalid fixed-point type `{name}`: a signed fixed-point type needs at least 1 \
                  integer bit (the sign bit); use `ufixed0_M` for a pure fraction"
+            ),
+            FixedNameError::Unsigned128 => format!(
+                "invalid fixed-point type `{name}`: unsigned 128-bit fixed-point formats are not \
+                 supported (the raw value is stored in a signed 128-bit integer, which cannot hold \
+                 a raw value above 2^127); use the signed `fixedN_M` with N + M = 128 or an \
+                 unsigned format of at most 64 bits"
+            ),
+            FixedNameError::TooManyFracBits128 { m } => format!(
+                "invalid fixed-point type `{name}`: 128-bit fixed-point formats support at most 126 \
+                 fractional bits, got {m}"
             ),
         }
     }
@@ -112,6 +128,12 @@ impl FixedFmt {
         if signed && n == 0 {
             return Some(Err(FixedNameError::NoSignBit));
         }
+        if w == 128 && !signed {
+            return Some(Err(FixedNameError::Unsigned128));
+        }
+        if w == 128 && m > 126 {
+            return Some(Err(FixedNameError::TooManyFracBits128 { m }));
+        }
         Some(Ok(FixedFmt { signed, n, m }))
     }
 
@@ -141,9 +163,8 @@ impl FixedFmt {
         format!("{}fixed{}_{}", if self.signed { "" } else { "u" }, self.n, self.m)
     }
 
-    /// Smallest / largest raw storage value. 128-bit formats are not implemented
-    /// anywhere; their bounds are clamped to the `i128` domain so queries never
-    /// overflow (an unsigned 128-bit maximum is not representable in `i128`).
+    /// Smallest / largest raw storage value. Only signed formats have a 128-bit
+    /// width (unsigned ones are rejected by `parse`), so the bounds fit an `i128`.
     pub fn min_raw(&self) -> i128 {
         if !self.signed { 0 } else if self.width() >= 128 { i128::MIN } else { -(1i128 << (self.width() - 1)) }
     }
@@ -183,32 +204,21 @@ impl FixedFmt {
         self.checked(a.checked_neg()?)
     }
 
-    /// `(ra * rb) >> m`, truncating toward zero. Done on magnitudes in `u128`,
-    /// which holds the 2W-bit intermediate for every width up to 64.
+    /// `(ra * rb) >> m`, truncating toward zero, through the 256-bit intermediate of
+    /// `fixed_wide_core.rs`. `None` on overflow.
     pub fn mul(&self, a: i128, b: i128) -> Option<i128> {
-        if self.width() > 64 {
-            return None;
-        }
-        let neg = (a < 0) != (b < 0);
-        let prod = a.unsigned_abs().checked_mul(b.unsigned_abs())?;
-        let mag = prod >> self.m;
-        self.checked(Self::apply_sign(mag, neg)?)
+        let (mag, neg, ovf) = w::__fxw_mul(a, b, self.m, false);
+        if ovf { None } else { self.checked_from(mag, neg) }
     }
 
     /// `(ra << m) / rb`, truncating toward zero. `None` on overflow; the caller
     /// reports division by zero before calling.
     pub fn div(&self, a: i128, b: i128) -> Option<i128> {
-        if self.width() > 64 || b == 0 {
+        if b == 0 {
             return None;
         }
-        let neg = (a < 0) != (b < 0);
-        let num = a.unsigned_abs().checked_shl(self.m)?;
-        // `checked_shl` only checks the shift amount, not lost high bits.
-        if num >> self.m != a.unsigned_abs() {
-            return None;
-        }
-        let mag = num / b.unsigned_abs();
-        self.checked(Self::apply_sign(mag, neg)?)
+        let (mag, neg, ovf) = w::__fxw_div(a, b, self.m, false);
+        if ovf { None } else { self.checked_from(mag, neg) }
     }
 
     pub fn rem(&self, a: i128, b: i128) -> Option<i128> {
@@ -250,13 +260,9 @@ impl FixedFmt {
         let digits = format!("{int_part}{frac_part}");
         let num: u128 = digits.parse().ok()?;
         let den: u128 = 10u128.checked_pow(frac_part.len() as u32)?;
-        // raw = round(num * 2^m / den). 2^m with m <= 128 overflows u128 only
-        // at m = 128, which no implemented format uses.
-        let scale = 1u128.checked_shl(self.m).filter(|_| self.m < 128)?;
-        let scaled = num.checked_mul(scale)?;
-        let (q, r) = (scaled / den, scaled % den);
-        let q = if r >= den - r { q + 1 } else { q }; // ties round up in magnitude
-        self.checked(Self::apply_sign(q, neg)?)
+        // raw = round(num * 2^m / den), ties away from zero, on a 256-bit intermediate.
+        let q = w::__fxw_scale_decimal(num, den, self.m)?;
+        self.checked_from(q, neg)
     }
 
     /// float → fixed, truncating toward zero (`as`). `None` for NaN/inf/range.
@@ -265,7 +271,7 @@ impl FixedFmt {
             return None;
         }
         let scaled = (f * 2f64.powi(self.m as i32)).trunc();
-        if scaled < -(2f64.powi(126)) || scaled > 2f64.powi(126) {
+        if scaled < -(2f64.powi(127)) || scaled >= 2f64.powi(127) {
             return None;
         }
         self.checked(scaled as i128)
@@ -279,7 +285,7 @@ impl FixedFmt {
     pub fn to_int(&self, raw: i128) -> i128 {
         let neg = raw < 0;
         let mag = (raw.unsigned_abs() >> self.m) as i128;
-        if neg { -mag } else { mag }
+        if neg { mag.wrapping_neg() } else { mag }
     }
 
     /// fixed → other fixed: shift by the difference of `m`, truncating toward
@@ -299,44 +305,34 @@ impl FixedFmt {
     /// Exact decimal expansion with trailing zeros trimmed (`1.5`,
     /// `0.0000152587890625`, `-3`). Always finite: the denominator is `2^m`.
     pub fn format_exact(&self, raw: i128) -> String {
-        let neg = raw < 0;
-        let mag = raw.unsigned_abs();
-        let int_part = mag >> self.m;
-        let mut frac = if self.m == 0 { 0 } else { mag & ((1u128 << self.m) - 1) };
-        let mut s = String::new();
-        if neg {
-            s.push('-');
-        }
-        s.push_str(&int_part.to_string());
-        if frac != 0 {
-            s.push('.');
-            // frac / 2^m: each ×10 step peels one exact decimal digit.
-            while frac != 0 {
-                frac *= 10;
-                s.push(char::from(b'0' + (frac >> self.m) as u8));
-                frac &= (1u128 << self.m) - 1;
-            }
-        }
-        s
+        self.format_digits(raw, None)
     }
 
     /// `{x:.Nf}` — rounded to nearest (ties away from zero) to `places`.
     pub fn format_places(&self, raw: i128, places: usize) -> String {
-        let neg = raw < 0;
-        let mag = raw.unsigned_abs();
-        // value = mag / 2^m; scaled = round(mag * 10^places / 2^m)
-        let pow10 = 10u128.pow(places as u32);
-        let (hi, lo) = (mag >> self.m, if self.m == 0 { 0 } else { mag & ((1u128 << self.m) - 1) });
-        // hi * 10^p is exact; lo * 10^p / 2^m needs rounding (lo < 2^64 here).
-        let lo_scaled = lo * pow10;
-        let half = if self.m == 0 { 0 } else { 1u128 << (self.m - 1) };
-        let frac_digits = if self.m == 0 { 0 } else { (lo_scaled + half) >> self.m };
-        let total = hi * pow10 + frac_digits;
-        let s = total.to_string();
-        let s = if s.len() <= places { format!("{}{s}", "0".repeat(places + 1 - s.len())) } else { s };
-        let (ip, fp) = s.split_at(s.len() - places);
-        let sign = if neg && total != 0 { "-" } else { "" };
-        if places == 0 { format!("{sign}{ip}") } else { format!("{sign}{ip}.{fp}") }
+        self.format_digits(raw, Some(places))
+    }
+
+    fn format_digits(&self, raw: i128, places: Option<usize>) -> String {
+        let (int_part, digits, nd) = w::__fxw_digits(raw.unsigned_abs(), self.m, places);
+        let is_zero = int_part == 0 && digits[..nd].iter().all(|d| *d == 0);
+        let mut s = String::new();
+        if raw < 0 && !is_zero {
+            s.push('-');
+        }
+        s.push_str(&int_part.to_string());
+        let want = places.unwrap_or(nd);
+        if want > 0 {
+            s.push('.');
+            for d in &digits[..nd] {
+                s.push(char::from(b'0' + *d));
+            }
+            // digits past the 128 the expansion can hold are all zero
+            for _ in nd..want {
+                s.push('0');
+            }
+        }
+        s
     }
 }
 
@@ -376,27 +372,17 @@ impl __FixedCast for f32 {
     fn __to_fixed<F: __FixedFormat>(self) -> Option<F> { F::__from_f64(self as f64) }
 }
 #[allow(dead_code)]
-fn __fx_exact(op: u8, a: i128, b: i128, m: u32, round: bool) -> (u128, bool) {
+fn __fx_exact(op: u8, a: i128, b: i128, m: u32, round: bool) -> (u128, bool, bool) {
     match op {
-        0 => { let v = a + b; (v.unsigned_abs(), v < 0) }
-        1 => { let v = a - b; (v.unsigned_abs(), v < 0) }
-        2 => {
-            let prod = a.unsigned_abs() * b.unsigned_abs();
-            let mut q = prod >> m;
-            if round && m > 0 && (prod & ((1u128 << m) - 1)) >= (1u128 << (m - 1)) { q += 1; }
-            (q, (a < 0) != (b < 0))
-        }
-        _ => {
-            let den = b.unsigned_abs();
-            let num = a.unsigned_abs() << m;
-            let mut q = num / den;
-            if round && (num % den) * 2 >= den { q += 1; }
-            (q, (a < 0) != (b < 0))
-        }
+        0 => __fxw::__fxw_add(a, b),
+        1 => __fxw::__fxw_sub(a, b),
+        2 => __fxw::__fxw_mul(a, b, m, round),
+        _ => __fxw::__fxw_div(a, b, m, round),
     }
 }
 #[allow(dead_code)]
-fn __fx_chk(mag: u128, neg: bool, min: i128, max: i128) -> Option<i128> {
+fn __fx_chk(mag: u128, neg: bool, ovf: bool, min: i128, max: i128) -> Option<i128> {
+    if ovf { return None; }
     let v = if neg {
         if mag > (i128::MAX as u128) + 1 { return None; }
         (mag as i128).wrapping_neg()
@@ -406,56 +392,24 @@ fn __fx_chk(mag: u128, neg: bool, min: i128, max: i128) -> Option<i128> {
     if v < min || v > max { None } else { Some(v) }
 }
 #[allow(dead_code)]
-fn __fx_sat(mag: u128, neg: bool, min: i128, max: i128) -> i128 {
-    match __fx_chk(mag, neg, min, max) { Some(v) => v, None if neg => min, None => max }
+fn __fx_sat(mag: u128, neg: bool, ovf: bool, min: i128, max: i128) -> i128 {
+    match __fx_chk(mag, neg, ovf, min, max) { Some(v) => v, None if neg => min, None => max }
 }
 #[allow(dead_code)]
 fn __fx_wrap(mag: u128, neg: bool, w: u32, signed: bool) -> i128 {
-    let mask: u128 = (1u128 << w) - 1;
+    let mask: u128 = if w >= 128 { u128::MAX } else { (1u128 << w) - 1 };
     let mut low = mag & mask;
     if neg { low = low.wrapping_neg() & mask; }
-    if signed && (low >> (w - 1)) == 1 { (low as i128).wrapping_sub(1i128 << w) } else { low as i128 }
+    if w >= 128 { low as i128 }
+    else if signed && (low >> (w - 1)) == 1 { (low as i128).wrapping_sub(1i128 << w) } else { low as i128 }
 }
 /// Exact decimal expansion of `mag / 2^m` (trailing zeros trimmed), or rounded to
 /// `{:.N}` places (ties away from zero) when a precision is given.
 #[allow(dead_code)]
 fn __fx_fmt(f: &mut core::fmt::Formatter<'_>, neg: bool, mag: u128, m: u32) -> core::fmt::Result {
-    let mask: u128 = if m == 0 { 0 } else { (1u128 << m) - 1 };
-    let mut int_part = mag >> m;
-    let mut frac = mag & mask;
-    let mut digits = [0u8; 96];
-    let mut nd = 0usize;
-    let mut round_up = false;
-    match f.precision() {
-        Some(p) => {
-            let p = if p > 90 { 90 } else { p };
-            while nd < p {
-                frac *= 10;
-                digits[nd] = (frac >> m) as u8;
-                frac &= mask;
-                nd += 1;
-            }
-            round_up = m != 0 && frac >= (1u128 << (m - 1));
-        }
-        None => {
-            while frac != 0 {
-                frac *= 10;
-                digits[nd] = (frac >> m) as u8;
-                frac &= mask;
-                nd += 1;
-            }
-        }
-    }
-    if round_up {
-        let mut i = nd;
-        loop {
-            if i == 0 { int_part += 1; break; }
-            i -= 1;
-            if digits[i] == 9 { digits[i] = 0; } else { digits[i] += 1; break; }
-        }
-    }
+    let (int_part, digits, nd) = __fxw::__fxw_digits(mag, m, f.precision());
     let is_zero = int_part == 0 && digits[..nd].iter().all(|d| *d == 0);
-    let mut buf = [0u8; 136];
+    let mut buf = [0u8; 176];
     let mut n = 0usize;
     let mut tmp = [0u8; 40];
     let mut t = 0usize;
@@ -503,20 +457,21 @@ impl FixedFmt {
         } else {
             format!("{{ let r = self.0 as i128; let mag = r.unsigned_abs(); let mut ip = mag >> {m}; \
                       if (mag & ((1u128 << {m}) - 1)) >= (1u128 << ({m} - 1)) {{ ip += 1; }} \
-                      let v = (ip << {m}) as i128; Self(Self::__narrow128(if r < 0 {{ -v }} else {{ v }})) }}")
+                      Self::__round_result(ip << {m}, r < 0, false) }}")
         };
+        let wide = self.width() >= 128;
         let abs_body = if self.signed { "Self(self.0.abs())" } else { "self" };
         let (w, sg, minr, maxr) = (self.width(), self.signed, self.min_raw(), self.max_raw());
         let mut policy = format!(
-            "    fn __ex(self, op: u8, o: Self, round: bool) -> (u128, bool) {{ __fx_exact(op, self.0 as i128, o.0 as i128, {m}, round) }}\n\
-                 fn __round_result(m: u128, n: bool) -> Self {{\n\
-                     match __fx_chk(m, n, {minr}i128, {maxr}i128) {{\n\
+            "    fn __ex(self, op: u8, o: Self, round: bool) -> (u128, bool, bool) {{ __fx_exact(op, self.0 as i128, o.0 as i128, {m}, round) }}\n\
+                 fn __round_result(m: u128, n: bool, x: bool) -> Self {{\n\
+                     match __fx_chk(m, n, x, {minr}i128, {maxr}i128) {{\n\
                          Some(v) => Self(v as {s}),\n\
                          None => if cfg!(debug_assertions) {{ panic!(\"fixed-point overflow\") }} else {{ Self(__fx_wrap(m, n, {w}, {sg}) as {s}) }},\n\
                      }}\n\
                  }}\n\
-                 pub fn mul_round(self, o: Self) -> Self {{ let (m, n) = self.__ex(2, o, true); Self::__round_result(m, n) }}\n\
-                 pub fn div_round(self, o: Self) -> Self {{ let (m, n) = self.__ex(3, o, true); Self::__round_result(m, n) }}\n");
+                 pub fn mul_round(self, o: Self) -> Self {{ let (m, n, x) = self.__ex(2, o, true); Self::__round_result(m, n, x) }}\n\
+                 pub fn div_round(self, o: Self) -> Self {{ let (m, n, x) = self.__ex(3, o, true); Self::__round_result(m, n, x) }}\n");
         policy.push_str(&format!(
             "    fn __fxm_fin(v: Option<i128>, what: &str) -> Self {{\n\
                      match v {{\n\
@@ -529,16 +484,28 @@ impl FixedFmt {
             ("cos", "fixed-point overflow"), ("tan", "tan: cos is zero here"),
             ("exp", "fixed-point overflow"), ("ln", "logarithm of a non-positive value"),
         ] {
+            if wide {
+                policy.push_str(&format!(
+                    "    pub fn {name}(self) -> Self {{ panic!(\"{name}() is not supported for 128-bit fixed-point formats\") }}\n"));
+                continue;
+            }
             policy.push_str(&format!(
                 "    pub fn {name}(self) -> Self {{ Self::__fxm_fin(__fxm::__fxm_{name}(self.0 as i128, {m}), \"{msg}\") }}\n"));
         }
         for (opn, code) in [("add", 0), ("sub", 1), ("mul", 2), ("div", 3)] {
             policy.push_str(&format!(
-                "    pub fn wrapping_{opn}(self, o: Self) -> Self {{ let (m, n) = self.__ex({code}, o, false); Self(__fx_wrap(m, n, {w}, {sg}) as {s}) }}\n\
-                     pub fn saturating_{opn}(self, o: Self) -> Self {{ let (m, n) = self.__ex({code}, o, false); Self(__fx_sat(m, n, {minr}i128, {maxr}i128) as {s}) }}\n\
-                     pub fn checked_{opn}(self, o: Self) -> Option<Self> {{ {zero_guard}let (m, n) = self.__ex({code}, o, false); __fx_chk(m, n, {minr}i128, {maxr}i128).map(|v| Self(v as {s})) }}\n",
+                "    pub fn wrapping_{opn}(self, o: Self) -> Self {{ let (m, n, _) = self.__ex({code}, o, false); Self(__fx_wrap(m, n, {w}, {sg}) as {s}) }}\n\
+                     pub fn saturating_{opn}(self, o: Self) -> Self {{ let (m, n, x) = self.__ex({code}, o, false); Self(__fx_sat(m, n, x, {minr}i128, {maxr}i128) as {s}) }}\n\
+                     pub fn checked_{opn}(self, o: Self) -> Option<Self> {{ {zero_guard}let (m, n, x) = self.__ex({code}, o, false); __fx_chk(m, n, x, {minr}i128, {maxr}i128).map(|v| Self(v as {s})) }}\n",
                 zero_guard = if code == 3 { "if o.0 == 0 { return None; } " } else { "" }));
         }
+        let (mul_expr, div_expr) = if wide {
+            (format!("{{ let (m, n, x) = __fxw::__fxw_mul(self.0 as i128, o.0 as i128, {m}, false); Self::__round_result(m, n, x) }}"),
+             format!("{{ let (m, n, x) = __fxw::__fxw_div(self.0 as i128, o.0 as i128, {m}, false); Self::__round_result(m, n, x) }}"))
+        } else {
+            (format!("Self(Self::__narrow(((self.0 as {wd}) * (o.0 as {wd})) / ((1 as {wd}) << {m})))"),
+             format!("Self(Self::__narrow(((self.0 as {wd}) << {m}) / (o.0 as {wd})))"))
+        };
         let mut out = format!(
 r#"
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -581,11 +548,11 @@ impl core::ops::Add for {name} {{ type Output = Self; fn add(self, o: Self) -> S
 impl core::ops::Sub for {name} {{ type Output = Self; fn sub(self, o: Self) -> Self {{ Self(self.0 - o.0) }} }}
 impl core::ops::Mul for {name} {{
     type Output = Self;
-    fn mul(self, o: Self) -> Self {{ Self(Self::__narrow(((self.0 as {wd}) * (o.0 as {wd})) / ((1 as {wd}) << {m}))) }}
+    fn mul(self, o: Self) -> Self {{ {mul_expr} }}
 }}
 impl core::ops::Div for {name} {{
     type Output = Self;
-    fn div(self, o: Self) -> Self {{ Self(Self::__narrow(((self.0 as {wd}) << {m}) / (o.0 as {wd}))) }}
+    fn div(self, o: Self) -> Self {{ {div_expr} }}
 }}
 impl core::ops::Rem for {name} {{ type Output = Self; fn rem(self, o: Self) -> Self {{ Self(self.0 % o.0) }} }}
 impl core::ops::AddAssign for {name} {{ fn add_assign(&mut self, o: Self) {{ *self = *self + o; }} }}
@@ -614,6 +581,7 @@ impl __FixedFormat for {name} {{
     fn __from_f64(f: f64) -> Option<Self> {{
         if !f.is_finite() {{ return None; }}
         let scaled = f * ((1u128 << {m}) as f64);
+        if !(scaled >= -170141183460469231731687303715884105728.0 && scaled < 170141183460469231731687303715884105728.0) {{ return None; }}
         <{s}>::try_from(scaled as i128).ok().map(Self)
     }}
     fn __raw128(self) -> i128 {{ self.0 as i128 }}
@@ -686,34 +654,19 @@ impl __FixedCast for {name} {{
     // operation as (magnitude, negative), before any range check. ----
 
     /// Exact `a op b` (truncated toward zero, or rounded to nearest with ties away
-    /// from zero when `round`) as magnitude + sign. `None` for width > 64 or a
-    /// zero divisor.
-    pub fn exact(&self, op: FxOp, a: i128, b: i128, round: bool) -> Option<(u128, bool)> {
-        if self.width() > 64 {
-            return None;
-        }
+    /// from zero when `round`) as magnitude + sign + "the magnitude overflowed 128
+    /// bits" (then the magnitude is its low 128 bits; see `fixed_wide_core.rs`).
+    /// `None` for a zero divisor.
+    pub fn exact(&self, op: FxOp, a: i128, b: i128, round: bool) -> Option<(u128, bool, bool)> {
         Some(match op {
-            FxOp::Add => ((a + b).unsigned_abs(), a + b < 0),
-            FxOp::Sub => ((a - b).unsigned_abs(), a - b < 0),
-            FxOp::Mul => {
-                let prod = a.unsigned_abs() * b.unsigned_abs();
-                let mut q = prod >> self.m;
-                if round && self.m > 0 && prod & ((1u128 << self.m) - 1) >= (1u128 << (self.m - 1)) {
-                    q += 1;
-                }
-                (q, (a < 0) != (b < 0))
-            }
+            FxOp::Add => w::__fxw_add(a, b),
+            FxOp::Sub => w::__fxw_sub(a, b),
+            FxOp::Mul => w::__fxw_mul(a, b, self.m, round),
             FxOp::Div => {
                 if b == 0 {
                     return None;
                 }
-                let den = b.unsigned_abs();
-                let num = a.unsigned_abs() << self.m;
-                let mut q = num / den;
-                if round && (num % den) * 2 >= den {
-                    q += 1;
-                }
-                (q, (a < 0) != (b < 0))
+                w::__fxw_div(a, b, self.m, round)
             }
         })
     }
@@ -731,16 +684,19 @@ impl __FixedCast for {name} {{
         if neg {
             low = low.wrapping_neg() & mask;
         }
-        if self.signed && low >> (w - 1) == 1 {
+        if w >= 128 {
+            low as i128
+        } else if self.signed && low >> (w - 1) == 1 {
             (low as i128).wrapping_sub(1i128 << w)
         } else {
             low as i128
         }
     }
 
-    /// Clamped to the representable range (the `saturating*` policy).
-    pub fn saturating_from(&self, mag: u128, neg: bool) -> i128 {
-        match self.checked_from(mag, neg) {
+    /// Clamped to the representable range (the `saturating*` policy); `ovf` is the
+    /// "magnitude overflowed 128 bits" flag of [`exact`](Self::exact).
+    pub fn saturating_from(&self, mag: u128, neg: bool, ovf: bool) -> i128 {
+        match if ovf { None } else { self.checked_from(mag, neg) } {
             Some(v) => v,
             None if neg => self.min_raw(),
             None => self.max_raw(),
@@ -755,7 +711,11 @@ impl __FixedCast for {name} {{
             return None;
         }
         let text = format!("{f:?}");
-        let text = if text.contains(['e', 'E']) { format!("{f:.20}") } else { text };
+        let text = if text.contains(['e', 'E']) {
+            // fixed-notation fallback, trailing zeros trimmed so the digit string stays short
+            let t = format!("{f:.20}");
+            t.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else { text };
         self.from_decimal(&text)
     }
 }
@@ -872,31 +832,31 @@ mod tests {
         let r = |s: &str| t.from_decimal(s).unwrap();
         let show = |v: i128| t.format_exact(v);
         let (a, b) = (r("100"), r("2"));
-        let (m, n) = t.exact(FxOp::Mul, a, b, false).unwrap();
+        let (m, n, _) = t.exact(FxOp::Mul, a, b, false).unwrap();
         assert_eq!(t.checked_from(m, n), None);
-        assert_eq!(show(t.saturating_from(m, n)), "127.99609375");
+        assert_eq!(show(t.saturating_from(m, n, false)), "127.99609375");
         assert_eq!(show(t.wrapping_from(m, n)), "-56"); // 200 - 256
-        let (m, n) = t.exact(FxOp::Mul, a, -b, false).unwrap();
-        assert_eq!(show(t.saturating_from(m, n)), "-128");
-        let (m, n) = t.exact(FxOp::Add, r("1.5"), r("2.25"), false).unwrap();
+        let (m, n, _) = t.exact(FxOp::Mul, a, -b, false).unwrap();
+        assert_eq!(show(t.saturating_from(m, n, false)), "-128");
+        let (m, n, _) = t.exact(FxOp::Add, r("1.5"), r("2.25"), false).unwrap();
         assert_eq!(show(t.checked_from(m, n).unwrap()), "3.75");
         assert_eq!(t.exact(FxOp::Div, 1, 0, false), None);
         // rounding: 1 lsb * 0.5 = half an lsb -> truncates to 0, rounds to 1
         let half = r("0.5");
-        let (m, n) = t.exact(FxOp::Mul, 1, half, false).unwrap();
+        let (m, n, _) = t.exact(FxOp::Mul, 1, half, false).unwrap();
         assert_eq!(t.checked_from(m, n), Some(0));
-        let (m, n) = t.exact(FxOp::Mul, 1, half, true).unwrap();
+        let (m, n, _) = t.exact(FxOp::Mul, 1, half, true).unwrap();
         assert_eq!(t.checked_from(m, n), Some(1));
-        let (m, n) = t.exact(FxOp::Div, r("1"), r("3"), true).unwrap();
+        let (m, n, _) = t.exact(FxOp::Div, r("1"), r("3"), true).unwrap();
         assert_eq!(t.checked_from(m, n), Some(85)); // 0.33203125 (truncation gives 85 too); 2/3 below
-        let (m, n) = t.exact(FxOp::Div, r("2"), r("3"), true).unwrap();
+        let (m, n, _) = t.exact(FxOp::Div, r("2"), r("3"), true).unwrap();
         assert_eq!(t.checked_from(m, n), Some(171)); // 170.67 rounds up
-        let (m, n) = t.exact(FxOp::Div, r("2"), r("3"), false).unwrap();
+        let (m, n, _) = t.exact(FxOp::Div, r("2"), r("3"), false).unwrap();
         assert_eq!(t.checked_from(m, n), Some(170));
         let u = f("ufixed8_8");
-        let (m, n) = u.exact(FxOp::Sub, 1, 2, false).unwrap();
+        let (m, n, _) = u.exact(FxOp::Sub, 1, 2, false).unwrap();
         assert_eq!(u.wrapping_from(m, n), 65535);
-        assert_eq!(u.saturating_from(m, n), 0);
+        assert_eq!(u.saturating_from(m, n, false), 0);
     }
 
     /// Compares the integer math against f64 at `m` fractional bits (<= 2 ulp).
@@ -944,5 +904,49 @@ mod tests {
         assert_eq!(a.from_f64_trunc(-1.99999), Some(-131071));
         assert_eq!(a.from_f64_trunc(f64::NAN), None);
         assert_eq!(f("fixed8_8").convert_to(32767, &f("fixed4_12")), None);
+    }
+
+    // ---- 128-bit formats: the wide helpers against a Python big-integer reference ----
+
+    #[test]
+    fn wide_helpers_match_big_integer_reference() {
+        use crate::fixed_wide_core as w;
+        use crate::fixed_wide_vectors as v;
+        for &(a, b, m, r, mag, neg, ovf) in v::MUL {
+            assert_eq!(w::__fxw_mul(a, b, m, r), (mag, neg, ovf), "mul {a} {b} m={m} round={r}");
+        }
+        for &(a, b, m, r, mag, neg, ovf) in v::DIV {
+            assert_eq!(w::__fxw_div(a, b, m, r), (mag, neg, ovf), "div {a} {b} m={m} round={r}");
+        }
+        for &(a, b, mag, neg, ovf) in v::ADD {
+            assert_eq!(w::__fxw_add(a, b), (mag, neg, ovf), "add {a} {b}");
+        }
+        for &(a, b, mag, neg, ovf) in v::SUB {
+            assert_eq!(w::__fxw_sub(a, b), (mag, neg, ovf), "sub {a} {b}");
+        }
+        for &(num, den, m, want) in v::DECIMAL {
+            assert_eq!(w::__fxw_scale_decimal(num, den, m), want, "decimal {num}/{den} m={m}");
+        }
+        for &(raw, m, places, want) in v::FORMAT {
+            let fmt = FixedFmt { signed: true, n: 128 - m, m };
+            let got = match places { Some(p) => fmt.format_places(raw, p), None => fmt.format_exact(raw) };
+            assert_eq!(got, want, "format {raw} m={m} places={places:?}");
+        }
+    }
+
+    #[test]
+    fn wide_formats_and_errors() {
+        assert!(FixedFmt::parse("fixed64_64").unwrap().is_ok());
+        assert!(FixedFmt::parse("fixed128_0").unwrap().is_ok());
+        assert!(FixedFmt::parse("fixed2_126").unwrap().is_ok());
+        assert!(matches!(FixedFmt::parse("ufixed64_64"), Some(Err(FixedNameError::Unsigned128))));
+        assert!(matches!(FixedFmt::parse("fixed1_127"), Some(Err(FixedNameError::TooManyFracBits128 { m: 127 }))));
+        let t = f("fixed64_64");
+        let a = t.from_decimal("1.5").unwrap();
+        let b = t.from_decimal("-2.25").unwrap();
+        assert_eq!(t.format_exact(t.mul(a, b).unwrap()), "-3.375");
+        assert_eq!(t.format_places(t.div(a, b).unwrap(), 20), "-0.66666666666666666663");
+        assert_eq!(t.mul(t.max_raw(), t.max_raw()), None);
+        assert_eq!(t.format_exact(t.min_raw()), "-9223372036854775808");
     }
 }

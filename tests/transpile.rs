@@ -610,6 +610,7 @@ transpile_test!(typed_tuple_idents);
 transpile_test!(fixed_point_struct_fn);
 transpile_test!(fixed_point_members);
 transpile_test!(fixed_point_policies);
+transpile_test!(fixed_point_wide);
 transpile_test!(fixed_point_math);
 transpile_test!(float32_array_literal_width_and_cast);
 transpile_test!(float64_array_literal_width_and_cast);

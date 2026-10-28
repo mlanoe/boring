@@ -1,0 +1,54 @@
+# 128-bit fixed-point formats (signed only): 256-bit intermediates for * and /.
+let fixed64_64 a = 1.5
+let fixed64_64 b = -2.25
+print "{a + b} {a - b} {a * b} {-a * b}"
+print "{a / b} {b / a} {a % 1.0}"
+print "{a} {b} {fixed64_64.epsilon} {fixed64_64.max} {fixed64_64.min}"
+let fixed64_64 third = (1.0 as fixed64_64) / 3.0
+print "{third} {third * 3.0} {third:.10f} {b:.3f} {fixed64_64.epsilon:.25f}"
+let fixed64_64 big = 4611686018427387904
+print "{big} {big * 0.5} {big / 4.0} {(big * 0.5) * 2.0}"
+
+# near the limits, with policies
+let fixed64_64 mx = fixed64_64.max
+let fixed64_64 mn = fixed64_64.min
+print "{mx.raw} {mn.raw} {a.raw} {fixed64_64.fromRaw(7)}"
+print "{mx.wrappingAdd(fixed64_64.epsilon)} {mx.saturatingAdd(1.0)} {mx.checkedAdd(1.0) else 0.0}"
+print "{mn.wrappingSub(fixed64_64.epsilon)} {mn.saturatingSub(1.0)} {mn.checkedSub(1.0) else 0.0}"
+print "{mx.wrappingMul(2.0)} {mx.saturatingMul(2.0)} {mx.checkedMul(2.0) else 0.0}"
+print "{mx.saturatingMul(-2.0)} {mn.saturatingMul(2.0)} {mn.wrappingMul(-1.0)} {mn.saturatingMul(-1.0)}"
+print "{mx.wrappingDiv(0.25)} {mx.saturatingDiv(0.25)} {mx.checkedDiv(0.25) else 0.0} {mx.checkedDiv(0.0) else -9.0}"
+let fixed64_64 eps = fixed64_64.epsilon
+print "{mx.mulRound(1.0)} {eps.mulRound(0.5)} {eps * 0.5} {(1.0 as fixed64_64).divRound(3.0)} {(2.0 as fixed64_64).divRound(3.0)}"
+print "{mx.floor()} {mn.round()} {mn.trunc()} {(mn + 1.0).abs()}"
+print "{(-2.5 as fixed64_64).round()} {(-2.5 as fixed64_64).floor()} {(-2.5 as fixed64_64).ceil()} {(2.75 as fixed64_64).fract()} {(-2.75 as fixed64_64).signum()}"
+print "{mx.min(mn)} {mx.max(mn)} {a.clamp(2.0, 3.0)} {a < b} {a > b} {a == a}"
+
+# fixed32_96: very small integer range, huge fraction
+let fixed32_96 p = 1.5
+let fixed32_96 q = -0.75
+print "{p * q} {p / q} {p + q} {q / p} {p:.30f}"
+let fixed32_96 tiny = fixed32_96.epsilon
+print "{tiny} {tiny * 0.5} {tiny.mulRound(0.5)} {fixed32_96.max} {fixed32_96.min}"
+let fixed32_96 hi = 1500000000.0
+print "{hi.saturatingMul(3.0)} {hi.wrappingMul(3.0)} {hi.checkedMul(3.0) else 0.0} {hi * -1.0} {hi.saturatingMul(-3.0)}"
+let fixed32_96 third96 = (1.0 as fixed32_96) / 3.0
+print "{third96} {third96 * 3.0} {0.1 as fixed32_96}"
+
+# casts
+let fixed64_64 c = 3.75
+print "{c as int} {c as float} {(-c) as int} {c as fixed32_96} {c as fixed16_16} {(1.25 as fixed16_16) as fixed64_64}"
+print "{5 as fixed64_64} {(-5) as fixed64_64} {2.5 as fixed64_64} {(0.0 - 1.0) as fixed64_64}"
+let fixed128_0 whole = 4000000000
+let fixed128_0 whole2 = 3
+print "{whole * whole * whole} {fixed128_0.min}"
+print "{whole} {whole * whole2} {whole / whole2} {whole % 1000.0} {fixed128_0.max}"
+let fixed2_126 f2 = 0.5
+print "{f2} {f2 * f2} {f2 / 1.5} {f2 * -1.5} {fixed2_126.max}"
+
+# collections and structs
+let [fixed64_64] arr = [0.1 as fixed64_64, 0.25 as fixed64_64, (-7.5) as fixed64_64]
+var fixed64_64 sum = 0.0
+for v in arr:
+    sum += v
+print "{sum} {arr[0] * arr[1]}"
