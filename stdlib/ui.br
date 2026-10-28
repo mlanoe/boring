@@ -408,8 +408,19 @@ pub view Fill:
     [View] children
     body(): native
 
+# Scroll: a finite viewport. Programmatic scrolling is request-driven: when `request` is above zero and differs from the last one the
+# host applied, the viewport scrolls so the `ScrollAnchor` named `anchor` sits at its leading edge (as far as the content allows).
+# Bump `request` to scroll to the same anchor again.
 pub view Scroll:
     ScrollAxis axis = .Vertical
+    string anchor = ""
+    int request = 0
+    [View] children
+    body(): native
+
+# A named place inside a `Scroll`'s content that `Scroll(anchor = name, request = n)` scrolls to. Layout-transparent.
+pub view ScrollAnchor:
+    string name
     [View] children
     body(): native
 
