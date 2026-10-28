@@ -603,6 +603,7 @@ transpile_test!(float32_struct_method_math);
 transpile_test!(float32_local_var_math);
 transpile_test!(float16_array_literal_width_and_cast);
 transpile_test!(fixed_point_basic);
+transpile_test!(fixed_point_collections);
 transpile_test!(fixed_point_struct_fn);
 transpile_test!(fixed_point_members);
 transpile_test!(fixed_point_policies);

@@ -382,6 +382,7 @@ interp_test!(float32_struct_method_math);
 interp_test!(float32_local_var_math);
 interp_test!(float16_array_literal_width_and_cast);
 interp_test!(fixed_point_basic);
+interp_test!(fixed_point_collections);
 interp_test!(fixed_point_struct_fn);
 interp_test!(fixed_point_members);
 interp_test!(fixed_point_policies);

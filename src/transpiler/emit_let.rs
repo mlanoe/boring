@@ -2564,6 +2564,11 @@ impl Transpiler {
                 return lit;
             }
         }
+        if let Some(ty) = declared_ty {
+            if let Some(code) = self.emit_fixed_collection_literal(ty, value) {
+                return code;
+            }
+        }
         // A lowered view state's `Slot` cell handed to a slot-typed slot (`NameEditor(name = st.name)`,
         // a `bind` argument) is the cell itself, not the value `st.name` reads as elsewhere.
         if let Some(cell) = self.state_cell_for_slot_target(declared_ty, value) {

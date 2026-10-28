@@ -465,6 +465,7 @@ itest!(float32_local_var_math);
 itest!(float32_array_literal_width_and_cast);
 itest!(float16_array_literal_width_and_cast);
 itest!(fixed_point_basic);
+itest!(fixed_point_collections);
 itest!(fixed_point_struct_fn);
 itest!(fixed_point_members);
 itest!(fixed_point_policies);

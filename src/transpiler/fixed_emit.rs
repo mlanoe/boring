@@ -91,6 +91,52 @@ impl Transpiler {
         })
     }
 
+    /// True when `ty` is a fixed-point type or a collection/tuple nesting one.
+    fn type_mentions_fixed(ty: &Type) -> bool {
+        match ty {
+            Type::Array(t) | Type::ArrayN(t, _) | Type::Set(t) => Self::type_mentions_fixed(t),
+            Type::Dict(k, v) => Self::type_mentions_fixed(k) || Self::type_mentions_fixed(v),
+            Type::Tuple(ts) => ts.iter().any(Self::type_mentions_fixed),
+            Type::Mut(t) | Type::Qualified(t, _) => Self::type_mentions_fixed(t),
+            _ => Self::fixed_fmt_of_type(ty).is_some(),
+        }
+    }
+
+    /// `[1.5, 2.25]` against `[fixed16_16]` (also `{K = fixedN_M}`, tuples, sets and
+    /// nestings): folds every untyped literal element to the element format.
+    /// `None` when `ty` holds no fixed-point type or `value` is not a literal collection.
+    pub(crate) fn emit_fixed_collection_literal(&self, ty: &Type, value: &Expr) -> Option<String> {
+        let ty = ty.without_mut();
+        if !Self::type_mentions_fixed(ty) {
+            return None;
+        }
+        match (ty, &value.kind) {
+            (Type::Array(et), ExprKind::Array(elems)) if !elems.is_empty() => {
+                let es: Vec<String> = elems.iter().map(|e| self.emit_let_value(Some(et), e)).collect();
+                Some(format!("vec![{}]", es.join(", ")))
+            }
+            (Type::ArrayN(et, _), ExprKind::Array(elems)) if !elems.is_empty() => {
+                let es: Vec<String> = elems.iter().map(|e| self.emit_let_value(Some(et), e)).collect();
+                Some(format!("[{}]", es.join(", ")))
+            }
+            (Type::Set(et), ExprKind::Set(elems)) if !elems.is_empty() => {
+                let es: Vec<String> = elems.iter().map(|e| self.emit_let_value(Some(et), e)).collect();
+                Some(format!("HashSet::from([{}])", es.join(", ")))
+            }
+            (Type::Tuple(ts), ExprKind::Tuple(elems)) if ts.len() == elems.len() => {
+                let es: Vec<String> = ts.iter().zip(elems).map(|(t, e)| self.emit_let_value(Some(t), e)).collect();
+                Some(format!("({})", es.join(", ")))
+            }
+            (Type::Dict(kt, vt), ExprKind::Dict(pairs)) if !pairs.is_empty() => {
+                let ps: Vec<String> = pairs.iter()
+                    .map(|(k, v)| format!("({}, {})", self.emit_let_value(Some(kt), k), self.emit_let_value(Some(vt), v)))
+                    .collect();
+                Some(format!("HashMap::from([{}])", ps.join(", ")))
+            }
+            _ => None,
+        }
+    }
+
     /// Operand of a fixed-point operation: a bare literal takes the operation's
     /// format, anything else is emitted normally.
     fn emit_fixed_operand(&self, e: &Expr, fmt: &FixedFmt) -> String {

@@ -1,0 +1,18 @@
+fixed16_16 total([fixed16_16] vs):
+    var fixed16_16 s = 0.0
+    for v in vs:
+        s = s + v
+    s
+
+[fixed16_16] make():
+    [0.5, 1, -2.25]
+
+def main():
+    let [fixed16_16] a = [1.5, 2.25]
+    print "total a = {total(a)}"
+    print "total lit = {total([1.25, 2.5])}"
+    print "make = {total(make())}"
+    let {string = fixed16_16} d = {"x" = 1.5, "y" = 2}
+    print "dict = {d["x"] + d["y"]}"
+    let [[fixed16_16]] n = [[1.5, 2], [0.25]]
+    print "nested = {total(n[0]) + total(n[1])}"

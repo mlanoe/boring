@@ -2336,6 +2336,9 @@ def Value coerce_declared_value(mut Interpreter interp, Value val, Type ty):
         Type.Optional(inner): coerce_declared_value(interp, val, inner)
         Type.Array(inner): coerce_array_elements(interp, val, inner)
         Type.ArrayN(inner, _): coerce_array_elements(interp, val, inner)
+        Type.Set(inner): coerce_set_elements(interp, val, inner)
+        Type.Tuple(tys): coerce_tuple_elements(interp, val, tys)
+        Type.Dict(kt, vt): coerce_dict_entries(interp, val, kt, vt)
         Type.Float16 | Type.Float32 | Type.Float64:
             cast_value(interp, val, ty)
         Type.Named(fname):
@@ -2361,6 +2364,36 @@ def Value coerce_array_elements(mut Interpreter interp, Value val, Type elem):
             for item in items:
                 coerced.push(coerce_declared_value(interp, item, elem))
             Value.Array(coerced)
+        _: val
+
+
+def Value coerce_set_elements(mut Interpreter interp, Value val, Type elem):
+    match val:
+        Value.Set(items):
+            mut [Value] coerced = []
+            for item in items:
+                coerced.push(coerce_declared_value(interp, item, elem))
+            Value.Set(coerced)
+        _: val
+
+def Value coerce_tuple_elements(mut Interpreter interp, Value val, [Type] tys):
+    match val:
+        Value.Tuple(items):
+            if items.len() != tys.len():
+                return val
+            mut [Value] coerced = []
+            for i in 0..<items.len():
+                coerced.push(coerce_declared_value(interp, items[i], tys[i]))
+            Value.Tuple(coerced)
+        _: val
+
+def Value coerce_dict_entries(mut Interpreter interp, Value val, Type kt, Type vt):
+    match val:
+        Value.Dict(pairs):
+            mut [(Value, Value)] coerced = []
+            for pair in pairs:
+                coerced.push((coerce_declared_value(interp, pair.0, kt), coerce_declared_value(interp, pair.1, vt)))
+            Value.Dict(coerced)
         _: val
 
 
