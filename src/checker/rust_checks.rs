@@ -745,6 +745,65 @@ impl Checker {
         ), line, col);
     }
 
+    /// A lent `mut` parameter (`is_lent_method_param`) is `&mut T` in the generated Rust, which
+    /// cannot be stored in a field: the transpiler used to fall back to a silent `.clone()`
+    /// while `boring run` kept the alias, so the two backends disagreed. Storing one -- `field = p`,
+    /// `h.field = p`, or `p` as an argument of a mutating call on a field (`items.push(p)`) -- is
+    /// rejected; the diagnostic asks for an explicit `.clone()` (or a `'shared`/`'actor` type).
+    pub(super) fn check_lent_param_stored(&mut self, f: &FnDecl) {
+        if self.kernel_dispatch_only { return; }
+        let lent: std::collections::HashSet<&str> = f.params.iter()
+            .filter(|p| self.is_lent_method_param(p))
+            .map(|p| p.name.as_str()).collect();
+        if lent.is_empty() { return; }
+        const STORING: &[&str] = &["push", "append", "insert", "add", "set", "pushFront", "push_front", "pushBack", "push_back"];
+        let mut found: Vec<(usize, usize, String, String)> = Vec::new(); // (line, col, param, place)
+        let this = &*self;
+        let bare = |e: &Expr| -> Option<String> {
+            match &e.kind { ExprKind::Var(n) if lent.contains(n.as_str()) => Some(n.clone()), _ => None }
+        };
+        let is_field_place = |e: &Expr| -> bool {
+            match &e.kind {
+                ExprKind::Var(n) => !f.params.iter().any(|p| &p.name == n) && this.current_struct_fields.contains(n.as_str()),
+                ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::LabeledIndex(..) => {
+                    let mut cur = e;
+                    loop {
+                        match &cur.kind {
+                            ExprKind::Field(o, _) | ExprKind::Index(o, _) | ExprKind::LabeledIndex(o, _) => cur = o,
+                            ExprKind::Var(n) => break !lent.contains(n.as_str()),
+                            _ => break false,
+                        }
+                    }
+                }
+                _ => false,
+            }
+        };
+        crate::ast::walk_stmts(&f.body, &mut |node| {
+            let crate::ast::WalkNode::Expr(e) = node else { return };
+            match &e.kind {
+                ExprKind::Assign(lhs, rhs) => {
+                    if let Some(n) = bare(rhs) {
+                        if is_field_place(lhs) { found.push((rhs.line, rhs.col, n, Self::place_text(lhs))); }
+                    }
+                }
+                ExprKind::MethodCall(recv, m, args) if STORING.contains(&m.as_str()) && is_field_place(recv) => {
+                    for a in args {
+                        if let Some(n) = bare(&a.value) { found.push((a.value.line, a.value.col, n, Self::place_text(recv))); }
+                    }
+                }
+                _ => {}
+            }
+        });
+        for (line, col, n, place) in found {
+            self.error(format!(
+                "cannot store the `mut` parameter `{n}` in `{place}`: a `mut` parameter is lent (`&mut`) from the caller, \
+                 so it cannot be kept past the call, and a stored copy would silently stop aliasing the caller's value. \
+                 Fix: store an explicit copy (`{n}.clone()`), or use a `'shared`/`'actor` type \
+                 (`Type'shared {n}`) if the field must keep sharing it"
+            ), line, col);
+        }
+    }
+
     /// Source-like text of a place expression for a diagnostic (`self.inner`, `h.inner`, `buf`).
     fn place_text(expr: &Expr) -> String {
         match &expr.kind {

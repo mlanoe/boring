@@ -1,0 +1,35 @@
+# A `mut` struct / collection parameter is lent (`&mut`) from the caller, so storing it in a
+# member needs an explicit `.clone()`: the stored value is then an independent copy in `boring
+# run` and `boring build` alike (the bare `kept = p` is rejected, see
+# error_mut_param_store.br).
+
+struct MutStorePoint:
+    var float x
+    var float y
+
+struct MutStoreHolder:
+    var MutStorePoint kept = MutStorePoint(0.0, 0.0)
+    var [MutStorePoint] all = []
+    var [int] nums = []
+
+    def keep(mut MutStorePoint p):
+        kept = p.clone()
+
+    def add(mut MutStorePoint p):
+        all.push(p.clone())
+
+    def setn(mut [int] a):
+        nums = a.clone()
+
+def main():
+    mut p = MutStorePoint(1.0, 2.0)
+    mut [int] a = [1, 2]
+    mut h = MutStoreHolder()
+    h.keep(p)
+    h.add(p)
+    h.setn(a)
+    p.x = 9.0
+    a.push(3)
+    print h.kept.x
+    print h.all[0].x
+    print h.nums.length

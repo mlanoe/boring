@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Storing a `mut` struct/collection parameter in a member is now a checker error instead of a silent run/build divergence.** A `mut Point p` (or `mut [T]`/`mut {K=V}`/`mut {T}`) parameter is lent as `&mut` and cannot be kept in `self`, so `kept = p` / `all.push(p)` transpiled to a `.clone()` while `boring run` aliased the caller's value (`9` vs `1` in the same program). `field = p`, `obj.field = p` and `p` as the argument of `push`/`append`/`insert`/`add`/`set` on a field are now rejected (`check_lent_param_stored`, `src/checker/rust_checks.rs`) with a message asking for an explicit `p.clone()` (or a `'shared`/`'actor` type); the explicit form behaves identically in both backends. See `tests/cases/mut_param_store_clone.br` and `error_mut_param_store.br`, and the `mut` vs `var` section of `docs/book.md`.
+
 ### Added
 
 - **Binary fixed-point types `fixedN_M` / `ufixedN_M` (aliases `iN_M` / `uN_M`) — Phase 1 (core).** `N` integer bits (sign included) + `M` fractional bits, storage `N + M` ∈ {8, 16, 32, 64}; value = `raw / 2^M`. Untyped literals adopt the format (rounded to nearest on the written decimal, out of range is an error); `+ - * / %` and comparisons are same-format only (`*`/`/` truncate toward zero through a 2W-bit intermediate, overflow is an error in `boring run` and panics in a debug build); fixed-point never mixes with other formats or int/float variables (`as` casts: fixed↔fixed truncates, int→fixed exact, float→fixed truncates, fixed→int/float); `"{x}"` prints the exact decimal and `"{x:.3f}"` rounds to nearest. Implemented in the Rust interpreter (`src/fixed.rs`), the transpiler (a generated `Fixed16_16(pub i32)` newtype per used format, no external dependency) and the self-hosted interpreter (`boring/interpreter/fixedpoint.br`), checked against one shared corpus (`fixed_point_basic`, `fixed_point_struct_fn`) plus `tests/fixed_point_errors.rs`. 128-bit formats, members (`floor`, `raw`, `fromRaw`, …) and GPU backends are not implemented yet — see `docs/fixed-point-types.md`.

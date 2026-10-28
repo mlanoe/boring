@@ -1519,6 +1519,7 @@ impl Checker {
         self.check_dead_code(&f.body);
         for stmt in &f.body { self.check_stmt(stmt); }
         self.check_kernel_copy_writes(f);
+        self.check_lent_param_stored(f);
         self.in_authorized_static_site = prev_static_site;
         self.current_return_ty = prev_return_ty;
         self.pop_scope();

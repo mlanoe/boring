@@ -980,6 +980,10 @@ transpile_test!(mut_scenarios);
 // the same case in tests/run.rs.
 transpile_test!(mut_param_type_method);
 
+// Storing a lent `mut` param in a member needs an explicit `.clone()` (the bare form is a checker
+// error, tests/cases/error_mut_param_store.br); the copy is independent in both backends.
+transpile_test!(mut_param_store_clone);
+
 // A `mut` argument lent to a method of a different receiver (`self.a.bump(self.inner)`, `x.bump(y)`)
 // is valid Rust and must keep compiling, as must the documented fix for lending a field to a method
 // of its own struct (copy into a local, call, assign back). Rejected counterparts:
