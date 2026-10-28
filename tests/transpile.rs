@@ -910,6 +910,10 @@ transpile_project_test!(ext_res_field);
 // `cargo run` for the same reason as `ext_res_field`.
 transpile_project_test!(ext_res_remove);
 
+// `res.dict_field[k] = v` through a `ResMut<T>` wrapper must `insert`, not `get_mut().expect(..)`
+// (panicked on a first-time key). See tests/cases/ext_res_dict_insert/src/main.br.
+transpile_project_test!(ext_res_dict_insert);
+
 // `TextColor` specifically (bevy::prelude::TextColor, bevy_text 0.19) -- the concrete
 // case that motivated auditing/extending `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`
 // beyond `Mesh2d`/`MeshMaterial2d` above; see tests/cases/text_color_construct/src/

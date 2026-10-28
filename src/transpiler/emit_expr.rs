@@ -3858,7 +3858,12 @@ impl Transpiler {
             // used to emit an invalid `.clone()`-as-assignment-target for the
             // non-self case).
             if let ExprKind::Field(inner_obj, field_name) = &dict_obj.kind {
+                // Falls back to `resolve_expr_struct_type`, which also sees through Bevy's
+                // deref-transparent wrappers (`ResMut<Cache> cache` -> `Cache`) that
+                // `resolve_struct_name` can't resolve; without it the assignment fell
+                // through to the update-existing-key (`get_mut().expect`) codegen.
                 let is_dict_field = self.resolve_struct_name(inner_obj)
+                    .or_else(|| self.resolve_expr_struct_type(inner_obj))
                     .and_then(|t| self.struct_fields.get(t.as_str())
                         .and_then(|fields| fields.iter().find(|(n, _)| n == field_name))
                         .map(|(_, ty)| matches!(ty.without_mut(), Type::Dict(..))))

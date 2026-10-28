@@ -1,0 +1,23 @@
+# Regression test: `res.dict_field[key] = v` where `res` is a `ResMut<T>` system-param
+# wrapper (the shape of a Bevy system writing into a resource's dict field) was emitted as
+# an update of an existing key (`(*res.keys.get_mut(&k).expect("dict key not found")) = v`),
+# panicking the first time a key was inserted. The dict-field assignment branch resolved
+# the receiver's struct with `resolve_struct_name`, which can't see through the deref-
+# transparent wrapper; it now falls back to `resolve_expr_struct_type`
+# (`TRANSPARENT_WRAPPER_GENERICS`), so the assignment emits `.insert(..)`. Codegen-only bug,
+# hence a project-mode test with the stand-in `ext_res` crate (see `ext_res_remove`).
+use ext_res.ResMut
+
+struct Cache:
+    var mut {string=string} keys
+
+def fill(mut ResMut<Cache> cache):
+    cache.keys["a"] = "b"
+    cache.keys["c"] = "d"
+    cache.keys["a"] = "e"
+    print cache.keys["a"]
+    print cache.keys["c"]
+
+def main():
+    var mut c = Cache({=})
+    fill(ResMut(c))
