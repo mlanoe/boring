@@ -4522,3 +4522,39 @@ def main() throws:
     assert!(build.status.success(), "generated wgpu project failed to compile:\n{}",
         String::from_utf8_lossy(&build.stderr));
 }
+
+/// A `continue` in a `for` loop must still run the loop increment: the increment
+/// goes in a WGSL `continuing` block, otherwise the shader loops forever (GPU hang).
+#[test]
+fn continue_in_for_loop_runs_increment_via_continuing_block() {
+    let (wgsl, _) = wgpu_codegen("continue_for_continuing", r#"
+kernel Neighbors:
+    let [int]'global a
+    mut [int]'unified out
+    let int n
+
+    def ():
+        let i = .thread.x
+        if i < n:
+            var int s = 0
+            for dy in -1..<2:
+                for dx in -1..<2:
+                    if dx == 0 and dy == 0:
+                        continue
+                    s += a[i]
+            for k in 0..<3:
+                if k == 1:
+                    continue
+                s += k
+            out[i] = s
+"#);
+    assert_eq!(wgsl.matches("continuing {").count(), 3, "{wgsl}");
+    assert!(wgsl.contains("continue;"), "{wgsl}");
+    assert!(wgsl.contains("dx = dx + 1;"), "{wgsl}");
+    // The increment must be the sole content of each `continuing` block.
+    for v in ["dx", "dy", "k"] {
+        let want = format!("continuing {{\n{v} = {v} + 1;", );
+        let squashed: String = wgsl.lines().map(|l| l.trim()).collect::<Vec<_>>().join("\n");
+        assert!(squashed.contains(&want), "missing continuing increment for {v}:\n{wgsl}");
+    }
+}

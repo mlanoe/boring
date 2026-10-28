@@ -1408,7 +1408,10 @@ impl DeviceEmitter {
                         self.line("workgroupBarrier();");
                     }
                     for s in &f.body { self.emit_stmt(s, false); }
-                    self.line(&format!("{var} = {var} + 1;"));
+                    // `continuing` so a `continue` in the body still runs the increment.
+                    self.line("continuing {");
+                    self.line(&format!("    {var} = {var} + 1;"));
+                    self.line("}");
                     self.indent -= 1;
                     self.line("}");
                     self.indent -= 1;
@@ -1429,7 +1432,10 @@ impl DeviceEmitter {
                             self.line("workgroupBarrier();");
                         }
                         for s in &f.body { self.emit_stmt(s, false); }
-                        self.line(&format!("{var} = {var} + 1;"));
+                        // `continuing` so a `continue` in the body still runs the increment.
+                        self.line("continuing {");
+                        self.line(&format!("    {var} = {var} + 1;"));
+                        self.line("}");
                         self.indent -= 1;
                         self.line("}");
                         self.indent -= 1;
