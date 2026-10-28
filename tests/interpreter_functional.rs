@@ -229,6 +229,7 @@ itest!(labeled_array);
 itest!(collections2);
 itest!(triple_string);
 itest!(raw_apostrophe_string);
+itest!(dollar_string);
 itest!(pipe);
 itest!(supertraits);
 itest!(type_cast);

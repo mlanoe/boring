@@ -179,6 +179,7 @@ print "Hello, {name}!"
 - `{expr:fmt}` → formatted interpolation with a **static** format specifier (e.g. `{n:.2f}`, `{n:x}` for hex); the format part is a raw string, not an expression — `{n:{fmt}}` does **not** interpolate `fmt`, it produces the literal `{:{fmt}}`
 - `{:x}` (empty expr, non-empty fmt) → literal `{:x}`, nothing is formatted
 - A lone `{` inside a string is **always** treated as the start of an interpolation hole — it is **not** a literal brace. `"{"` is a lexer error (unterminated string). Use `"{{"` instead.
+- Two alternatives for brace-heavy text (JSON, CSS): `$"..."` / `$"""..."""` interpolate with `$name` / `${expr}` and treat `{`/`}` as literal (`$$` = literal `$`); `'''...'''` is **raw** — no interpolation, no escapes, everything literal. See [book.md](docs/book.md) ("`$` interpolation" and "Raw strings").
 
 ## Common types
 

@@ -594,6 +594,39 @@ Use `"""` when you want interpolation, `'''` when you don't. A lone `'` or `''` 
 let body: Arc<str> = Arc::<str>::from("{\"name\": \"Alice\", \"tags\": [\"a\", \"b\"]}");
 ```
 
+### `$` interpolation — `$"..."` and `$"""..."""`
+
+A `$` in front of a string changes its interpolation syntax: holes are written `$name` or `${expr}`, and `{` / `}` become ordinary characters. It is meant for text that is full of braces (JSON, CSS, generated code) where `{{`/`}}` doubling is noisy:
+
+```boring
+let name = "Alice"
+let age  = 30
+
+print $"hello $name, next year ${age + 1}"
+# → hello Alice, next year 31
+
+let body = $"""{"name": "$name", "age": $age, "tags": ["a", "b"]}"""
+# → {"name": "Alice", "age": 30, "tags": ["a", "b"]}
+```
+
+| In `$"..."` / `$"""..."""` | Meaning |
+|---|---|
+| `$name` | hole for the identifier `name` (letters, digits, `_`; stops at the first other character) |
+| `${expr}` | hole for any expression, including `${n:.2f}` format specifiers |
+| `$$` | a literal `$` |
+| `$` followed by anything else (`$1`, `$ `, end of string) | a literal `$` |
+| `{`, `}` | literal braces — never a hole |
+
+`$user.name` interpolates `user` followed by the text `.name`; write `${user.name}` for a field access.
+
+The rest behaves like the string it prefixes: `$"..."` is single-line and processes `\n`, `\"` and the other escapes like `"..."`; `$"""..."""` is multiline with the same dedent and first/last-newline rules as `"""` and keeps backslashes literal. Only the hole syntax differs, so a plain `"..."` or `"""..."""` is unchanged — `"{x}"` still interpolates.
+
+**Rust equivalent** — rewritten to the regular form before parsing, so it produces the same `format!` call as the equivalent `"..."`:
+
+```rust
+let body = format!("{{\"name\": \"{}\", \"age\": {}, \"tags\": [\"a\", \"b\"]}}", name, age);
+```
+
 ### `print` and `write`
 
 `print` outputs with a trailing newline; `write` outputs without one.

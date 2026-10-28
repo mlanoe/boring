@@ -1,0 +1,13 @@
+# $"..." / $"""...""" : `$name` / `${expr}` interpolate, `{` and `}` are literal.
+let name = "Alice"
+let age = 30
+let id = 7
+
+print $"hello $name, next year ${age + 1}"
+print $"""{"id": "$id", "name": "$name", "age": ${age}}"""
+print $"cost $$5 and $1 and {braces} and end$"
+print $"""
+    {
+      "who": "$name"
+    }
+"""

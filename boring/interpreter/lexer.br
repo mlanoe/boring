@@ -112,6 +112,95 @@ def string dedent_triple(string raw):
         out = out + result[ii]
     return out
 
+def bool is_dollar_ident_start(string c):
+    return c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+
+def bool is_dollar_ident_char(string c):
+    return is_dollar_ident_start(c) or (c >= "0" and c <= "9")
+
+# Re-encode the content of a `$"..."` / `$"""..."""` string as the content of a
+# regular `"..."` token: `$name` / `${expr}` -> `{name}` / `{expr}` holes, `$$` -> `$`,
+# any other `$` stays literal, literal braces are doubled. `keep_escapes` is true for
+# the single-line form (its `\x` escapes pass through) and false for the triple form
+# (backslashes stay literal).
+def string encode_dollar_content(string content, bool keep_escapes, int line):
+    let cs = content.chars()
+    let n = cs.length
+    var out = ""
+    var i = 0
+    while i < n:
+        let c = cs[i]
+        if c == "$":
+            let nc = if i + 1 < n: cs[i + 1] else: ""
+            if nc == "$":
+                out = out + "$"
+                i += 2
+            elif nc == "{{":
+                var depth = 0
+                var j = i + 1
+                var inner = ""
+                var closed = false
+                while j < n:
+                    let hc = cs[j]
+                    j += 1
+                    if hc == "{{":
+                        depth += 1
+                        if depth == 1:
+                            continue
+                    elif hc == "}}":
+                        depth -= 1
+                        if depth == 0:
+                            closed = true
+                            break
+                    if hc == "\n":
+                        inner = inner + " "
+                    else:
+                        inner = inner + hc
+                if not closed:
+                    throw "line {line}: unterminated string"
+                out = out + "{{" + inner + "}}"
+                i = j
+            elif nc != "" and is_dollar_ident_start(nc):
+                var j = i + 1
+                var name = ""
+                while j < n and is_dollar_ident_char(cs[j]):
+                    name = name + cs[j]
+                    j += 1
+                out = out + "{{" + name + "}}"
+                i = j
+            else:
+                out = out + "$"
+                i += 1
+        elif c == "{{":
+            out = out + "{{{{"
+            i += 1
+        elif c == "}}":
+            out = out + "}}}}"
+            i += 1
+        elif c == "\"":
+            out = out + "\\\""
+            i += 1
+        elif c == "\\" and keep_escapes:
+            out = out + "\\"
+            if i + 1 < n:
+                out = out + cs[i + 1]
+                i += 2
+            else:
+                i += 1
+        elif c == "\\":
+            out = out + "\\\\"
+            i += 1
+        elif c == "\n":
+            out = out + "\\n"
+            i += 1
+        elif c == "\r":
+            out = out + "\\r"
+            i += 1
+        else:
+            out = out + c
+            i += 1
+    return out
+
 def string preprocess_triple_strings(string source):
     let chars = source.chars()
     let n = chars.length
@@ -170,6 +259,65 @@ def string preprocess_triple_strings(string source):
             while nl < newlines_consumed:
                 result = result + "\n"
                 nl += 1
+            continue
+        if ch == "$" and i + 1 < n and chars[i + 1] == "\"":
+            # `$"..."` / `$"""..."""`: `$` interpolation, rewritten to the regular form.
+            let start_line = line
+            if i + 3 < n and chars[i + 2] == "\"" and chars[i + 3] == "\"":
+                i += 4
+                var raw = ""
+                var newlines_consumed = 0
+                var closed = false
+                while i < n:
+                    if i + 2 < n and chars[i] == "\"" and chars[i + 1] == "\"" and chars[i + 2] == "\"":
+                        i += 3
+                        closed = true
+                        break
+                    if chars[i] == "\n":
+                        newlines_consumed += 1
+                        line += 1
+                    raw = raw + chars[i]
+                    i += 1
+                if not closed:
+                    throw "line {start_line}: unterminated string"
+                let content = dedent_triple(raw)
+                result = result + "\"" + encode_dollar_content(content, false, start_line) + "\""
+                var nl = 0
+                while nl < newlines_consumed:
+                    result = result + "\n"
+                    nl += 1
+            else:
+                i += 2
+                var raw = ""
+                var closed = false
+                while i < n:
+                    let c = chars[i]
+                    if c == "\n":
+                        break
+                    i += 1
+                    if c == "\"":
+                        closed = true
+                        break
+                    raw = raw + c
+                    if c == "\\":
+                        if i < n and chars[i] != "\n":
+                            raw = raw + chars[i]
+                            i += 1
+                    elif c == "$" and i < n and chars[i] == "{{":
+                        var depth = 0
+                        while i < n and chars[i] != "\n":
+                            let hc = chars[i]
+                            raw = raw + hc
+                            i += 1
+                            if hc == "{{":
+                                depth += 1
+                            elif hc == "}}":
+                                depth -= 1
+                                if depth == 0:
+                                    break
+                if not closed:
+                    throw "line {start_line}: unterminated string"
+                result = result + "\"" + encode_dollar_content(raw, true, start_line) + "\""
             continue
         if ch == "\"":
             if i + 2 < n and chars[i + 1] == "\"" and chars[i + 2] == "\"":

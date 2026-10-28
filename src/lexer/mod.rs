@@ -138,6 +138,99 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
             continue;
         }
 
+        // ── `$"..."` / `$"""..."""`: `$` interpolation ───────────────────────
+        // Same strings as `"..."` / `"""..."""`, except that `{`/`}` are literal
+        // and holes are written `$name` or `${expr}` (`$$` is a literal `$`).
+        // Rewritten to the regular form (`{{`/`}}` for literal braces, `{...}` for
+        // holes) so everything downstream is unchanged. Like their plain
+        // counterparts, `$"..."` processes `\n`-style escapes and `$"""..."""`
+        // keeps backslashes literal. `$` is otherwise unused in the language.
+        if ch == '$' && chars.get(i + 1) == Some(&'"') {
+            let start_line = line;
+            if chars.get(i + 2) == Some(&'"') && chars.get(i + 3) == Some(&'"') {
+                i += 4; // consume opening $"""
+
+                let mut raw = String::new();
+                let mut newlines_consumed = 0usize;
+                let mut closed = false;
+                while i < n {
+                    if chars[i] == '"'
+                        && chars.get(i + 1) == Some(&'"')
+                        && chars.get(i + 2) == Some(&'"')
+                    {
+                        i += 3;
+                        closed = true;
+                        break;
+                    }
+                    if chars[i] == '\n' {
+                        newlines_consumed += 1;
+                        line += 1;
+                    }
+                    raw.push(chars[i]);
+                    i += 1;
+                }
+                if !closed {
+                    return Err(LexError::UnterminatedString { line: start_line, col: 1 });
+                }
+
+                let content = dedent_triple(&raw);
+                result.push('"');
+                result.push_str(&encode_dollar_content(&content, false, start_line)?);
+                result.push('"');
+                for _ in 0..newlines_consumed {
+                    result.push('\n');
+                }
+            } else {
+                i += 2; // consume opening $"
+
+                let mut raw = String::new();
+                let mut closed = false;
+                while i < n {
+                    let c = chars[i];
+                    if c == '\n' {
+                        break;
+                    }
+                    i += 1;
+                    if c == '"' {
+                        closed = true;
+                        break;
+                    }
+                    raw.push(c);
+                    if c == '\\' {
+                        // Escape: copy the next character unconditionally (`\"`).
+                        if i < n && chars[i] != '\n' {
+                            raw.push(chars[i]);
+                            i += 1;
+                        }
+                    } else if c == '$' && chars.get(i) == Some(&'{') {
+                        // `${expr}` hole: copy to the matching `}` so a `"` inside
+                        // the expression doesn't end the string.
+                        let mut depth = 0usize;
+                        while i < n && chars[i] != '\n' {
+                            let hc = chars[i];
+                            raw.push(hc);
+                            i += 1;
+                            if hc == '{' {
+                                depth += 1;
+                            } else if hc == '}' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !closed {
+                    return Err(LexError::UnterminatedString { line: start_line, col: 1 });
+                }
+                result.push('"');
+                result.push_str(&encode_dollar_content(&raw, true, start_line)?);
+                result.push('"');
+            }
+            continue;
+        }
+
         if ch == '"' {
             // ── Triple-quoted string ────────────────────────────────────────
             if chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"') {
@@ -280,6 +373,121 @@ fn dedent_triple(raw: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Re-encode the content of a `$"..."` / `$"""..."""` string as the content of a
+/// regular `"..."` token: `$name` / `${expr}` become `{name}` / `{expr}` holes,
+/// `$$` becomes `$`, a `$` followed by anything else stays a literal `$`, and
+/// literal `{`/`}` are doubled so `lex_string` reads them back as braces.
+///
+/// `keep_escapes` is true for the single-line form (its `\x` escapes are passed
+/// through for `lex_string` to process) and false for the triple form, which —
+/// like `"""` — keeps every backslash literal.
+fn encode_dollar_content(
+    content: &str,
+    keep_escapes: bool,
+    line: usize,
+) -> Result<String, LexError> {
+    let cs: Vec<char> = content.chars().collect();
+    let mut out = String::with_capacity(content.len() + 8);
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        match c {
+            '$' => match cs.get(i + 1) {
+                Some('$') => {
+                    out.push('$');
+                    i += 2;
+                }
+                Some('{') => {
+                    let mut depth = 0usize;
+                    let mut j = i + 1;
+                    let mut inner = String::new();
+                    loop {
+                        let Some(&hc) = cs.get(j) else {
+                            return Err(LexError::UnterminatedString { line, col: 1 });
+                        };
+                        j += 1;
+                        if hc == '{' {
+                            depth += 1;
+                            if depth == 1 {
+                                continue;
+                            }
+                        } else if hc == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        // A hole can't span lines in the rewritten token.
+                        inner.push(if hc == '\n' { ' ' } else { hc });
+                    }
+                    out.push('{');
+                    out.push_str(&inner);
+                    out.push('}');
+                    i = j;
+                }
+                Some(&nc) if nc == '_' || nc.is_ascii_alphabetic() => {
+                    let mut j = i + 1;
+                    let mut name = String::new();
+                    while let Some(&ic) = cs.get(j) {
+                        if ic == '_' || ic.is_ascii_alphanumeric() {
+                            name.push(ic);
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push('{');
+                    out.push_str(&name);
+                    out.push('}');
+                    i = j;
+                }
+                _ => {
+                    out.push('$');
+                    i += 1;
+                }
+            },
+            '{' => {
+                out.push_str("{{");
+                i += 1;
+            }
+            '}' => {
+                out.push_str("}}");
+                i += 1;
+            }
+            '"' => {
+                out.push_str("\\\"");
+                i += 1;
+            }
+            '\\' if keep_escapes => {
+                out.push('\\');
+                if let Some(&nc) = cs.get(i + 1) {
+                    out.push(nc);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '\\' => {
+                out.push_str("\\\\");
+                i += 1;
+            }
+            '\n' => {
+                out.push_str("\\n");
+                i += 1;
+            }
+            '\r' => {
+                out.push_str("\\r");
+                i += 1;
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Error)]
@@ -1599,5 +1807,77 @@ mod raw_apostrophe_strings {
     #[test]
     fn unterminated_raw_string_is_an_error() {
         assert!(matches!(lex("let x = '''abc"), Err(LexError::UnterminatedString { .. })));
+    }
+}
+
+#[cfg(test)]
+mod dollar_strings {
+    use super::*;
+
+    fn kinds(src: &str) -> Vec<TokenKind> {
+        lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+    }
+
+    /// A `$"..."` literal lexes to exactly the tokens of its regular-string equivalent.
+    fn same(dollar: &str, regular: &str) {
+        assert_eq!(
+            kinds(&format!("let s = {dollar}")),
+            kinds(&format!("let s = {regular}")),
+            "{dollar}  vs  {regular}"
+        );
+    }
+
+    #[test]
+    fn name_and_expression_holes() {
+        same(r#"$"hello $name!""#, r#""hello {name}!""#);
+        same(r#"$"a ${x + 1} b""#, r#""a {x + 1} b""#);
+        same(r#"$"${user.name} / $user.name""#, r#""{user.name} / {user}.name""#);
+        same(r#"$"${n:.2f}""#, r#""{n:.2f}""#);
+        same(r#"$"${f("x")}""#, r#""{f("x")}""#);
+    }
+
+    #[test]
+    fn braces_are_literal() {
+        same(r#"$"{braces} {}""#, r#""{{braces}} {{}}""#);
+        same(r#"$"""{"id": "$id", "n": ${a.b}}""""#, r#""{{\"id\": \"{id}\", \"n\": {a.b}}}""#);
+    }
+
+    #[test]
+    fn dollar_escape_and_lone_dollar() {
+        same(r#"$"cost $$5""#, r#""cost $5""#);
+        same(r#"$"a $1 b $ c end$""#, r#""a $1 b $ c end$""#);
+    }
+
+    #[test]
+    fn single_line_keeps_escapes_and_triple_keeps_backslashes_literal() {
+        same(r#"$"a\nb \"q\"""#, r#""a\nb \"q\"""#);
+        same(r#"$"""a\nb""""#, r#""""a\nb""""#);
+    }
+
+    #[test]
+    fn multiline_is_dedented_like_triple_double_quote() {
+        let body = "\n    first \"q\" $x\n      second\n    ";
+        same(&format!("$\"\"\"{body}\"\"\""), &format!("\"\"\"{}\"\"\"", body.replace("$x", "{x}")));
+    }
+
+    #[test]
+    fn line_numbers_after_multiline_are_preserved() {
+        let toks = lex("let x = $\"\"\"\na $b\nc\n\"\"\"\nlet y = 1").unwrap();
+        let y = toks.iter().find(|t| matches!(&t.kind, TokenKind::Ident(s) if s == "y")).unwrap();
+        assert_eq!(y.line, 5);
+    }
+
+    #[test]
+    fn ignored_in_comments_strings_and_raw_strings() {
+        assert!(!kinds("# $\"not a string\nlet x = 1").iter().any(|k| matches!(k, TokenKind::Str(_))));
+        same(r#"'''$"x" $y'''"#, r#""$\"x\" $y""#);
+        same(r#""cost $5""#, r#""cost $5""#);
+    }
+
+    #[test]
+    fn unterminated_forms_are_errors() {
+        assert!(matches!(lex("let x = $\"abc"), Err(LexError::UnterminatedString { .. })));
+        assert!(matches!(lex("let x = $\"\"\"abc"), Err(LexError::UnterminatedString { .. })));
+        assert!(matches!(lex("let x = $\"${abc\""), Err(LexError::UnterminatedString { .. })));
     }
 }
