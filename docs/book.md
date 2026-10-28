@@ -1,12 +1,18 @@
 # The new programming language is Boring
 
-Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while retaining full access to Rust's type system, ownership model, and performance. Every Boring program can be run directly (interpreter) or compiled with `boring build`.
+Boring is a high-level language that transpiles to Rust. It is designed to feel lighter than Rust while mapping its types, ownership model, and performance-oriented constructs explicitly to Rust. Boring source can be run directly with the interpreter or transpiled with `boring build`; target-specific constructs and backend limitations are called out in the relevant chapters.
 
 Boring's own semantics — memory management, ownership, and the qualifiers in [chapter 21](#21-ownership-qualifiers) especially — follow Rust's directly rather than inventing an independent model, so prior familiarity with Rust's concepts (ownership, borrowing, `Rc`/`Arc`, `Mutex`/`RwLock`) makes this book much easier to follow. [The Rust Programming Language](https://doc.rust-lang.org/book/) is the standard reference if you need to pick those up first.
 
 ---
 
+## How to use this book
+
+This file is the reader-facing language reference. Read chapters 1–15 in order for a first tour of the language, then choose the track that matches the program you are building. Chapters 16–23 cover data flow, ownership and concurrency; chapters 24–31 are reference and advanced material; chapters 32–33 cover GPU computing and dependency injection. The separate documents linked under [Further Reading](#further-reading) are focused references, backend guides, implementation-status reports, and design records. A document marked **Draft**, **Plan**, or **Proposed** does not define shipped language behavior.
+
 ## Table of Contents
+
+### Language fundamentals
 
 1. [Getting Started](#1-getting-started)
 2. [Variables and Mutability](#2-variables-and-mutability)
@@ -23,7 +29,10 @@ Boring's own semantics — memory management, ownership, and the qualifiers in [
 13. [Generics](#13-generics)
 14. [Closures and Higher-Order Functions](#14-closures-and-higher-order-functions)
 15. [Modules](#15-modules)
-16. [Pipe Operator](#16-pipe-operator-)
+
+### Data flow, ownership and concurrency
+
+16. [Pipe Operator](#16-pipe-operator)
 17. [Streams](#17-streams-stream--yield)
 18. [Channels](#18-channels-channel)
 19. [Task handles and parallel awaiting](#19-task-handles-and-parallel-awaiting)
@@ -31,6 +40,9 @@ Boring's own semantics — memory management, ownership, and the qualifiers in [
 21. [Ownership Qualifiers](#21-ownership-qualifiers)
 22. [Defer](#22-defer)
 23. [Tasks (Async)](#23-tasks-async)
+
+### Reference and advanced topics
+
 24. [Attributes](#24-attributes)
 25. [Format Specifiers](#25-format-specifiers)
 26. [Built-in Functions](#26-built-in-functions)
@@ -39,6 +51,9 @@ Boring's own semantics — memory management, ownership, and the qualifiers in [
 29. [Advanced](#29-advanced)
 30. [Qualifier Inference](#30-qualifier-inference)
 31. [Debugging & Profiling](#31-debugging--profiling)
+
+### Specialized systems
+
 32. [GPU Computing](#32-gpu-computing)
 33. [Dependency Injection](#33-dependency-injection)
 
@@ -493,7 +508,7 @@ let string c = a + " " + b     # string — concatenation
 let string d = "Hi, {a}!"      # string — interpolation
 ```
 
-> Boring infers the string representation automatically. String literals stay as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it (storage in a variable, field, collection, or concatenation). See [Advanced — Strings](#advanced--strings-string-and-stringshared) for details.
+> Boring infers the string representation automatically. String literals stay as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when the context requires it (storage in a variable, field, collection, or concatenation). See [Advanced — Strings](#advanced--strings-string) for details.
 
 ### String interpolation
 
@@ -3330,7 +3345,7 @@ fn clone_shape(&self) -> Box<dyn Drawable> { … }
 shapes: Vec<Box<dyn Drawable>>,
 ```
 
-For **static dispatch** (no heap allocation, function determines the concrete type), use the `<Trait>` shorthand — see [Generics — trait shorthand](#trait-shorthand----trait).
+For **static dispatch** (no heap allocation, function determines the concrete type), use the `<Trait>` shorthand — see [Generics — trait shorthand](#trait-shorthand--trait).
 
 ### Downcasting a trait object
 
@@ -5300,7 +5315,7 @@ type Parser     = fn(&str) -> Result<Arc<str>, Box<dyn std::error::Error>>;
 // async and throws/task equivalents are function signatures, not type aliases in plain Rust
 ```
 
-Built-in primitives (`int`, `uint`, `float`, `bool`) are always `Copy` Rust types — they carry no qualifier. `string` literals emit as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when they are stored or concatenated. See [Advanced — Strings](#advanced--strings-string-and-arc-str).
+Built-in primitives (`int`, `uint`, `float`, `bool`) are always `Copy` Rust types — they carry no qualifier. `string` literals emit as `&str`; the transpiler promotes them to `Rc<str>` (single-thread) or `Arc<str>` (multi-thread) when they are stored or concatenated. See [Advanced — Strings](#advanced--strings-string).
 
 ### Built-in Types & Functions Reference
 
@@ -6465,9 +6480,8 @@ It's a **reference**, never a clone, and deliberately so: `'actor'observed`/
 bare `T`/`Box<T>`, with no `Clone` bound anywhere in the picture) — cloning simply
 isn't an option for those two, so a borrow is the one representation that works
 uniformly across all four legal base compositions. This falls out of Boring's own
-existing rule that structs are already passed by reference automatically (see
-["Parameter passing"](#parameter-passing) — "Structs, enums, arrays, dicts, sets —
-always passed by reference (`&T`) automatically. Never write `&`.") — declaring the
+existing [universal-borrow inference](#universal-borrow-as-inference-output) for
+read-only struct-shaped parameters — declaring the
 callback parameter as `T'observed` already means "receives a reference", the same as
 any other struct-shaped parameter:
 
@@ -6891,7 +6905,7 @@ let int   x = 42    # isize
 let uint  n = 100   # usize
 ```
 
-> For `string` details see [Advanced — Strings](#advanced--strings-string-and-arc-str).
+> For `string` details see [Advanced — Strings](#advanced--strings-string).
 
 ### Weak references — `T'shared'weak`, `T'actor'weak`, `T'guard'weak`
 
@@ -9298,7 +9312,9 @@ Callers can pass any qualifier. The transpiler acquires the lock at the call sit
 
 A **storage signal** (field assignment, task capture, return with ownership qualifier, or field-destructuring pattern such as `guard let Some(x) = n.field` / `if let Some(x) = n.field` / `let x = n.field`) or a **qualifier demand signal** (passed to a function expecting a specific qualifier) causes the inference to fall back to the normal constraint-elimination path instead.
 
-This applies to every user struct/enum in a **free function** parameter, including structs with dynamic fields (arrays, dicts, sets) of unknown size — a by-value parameter there would force a deep `.clone()` at every call site. Two exceptions stay by value: struct-method parameters, and types that some function returns as `T'actor`/`T'guard` (bare `T` params of those default to `'actor` propagation). Write `T&` explicitly if you need the borrow regardless.
+This applies to every user struct/enum in a **free function** parameter, including structs with dynamic fields (arrays, dicts, sets) of unknown size — a by-value parameter there would force a deep `.clone()` at every call site. Two exceptions stay by value: types that some function returns as `T'actor`/`T'guard` (bare `T` params of those default to `'actor` propagation), and the method cases below. Write `T&` explicitly if you need the borrow regardless.
+
+**Method parameters.** A bare, read-only struct/enum/array/dict/set parameter of a `req` or `def` method of a struct or enum is resolved by the same inference (`req float sum(Point p)` is `fn sum(&self, p: &Point)`; call sites emit `&p`, in any order and across files). A `def` call whose argument overlaps its receiver (`self.addAll(self.items)`) is passed a copy (`&self.items.clone()`), exactly what by-value passing did, because a borrow would conflict with `&mut self`. A call site cannot always know its receiver's type, so for such a receiver the signature is found by method *name*: every method bearing that name must be a plain struct/enum method and all must borrow the same positions (a free function of the same name does not matter). Otherwise every parameter of every method of that name stays by value, at every call site. A method that implements a trait method keeps by-value parameters (it must match the trait's signature), as do overloaded, generic or `task`/`stream` methods and any method called with labeled arguments. A parameter stored into a field, returned, captured, matched on, or otherwise needing ownership stays by value exactly as in a free function. Write `T&` explicitly to force the borrow.
 
 | Parameter | Signals | Emitted form |
 |---|---|---|
@@ -9307,7 +9323,7 @@ This applies to every user struct/enum in a **free function** parameter, includi
 | `Counter c` | qualifier demand | concrete qualifier |
 | `Counter c` | storage | concrete qualifier |
 
-The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and **struct/enum method parameters** are excluded from universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes — and are the only way to get universal borrowing in a *read-only* method parameter. (A `mut Counter c` method parameter needs no annotation: it is lent as `&mut Counter` unconditionally, see "`mut` vs `var` on a struct parameter".)
+The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and the method parameters excluded above are not candidates for universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes. (A `mut Counter c` method parameter needs no annotation: it is lent as `&mut Counter` unconditionally, see "`mut` vs `var` on a struct parameter".)
 
 **A universal borrow is never subject to size-based auto-boxing.** Because it resolves as a *pre-fallback*, before the size-based chain (`docs/transpilation-modes.md`'s "Size-based auto-boxing") even runs, a struct over `--inline-auto-bytes` still renders as a plain `&Counter`/`&mut Counter` when it resolves to a universal borrow — never `&Box<Counter>`/`&mut Box<Counter>`. (`emit_type`'s `OwnerQual::Borrow`/`OwnerQual::BorrowMut` rendering, `src/transpiler/emit_top.rs`, suppresses the size-based fallback on its `Named` inner the same way the `'owned` qualifier's own branch already does — see `tests/cases/oversized_param_borrow_stays_unboxed.br`.)
 
@@ -9789,7 +9805,7 @@ macOS GPU target (`boring build --target metal`): qualifier → MSL address spac
 Cross-platform GPU target (`boring build --target wgpu`): runs on DirectX 12 (Windows), Vulkan (Windows / Linux), and Metal (macOS) — no NVIDIA GPU or external toolchain required. Covers qualifier → WGSL mapping, pipeline overrides for dynamic workgroup size, generic kernel monomorphisation, and limitations vs CUDA.
 
 **[GPU display](gpu-display.html)**
-Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, and `kernel: loop:` render loop. Metal implemented; CUDA and simulation pending.
+Live GPU rendering to a native OS window: `'surface` pixel buffer, `Screen` object, input handling, and the `kernel: loop:` render loop. Metal, wgpu, CUDA, ROCm, and CPU SIMD are implemented; interpreter simulation is pending.
 
 **[Warp-level primitives](warp-level-primitives.html)**
 `.warp.*` — warp/wavefront/SIMD-group/subgroup built-ins (`size`, `lane`, `sync()`, `shuffle_down/up/xor/shuffle`) for intra-warp reductions that skip the shared-memory round-trip and block barrier a full `sync` costs. Per-backend mapping, the wgpu real-subgroup/shared-memory-emulated fallback split, and the divergent-branch mask caveat.
@@ -10003,6 +10019,17 @@ Deep dive into the three binding forms (`let` / `mut` / `var`), their interactio
 **[Scoped Access Blocks — `with`](scoped-access-blocks.html)**
 Full design and implementation notes for `with` — see [chapter 21](#scoped-access-blocks--with) above for the `'actor`/`'guard` per-block locking language reference, and [chapter 32, GPU Computing](#32-gpu-computing) for GPU materialization, function-boundary residency, and resident struct fields. These features are implemented on the GPU host targets; the design document records the generated Rust and current backend limitations.
 
+### Types and arrays
+
+**[Fixed-width floating-point types](float-width-types.html)**
+The precise `float16`/`float32`/`float64` type model, aliases, literal inference, casts, host mappings, and per-backend support.
+
+**[Fixed-point types](fixed-point-types.html)**
+The implemented `fixedN_M`/`ufixedN_M` formats, arithmetic and conversion semantics, interpreter/transpiler coverage, GPU support, and remaining width limitations.
+
+**[Labeled multi-dimensional arrays](array-multidim-types.html)**
+Array shape syntax, axis labels, indexing and layout, type checking, and backend mappings.
+
 ### Compilation targets
 
 **[Rust-for-Linux target](linux-target.html)**
@@ -10011,12 +10038,20 @@ Full design and implementation notes for `with` — see [chapter 21](#scoped-acc
 **[Transpilation Modes](transpilation-modes.html)**
 The two orthogonal flags (`--threading` and `--mode`) that control memory management and concurrency in the standard Rust backend: `single` vs `multi`, `managed` vs `strict`.
 
+**[GPU language reference](gpu-module.html)**
+Portable kernel syntax, memory qualifiers, dispatch, synchronization, atomics, simulation profiles, and the safety model shared by GPU backends.
+
+Backend-specific behavior is documented separately for [CUDA](cuda-module.html), [ROCm](rocm-backend.html), [Metal](metal-backend.html), [wgpu](wgpu-backend.html), and [CPU SIMD](simd-backend.html). See also [GPU display](gpu-display.html), [warp-level primitives](warp-level-primitives.html), and [tensor operations](tensor-operations.html).
+
 ### Language internals
 
-**[Interpreter self-hosting plan](interpreter-port-plan.html)**
-How and why the Boring interpreter was rewritten in Boring itself (`boring/interpreter/`), the porting strategy, and the current implementation status.
+**[Interpreter parity audit](interpreter-parity.html)**
+The current comparison between transpiled execution, the Rust interpreter, and the self-hosted interpreter, including its architecture, implementation tradeoffs, and known semantic gaps.
+
+**[Cross-project code sharing](cross-project-code-sharing-gap.html)**
+The implemented `[deps]` and embedded-stdlib model, its resolution rules, and the limitations that remain compared with a package manager.
 
 ### Design drafts and exploration
 
 **[Library Distribution Model](library-distribution.html)**
-Boring transpiles to Rust — dependency management and distribution are handled by Cargo on the generated project. A Boring-native package manager is out of scope: source files remain private, only the generated Rust is shipped.
+**Draft.** An exploration of source distribution, generated Rust, ABI constraints, and possible interface files. It is not a shipped package-format specification.

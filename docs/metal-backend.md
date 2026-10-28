@@ -146,7 +146,7 @@ A `mut` kernel field initialized from a constructor argument always takes the in
 | Warp intrinsics | full support | SIMD-group operations (different API) |
 | `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
 | Windows / Linux | yes | macOS only |
-| Tensor-core (`kernel.tensors.*`) | not yet implemented on either backend | not yet implemented — see [tensor-core primitives](tensor-core-primitives.html) for a proposed design (`simdgroup_matrix`, 8×8 fp16/fp32 only, Apple7+/A14+) |
+| Tensor operations (`kernel.tensors.*`) | portable and selected native paths | portable scalar/tiled paths plus `simdgroup_matrix` for eligible float operations and selected native quantized schedules — see [tensor operations](tensor-operations.html) |
 
 ---
 

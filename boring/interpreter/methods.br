@@ -1484,7 +1484,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     throw "unknown method {method_name} on {recv_type}"
 
         # float16 sibling — transcendental/rounding ops go through f32 and
-        # round back to binary16 (docs/float16.md).
+        # round back to binary16 (docs/float-width-types.md).
         Value.Float16(h):
             let f = h as float32
             match method_name:

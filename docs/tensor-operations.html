@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Tensor operations</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="tensor-operations">Tensor operations</h1>
+<blockquote><strong>Status: implemented.</strong> Host operations, device tile collectives, interpreter and CPU fallbacks, all GPU backends, dynamic <code>linear</code>, packed GGUF weights, and selected native schedules are available. Native matrix hardware is an optimization; every accepted operation has a portable implementation.</blockquote>
+<p>Boring exposes matrix operations on ordinary labeled arrays. It does not expose hardware fragments, introduce a dynamic <code>Tensor</code> object, or require tensor-core hardware. Shapes, storage qualifiers, allocation, and host access remain visible in the source.</p>
+<h2 id="operation-families">Operation families</h2>
+<p>There are two related APIs:</p>
+<ul><li><code>kernel.tensors.*</code> performs a complete host-side operation and owns GPU</li></ul>
+<p>  dispatch when compiling for a GPU target;</p>
+<ul><li><code>.tensors.*Tile</code> is used inside a <code>kernel</code> entry point. Every thread in a</li></ul>
+<p>  block participates in one collective operation on an explicit output tile.</p>
+<p>The camel-case spellings below are canonical. Compatibility aliases for the older GPU naming style remain accepted.</p>
+<table><thead><tr><th>Whole operation</th><th>Device tile operation</th><th>Result</th></tr></thead><tbody><tr><td><code>kernel.tensors.matmul(a, b, c)</code></td><td><code>.tensors.matmulTile(...)</code></td><td>overwrite <code>c</code> with <code>a × b</code></td></tr><tr><td><code>kernel.tensors.mma(a, b, c)</code></td><td><code>.tensors.mmaTile(...)</code></td><td>accumulate <code>a × b</code> into <code>c</code></td></tr><tr><td><code>kernel.tensors.linear(x, w, y, ...)</code></td><td><code>.tensors.linearTile(...)</code></td><td>overwrite <code>y</code> with <code>x × wᵀ</code></td></tr></tbody></table>
+<p>All forms use destination passing: the caller supplies a mutable output. Tensor operations do not allocate a public result implicitly.</p>
+<h2 id="shapes-and-layout">Shapes and layout</h2>
+<p>The API uses Boring&#x27;s existing labeled arrays. The first declared axis is the fastest-varying axis; labels document a shape but do not change storage order. For rank-two matrix multiplication:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> [float32, k = <span class="nb">32</span>, m = <span class="nb">16</span>]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;global</span> a
+<span class="kw">let</span> [float32, n = <span class="nb">24</span>, k = <span class="nb">32</span>]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;global</span> b
+<span class="kw">mut</span> [float32, n = <span class="nb">24</span>, m = <span class="nb">16</span>]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;unified</span> c</code></pre></div>
+<p><code>a</code> is M×K, <code>b</code> is K×N, and <code>c</code> is M×N. Operand position and axis order define the contraction; the names <code>m</code>, <code>n</code>, and <code>k</code> are not reserved. The checker validates fixed extents and rejects incompatible shapes.</p>
+<p><code>linear</code> uses the row-major weight layout common to PyTorch and GGUF: <code>x</code> is M×K, <code>weight</code> is N×K, and <code>y</code> is M×N. It computes <code>x × weightᵀ</code> without materializing a transposed weight buffer.</p>
+<p>Arbitrary strided views, implicit transpose, broadcasting, runtime rank, and batched rank-three products are not part of the current contract.</p>
+<h2 id="host-operations">Host operations</h2>
+<h3 id="fixed-shapes">Fixed shapes</h3>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> [float32, k = <span class="nb">3</span>, m = <span class="nb">2</span>] a = [
+    <span class="nb">1.0</span> <span class="kw">as</span> float32, <span class="nb">2.0</span> <span class="kw">as</span> float32, <span class="nb">3.0</span> <span class="kw">as</span> float32,
+    <span class="nb">4.0</span> <span class="kw">as</span> float32, <span class="nb">5.0</span> <span class="kw">as</span> float32, <span class="nb">6.0</span> <span class="kw">as</span> float32,
+]
+<span class="kw">let</span> [float32, n = <span class="nb">2</span>, k = <span class="nb">3</span>] b = [
+    <span class="nb">1.0</span> <span class="kw">as</span> float32, <span class="nb">0.0</span> <span class="kw">as</span> float32,
+    <span class="nb">0.0</span> <span class="kw">as</span> float32, <span class="nb">1.0</span> <span class="kw">as</span> float32,
+    <span class="nb">1.0</span> <span class="kw">as</span> float32, <span class="nb">1.0</span> <span class="kw">as</span> float32,
+]
+<span class="kw">mut</span> [float32, n = <span class="nb">2</span>, m = <span class="nb">2</span>] c = [<span class="nb">0.0</span> <span class="kw">as</span> float32 <span class="kw">for</span> ..&lt;<span class="nb">4</span>]
+
+<span class="kw">kernel</span>.tensors.<span class="fn">matmul</span>(a, b, c)
+<span class="kw">with</span> c:
+    print <span class="s">"<span class="si">{c[0]}</span>"</span></code></pre></div>
+<p>For GPU builds the compiler synthesizes and dispatches a private kernel. For <code>boring run</code> and the ordinary Rust/CPU path it executes a correctness-first CPU implementation. Qualifiers may be written explicitly or inferred for operands connected to a tensor call: read-only inputs default to <code>&#x27;kernel&#x27;global</code> and a mutable result to <code>&#x27;kernel&#x27;unified</code>.</p>
+<p>Host calls are accepted at top level, in functions and methods, and in supported control-flow bodies. A GPU-target function containing a call declares <code>throws</code> because construction or dispatch can fail. A result returned immediately stays resident; <code>with</code> materializes it when the host needs element access.</p>
+<p>Struct fields can be operands. A destination field must be <code>mut</code>, its method must be <code>def</code>, and the receiver must permit mutation. Nested fields such as <code>self.layer.weight</code> are not operands, and one call cannot combine fields from two different receiver objects.</p>
+<h3 id="runtime-dimensions">Runtime dimensions</h3>
+<p>Flat buffers use explicit dimensions because their types do not carry extents:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">req</span> [float32]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;unified</span> <span class="fn">project</span>(
+    [float32]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;global</span> x,
+    [float32]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;global</span> weight,
+    <span class="kt">int</span> rows,
+    <span class="kt">int</span> outputs,
+    <span class="kt">int</span> inputs,
+) <span class="kw">throws</span>:
+    <span class="kw">mut</span> [float32]<span class="lf">&#x27;kernel</span><span class="lf">&#x27;unified</span> y = [<span class="nb">0.0</span> <span class="kw">as</span> float32 <span class="kw">for</span> ..&lt;rows * outputs]
+    <span class="kw">kernel</span>.tensors.<span class="fn">linear</span>(
+        x, weight, y,
+        m = rows, n = outputs, k = inputs,
+    )
+    y</code></pre></div>
+<p><code>m</code>, <code>n</code>, and <code>k</code> are all required, distinct named arguments. They must be positive and the runtime validates input, weight, bias, and destination lengths before executing. An optional one-dimensional bias is fused and broadcast over the M rows:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>.tensors.<span class="fn">linear</span>(x, weight, bias, y, m = m, n = n, k = k)</code></pre></div>
+<h2 id="packed-and-16-bit-weights">Packed and 16-bit weights</h2>
+<p>Dynamic <code>linear</code> accepts a <code>uint8</code> weight buffer plus a literal <code>format</code>. The decoder is fused into the operation; no full float32 weight copy is allocated.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span>.tensors.<span class="fn">linear</span>(
+    x, packedWeight, bias, y,
+    m = m, n = n, k = k,
+    format = <span class="s">"q8_0"</span>,
+)</code></pre></div>
+<p>Accepted formats are:</p>
+<table><thead><tr><th>Family</th><th>Formats</th></tr></thead><tbody><tr><td>GGML blocks of 32 values</td><td><code>q8_0</code>, <code>q5_0</code>, <code>q5_1</code>, <code>q4_0</code>, <code>q4_1</code>, <code>iq4_nl</code></td></tr><tr><td>GGML K-quants of 256 values</td><td><code>q6_k</code>, <code>q5_k</code>, <code>q4_k</code>, <code>q3_k</code>, <code>q2_k</code></td></tr><tr><td>Unquantized 16-bit weights</td><td><code>f16</code>, <code>bf16</code></td></tr></tbody></table>
+<p>The K dimension must be divisible by the format&#x27;s block size. Inputs, accumulation, optional bias, and outputs are float32. Each format&#x27;s scale, minimum, sign-bit, and codebook rules follow its GGML storage contract.</p>
+<h2 id="device-tile-collectives">Device tile collectives</h2>
+<p>Inside a kernel, tile operations reduce over the complete K dimension and work on a selected output region:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> MatrixMul:
+    <span class="kw">let</span> [float32, k = <span class="nb">35</span>, m = <span class="nb">33</span>]<span class="lf">&#x27;global</span> a
+    <span class="kw">let</span> [float32, n = <span class="nb">67</span>, k = <span class="nb">35</span>]<span class="lf">&#x27;global</span> b
+    <span class="kw">mut</span> [float32, n = <span class="nb">67</span>, m = <span class="nb">33</span>]<span class="lf">&#x27;unified</span> c
+
+    <span class="kw">def</span> ():
+        <span class="kw">let</span> row = .block.y * <span class="nb">16</span>
+        <span class="kw">let</span> col = .block.x * <span class="nb">16</span>
+        .tensors.<span class="fn">matmulTile</span>(
+            a, b, c,
+            row = row, col = col,
+            rows = <span class="nb">16</span>, cols = <span class="nb">16</span>,
+        )</code></pre></div>
+<p><code>rows</code> and <code>cols</code> are positive compile-time integer literals. <code>row</code> and <code>col</code> must be non-negative, block-uniform expressions. Edge tiles are clipped and do not read or write out of bounds.</p>
+<p>The collective contract is:</p>
+<ol><li>every thread in the block reaches the same call in uniform control flow;</li><li>all threads use the same operands, origins, and extents;</li><li>the block exclusively owns its destination tile during the call;</li><li>the destination does not overlap either input;</li><li>the operation provides the block synchronization and memory ordering needed</li></ol>
+<p>   around its reads and writes; 6. completion is not a grid-wide or host barrier.</p>
+<p>Do not guard a call with <code>if .thread.x == 0</code>. Calling it on every lane means participating in one collective, not launching one multiplication per lane. Several blocks may operate on the same matrices only when their destination tiles are disjoint. The explicit device API leaves this disjointness to the developer; whole host operations construct the mapping themselves.</p>
+<p><code>&#x27;global</code> and <code>&#x27;unified</code> retain their ordinary memory and residency meanings. Tensor operations introduce no new qualifier. Block-shared bare-<code>&#x27;actor</code> and per-thread <code>&#x27;local</code> arrays are not accepted as general tensor operands.</p>
+<h2 id="numerical-contract">Numerical contract</h2>
+<p>The default profile uses float32 inputs, accumulation, and output. Native paths must preserve that profile unless the project explicitly opts into reduced precision. Backends may change reduction order or use fused multiply-add, so cross-device comparisons use an absolute/relative tolerance rather than requiring bitwise identity.</p>
+<p><code>matmul</code> and <code>linear</code> overwrite the destination. <code>mma</code> starts from the existing destination value. Empty outputs perform no accesses; an empty reduction writes zero for <code>matmul</code> and preserves the destination for <code>mma</code>.</p>
+<h2 id="backend-behavior">Backend behavior</h2>
+<table><thead><tr><th>Target</th><th>Portable behavior</th><th>Native/optimized behavior</th></tr></thead><tbody><tr><td>Interpreter</td><td>correctness reference over ordinary array values</td><td>none</td></tr><tr><td>Rust CPU</td><td>nested-loop fallback</td><td>none</td></tr><tr><td>CPU SIMD</td><td>portable CPU lowering, multithreaded where configured</td><td>SIMD dot products and specialized quantized schedules</td></tr><tr><td>CUDA</td><td>scalar/tiled generated kernels</td><td>cuBLAS SGEMM for eligible host float operations; opt-in TF32 WMMA and half-precision quantized prefill</td></tr><tr><td>Metal</td><td>scalar/tiled generated kernels</td><td><code>simdgroup_matrix</code> for eligible float operations and selected native quantized schedules</td></tr><tr><td>ROCm</td><td>scalar/tiled HIP kernels</td><td>optional rocBLAS SGEMM; no MFMA/WMMA dependency</td></tr><tr><td>wgpu</td><td>scalar/tiled WGSL kernels</td><td>no cooperative-matrix dependency</td></tr></tbody></table>
+<p>Every accepted call remains correct when a native path is unavailable. CUDA toolchain coverage exists for generated tensor code, but broad numerical CUDA hardware coverage is more limited than Metal, ROCm, wgpu, and CPU coverage.</p>
+<h2 id="schedule-configuration">Schedule configuration</h2>
+<p>Schedules are selected when <code>boring build</code> generates the target project:</p>
+<div class="code-block" data-lang="toml"><span class="lang-label">toml</span><pre><code>[tensor.matmul]
+algorithm = &quot;auto&quot;
+
+[tensor.linear]
+algorithm = &quot;auto&quot;
+
+[tensor.linear.decode]
+q8_0 = &quot;warp-broadcast&quot;
+
+[tensor.linear.prefill]
+algorithm = &quot;auto&quot;
+precision = &quot;float&quot;</code></pre></div>
+<p>The common linear schedule values are <code>auto</code>, <code>native</code>, <code>scalar</code>, <code>portable</code>, <code>warp</code>, and <code>warp-broadcast</code>; Metal decode diagnostics additionally accept <code>rows</code> and <code>split-k</code>. Per-format keys override the general decode or prefill choice. <code>scalar</code> is the correctness-oriented accumulation reference and <code>portable</code> keeps generated cross-backend schedules where Metal would otherwise choose a hand-written native path.</p>
+<p>For fixed matrices, <code>auto</code> is the default. CUDA additionally accepts <code>tf32</code>, an explicit reduced-precision choice requiring sm_80+. ROCm accepts <code>rocblas</code>, which links rocBLAS and uses SGEMM where eligible.</p>
+<p><code>[tensor.linear.prefill] precision = &quot;half&quot;</code> is an explicit speed/accuracy tradeoff for native Metal prefill and CUDA WMMA prefill. It rounds staged activations and dequantized weights to float16 while keeping float32 accumulation. It is never selected implicitly; <code>precision = &quot;float&quot;</code> is the default.</p>
+<h2 id="current-limitations">Current limitations</h2>
+<ul><li>No public hardware-fragment types or direct <code>mma.sync</code>-style API.</li><li>No implicit transpose, arbitrary contraction, broadcasting, or strided view.</li><li>No runtime-rank or rank-three batched attention operation yet.</li><li>Explicit device tile calls require conservative, statically verifiable</li></ul>
+<p>  collective control flow and block-uniform origins.</p>
+<ul><li>Nested struct fields and fields from multiple receiver objects cannot be</li></ul>
+<p>  mixed directly in one host tensor call.</p>
+<ul><li>Mutable resident destinations retain value semantics and can require a</li></ul>
+<p>  device-to-device copy between operations.</p>
+<ul><li>Backend-native schedules cover selected shapes, types, and formats; the</li></ul>
+<p>  portable fallback remains the contract for everything else.</p>
+<h2 id="related-documentation">Related documentation</h2>
+<ul><li><a href="array-multidim-types.html">Labeled multi-dimensional arrays</a></li><li><a href="gpu-module.html">GPU computing language reference</a></li><li><a href="cuda-module.html">CUDA backend</a></li><li><a href="rocm-backend.html">ROCm backend</a></li><li><a href="metal-backend.html">Metal backend</a></li><li><a href="wgpu-backend.html">wgpu backend</a></li><li><a href="simd-backend.html">CPU SIMD backend</a></li></ul>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

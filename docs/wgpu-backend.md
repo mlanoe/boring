@@ -440,7 +440,7 @@ Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
 | `freeMem()` | `cuMemGetInfo` | always 0 — wgpu does not expose free VRAM |
 | `computeCapability()` | CUDA SM version | always `[0, 0]` — not applicable |
 | Windows / Linux / macOS | Windows + Linux | yes — Windows (DX12), Linux (Vulkan), macOS (Metal via wgpu) |
-| Tensor-core (`kernel.tensors.*`) | not yet implemented | not yet implemented — WGSL has no cooperative-matrix primitive at this project's pinned wgpu version (~v22); real upstream work exists (`Features::EXPERIMENTAL_COOPERATIVE_MATRIX`, merged wgpu ~28.x) but postdates the pin. See [tensor-core primitives](tensor-core-primitives.html) for the proposed design and revisit trigger. |
+| Tensor operations (`kernel.tensors.*`) | portable and selected native paths | implemented with portable scalar/tiled WGSL kernels; no cooperative-matrix feature is required — see [tensor operations](tensor-operations.html) |
 
 ### Will these gaps close?
 

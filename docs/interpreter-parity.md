@@ -6,8 +6,8 @@ Audit du 29 septembre 2026, après le premier lot de corrections numériques.
 
 Le transpileur sert de référence fonctionnelle. Les deux interpréteurs sont déjà
 substantiels, mais leurs suites historiques ne couvrent pas les mêmes programmes.
-Le statut « Complete » du document `interpreter-port-plan.md` décrit le portage
-historique, pas une parité avec toutes les fonctionnalités actuelles du transpileur.
+Le self-hosted interpreter est un portage complet de son périmètre d'origine, pas
+une garantie de parité avec toutes les fonctionnalités actuelles du transpileur.
 
 La comparaison automatique sélectionne les **167 fixtures simples** enregistrées
 par `transpile_test!` dans `tests/transpile.rs` et disposant de fichiers `.br` et
@@ -28,6 +28,36 @@ constituent son oracle. Le Rust généré a été réellement compilé/exécuté
 cas numériques modifiés (voir validation ci-dessous). Les programmes projet, les
 cas négatifs, les cibles GPU et les appels à des bibliothèques Rust externes ne
 sont pas couverts exhaustivement par cette sélection.
+
+## Architecture du self-hosted interpreter
+
+L'interpréteur écrit en Boring, dans `boring/interpreter/`, forme une chaîne
+autonome : lexer, parseur et moteur d'évaluation sont tous implémentés en Boring.
+Il ne dépend pas du front-end Rust pour analyser le programme interprété. Le
+checker, le transpileur et les backends GPU restent en Rust et ne font pas partie
+de ce portage.
+
+Le même code peut être transpilé en deux variantes : strict/multi utilise les
+représentations thread-safe du transpileur, tandis que strict/single utilise les
+formes locales `Rc`/`RefCell`. Cette double construction vérifie que le code de
+l'interpréteur respecte les deux modèles ; elle ne prouve pas que leurs moteurs
+d'exécution ont la même couverture fonctionnelle que le transpileur.
+
+Quelques choix d'implémentation restent volontairement plus simples que ceux du
+Rust généré :
+
+- `Value::Dict` et `Value::Set` reposent sur des tableaux et effectuent des
+  recherches linéaires. Les opérations élémentaires sont donc O(n), et les
+  opérations d'ensemble qui recherchent chaque élément peuvent être O(n·m), là
+  où le Rust généré utilise `HashMap`/`HashSet`. Une vraie table de hachage
+  demanderait notamment un contrat `Hash`/`Eq` pour toutes les variantes
+  récursives et dynamiques de `Value` ;
+- les canaux utilisent un tableau avec suppression en tête plutôt qu'un
+  `VecDeque`, donc cette opération est O(n) ;
+- les imports de fichiers relatifs sont pris en charge, mais la stdlib embarquée
+  `boring.*`, les dépendances `[deps]`, `BORING_PATH` et l'isolation complète des
+  imports sélectifs ne le sont pas. Ces limites figurent également dans le tableau
+  des écarts ci-dessous.
 
 Avant correction, sur les 166 fixtures alors sélectionnées : Rust 154 conformes,
 Boring 108 conformes. Le nouveau cas numérique ajoute une réussite aux deux moteurs ;

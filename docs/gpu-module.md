@@ -524,11 +524,10 @@ See [warp-level primitives](warp-level-primitives.html) for the full design
 (per-backend mapping, the wgpu real-subgroup/emulated-fallback split, and the
 divergent-branch caveat).
 
-Matrix/tensor-core acceleration (`kernel.tensors.*`) is a **proposed, not yet
-implemented** extension of this same nested-namespace pattern — see
-[tensor-core primitives](tensor-core-primitives.html) for the full design,
-per-backend feasibility (including a definitive finding that RDNA1/RDNA2 AMD
-GPUs have no matrix-core hardware at all), and phased implementation plan.
+Matrix operations (`kernel.tensors.*` on the host and `.tensors.*Tile` inside
+a kernel) are implemented with portable fallbacks and selected native backend
+schedules. See [tensor operations](tensor-operations.html) for the API,
+collective contract, packed-weight formats, and backend behavior.
 
 ---
 

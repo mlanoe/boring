@@ -165,7 +165,7 @@ The input members (`screen.key…`, `screen.mouse…`, `screen.text`, …) are l
 | `screen.key(k)` | `bool` — true while key `k` is held |
 | `screen.key_pressed(k)` / `key_repeat(k)` / `key_released(k)` | key edges — see [Input](#input-simd-metal-cuda-rocm-wgpu) |
 | `screen.mouse_pressed(b)` / `mouse_released(b)` | mouse-button edges |
-| `screen.touchAt(i)` | `.x` / `.y` of the i-th finger down — see [Touch](#touch) |
+| `screen.touchAt(i)` | `.x` / `.y` of the i-th finger down — see [Input](#input-simd-metal-cuda-rocm-wgpu) |
 
 ### Key strings
 

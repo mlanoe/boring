@@ -1,11 +1,49 @@
-# `float32` / `float64`: real fixed-width float types, `float` as a pure alias
+# Fixed-width floating-point types: `float16`, `float32`, and `float64`
 
-> **Status: Implemented.** `float32`/`float64` (and `float16`, see
-> [float16.md](float16.md)) are real, distinct `Type`/`Value` variants in the
+> **Status: Implemented.** `float16`, `float32`, and `float64` are real,
+> distinct `Type`/`Value` variants in the
 > interpreter and transpiler. This document is kept as the original design
 > record; the "Problem Statement" below describes the state *before* that
 > work, and is no longer the current behavior. For current behavior see the
 > "Fixed-width floats" section of [book.md](book.md).
+
+## Current type family
+
+| Boring type | Aliases | Host representation | Storage |
+|---|---|---|---|
+| `float16` | `f16`, `Float16` in type position | `half::f16` | IEEE 754 binary16, 2 bytes |
+| `float32` | `f32`, `Float32` in type position | Rust `f32` | IEEE 754 binary32, 4 bytes |
+| `float64` | `f64`, `Float64`, and bare `float` in type position | Rust `f64` | IEEE 754 binary64, 8 bytes |
+
+The widths are preserved in scalars, arrays, tensors, the interpreter, generated
+host Rust, and supported GPU buffers. Conversions between widths are explicit:
+
+```boring
+let float16 compact = value as float16
+let float32 restored = compact as float32
+let float16 parsed = "1.5".parseFloat16() else float16(0.0)
+mut [float16]'kernel'unified cache = [0.0 as float16 for ..<count]
+```
+
+`float16` supports the same conversions, comparisons, collection operations,
+math functions, tensor operations, and quantized tensor paths as the wider
+types. Transcendental operations compute through `float32` internally and round
+their result back to binary16, so binary16 rounding is preserved at arithmetic
+and conversion boundaries.
+
+### GPU representation of `float16`
+
+| Backend | Device representation | Requirement |
+|---|---|---|
+| Metal | MSL `half` | native |
+| CUDA | `__half` | native CUDA half support |
+| ROCm/HIP | `_Float16` | native HIP/Clang half support |
+| wgpu | WGSL `f16` | `wgpu::Features::SHADER_F16` / adapter `shader-f16` support |
+
+The wgpu backend enables the optional WGSL extension and requests the feature
+whenever a generated shader uses `float16`. Device creation reports a capability
+error when the selected adapter lacks it; buffers are never silently widened to
+`float32`.
 
 ## Problem Statement
 
@@ -61,7 +99,7 @@ types with a real identity, not a new problem being bundled in:
   64-bit) used inside a `kernel` targeting Metal is *actually* computed at
   32-bit precision on-device today, with nothing telling the author. Once
   `float64` is a real, checked type, this stops being representable at all —
-  see [Metal below](#metal-mslfloat64-device-side-is-a-compile-error-not-a-silent-narrowing).
+  see [Metal below](#metal-msl-float64-device-side-is-a-compile-error-not-a-silent-narrowing).
 - **The generic `'kernel'unified` residency path already narrows `float` to
   32-bit on the device side, on purpose — `float32`/`float64` make that
   explicit instead of implicit.** `kernel_host_scalar_type` (device-facing)
@@ -69,7 +107,7 @@ types with a real identity, not a new problem being bundled in:
   (host-facing) maps the same `Type::Float` to `"f64"`
   (`src/transpiler/emit_kernel.rs`) — a deliberate choice (this path targets
   wgpu, which has no 64-bit float at all), not a bug; see
-  [§6's note](#hostdevice-buffer-narrowing-in-the-generic-gpuunified-residency-path--not-a-bug-after-all)
+  [§6's note](#hostdevice-buffer-narrowing-in-the-generic-kernelunified-residency-path--not-a-bug-after-all)
   for why an earlier revision of this document mischaracterized it as one.
   `float32`/`float64` as separate types at least make the two functions'
   differing treatment legible by name instead of both silently reading the
@@ -652,11 +690,9 @@ pointer-width-style type like `int`/`uint`).
 - **New float constants for `float32`** (`PI` etc. are `Value::Float64`
   today) — no product requirement surfaced for `float32`-native constants;
   `PI as float32` covers the need if it ever arises.
-- **Half-precision (`float16`/`bfloat16`)** — this proposal originally left both
-  formats out because they require a different hardware and Rust representation.
-  `float16` was implemented subsequently with `half::f16` on the host and native
-  half storage on supported GPU backends; see [float16.md](float16.md).
-  `bfloat16` remains outside this proposal.
+- **`bfloat16`** — remains outside this proposal. `float16`, which the original
+  proposal also left out, was implemented subsequently and is documented in the
+  current type-family section above.
 
 Interpolating a numeric optional (`"{d.get("k") as float64}"`, `"{o}"` with `int? o`) prints the
 value, or `nil` when absent, under both `boring run` and `boring build`. Regression:

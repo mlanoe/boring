@@ -87,7 +87,8 @@ enum Value:
     # gets. No trivial fix: it would need a real `Hash`/`Eq` impl over this
     # recursive, dynamically-typed `Value` built from scratch in Boring, since
     # the language exposes no hash-map primitive independent of `{K=V}`
-    # itself. See docs/interpreter-port-plan.md §8.3 for the full writeup.
+    # itself. See docs/interpreter-parity.md, "Architecture du self-hosted
+    # interpreter", for the documented runtime tradeoff.
     Dict([(Value, Value)] pairs)
     Set([Value] elems)
     Object(ObjectInner'actor inner)
