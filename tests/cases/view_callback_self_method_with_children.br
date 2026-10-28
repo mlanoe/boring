@@ -1,0 +1,31 @@
+# A view with a `[View] children` field whose `body()` closure calls its own method
+# (`self.toggle()`): the stored callback must not capture the whole view (`dyn View` is not
+# Send/Sync), `boring build` used to fail with E0277. Only compiled here.
+use boring.ui.*
+
+pub view Disclosure:
+    state bool open = false
+
+    string title
+    [View] children
+
+    def toggle():
+        let now = open
+        open = !now
+
+    body():
+        Column(alignment = .Leading, spacing = 4.0):
+            Button(label = title, onActivate = ():
+                self.toggle())
+            if open:
+                Column(alignment = .Leading, spacing = 2.0):
+                    for i in 0..<children.length with i:
+                        children[i]
+
+view Parent:
+    body():
+        Disclosure(title = "More"):
+            Text(content = "details")
+
+def main():
+    print "ok"

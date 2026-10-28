@@ -2689,6 +2689,16 @@ impl Transpiler {
             self.emit_any_cast_helper();
             supers.push("BoringAnyCast".to_string());
         }
+        // Multi-threaded output: a trait object must be `Send + Sync` so a struct holding an
+        // `Arc<dyn Trait>` (a view's `[View] children`) can be snapshotted into a stored closure
+        // (`self.clone()` moved into a callback) without E0277.
+        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+            && t.type_params.is_empty()
+            && !supers.iter().any(|s| s == "Send")
+        {
+            supers.push("Send".to_string());
+            supers.push("Sync".to_string());
+        }
         let parents = if supers.is_empty() {
             String::new()
         } else {

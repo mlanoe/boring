@@ -881,6 +881,7 @@ interp_test!(var_mut_collection_ok);
 interp_test!(parse_scenarios);
 interp_test!(misc_scenarios_9);
 interp_test!(view_callbacks_capture_state_handles);
+interp_test!(view_callback_self_method_with_children);
 interp_test!(clone_deep_copy);
 interp_test!(trait_object_no_rebox);
 interp_test!(trait_object_fallback_optional);

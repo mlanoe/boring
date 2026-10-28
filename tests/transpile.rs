@@ -1493,6 +1493,7 @@ transpile_test!(var_mut_collection_ok);
 transpile_test!(parse_scenarios);
 transpile_test!(misc_scenarios_9);
 transpile_test!(view_callbacks_capture_state_handles);
+transpile_test!(view_callback_self_method_with_children);
 transpile_test!(trait_object_no_rebox);
 transpile_test!(trait_object_fallback_optional);
 transpile_test!(misc_scenarios_3);
