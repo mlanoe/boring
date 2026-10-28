@@ -65,7 +65,8 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
         // First launch of this instance on Metal: every buffer comes from the CPU copy.
         let k = {name} {{
             __queue: __boring_metal_queue(&device),
-            __pipeline: __boring_metal_pipeline(&device, \"{name}_kernel\")?,
+            // A kernel Metal cannot compile (64-bit atomics, for one) is not an error of the program: another backend, or the CPU, runs it.
+            __pipeline: __boring_metal_pipeline(&device, \"{name}_kernel\").map_err(|e| crate::unified::Unsupported(e.to_string()))?,
             __device: device.clone(),
 "
     );
@@ -111,5 +112,77 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 }}
 "
     ));
+    s.push_str(&crate::transpiler::unified::swap_adapter(name, fields, &|_| true, &|obj, field| format!("{obj}.{field}"), &|_| String::new()));
+    // A device-side copy of one buffer (handle: its element type and the new `Buffer`), and the
+    // matching replacement. Metal buffers are shared memory: the copy is a `memcpy` once the
+    // launches in flight finished.
+    s.push_str(&format!(
+        "pub fn __boring_unified_export_{name}(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(k) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    let (tag, source): (&'static str, &Buffer) = match index {{
+"
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array {
+            s.push_str(&format!("        {i} => (\"{}\", &k.0.{}),\n", f.rust_ty, f.name));
+        }
+    }
+    s.push_str(
+        "        _ => return Err(\"not a buffer\".into()),
+    };
+    __boring_metal_flush()?;
+    let length = source.length();
+    let copy = boring_metal_device().new_buffer(length, MTLResourceOptions::StorageModeShared);
+    unsafe { std::ptr::copy_nonoverlapping(source.contents() as *const u8, copy.contents() as *mut u8, length as usize); }
+    Ok(Box::new((tag, crate::unified::AssertSend(copy))))
+}
+",
+    );
+    s.push_str(&format!(
+        "pub fn __boring_unified_import_{name}(id: u64, index: usize, handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let (tag, buffer) = *handle.downcast::<(&'static str, crate::unified::AssertSend<Buffer>)>().map_err(|_| crate::unified::Unsupported(\"foreign buffer handle\".into()))?;
+    let mut store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(k) = store.as_mut().and_then(|instances| instances.get_mut(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    match index {{
+"
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array {
+            s.push_str(&format!(
+                "        {i} if tag == \"{}\" => k.0.{} = buffer.0,\n",
+                f.rust_ty, f.name
+            ));
+        }
+    }
+    s.push_str("        _ => return Err(Box::new(crate::unified::Unsupported(\"another element type\".into()))),\n    }\n    Ok(())\n}\n");
+    // Elements `start..start + len` of one buffer, without reading the rest.
+    s.push_str(&format!(
+        "pub fn __boring_unified_read_range_{name}(id: u64, index: usize, start: usize, len: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(k) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    match index {{
+"
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array && f.mutable {
+            let source = device_elem(decl_of(f));
+            let convert = cast("e", &source, f.rust_ty);
+            s.push_str(&format!(
+                "        {i} => {{
+            __boring_metal_flush()?;
+            let n = k.0.{field}.length() as usize / std::mem::size_of::<{source}>();
+            let end = (start + len).min(n);
+            let begin = start.min(end);
+            let ptr = k.0.{field}.contents() as *const {source};
+            *out.{acc}() = unsafe {{ std::slice::from_raw_parts(ptr.add(begin), end - begin) }}.iter().map(|&e| {convert}).collect();
+        }}
+",
+                field = f.name,
+                acc = f.accessor()
+            ));
+        }
+    }
+    s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
     s
 }

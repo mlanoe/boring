@@ -1775,6 +1775,24 @@ impl Transpiler {
             };
             return format!("{}[{}].to_vec()", obj_s, range_s);
         }
+        // `k.buf[i]` on a buffer the multi-target CPU host routes: one element, read from the
+        // backend when it holds the newer data, instead of the whole buffer.
+        if !self.in_lhs_assign.get() {
+            if let ExprKind::Field(kobj, kfield) = &obj.kind {
+                if let ExprKind::Var(kvar) = &kobj.kind {
+                    if let Some(decl) = self.routed_array_field_of(kvar, kfield) {
+                        let idx_s = self.emit_expr(idx);
+                        let at = format!("{kvar}.__at_{kfield}(({idx_s}) as usize)");
+                        return if matches!(decl.qual, GpuQual::Surface) {
+                            at
+                        } else {
+                            let host_ty = super::emit_kernel::kernel_host_element_type(&super::emit_kernel::array_inner_type(&decl.ty));
+                            format!("({at} as {host_ty})")
+                        };
+                    }
+                }
+            }
+        }
         // `memo.memory.placed[k]`: dict held by the struct behind an `'actor` field.
         if !self.in_lhs_assign.get() {
             if let Some((r, sub, Type::Dict(..))) = self.actor_subfield_collection(obj) {
@@ -3063,7 +3081,12 @@ impl Transpiler {
                     if self.kernel_vars.contains_key(a.as_str()) && self.kernel_vars.contains_key(b.as_str()) {
                         if let (Some(dest), Some(_)) = (self.routed_array_field_of(a, to_field), self.routed_array_field_of(b, from_field)) {
                             let inner = super::emit_kernel::kernel_host_scalar_type(&super::emit_kernel::array_inner_type(&dest.ty));
-                            return format!("{a}.copy_{to_field}_to_device(&{b}.copy_{from_field}_to_host().iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>())");
+                            let through_cpu = format!("{a}.copy_{to_field}_to_device(&{b}.copy_{from_field}_to_host().iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>())");
+                            // Both buffers on one backend: the copy is made there.
+                            if let (Some(to_index), Some(from_index)) = (self.routed_field_index(a, to_field), self.routed_field_index(b, from_field)) {
+                                return format!("if !crate::unified::copy({b}.__id, {from_index}, {a}.__id, {to_index}) {{ {through_cpu}; }}");
+                            }
+                            return through_cpu;
                         }
                         return format!("{a}.{to_field} = {b}.{from_field}.clone()");
                     }
@@ -3150,6 +3173,31 @@ impl Transpiler {
                     _ => None,
                 }).collect();
                 if !routed.is_empty() && lhs.len() == rhs.len() && routed.iter().all(|r| r.is_some()) {
+                    // `a.x, a.y = a.y, a.x` of two buffers of one element type: exchanged on the
+                    // backend when both live there (the `Vec`s are exchanged on the CPU too).
+                    if let (2, Some(Some(r0)), Some(Some(r1))) = (lhs.len(), routed.first(), routed.get(1)) {
+                        let reversed = match (&rhs[0].kind, &rhs[1].kind, &lhs[0].kind, &lhs[1].kind) {
+                            (ExprKind::Field(o0, f0), ExprKind::Field(o1, f1), ExprKind::Field(p0, g0), ExprKind::Field(p1, g1)) => {
+                                match (&o0.kind, &o1.kind, &p0.kind, &p1.kind) {
+                                    (ExprKind::Var(a0), ExprKind::Var(a1), ExprKind::Var(b0), ExprKind::Var(b1)) => a0 == b1 && f0 == g1 && a1 == b0 && f1 == g0,
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        };
+                        let (i0, i1) = (self.routed_field_index(&r0.0, &r0.1), self.routed_field_index(&r1.0, &r1.1));
+                        if let (true, Some(i0), Some(i1)) = (reversed && r0.2 == r1.2, i0, i1) {
+                            let (a, fa, b, fb) = (&r0.0, &r0.1, &r1.0, &r1.1);
+                            let (t0, t1) = (format!("{a}.copy_{fa}_to_host()"), format!("{b}.copy_{fb}_to_host()"));
+                            let inner = r0.2;
+                            let through_cpu = format!(
+                                "{{ let (__t0, __t1) = ({t1}, {t0},); {a}.copy_{fa}_to_device(&__t0.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>()); {b}.copy_{fb}_to_device(&__t1.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>()); }}"
+                            );
+                            return format!(
+                                "if crate::unified::swap({a}.__id, {i0}, {b}.__id, {i1}) {{ std::mem::swap(&mut {a}.{fa}, &mut {b}.{fb}); }} else {through_cpu}"
+                            );
+                        }
+                    }
                     let temps: Vec<String> = (0..routed.len()).map(|i| format!("__t{i}")).collect();
                     let values: Vec<String> = rhs.iter().map(|e| self.emit_expr_owned(e)).collect();
                     let assigns: Vec<String> = routed.iter().flatten().zip(&temps).map(|((o, f, inner), t)| {

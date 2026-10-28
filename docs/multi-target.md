@@ -81,7 +81,7 @@ for b in kernel.backends():
 
 `kernel.backends()` lists the backends the program may run kernels on, best first, the CPU
 among them (`b.name` is `cpu`, `wgpu`, `metal`, `cuda` or `rocm`; `b.kind` is `gpu` or `cpu`;
-`b.score` is the start-up benchmark score, or the prior of a backend that cannot be measured;
+`b.score` is the start-up benchmark score, or the device-table score of a backend that cannot be measured;
 `b.load` is how many other programs were using it at start-up). It lists only what this run
 installed: with `BORING_BACKEND=wgpu,simd` that is those two. A single-target build lists its own
 target and `boring run` lists the CPU, both with score 0 and load 0.
@@ -110,14 +110,27 @@ each buffer, whether the backend's copy is valid and whether it is newer than th
 Scalars are re-sent at every launch. `BORING_BACKEND_VERBOSE=1` ends with
 `boring: buffer transfers: N up, M down`.
 
-Each host read of a buffer field downloads it whole; to read many elements after a launch, bind
-the field once (`let result = k.buf`) and read the binding.
+Reading one element (`k.buf[i]`) reads just that element from the backend; reading the field
+whole (`let result = k.buf`) downloads it all. To read many elements after a launch, bind the
+field once and read the binding: each element read of a buffer that lives on a backend is a
+small transfer of its own. An element read of a buffer the CPU already holds costs nothing.
+
+The ping-pong swap `a.x, a.y = a.y, a.x` and the copy `b.cells = a.cells` also stay on the
+backend when both buffers are resident on it: the swap exchanges the two device buffers, the copy
+is a device-side copy. Otherwise (another backend, a buffer the CPU changed, a backend with no
+device-side copy: ROCm has none, wgpu does it for 32-bit element types only) they go through the
+CPU as before.
 
 A kernel is routable when its fields are numeric/bool scalars, `Dimension`s and plain `[T]`
-buffers in `'unified`, `'global` or `'surface` memory. Anything else (shared memory, atomics,
-struct or fixed-array fields, generic kernels) runs on the CPU. An adapter can also decline one
+buffers in `'unified`, `'global`, `'surface`, `'actor'unified` or `'actor'global` memory.
+Block-shared (`'actor`) and per-thread (`'local`) fields have no host data and are simply not
+arguments, so a kernel with a shared-memory tile is routed; an atomic buffer is a buffer. Struct
+or fixed-array fields and generic kernels run on the CPU. An adapter can also decline one
 launch: wgpu fixes the workgroup size in the shader from the kernel's launch site, so a launch
-with another block size goes elsewhere.
+with another block size goes elsewhere. A backend that cannot compile a kernel (Metal has no
+64-bit signed atomics, wgpu rejects a shader it cannot validate) declines it the same way: the
+next backend, or the CPU, runs it (`BORING_BACKEND_VERBOSE=1` says why). A backend compiles its
+kernels together, so one kernel it rejects takes the others of the program with it.
 
 ### Programs with a `Screen`
 
@@ -125,9 +138,9 @@ The `Screen` lives on the CPU host, which presents its own copy of the pixels. A
 buffer is a buffer like any other for the router: kernels that write it run on a backend, and
 `screen.present(k.pixels)` (or any host read) first brings the newest pixels back from it. A
 render loop such as `examples/game_of_life.br` therefore runs its kernels on the best GPU while
-the window stays on the CPU host. The pixels come back to the CPU every frame, and a ping-pong
-swap (`a.x, a.y = a.y, a.x`) or a kernel-to-kernel copy (`b.cells = a.cells`) goes through the
-CPU too, so a light kernel can still be faster left on the CPU: `@prefer(.cpu)` says so.
+the window stays on the CPU host. The pixels come back to the CPU every frame (the swap and the copy of a ping-pong
+loop stay on the backend), so a light kernel can still be faster left on the CPU:
+`@prefer(.cpu)` says so.
 
 ## The generated crate
 
@@ -165,9 +178,19 @@ A backend that cannot compile the program is left out with a warning. The crates
    noisy and a native backend is the safer choice. The CPU is ranked too: only the backends above
    it receive kernels.
 
-A backend that cannot be measured keeps a fixed prior (cuda 10M, rocm 8M, metal 2M, wgpu 1M,
-simd 0.1M). ROCm is always in that case: its kernels are code objects built ahead of time, so
-there is no run-time compiler to build a benchmark with. The CUDA benchmark goes through nvrtc.
+A backend that cannot be measured is scored from an embedded table of known devices
+(`DEVICES` in `src/multi_policy.rs`): the device's approximate peak FP32 throughput from the
+vendors' public figures (GeForce RTX 50/40/30/20 and GTX 16/10, data-centre NVIDIA, Radeon RX
+7000/6000 and Instinct, Intel Arc, Apple M1 to M4), converted to benchmark points (60 thousand
+per TFLOPS, calibrated on an Apple M3, and 60% of that through wgpu since it reaches less of the
+device than the native API). A device the table does not know keeps a fixed prior per backend
+(cuda 1.2M, rocm 0.9M, metal 0.4M, wgpu 0.25M, simd 0.1M). ROCm is always in that case: its
+kernels are code objects built ahead of time, so there is no run-time compiler to build a
+benchmark with. The CUDA benchmark goes through nvrtc.
+
+The table is approximate: it orders very different devices (a discrete GPU against an
+integrated one, an RX 6600 against a CPU), not close ones, and a measured score always replaces
+it. Run with `BORING_BACKEND_VERBOSE=1` to see which scores are priors.
 
 ## Environment variables
 
@@ -175,7 +198,7 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 |---|---|
 | `BORING_BACKEND=a,b` | offer kernels to these backends, in this order; no benchmark and no small-launch rule. The CPU runs what none takes |
 | `BORING_BACKEND=list` | print each backend with its device and cached score, then exit |
-| `BORING_BENCH=off` | skip ranking: the static order applies |
+| `BORING_BENCH=off` | measure nothing: rank by the embedded device table and the load |
 | `BORING_BENCH=force` | measure again, ignoring the cache |
 | `BORING_BACKEND_VERBOSE=1` | print the ranking and where each kernel runs |
 | `BORING_GPU_MIN_THREADS=n` | launches under `n` threads stay on the CPU (default 16384) |
@@ -184,5 +207,5 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 ## Not implemented yet
 
 - A remote service as a backend.
-- Routing for kernels with shared memory, atomics or struct fields.
-- Keeping a ping-pong swap or a kernel-to-kernel copy on the backend (they go through the CPU).
+- Routing for kernels with struct or fixed-array fields.
+- Device-side copy and ranged reads on ROCm, and for wgpu buffers of 8/16/64-bit elements.

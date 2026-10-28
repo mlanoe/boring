@@ -110,6 +110,20 @@ macro_rules! arg_types {
 }
 
 impl<'a> Arg<'a> {
+    /// Keep only elements `start..start + len` of a buffer argument (a whole-buffer read made
+    /// where only a range was asked for).
+    pub fn keep_range(&mut self, start: usize, len: usize) {
+        macro_rules! keep {
+            ($($b:ident),*) => {
+                match self {
+                    $(Arg::$b(v) => { let end = (start + len).min(v.len()); let begin = start.min(end); v.truncate(end); v.drain(..begin); })*
+                    _ => {}
+                }
+            };
+        }
+        keep!(BufF16, BufF32, BufF64, BufI8, BufI16, BufI32, BufI64, BufIsize, BufU8, BufU16, BufU32, BufU64, BufUsize, BufBool);
+    }
+
     /// A `Dimension` field's `[width, height]`.
     pub fn as_dim(&self) -> [u32; 2] {
         match self {
@@ -161,12 +175,29 @@ pub type Run = fn(u64, &mut [Arg<'_>], &[bool], [u32; 3], [u32; 3]) -> Result<()
 pub type Read = fn(u64, usize, &mut Arg<'_>) -> Result<(), BoxError>;
 /// Free the device side of instance `id`.
 pub type Release = fn(u64);
+/// Exchange buffer `ia` of instance `a` with buffer `ib` of instance `b` (the same kernel, both
+/// resident, `a` and `b` possibly the same instance) without leaving the device. `Unsupported`
+/// when the two buffers cannot be exchanged.
+pub type Swap = fn(u64, usize, u64, usize) -> Result<(), BoxError>;
+/// A copy, made on the device, of buffer `index` of instance `id`, as an opaque device handle.
+pub type Export = fn(u64, usize) -> Result<Box<dyn std::any::Any + Send>, BoxError>;
+/// Replace buffer `index` of instance `id` with a handle another `Export` of the same backend
+/// produced. `Unsupported` when the handle is of another element type.
+pub type Import = fn(u64, usize, Box<dyn std::any::Any + Send>) -> Result<(), BoxError>;
+/// Copy elements `start..start + len` of buffer `index` of instance `id` from the device into
+/// the `Vec` held by `out` (replacing its contents). `Unsupported` when only a whole-buffer
+/// read is possible.
+pub type ReadRange = fn(u64, usize, usize, usize, &mut Arg<'_>) -> Result<(), BoxError>;
 
 pub struct KernelRoute {
     pub name: &'static str,
     pub run: Run,
     pub read: Read,
     pub release: Release,
+    pub swap: Swap,
+    pub export: Export,
+    pub import: Import,
+    pub read_range: ReadRange,
 }
 
 /// What `kernel.backends()` reports for one backend.
@@ -312,7 +343,12 @@ pub fn dispatch(spec: &Spec, id: u64, args: &mut [Arg<'_>], grid: [u32; 3], bloc
                     state.record(kernel, routes.name);
                     return Some(Ok(()));
                 }
-                Err(e) if e.is::<Unsupported>() => continue,
+                Err(e) if e.is::<Unsupported>() => {
+                    if state.verbose {
+                        eprintln!("boring: {} cannot run kernel {kernel}: {e}", routes.name);
+                    }
+                    continue;
+                }
                 Err(e) => return Some(Err(e)),
             }
         }
@@ -342,6 +378,78 @@ pub fn fetch(id: u64, index: usize, out: &mut Arg<'_>) -> bool {
     let Some(read) = state.read_of(inst.backend, inst.kernel) else { return false };
     DOWNLOADS.fetch_add(1, Ordering::Relaxed);
     read(id, index, out).is_ok()
+}
+
+/// The CPU host reads elements `start..start + len` of buffer `index` of instance `id`: when the
+/// device holds the newer data, replace the `Vec` in `out` with just that range, read from the
+/// device. Returns false, leaving `out` alone, when the CPU copy is current.
+pub fn fetch_range(id: u64, index: usize, start: usize, len: usize, out: &mut Arg<'_>) -> bool {
+    let Some(state) = STATE.get() else { return false };
+    let instances = state.instances.lock().unwrap();
+    let Some(inst) = instances.get(&id) else { return false };
+    if !inst.remote_newest.get(index).copied().unwrap_or(false) {
+        return false;
+    }
+    let Some(route) = inst.backend.and_then(|b| state.route_of(b, inst.kernel)) else { return false };
+    DOWNLOADS.fetch_add(1, Ordering::Relaxed);
+    match (route.read_range)(id, index, start, len, out) {
+        Ok(()) => true,
+        Err(e) if e.is::<Unsupported>() => {
+            // Only a whole-buffer read is possible: read it all, keep what was asked.
+            let ok = (route.read)(id, index, out).is_ok();
+            if ok {
+                out.keep_range(start, len);
+            }
+            ok
+        }
+        Err(_) => false,
+    }
+}
+
+/// The CPU host exchanges buffer `ia` of instance `a` with buffer `ib` of instance `b`
+/// (`a.x, a.y = a.y, a.x`). When both are resident on one backend, the exchange happens there:
+/// returns true, and the caller then exchanges its own `Vec`s. False means nothing was done;
+/// the caller goes through the CPU.
+pub fn swap(a: u64, ia: usize, b: u64, ib: usize) -> bool {
+    let Some(state) = STATE.get() else { return false };
+    let mut instances = state.instances.lock().unwrap();
+    let ok = |i: &Instance, index: usize| index < i.device_valid.len() && i.device_valid[index];
+    let (Some(x), Some(y)) = (instances.get(&a), instances.get(&b)) else { return false };
+    if x.kernel != y.kernel || x.backend.is_none() || x.backend != y.backend || !ok(x, ia) || !ok(y, ib) {
+        return false;
+    }
+    let Some(route) = state.route_of(x.backend.unwrap(), x.kernel) else { return false };
+    if (route.swap)(a, ia, b, ib).is_err() {
+        return false;
+    }
+    // The flags travel with the data (the CPU `Vec`s are exchanged by the caller too).
+    let (na, nb) = (instances[&a].remote_newest[ia], instances[&b].remote_newest[ib]);
+    instances.get_mut(&a).unwrap().remote_newest[ia] = nb;
+    instances.get_mut(&b).unwrap().remote_newest[ib] = na;
+    true
+}
+
+/// The CPU host copies buffer `isrc` of instance `src` into buffer `idst` of instance `dst`
+/// (`b.cells = a.cells`). When both are resident on one backend and the source's device copy is
+/// valid, the copy is made there: returns true, and the destination's newest data is then on the
+/// device. False means nothing was done; the caller goes through the CPU.
+pub fn copy(src: u64, isrc: usize, dst: u64, idst: usize) -> bool {
+    let Some(state) = STATE.get() else { return false };
+    let mut instances = state.instances.lock().unwrap();
+    let (Some(s), Some(d)) = (instances.get(&src), instances.get(&dst)) else { return false };
+    if s.backend.is_none() || s.backend != d.backend || isrc >= s.device_valid.len() || !s.device_valid[isrc] || idst >= d.device_valid.len() {
+        return false;
+    }
+    let backend = s.backend.unwrap();
+    let (Some(from), Some(to)) = (state.route_of(backend, s.kernel), state.route_of(backend, d.kernel)) else { return false };
+    let Ok(handle) = (from.export)(src, isrc) else { return false };
+    if (to.import)(dst, idst, handle).is_err() {
+        return false;
+    }
+    let d = instances.get_mut(&dst).unwrap();
+    d.device_valid[idst] = true;
+    d.remote_newest[idst] = true;
+    true
 }
 
 /// The CPU host is about to replace buffer `index` of instance `id` entirely: the device copy
@@ -579,6 +687,39 @@ mod tests {
     fn up() -> bool {
         true
     }
+    fn no_swap(_: u64, _: usize, _: u64, _: usize) -> Result<(), BoxError> {
+        Err(Box::new(Unsupported("swap".into())))
+    }
+    fn no_export(_: u64, _: usize) -> Result<Box<dyn std::any::Any + Send>, BoxError> {
+        Err(Box::new(Unsupported("export".into())))
+    }
+    fn no_import(_: u64, _: usize, _: Box<dyn std::any::Any + Send>) -> Result<(), BoxError> {
+        Err(Box::new(Unsupported("import".into())))
+    }
+    fn no_range(_: u64, _: usize, _: usize, _: usize, _: &mut Arg<'_>) -> Result<(), BoxError> {
+        Err(Box::new(Unsupported("range".into())))
+    }
+    // Backend "b" does it all on its fake device memory.
+    fn swap_b(a: u64, ia: usize, b: u64, ib: usize) -> Result<(), BoxError> {
+        with_device(|d| {
+            let x = d.remove(&("b", a, ia)).ok_or("no buffer")?;
+            let y = d.insert(("b", b, ib), x).ok_or("no buffer")?;
+            d.insert(("b", a, ia), y);
+            Ok(())
+        })
+    }
+    fn export_b(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, BoxError> {
+        Ok(Box::new(with_device(|d| d[&("b", id, index)].clone())))
+    }
+    fn import_b(id: u64, index: usize, handle: Box<dyn std::any::Any + Send>) -> Result<(), BoxError> {
+        let data = handle.downcast::<Vec<f32>>().map_err(|_| Unsupported("element type".into()))?;
+        with_device(|d| d.insert(("b", id, index), *data));
+        Ok(())
+    }
+    fn range_b(id: u64, index: usize, start: usize, len: usize, out: &mut Arg<'_>) -> Result<(), BoxError> {
+        *out.buf_f32() = with_device(|d| d[&("b", id, index)][start..start + len].to_vec());
+        Ok(())
+    }
 
     const SPEC: Spec = Spec { name: "Affine", args: &[Kind::Scalar, Kind::Buffer, Kind::MutBuffer] };
 
@@ -592,8 +733,8 @@ mod tests {
     fn buffers_stay_on_the_device_between_launches() {
         install(
             vec![
-                Routes { name: "a", init: up, kernels: vec![KernelRoute { name: "Affine", run: run_a, read: read_a, release: release_a }] },
-                Routes { name: "b", init: up, kernels: vec![KernelRoute { name: "Affine", run: run_b, read: read_b, release: release_b }] },
+                Routes { name: "a", init: up, kernels: vec![KernelRoute { name: "Affine", run: run_a, read: read_a, release: release_a, swap: no_swap, export: no_export, import: no_import, read_range: no_range }] },
+                Routes { name: "b", init: up, kernels: vec![KernelRoute { name: "Affine", run: run_b, read: read_b, release: release_b, swap: swap_b, export: export_b, import: import_b, read_range: range_b }] },
             ],
             true,
             vec![BackendInfo { name: "a", kind: "gpu", class: "discrete", score: 2.0, load: 0 }, BackendInfo { name: "cpu", kind: "cpu", class: "cpu", score: 1.0, load: 1 }],
@@ -656,6 +797,28 @@ mod tests {
         assert_eq!(data, vec![40.0, 40.0], "pulled from a before moving");
         assert_eq!(uploaded() - up0, 7);
         assert!(with_device(|d| d.keys().all(|(b, i, _)| !(*b == "a" && *i == id))), "a released the instance");
+
+        // Two instances on backend b: copy and exchange buffers without leaving the device, and
+        // read one element without downloading the whole buffer.
+        let other = new_instance();
+        let (mut bias2, mut data2) = (vec![0.0f32], vec![1.0f32, 2.0]);
+        assert!(matches!(launch(other, 99.0, &mut bias2, &mut data2, Hints::default()), Some(Ok(()))));
+        assert_eq!(with_device(|d| d[&("b", other, 2)].clone()), vec![99.0, 198.0]);
+        let down1 = downloaded();
+        assert!(copy(other, 2, id, 2), "both are on b");
+        assert_eq!(with_device(|d| d[&("b", id, 2)].clone()), vec![99.0, 198.0]);
+        assert!(is_remote(id, 2));
+        let mut one = Vec::new();
+        assert!(fetch_range(id, 2, 1, 1, &mut Arg::BufF32(&mut one)));
+        assert_eq!(one, vec![198.0]);
+        assert!(!fetch_range(id, 1, 0, 1, &mut Arg::BufF32(&mut one)), "the bias is current on the CPU");
+        assert_eq!(downloaded() - down1, 1);
+        with_device(|d| d.insert(("b", id, 2), vec![5.0, 6.0]));
+        assert!(swap(id, 2, other, 2));
+        assert_eq!(with_device(|d| (d[&("b", id, 2)].clone(), d[&("b", other, 2)].clone())), (vec![99.0, 198.0], vec![5.0, 6.0]));
+        assert!(!swap(id, 2, 424242, 2), "an unknown instance is not resident");
+        assert!(!copy(424242, 2, id, 2));
+        release(other);
 
         // Dropping the instance frees the device side.
         release(id);

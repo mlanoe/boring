@@ -1119,6 +1119,10 @@ impl Emitter {
                     // The newest data may be on a backend: read it from there, and tell the
                     // router before the CPU replaces or edits the buffer.
                     self.line(1, &format!(
+                        "#[allow(dead_code)] fn __at_{n}(&self, i: usize) -> {t} {{ if crate::unified::is_remote(self.__id, {index}) {{ let mut v: Vec<{t}> = Vec::new(); if crate::unified::fetch_range(self.__id, {index}, i, 1, &mut crate::unified::Arg::{variant}(&mut v)) {{ if let Some(x) = v.first() {{ return *x; }} }} }} self.{n}[i] }}",
+                        n = f.name
+                    ));
+                    self.line(1, &format!(
                         "fn copy_{n}_to_host(&self) -> Vec<{t}> {{ let mut v = self.{n}.clone(); if crate::unified::is_remote(self.__id, {index}) {{ crate::unified::fetch(self.__id, {index}, &mut crate::unified::Arg::{variant}(&mut v)); }} v }}",
                         n = f.name
                     ));

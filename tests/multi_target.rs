@@ -270,9 +270,12 @@ fn policy_benchmarks_caches_and_reacts_to_load() {
     assert!(stderr.contains("kernels run on []"), "{stderr}");
     assert!(stdout.contains("y[15] = 31"), "{stdout}");
 
-    // BORING_BENCH=off skips the ranking: the static order (wgpu first) applies again.
+    // BORING_BENCH=off measures nothing: the embedded device table gives the scores (flagged
+    // as priors), and the load still counts.
+    drop(_busy);
     let (_, stderr) = run_crate(&dir, &cache, &[("BORING_BENCH", "off")]);
-    assert!(stderr.contains("kernels run on [wgpu]"), "{stderr}");
+    assert!(!stderr.contains("benchmarking"), "{stderr}");
+    assert!(stderr.contains("(prior)") && stderr.contains("wgpu"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -917,6 +920,14 @@ fn screen_programs_route_their_surfaces() {
         let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "metal,simd")]);
         assert_eq!(stdout, cpu, "{stderr}");
         assert!(stderr.contains("kernel Step -> metal") && stderr.contains("kernel Render -> metal"), "{stderr}");
+        // Six generations of ping-pong swap and kernel-to-kernel copy stay on the device: the
+        // buffers go up once and only the final checksum reads them back.
+        let counts: Vec<u64> = stderr
+            .lines()
+            .find_map(|l| l.strip_prefix("boring: buffer transfers: "))
+            .map(|l| l.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse().ok()).collect())
+            .unwrap_or_default();
+        assert!(counts.len() == 2 && counts[0] <= 6 && counts[1] <= 4, "swap and copy went through the CPU: {stderr}");
     }
 
     // The shipped example, for every backend that can build it, still starts.
@@ -927,5 +938,119 @@ fn screen_programs_route_their_surfaces() {
     let (listed, _) = run_crate(&example, &cache, &[("BORING_BACKEND", "list")]);
     assert!(listed.contains("simd: available"), "{listed}");
     let _ = std::fs::remove_dir_all(&example);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reading one element of a buffer that lives on a backend reads that element, and the values
+/// are the CPU's.
+#[test]
+fn single_elements_are_read_from_the_backend() {
+    let dir = project("element_reads");
+    let program = format!("{DIMENSION_LIFE}print \"elements {{step.cellsOut[0]}} {{step.cellsOut[5]}} {{step.cellsOut[63]}} {{step.cellsOut[4095]}} {{step.cellsIn[7]}}\"\n");
+    std::fs::write(source(&dir), program).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert!(cpu.contains("elements "), "{cpu}");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+        assert_eq!(stdout, cpu, "{stderr}");
+        assert!(stderr.contains("kernel Step -> wgpu"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const SHARED_REDUCE: &str = r#"
+kernel Reduce:
+    let [float32]'unified input
+    mut [float32]'unified sums
+    mut [float32, 64]'actor tile
+
+    init([float32]'unified data, [float32]'unified out):
+        input = data
+        sums = out
+
+    def ():
+        let tid = .thread.x
+        tile[tid] = input[.block.x * .block_dim.x + tid]
+        if tid == 0:
+            var float32 sum = 0.0
+            for k in 0..<64:
+                sum += tile[k]
+            sums[.block.x] = sum
+
+mut reduce = Reduce([float32(i) for i in 0..<256], [float32(0) for ..<4])
+kernel:
+    reduce(block = 64, grid = 4)
+print "sums {reduce.sums[0]} {reduce.sums[1]} {reduce.sums[2]} {reduce.sums[3]}"
+"#;
+
+const ATOMIC_HISTOGRAM: &str = r#"
+kernel Histogram:
+    let [int]'unified values
+    mut [int]'actor'unified counts
+
+    init([int]'unified v, [int]'actor'unified c):
+        values = v
+        counts = c
+
+    def ():
+        let i = .block.x * .block_dim.x + .thread.x
+        counts[values[i] % 4] += 1
+
+mut hist = Histogram([i * 3 for i in 0..<256], [0, 0, 0, 0])
+kernel:
+    hist(block = 64, grid = 4)
+print "counts {hist.counts[0]} {hist.counts[1]} {hist.counts[2]} {hist.counts[3]}"
+"#;
+
+/// Kernels with block-shared memory (`'actor` tiles) and atomic buffers (`'actor'unified`) are
+/// routed: shared memory is not an argument, an atomic buffer is a buffer.
+#[test]
+fn shared_memory_and_atomics_are_routed() {
+    let dir = project("shared_atomics");
+    let target = if cfg!(target_os = "macos") { "wgpu,metal,simd" } else { "wgpu,simd" };
+    for (program, expected, kernel) in [
+        (SHARED_REDUCE, "sums 2016 6112 10208 14304", "Reduce"),
+        (ATOMIC_HISTOGRAM, "counts 64 64 64 64", "Histogram"),
+    ] {
+        std::fs::write(source(&dir), program).unwrap();
+        // 64-bit atomics (`int`) are not available in Metal Shading Language: a Metal build of the
+        // histogram is left to the CPU and wgpu.
+        let target = if kernel == "Histogram" { "wgpu,simd" } else { target };
+        let out = build(&dir, target);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let cache = dir.join("cache");
+        let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+        assert_eq!(cpu.trim(), expected);
+        let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+        for backend in ["wgpu", "metal"] {
+            if listed.contains(&format!("{backend}: available")) {
+                let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", &format!("{backend},simd"))]);
+                assert_eq!(stdout.trim(), expected, "{backend}: {stderr}");
+                assert!(stderr.contains(&format!("kernel {kernel} -> {backend}")), "{backend} did not run it: {stderr}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A kernel a backend cannot compile is run elsewhere, not reported as the program's error.
+#[test]
+fn a_kernel_a_backend_rejects_runs_elsewhere() {
+    let dir = project("rejected_kernel");
+    // `int32` atomics are rejected by wgpu's validation (a non-atomic buffer declaration).
+    std::fs::write(source(&dir), ATOMIC_HISTOGRAM.replace("[int]", "[int32]").replace("[i * 3 for", "[int32(i * 3) for").replace("[0, 0, 0, 0]", "[int32(0), int32(0), int32(0), int32(0)]")).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+        assert_eq!(stdout.trim(), "counts 64 64 64 64", "{stderr}");
+        assert!(stderr.contains("wgpu cannot run kernel Histogram") && stderr.contains("kernel Histogram -> cpu"), "{stderr}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -402,15 +402,36 @@ fn verbose() -> bool {
 /// Order the usable backends by measured speed and current load (see `policy.rs`).
 /// `BORING_BENCH=off` keeps the static order, `BORING_BENCH=force` measures again.
 /// A backend that was not ranked (forced order, ranking off, a single candidate).
-fn unranked(backend: &Backend) -> policy::Ranked {
-    let score = policy::prior(backend.name);
+fn unranked(backend: &Backend, device: &str) -> policy::Ranked {
+    let score = policy::device_prior(backend.name, device);
     policy::Ranked { name: backend.name.to_string(), score, measured: false, load: 0, effective: score }
+}
+
+fn show(ranked: &[policy::Ranked]) {
+    if verbose() {
+        for r in ranked {
+            eprintln!(
+                "boring: {:<6} score {:>10.0}{} load {} -> {:.0}",
+                r.name, r.score, if r.measured { "" } else { " (prior)" }, r.load, r.effective
+            );
+        }
+    }
 }
 
 fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> Vec<(&'a Backend, policy::Ranked)> {
     let mode = std::env::var("BORING_BENCH").unwrap_or_default().trim().to_lowercase();
-    if mode == "off" || usable.len() < 2 {
-        return usable.iter().map(|(backend, _)| (*backend, unranked(backend))).collect();
+    if usable.len() < 2 {
+        return usable.iter().map(|(backend, device)| (*backend, unranked(backend, device))).collect();
+    }
+    if mode == "off" {
+        // No measuring: rank by what the embedded device table says about each device.
+        let candidates: Vec<_> = usable
+            .iter()
+            .map(|(backend, device)| (backend.name.to_string(), None, dir.map(|d| policy::current_load(d, backend.name)).unwrap_or(0), policy::device_prior(backend.name, device)))
+            .collect();
+        let ranked = policy::rank(&candidates);
+        show(&ranked);
+        return ranked.into_iter().filter_map(|r| usable.iter().map(|(b, _)| *b).find(|b| b.name == r.name).map(|b| (b, r))).collect();
     }
     let mut cache = dir.map(policy::load_cache).unwrap_or_default();
     let now = policy::now();
@@ -431,7 +452,7 @@ fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> 
             }
         };
         let load = dir.map(|d| policy::current_load(d, backend.name)).unwrap_or(0);
-        candidates.push((backend.name.to_string(), score, load));
+        candidates.push((backend.name.to_string(), score, load, policy::device_prior(backend.name, device)));
     }
     if measured_now {
         if let Some(dir) = dir {
@@ -439,14 +460,7 @@ fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> 
         }
     }
     let ranked = policy::rank(&candidates);
-    if verbose() {
-        for r in &ranked {
-            eprintln!(
-                "boring: {:<6} score {:>10.0}{} load {} -> {:.0}",
-                r.name, r.score, if r.measured { "" } else { " (prior)" }, r.load, r.effective
-            );
-        }
-    }
+    show(&ranked);
     ranked.into_iter().filter_map(|r| usable.iter().map(|(b, _)| *b).find(|b| b.name == r.name).map(|b| (b, r))).collect()
 }
 "#,
@@ -457,7 +471,7 @@ fn rank<'a>(usable: &[(&'a Backend, String)], dir: Option<&std::path::Path>) -> 
         let list: Vec<String> = kernels
             .iter()
             .map(|k| format!(
-                "unified::KernelRoute {{ name: \"{k}\", run: backend_{n}::__boring_unified_{k}, read: backend_{n}::__boring_unified_read_{k}, release: backend_{n}::__boring_unified_release_{k} }}"
+                "unified::KernelRoute {{ name: \"{k}\", run: backend_{n}::__boring_unified_{k}, read: backend_{n}::__boring_unified_read_{k}, release: backend_{n}::__boring_unified_release_{k}, swap: backend_{n}::__boring_unified_swap_{k}, export: backend_{n}::__boring_unified_export_{k}, import: backend_{n}::__boring_unified_import_{k}, read_range: backend_{n}::__boring_unified_read_range_{k} }}"
             ))
             .collect();
         arms.push_str(&format!(
@@ -524,7 +538,7 @@ fn main() {
         compiled.iter().collect()
     };
     let usable: Vec<(&Backend, String)> = wanted.into_iter().filter_map(|b| silently(b.device_name).map(|d| (b, d))).collect();
-    let ranked: Vec<(&Backend, policy::Ranked)> = if forced { usable.iter().map(|(b, _)| (*b, unranked(b))).collect() } else { rank(&usable, dir.as_deref()) };
+    let ranked: Vec<(&Backend, policy::Ranked)> = if forced { usable.iter().map(|(b, d)| (*b, unranked(b, d))).collect() } else { rank(&usable, dir.as_deref()) };
 
     // Backends ranked above the CPU get the kernels they can run; the CPU takes the rest.
     let order: Vec<unified::Routes> = ranked.iter().take_while(|(b, _)| b.name != "simd").filter_map(|(b, _)| routes_for(b.name)).collect();

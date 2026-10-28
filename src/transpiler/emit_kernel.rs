@@ -1262,6 +1262,14 @@ impl Transpiler {
         self.routed_array_field_of(var_name, field)
     }
 
+    /// The position of `field` among the routed arguments of the kernel behind `var_name` (the
+    /// index the router knows the buffer by), when it is a routed buffer.
+    pub(crate) fn routed_field_index(&self, var_name: &str, field: &str) -> Option<usize> {
+        self.routed_array_field_of(var_name, field)?;
+        let decl = self.kernel_decls.get(self.kernel_vars.get(var_name)?)?;
+        crate::transpiler::unified::route_fields(decl)?.iter().position(|f| f.name == field)
+    }
+
     /// [`Self::routed_array_field`] for a kernel variable named `var_name`.
     pub(crate) fn routed_array_field_of(&self, var_name: &str, field: &str) -> Option<&KernelFieldDecl> {
         if !self.config.unified_routing {

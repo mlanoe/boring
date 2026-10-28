@@ -93,11 +93,18 @@ fn numeric_rust(t: &Type) -> Option<&'static str> {
 pub fn route_fields(k: &KernelDecl) -> Option<Vec<RouteField>> {
     let mut fields = Vec::new();
     for f in &k.fields {
+        // Block-shared (`'actor`) and per-thread (`'local`) memory lives inside the launch:
+        // it has no host data, so it is not an argument.
+        if matches!(f.qual, GpuQual::Actor | GpuQual::Local) {
+            continue;
+        }
         match base(&f.ty) {
             Type::Array(element) => {
                 // A screen surface is a buffer like any other here: the CPU host presents its own
                 // copy, fetching the newest data from the backend first.
-                if !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface) {
+                // `'actor'global` / `'actor'unified` are buffers whose indexed accesses are atomic
+                // on the device: the same buffer to the router.
+                if !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface | GpuQual::ActorGlobal | GpuQual::ActorUnified) {
                     return None;
                 }
                 fields.push(RouteField {
@@ -155,9 +162,18 @@ mod tests {
 
     #[test]
     fn other_field_kinds_keep_the_kernel_on_the_cpu() {
-        assert!(route_fields(&kernel("    mut [int]'actor shared\n")).is_none());
         assert!(route_fields(&kernel("    let Dimension'global dim\n")).is_none());
         assert!(route_fields(&kernel("    let [float32]'unified x\n    let Point p\n")).is_none());
+    }
+
+    #[test]
+    fn shared_memory_and_atomic_buffers_are_routable() {
+        // Block-shared and per-thread memory has no host data: not an argument. An atomic
+        // buffer is a buffer.
+        let k = kernel("    let [float32]'unified input\n    mut [float32, 64]'actor tile\n    mut float32 acc\n    mut [int]'actor'unified counts\n    mut [uint]'actor'global totals\n");
+        let fields = route_fields(&k).expect("routable");
+        let shapes: Vec<_> = fields.iter().map(|f| (f.name.as_str(), f.rust_ty, f.array, f.mutable)).collect();
+        assert_eq!(shapes, [("input", "f32", true, false), ("counts", "i32", true, true), ("totals", "u32", true, true)]);
     }
 
     #[test]
@@ -179,6 +195,60 @@ pub const BACKEND_STRUCT: &str = "#[allow(dead_code)] #[derive(Debug, Clone)] pu
 /// `class` is a Rust expression of type `&str`.
 pub fn single_backends_fn(name: &str, kind: &str, class: &str) -> String {
     format!("{BACKEND_STRUCT}#[allow(dead_code)] fn __boring_backends() -> Vec<__BoringBackend> {{ vec![__BoringBackend {{ name: \"{name}\".into(), kind: \"{kind}\".into(), class: ({class}).into(), score: 0.0, load: 0 }}] }}\n")
+}
+
+/// `__boring_unified_swap_<name>`: exchange two device buffers of one kernel (of one instance or
+/// of two) without leaving the device. `place(obj, field)` is the Rust place holding a field's
+/// device buffer on the kernel `obj`, `after(obj)` a statement to run on each kernel once its
+/// buffers moved (wgpu rebuilds its bind group), empty when none. Only mutable buffers of one
+/// element type (and `allow`ed by the backend) can be exchanged; any other pair is `Unsupported`.
+pub fn swap_adapter(name: &str, fields: &[RouteField], allow: &dyn Fn(&RouteField) -> bool, place: &dyn Fn(&str, &str) -> String, after: &dyn Fn(&str) -> String) -> String {
+    let swappable: Vec<(usize, &RouteField)> = fields.iter().enumerate().filter(|(_, f)| f.array && f.mutable && allow(f)).collect();
+    let mut same = String::new();
+    let mut cross = String::new();
+    for (i, fi) in &swappable {
+        for (j, fj) in &swappable {
+            if fi.rust_ty != fj.rust_ty {
+                continue;
+            }
+            if i != j {
+                same.push_str(&format!(
+                    "            ({i}, {j}) => {{ std::mem::swap(&mut {}, &mut {}); {} Ok(()) }}\n",
+                    place("k", &fi.name), place("k", &fj.name), after("k")
+                ));
+            }
+            cross.push_str(&format!(
+                "                ({i}, {j}) => {{ std::mem::swap(&mut {}, &mut {}); {} {} Ok(()) }}\n",
+                place("x.0", &fi.name), place("y.0", &fj.name), after("x.0"), after("y.0")
+            ));
+        }
+    }
+    format!(
+        "pub fn __boring_unified_swap_{name}(a: u64, ia: usize, b: u64, ib: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let unsupported = || -> Box<dyn std::error::Error + Send + Sync> {{ Box::new(crate::unified::Unsupported(\"these buffers cannot be exchanged\".into())) }};
+    let mut store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(instances) = store.as_mut() else {{ return Err(\"no resident instance\".into()) }};
+    if a == b {{
+        if ia == ib {{ return Ok(()); }}
+        let k = &mut instances.get_mut(&a).ok_or(\"no resident instance\")?.0;
+        let r: Result<(), Box<dyn std::error::Error + Send + Sync>> = match (ia, ib) {{
+{same}            _ => Err(unsupported()),
+        }};
+        r
+    }} else {{
+        let mut x = instances.remove(&a).ok_or(\"no resident instance\")?;
+        let r: Result<(), Box<dyn std::error::Error + Send + Sync>> = match instances.get_mut(&b) {{
+            Some(y) => match (ia, ib) {{
+{cross}                _ => Err(unsupported()),
+            }},
+            None => Err(\"no resident instance\".into()),
+        }};
+        instances.insert(a, x);
+        r
+    }}
+}}
+"
+    )
 }
 
 /// CUDA and HIP share one host shape (a context, a cached stream, `clone_htod`/`clone_dtoh`,
@@ -319,5 +389,82 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 }}
 "
     ));
+    s.push_str(&swap_adapter(name, fields, &|_| true, &|obj, field| format!("{obj}.{field}"), &|_| String::new()));
+    match flavor {
+        StreamFlavor::Cuda => {
+            // `CudaSlice::clone` is a device-to-device copy.
+            s.push_str(&format!(
+                "pub fn __boring_unified_export_{name}(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(resident) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    let k = &resident.0;
+    match index {{
+"
+            ));
+            for (i, f) in fields.iter().enumerate() {
+                if f.array {
+                    let deref = if matches!(decl_of(f).binding, FieldBinding::Let) { "(*" } else { "(" };
+                    s.push_str(&format!("        {i} => Ok(Box::new({deref}k.{}).clone())),\n", f.name));
+                }
+            }
+            s.push_str("        _ => Err(\"not a buffer\".into()),\n    }\n}\n");
+            s.push_str(&format!(
+                "pub fn __boring_unified_import_{name}(id: u64, index: usize, handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let mut store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(resident) = store.as_mut().and_then(|instances| instances.get_mut(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    let k = &mut resident.0;
+    match index {{
+"
+            ));
+            for (i, f) in fields.iter().enumerate() {
+                if f.array {
+                    let target = element_ty(&decl_of(f).ty);
+                    let value = if matches!(decl_of(f).binding, FieldBinding::Let) { "Arc::new(*buffer)" } else { "*buffer" };
+                    s.push_str(&format!(
+                        "        {i} => {{ let buffer = handle.downcast::<CudaSlice<{target}>>().map_err(|_| crate::unified::Unsupported(\"another element type\".into()))?; k.{} = {value}; }}\n",
+                        f.name
+                    ));
+                }
+            }
+            s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+            s.push_str(&format!(
+                "pub fn __boring_unified_read_range_{name}(id: u64, index: usize, start: usize, len: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let store = __BORING_STORE_{name}.lock().unwrap();
+    let Some(resident) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
+    let k = &resident.0;
+    match index {{
+"
+            ));
+            for (i, f) in fields.iter().enumerate() {
+                if f.array && f.mutable {
+                    let source = element_ty(&decl_of(f).ty);
+                    let convert = cast("e", &source, f.rust_ty);
+                    s.push_str(&format!(
+                        "        {i} => {{
+            let end = (start + len).min(k.{field}.len());
+            let begin = start.min(end);
+            let v = k.__stream.clone_dtoh(&k.{field}.slice(begin..end)).map_err(__boring_cuda_classify_error)?;
+            k.__stream.synchronize().map_err(__boring_cuda_classify_error)?;
+            *out.{acc}() = v.into_iter().map(|e| {convert}).collect();
+        }}
+",
+                        field = f.name,
+                        acc = f.accessor()
+                    ));
+                }
+            }
+            s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+        }
+        StreamFlavor::Rocm => {
+            // The HIP wrapper has no device-to-device copy or ranged read: these go through the CPU.
+            let unsupported = "Err(Box::new(crate::unified::Unsupported(\"no device-side copy on this backend\".into())))";
+            s.push_str(&format!(
+                "pub fn __boring_unified_export_{name}(_id: u64, _index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{ {unsupported} }}
+pub fn __boring_unified_import_{name}(_id: u64, _index: usize, _handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{ {unsupported} }}
+pub fn __boring_unified_read_range_{name}(_id: u64, _index: usize, _start: usize, _len: usize, _out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{ {unsupported} }}
+"
+            ));
+        }
+    }
     s
 }
