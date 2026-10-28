@@ -183,7 +183,6 @@ print <span class="s">"scale ran on <span class="si">{kernel.lastChoice(k)}</spa
 <table><thead><tr><th>Variable</th><th>Effect</th></tr></thead><tbody><tr><td><code>BORING_BACKEND=a,b</code></td><td>offer kernels to these backends, in this order; no benchmark and no small-launch rule. The CPU runs what none takes</td></tr><tr><td><code>BORING_BACKEND=list</code></td><td>print each backend with its device and cached score, then exit</td></tr><tr><td><code>BORING_BENCH=off</code></td><td>skip ranking: the static order applies</td></tr><tr><td><code>BORING_BENCH=force</code></td><td>measure again, ignoring the cache</td></tr><tr><td><code>BORING_BACKEND_VERBOSE=1</code></td><td>print the ranking and where each kernel runs</td></tr><tr><td><code>BORING_GPU_MIN_THREADS=n</code></td><td>launches under <code>n</code> threads stay on the CPU (default 16384)</td></tr><tr><td><code>BORING_CACHE_DIR=dir</code></td><td>where scores and leases are kept</td></tr></tbody></table>
 <h2 id="not-implemented-yet">Not implemented yet</h2>
 <ul><li>A remote service as a backend.</li><li>Routing for kernels with shared memory, atomics or struct fields.</li><li>Keeping a ping-pong swap or a kernel-to-kernel copy on the backend (they go through the CPU).</li></ul>
-<p>  fields.</p>
 </main>
 <script>
 // Build TOC from headings
