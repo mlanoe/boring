@@ -893,3 +893,7 @@ interp_test!(optional_scenarios);
 interp_test!(closure_scenarios);
 interp_test!(bytes_array_field_and_param_reuse);
 interp_test!(len_int_return);
+
+// Multi-line closure whose body is only `pass`, as a struct-ctor argument: `// pass` used to
+// swallow the closing delimiters on the flattened closure line.
+interp_test!(closure_pass_body_struct_arg);

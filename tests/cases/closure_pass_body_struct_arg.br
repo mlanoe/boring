@@ -1,0 +1,14 @@
+pub use BoolAction as def void(bool)
+
+struct Holder:
+    BoolAction onBusy
+
+struct Root:
+    req Holder make():
+        Holder(onBusy = (v):
+            pass)
+
+def main():
+    let h = Root().make()
+    h.onBusy(true)
+    print "ok"

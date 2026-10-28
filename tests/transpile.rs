@@ -1509,3 +1509,6 @@ transpile_test!(closure_scenarios);
 transpile_test!(bytes_array_field_and_param_reuse);
 transpile_test!(len_int_return);
 transpile_test!(inline_ctor_field_method_call);
+
+// See tests/cases/closure_pass_body_struct_arg.br (`pass` emitted as a `//` comment).
+transpile_test!(closure_pass_body_struct_arg);

@@ -202,7 +202,16 @@ impl Transpiler {
                     self.line(&format!("yield {};", val));
                 }
             }
-            Stmt::Comment(text)     => self.line(&format!("// {}", text)),
+            Stmt::Comment(text)     => {
+                // Block comment, not `//`: closure bodies are flattened onto one line
+                // (`sub.out.trim()`), where a trailing `// pass` would swallow the closing
+                // delimiters. Fall back to `//` if the text itself would break a block comment.
+                if text.contains("/*") || text.contains("*/") || text.contains('\n') {
+                    self.line(&format!("// {}", text.replace('\n', " ")))
+                } else {
+                    self.line(&format!("/* {} */", text))
+                }
+            }
             Stmt::Expr(e)           => {
                 if is_last && self.in_throws && !self.suppress_ok_wrap && self.fn_declared_void {
                     // Void throws function: emit the expression as a statement (for side-effects/?)
