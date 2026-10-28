@@ -174,24 +174,41 @@ mod macos {
             fs::write(root.join("prefill.br"), include_str!("fixtures/metal_tiled_quant_prefill.br")).unwrap();
             build(&root, config)
         };
+        // Q4_1, Q5_1, Q5_K, F16 and BF16 live in their own fixture (the SIMD CPU tests reuse the one above).
+        let build_gguf_fixture = |name: &str, config: &str| {
+            let root = base.join(format!("gguf_{name}"));
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("prefill.br"), include_str!("fixtures/metal_tiled_gguf_formats_prefill.br")).unwrap();
+            build(&root, config)
+        };
         let scalar_exe = build_fixture("scalar", "[tensor.linear.prefill]\nalgorithm = \"scalar\"\n");
         let simd_exe = build_fixture("tiled", "[tensor.linear.prefill]\nalgorithm = \"auto\"\n");
         // The generic Boring-synthesized kernels stay selectable and must keep working.
         let portable_exe = build_fixture("portable", "[tensor.linear]\nalgorithm = \"portable\"\n");
         assert_ne!(fs::canonicalize(&scalar_exe).unwrap(), fs::canonicalize(&simd_exe).unwrap());
         assert_ne!(fs::canonicalize(&simd_exe).unwrap(), fs::canonicalize(&portable_exe).unwrap());
-        for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k"] {
+        let gguf_scalar_exe = build_gguf_fixture("scalar", "[tensor.linear.prefill]\nalgorithm = \"scalar\"\n");
+        // `<format> = "native"` is what enables the native Metal schedules next to the project default.
+        let native_config = "[tensor.linear.prefill]\nq4_1 = \"native\"\nq5_1 = \"native\"\nq5_k = \"native\"\nf16 = \"native\"\nbf16 = \"native\"\nalgorithm = \"scalar\"\n";
+        let gguf_simd_exe = build_gguf_fixture("native", native_config);
+        let gguf_portable_exe = build_gguf_fixture("portable", "[tensor.linear]\nalgorithm = \"portable\"\n");
+        for format in ["q4_0", "q5_0", "iq4_nl", "q3_k", "q2_k", "q4_1", "q5_1", "q5_k", "f16", "bf16"] {
+            let (scalar_exe, simd_exe, portable_exe) = if matches!(format, "q4_1" | "q5_1" | "q5_k" | "f16" | "bf16") {
+                (&gguf_scalar_exe, &gguf_simd_exe, &gguf_portable_exe)
+            } else {
+                (&scalar_exe, &simd_exe, &portable_exe)
+            };
             let k_quant = format.ends_with("_k");
             // m == 1 exercises the decode (matrix-vector) kernels; n = 1000 is not a multiple of the
             // 32 output rows a decode threadgroup covers.
             let shapes = [(1, 77, 512), (1, 33, 256), (1, 1000, 1024), (37, 77, 512), (8, 33, 256), (130, 129, 256), (300, 200, if k_quant { 1024 } else { 800 })];
             for (m, n, k) in shapes {
                 for with_bias in [false, true] {
-                    let scalar = run(&scalar_exe, format, m, n, k, with_bias);
+                    let scalar = run(scalar_exe, format, m, n, k, with_bias);
                     assert_eq!(scalar.len(), m * n);
                     let scale = scalar.iter().copied().map(f32::abs).fold(0.0, f32::max);
                     assert!(scale.is_finite() && scale > 0.0, "{format} {m}x{n}x{k}: degenerate reference (scale {scale})");
-                    for (variant, exe) in [("simd", &simd_exe), ("portable", &portable_exe)] {
+                    for (variant, exe) in [("simd", simd_exe), ("portable", portable_exe)] {
                         let actual = run(exe, format, m, n, k, with_bias);
                         assert_eq!(actual.len(), scalar.len());
                         let mut worst = 0.0f32;

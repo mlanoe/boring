@@ -3969,6 +3969,13 @@ impl Transpiler {
                     .iter()
                     .find(|arg| arg.label.as_deref() == Some("format"))
             });
+            if let Some(ExprKind::Str(value)) = format.map(|arg| &arg.value.kind) {
+                if matches!(value.as_str(), "q4_1" | "q5_1" | "q5_k" | "f16" | "bf16") {
+                    // GPU (Metal, wgpu, CUDA, ROCm) and the interpreter handle these; the CPU SIMD
+                    // dequantizers do not cover them yet. Fail with a readable message.
+                    return Some(format!("compile_error!(\"kernel.tensors.linear format '{value}' is not implemented for the simd target (use a GPU target or the interpreter)\")"));
+                }
+            }
             if matches!(format.map(|arg| &arg.value.kind), Some(ExprKind::Str(value)) if matches!(value.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k")) {
                 let format_name = match format.map(|arg| &arg.value.kind) {
                     Some(ExprKind::Str(value)) => value.as_str(),

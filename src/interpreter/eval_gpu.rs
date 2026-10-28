@@ -1420,12 +1420,29 @@ impl Interpreter {
                         let right = if let Some(bytes) = packed.as_ref() {
                             let flat = col * k + inner;
                             let block = flat / block_elements;
-                            let offset = block * block_bytes;
+                            let offset = if matches!(quantized_format, Some("f16" | "bf16")) { flat * 2 } else { block * block_bytes };
                             let scale_offset = offset + quantized_geometry.unwrap().scale_offset;
                             let bits = u16::from_le_bytes([bytes[scale_offset], bytes[scale_offset + 1]]);
-                            let scale = f16_to_f32(bits);
+                            let mut scale = f16_to_f32(bits);
                             let mut minimum = 0.0f32;
-                            let quantized = if quantized_format == Some("q8_0") {
+                            let quantized = if quantized_format == Some("f16") {
+                                1.0f32
+                            } else if quantized_format == Some("bf16") {
+                                scale = f32::from_bits((bits as u32) << 16);
+                                1.0f32
+                            } else if matches!(quantized_format, Some("q4_1" | "q5_1")) {
+                                let five = quantized_format == Some("q5_1");
+                                let position = flat % 32;
+                                let qs_offset = if five { 8 } else { 4 };
+                                let byte = bytes[offset + qs_offset + position % 16];
+                                let nibble = if position < 16 { byte & 0x0f } else { byte >> 4 } as u32;
+                                let high = if five {
+                                    let high_bits = u32::from_le_bytes([bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]]);
+                                    (high_bits >> position) & 1
+                                } else { 0 };
+                                minimum = -f16_to_f32(u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]));
+                                (nibble | high << 4) as f32
+                            } else if quantized_format == Some("q8_0") {
                                 (bytes[offset + 2 + flat % 32] as i8) as f32
                             } else if quantized_format == Some("q5_0") {
                                 let position = flat % 32;
@@ -1515,8 +1532,15 @@ impl Interpreter {
                                 } else {
                                     (bytes[scales + subblock + 4] >> 4) | ((bytes[scales + subblock] >> 6) << 4)
                                 };
-                                let packed = bytes[offset + 16 + chunk * 32 + lane];
-                                let nibble = if half == 0 { packed & 15 } else { packed >> 4 };
+                                let nibble = if quantized_format == Some("q5_k") {
+                                    let packed = bytes[offset + 48 + chunk * 32 + lane];
+                                    let low = if half == 0 { packed & 15 } else { packed >> 4 };
+                                    let high = (bytes[offset + 16 + lane] >> (chunk * 2 + half)) & 1;
+                                    low | high << 4
+                                } else {
+                                    let packed = bytes[offset + 16 + chunk * 32 + lane];
+                                    if half == 0 { packed & 15 } else { packed >> 4 }
+                                };
                                 let min_bits = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
                                 minimum = f16_to_f32(min_bits) * min6 as f32;
                                 scale6 as f32 * nibble as f32

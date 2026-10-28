@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`kernel.tensors.linear` formats `q4_1`, `q5_1`, `q5_k`, `f16` and `bf16`.** Accepted by the checker, interpreter (reference dequantizers, checked against the Python `gguf` package's dequantize in `tests/tensor_gguf_formats.rs`) and the generic CUDA/ROCm/wgpu/Metal kernels. On Metal they get native schedules: SIMD-group decode and blocked prefill for Q4_1/Q5_1/F16/BF16 (extending the 32-element-block kernels), and a Q5_K kernel family derived from Q4_K. F16/BF16 weights require `k % 32 == 0`. Enable with `[tensor.linear.prefill] <format> = "native"` (Q4_0/Q5_0 need the same switch when the default prefill algorithm is `scalar`).
+
 ---
 
 ## [0.9.11] — 2026-10-28 *(cargo test: 3845/3845 passing across 123 suites, 14 ignored · clippy: clean · self-hosted interpreter functional: 160/160)*

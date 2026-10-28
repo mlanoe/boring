@@ -3137,7 +3137,7 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
             eprintln!("error: tensor linear decode algorithm '{}' is implemented only for q8_0", algorithm);
             process::exit(1);
         }
-        if matches!(algorithm.as_str(), "warp" | "warp-broadcast") && !matches!(format.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") {
+        if matches!(algorithm.as_str(), "warp" | "warp-broadcast") && !matches!(format.as_str(), "q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k" | "q5_k" | "q5_1" | "q4_1" | "f16" | "bf16") {
             eprintln!("error: tensor linear decode algorithm '{}' is not implemented for {}", algorithm, format);
             process::exit(1);
         }

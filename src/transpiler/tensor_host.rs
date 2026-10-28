@@ -64,7 +64,7 @@ impl Default for TensorLinearConfig {
 /// K-quant superblocks walked one 32-wide K step at a time).
 fn metal_blocked_format(config: &TensorLinearConfig, format: Option<&str>) -> bool {
     config.metal_blocked_prefill && !config.wants_portable(format)
-        && matches!(format, Some("q4_0" | "q5_0" | "iq4_nl" | "q3_k" | "q2_k"))
+        && matches!(format, Some("q4_0" | "q5_0" | "q4_1" | "q5_1" | "iq4_nl" | "q3_k" | "q2_k" | "f16" | "bf16"))
 }
 
 /// Blocked formats whose decode (`m == 1`) also has a Metal SIMD-group kernel: four output rows
@@ -337,9 +337,10 @@ fn lower_function_body(
             };
             let native_packed = tensor_config.native_dynamic_q8_linear
                 && element == TensorElement::Float32
-                && matches!(dynamic.format, Some("q8_0" | "q4_k" | "q6_k"))
+                && matches!(dynamic.format, Some("q8_0" | "q4_k" | "q5_k" | "q6_k"))
                 && matches!(tensor_config.algorithm(dynamic.format, false), "auto" | "native")
-                && !(dynamic.format == Some("q8_0") && tensor_config.algorithm(dynamic.format, true) == "scalar");
+                && !(dynamic.format == Some("q8_0") && tensor_config.algorithm(dynamic.format, true) == "scalar")
+                && !(dynamic.format == Some("q5_k") && tensor_config.algorithm(dynamic.format, true) == "scalar");
             let prefix = if tensor_config.native_dynamic_float_linear && dynamic.format.is_none()
                 && element == TensorElement::Float32 {
                 "BoringTensorDynamicFloatNative"
@@ -350,6 +351,8 @@ fn lower_function_body(
                     Some("q6_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" && half_prefill => "BoringTensorDynamicQ6KNativeScalarDecodeHalfPrefill",
                     Some("q4_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" => "BoringTensorDynamicQ4KNativeScalarDecode",
                     Some("q6_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" => "BoringTensorDynamicQ6KNativeScalarDecode",
+                    Some("q5_k") if half_prefill => "BoringTensorDynamicQ5KNativeHalfPrefill",
+                    Some("q5_k") => "BoringTensorDynamicQ5KNative",
                     Some("q4_k") if half_prefill => "BoringTensorDynamicQ4KNativeHalfPrefill",
                     Some("q6_k") if half_prefill => "BoringTensorDynamicQ6KNativeHalfPrefill",
                     Some("q4_k") => "BoringTensorDynamicQ4KNative",
@@ -758,6 +761,9 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str, config: &TensorLinearConf
     }
 }
 
+/// Boring source decoding the f16 at byte `blockByte + 2` into `dMin` (Q4_1/Q5_1's `m`).
+const F16_MIN_DECODE: &str = "                let minBits = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n";
+
 fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>, element: TensorElement, tensor_config: &TensorLinearConfig) -> Result<KernelDecl, String> {
     let scalar_type = if element == TensorElement::Float16 { "float16" } else { "float32" };
     let bias_field = if has_bias { format!("    let [{scalar_type}]'global bias\n") } else { String::new() };
@@ -767,7 +773,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     let weight_type = if quantized_format.is_some() { "uint8" } else { scalar_type };
     let geometry = quantized_format.and_then(crate::tensor_formats::quantized_linear_geometry);
     let block_bytes = geometry.map_or(0, |geometry| geometry.block_bytes);
-    let quantized_value = match quantized_format {
+    let quantized_value_base: &str = match quantized_format {
         Some("q8_0") => "                let raw = int(b[blockByte + 2 + flat % 32])\n                let quantized = if raw > 127: raw - 256 else: raw\n",
         Some("q5_0") => "                let position = flat % 32\n                let qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                let packed = int(b[blockByte + 6 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n                let quantized = (nibble | (high << 4)) - 16\n",
         Some("q4_0") => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = nibble - 8\n",
@@ -775,12 +781,27 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
         Some("q6_k") => "                let position = flat % 256\n                let iteration = position / 128\n                let within = position % 128\n                let group = within / 32\n                let lane = within % 32\n                let half = lane / 16\n                let qlBase = blockByte + iteration * 64\n                let qhBase = blockByte + 128 + iteration * 32\n                let scaleBase = blockByte + 192 + iteration * 8\n                let low0 = int(b[qlBase + lane])\n                let low32 = int(b[qlBase + lane + 32])\n                let nibble = if group == 0: low0 & 0xF elif group == 1: low32 & 0xF elif group == 2: (low0 >> 4) & 0xF else: (low32 >> 4) & 0xF\n                let highByte = int(b[qhBase + lane])\n                let high = (highByte >> ((group * 2) as uint32)) & 3\n                let scaleRaw = int(b[scaleBase + half + group * 2])\n                let subScale = if scaleRaw > 127: scaleRaw - 256 else: scaleRaw\n                let quantized = subScale * ((nibble | (high << 4)) - 32)\n",
         Some("q3_k") => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleIndex = outer * 8 + group * 2 + sub\n                let scaleWord = scaleIndex / 4\n                let scaleLane = scaleIndex % 4\n                let scaleByte = int(b[blockByte + 96 + (scaleWord % 2) * 4 + scaleLane])\n                let scaleLow = if scaleWord < 2: scaleByte & 0xF else: (scaleByte >> 4) & 0xF\n                let scaleHigh = (int(b[blockByte + 104 + scaleLane]) >> ((scaleWord * 2) as uint32)) & 3\n                let subScale = (scaleLow | (scaleHigh << 4)) - 32\n                let packed = int(b[blockByte + 32 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let highMask = int(b[blockByte + sub * 16 + lane]) & ((1 as int) << ((outer * 4 + group) as uint32))\n                let highOffset = if highMask == 0: 4 else: 0\n                let quantized = subScale * (q - highOffset)\n",
         Some("q2_k") => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleByte = int(b[blockByte + outer * 8 + group * 2 + sub])\n                let packed = int(b[blockByte + 16 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let minBits = int(b[blockByte + 82]) | (int(b[blockByte + 83]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * ((scaleByte >> 4) as float32)\n                let quantized = (scaleByte & 0xF) * q\n",
+        Some("f16") => "                let quantized = 1\n",
+        Some("bf16") => "                let bits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                let bfExponent = (bits >> 7) & 0xFF\n                let bfFraction = bits & 0x7F\n                if bfExponent == 0:\n                    scale = (bfFraction as float32) / 128.0 * 1.17549435e-38\n                elif bfExponent == 0xFF:\n                    scale = if bfFraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (bfFraction as float32) / 128.0\n                    var int bfPower = bfExponent - 127\n                    while bfPower > 0:\n                        scale *= 2.0\n                        bfPower -= 1\n                    while bfPower < 0:\n                        scale /= 2.0\n                        bfPower += 1\n                if (bits >> 15) == 1:\n                    scale = 0.0 - scale\n                let quantized = 1\n",
+        Some("q4_1") => "                let position = flat % 32\n                let packed = int(b[blockByte + 4 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n__F16_MIN__                minimum = 0.0 - dMin\n                let quantized = nibble\n",
+        Some("q5_1") => "                let position = flat % 32\n                let qh = int(b[blockByte + 4]) | (int(b[blockByte + 5]) << 8) | (int(b[blockByte + 6]) << 16) | (int(b[blockByte + 7]) << 24)\n                let packed = int(b[blockByte + 8 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n__F16_MIN__                minimum = 0.0 - dMin\n                let quantized = nibble | (high << 4)\n",
         _ => "                let position = flat % 256\n                let chunk = position / 64\n                let within = position % 64\n                let half = within / 32\n                let lane = within % 32\n                let subblock = chunk * 2 + half\n                let scalesBase = blockByte + 4\n                let subScale = if subblock < 4: int(b[scalesBase + subblock]) & 63 else: (int(b[scalesBase + subblock + 4]) & 0xF) | ((int(b[scalesBase + subblock - 4]) >> 6) << 4)\n                let subMin = if subblock < 4: int(b[scalesBase + subblock + 4]) & 63 else: (int(b[scalesBase + subblock + 4]) >> 4) | ((int(b[scalesBase + subblock]) >> 6) << 4)\n                let packed = int(b[blockByte + 16 + chunk * 32 + lane])\n                let nibble = if half == 0: packed & 0xF else: (packed >> 4) & 0xF\n                let minBits = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * (subMin as float32)\n                let quantized = subScale * nibble\n",
     };
+    let quantized_value = if quantized_format == Some("q5_k") {
+        // Q5_K = Q4_K's scale/min packing plus a 32-byte high-bit plane (offset 16); the
+        // 4-bit quants move from offset 16 to 48. Bit `2*chunk + half` of `qh[lane]` is bit 4.
+        quantized_value_base.replace(
+            "                let packed = int(b[blockByte + 16 + chunk * 32 + lane])\n                let nibble = if half == 0: packed & 0xF else: (packed >> 4) & 0xF\n",
+            "                let packedLow = int(b[blockByte + 48 + chunk * 32 + lane])\n                let lowNibble = if half == 0: packedLow & 0xF else: (packedLow >> 4) & 0xF\n                let highBit = (int(b[blockByte + 16 + lane]) >> ((chunk * 2 + half) as uint32)) & 1\n                let nibble = lowNibble | (highBit << 4)\n",
+        )
+    } else {
+        quantized_value_base.to_string()
+    }.replace("__F16_MIN__", F16_MIN_DECODE);
     let block_elements = geometry.map_or(32, |geometry| geometry.block_elements);
     let scale_offset = geometry.map_or(0, |geometry| geometry.scale_offset);
+    let block_byte_expr = if matches!(quantized_format, Some("f16" | "bf16")) { "flat * 2".to_string() } else { format!("(flat / {block_elements}) * {block_bytes}") };
     let product = if quantized_format.is_some() {
-        format!("                let flat = col * k + inner\n                let blockByte = (flat / {block_elements}) * {block_bytes}\n                let scaleOffset = blockByte + {scale_offset}\n                let scaleBits = int(b[scaleOffset]) | (int(b[scaleOffset + 1]) << 8)\n                let sign = (scaleBits >> 15) & 1\n                let exponent = (scaleBits >> 10) & 0x1F\n                let fraction = scaleBits & 0x3FF\n                var float32 scale = 0.0\n                if exponent == 0:\n                    scale = (fraction as float32) / 16777216.0\n                elif exponent == 0x1F:\n                    scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (fraction as float32) / 1024.0\n                    var int scaleExponent = exponent - 15\n                    while scaleExponent > 0:\n                        scale *= 2.0\n                        scaleExponent -= 1\n                    while scaleExponent < 0:\n                        scale /= 2.0\n                        scaleExponent += 1\n                if sign == 1:\n                    scale = 0.0 - scale\n                var float32 minimum = 0.0\n{quantized_value}                sum += a[row * k + inner] * ((quantized as float32) * scale - minimum)\n")
+        format!("                let flat = col * k + inner\n                let blockByte = {block_byte_expr}\n                let scaleOffset = blockByte + {scale_offset}\n                let scaleBits = int(b[scaleOffset]) | (int(b[scaleOffset + 1]) << 8)\n                let sign = (scaleBits >> 15) & 1\n                let exponent = (scaleBits >> 10) & 0x1F\n                let fraction = scaleBits & 0x3FF\n                var float32 scale = 0.0\n                if exponent == 0:\n                    scale = (fraction as float32) / 16777216.0\n                elif exponent == 0x1F:\n                    scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (fraction as float32) / 1024.0\n                    var int scaleExponent = exponent - 15\n                    while scaleExponent > 0:\n                        scale *= 2.0\n                        scaleExponent -= 1\n                    while scaleExponent < 0:\n                        scale /= 2.0\n                        scaleExponent += 1\n                if sign == 1:\n                    scale = 0.0 - scale\n                var float32 minimum = 0.0\n{quantized_value}                sum += a[row * k + inner] * ((quantized as float32) * scale - minimum)\n")
     } else if element == TensorElement::Float16 {
         "                sum += (a[row * k + inner] as float32) * (b[col * k + inner] as float32)\n".to_string()
     } else {
@@ -796,15 +817,16 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     // A native packed kernel (Metal Q8_0/Q4_K/Q6_K) gets its body from the backend, so it
     // must not also declare the portable shared tiles.
     let native_packed_kernel = tensor_config.native_dynamic_q8_linear
-        && matches!(quantized_format, Some("q8_0" | "q4_k" | "q6_k"))
+        && matches!(quantized_format, Some("q8_0" | "q4_k" | "q5_k" | "q6_k"))
         && matches!(tensor_config.algorithm(quantized_format, false), "auto" | "native")
-        && !(quantized_format == Some("q8_0") && decode_algorithm == "scalar");
+        && !(quantized_format == Some("q8_0") && decode_algorithm == "scalar")
+        && !(quantized_format == Some("q5_k") && decode_algorithm == "scalar");
     let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
         && quantized_format.is_some()
         && !native_packed_kernel
         && matches!(tensor_config.algorithm(quantized_format, false), "auto" | "native")
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
-    let warp_decode = matches!(quantized_format, Some("q8_0" | "q6_k" | "q4_k" | "q3_k" | "q2_k"))
+    let warp_decode = matches!(quantized_format, Some("q8_0" | "q6_k" | "q5_k" | "q4_k" | "q3_k" | "q2_k" | "q5_1" | "q4_1" | "f16" | "bf16"))
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
     let q8_scale_lane = if tensor_config.target_warp_width == 32 {
         "0"
@@ -1021,7 +1043,7 @@ fn parse_dynamic_replacement_stmts(
     };
     let decode_algorithm = tensor_config.algorithm(call.format, true);
     let warp_decode = match call.format {
-        Some("q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k") => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
+        Some("q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k" | "q5_k" | "q5_1" | "q4_1" | "f16" | "bf16") => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
         _ => false,
     };
     let warps_per_block = 256 / tensor_config.target_warp_width.max(1);
@@ -1040,9 +1062,10 @@ fn parse_dynamic_replacement_stmts(
         && element == TensorElement::Float32;
     let native_packed = tensor_config.native_dynamic_q8_linear
         && element == TensorElement::Float32
-        && matches!(call.format, Some("q8_0" | "q4_k" | "q6_k"))
+        && matches!(call.format, Some("q8_0" | "q4_k" | "q5_k" | "q6_k"))
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
-        && !(call.format == Some("q8_0") && decode_algorithm == "scalar");
+        && !(call.format == Some("q8_0") && decode_algorithm == "scalar")
+        && !(call.format == Some("q5_k") && decode_algorithm == "scalar");
     let native_scalar_decode = native_packed && decode_algorithm == "scalar";
     let native_prefill_rows = if tensor_config.prefill_precision.as_deref() == Some("half") { 128 } else { 64 };
     let native_prefill_columns = 64;
@@ -1057,7 +1080,7 @@ fn parse_dynamic_replacement_stmts(
         format!("    if {m} % 8 == 0 and {n} % 8 == 0 and {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = ({n} / 8, {m} / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
     } else if native_scalar_decode {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 255) / 256)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
-    } else if native_packed && call.format == Some("q4_k") {
+    } else if native_packed && matches!(call.format, Some("q4_k" | "q5_k")) {
         let rows_per_block = 8 * Q4K_ROWS_PER_SIMDGROUP;
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed && call.format == Some("q6_k") {
@@ -1300,7 +1323,7 @@ run()
     fn portable_quantized_prefill_adds_shared_tiles_while_scalar_stays_reference() {
         let quals = [GpuQual::Global, GpuQual::Global, GpuQual::Unified];
         let tiled_config = TensorLinearConfig { portable_tiled_dynamic_quantized_linear: true, ..Default::default() };
-        for format in ["q8_0", "q5_0", "q4_0", "iq4_nl", "q6_k", "q4_k", "q3_k", "q2_k"] {
+        for format in ["q8_0", "q5_0", "q4_0", "iq4_nl", "q6_k", "q4_k", "q3_k", "q2_k", "q5_1", "q4_1", "q5_k", "f16", "bf16"] {
             let tiled = parse_dynamic_linear_kernel(
                 &format!("Tiled{format}"), quals.clone(), true, Some(format), TensorElement::Float32, &tiled_config,
             ).unwrap();
