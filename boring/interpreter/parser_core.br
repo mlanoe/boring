@@ -584,6 +584,9 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
             name_off = 3
             while parser_token_at_offset_is(p, name_off, "Tick"):
                 name_off = name_off + 2
+            # Optional qualified return: `Node'shared? pick(...)`.
+            if parser_token_at_offset_is(p, name_off, "Question"):
+                name_off = name_off + 1
         let lparen_off = name_off + 1
         if parser_token_at_offset_is(p, name_off, "Ident") and parser_token_at_offset_is(p, lparen_off, "LParen"):
             let params_off = lparen_off + 1
