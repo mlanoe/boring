@@ -2558,6 +2558,12 @@ impl Transpiler {
         // correct `Box<Counter>`. A plain `let Counter'owned c = ...` (no `Type::Mut` wrapper)
         // was never affected — only `mut`/`var mut` bindings were.
         let declared_ty = declared_ty.map(Type::without_mut);
+        // `let fixed16_16 x = 1.5` / `= 3`: an untyped literal takes the declared format.
+        if let Some(fmt) = declared_ty.and_then(Self::fixed_fmt_of_type) {
+            if let Some(lit) = self.emit_fixed_literal(value, &fmt) {
+                return lit;
+            }
+        }
         // A lowered view state's `Slot` cell handed to a slot-typed slot (`NameEditor(name = st.name)`,
         // a `bind` argument) is the cell itself, not the value `st.name` reads as elsewhere.
         if let Some(cell) = self.state_cell_for_slot_target(declared_ty, value) {

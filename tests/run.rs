@@ -380,6 +380,8 @@ interp_test!(float32_struct_method_math);
 // (non-method) function — see tests/cases/float32_local_var_math.br's doc comment.
 interp_test!(float32_local_var_math);
 interp_test!(float16_array_literal_width_and_cast);
+interp_test!(fixed_point_basic);
+interp_test!(fixed_point_struct_fn);
 interp_test!(float32_array_literal_width_and_cast);
 interp_test!(float64_array_literal_width_and_cast);
 interp_test!(optional_interp_numeric);

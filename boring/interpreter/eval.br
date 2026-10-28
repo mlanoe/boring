@@ -157,6 +157,14 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                             Value.Float64(0.0 - f)
                         Value.Float16(f):
                             Value.Float16((0.0 as float16) - f)
+                        Value.Fixed(raw, sg, n, m):
+                            let nf = FixedFmt(signed = sg, n = n, m = m)
+                            if not sg:
+                                throw "cannot negate unsigned {nf.name()}"
+                            if let nr = fixed_neg(nf, raw):
+                                Value.Fixed(nr, sg, n, m)
+                            else:
+                                throw "fixed-point overflow: negation in {nf.name()}"
                         Value.Float32(f):
                             Value.Float32(0.0 - f)
                         Value.Object(neg_inner):
@@ -611,6 +619,11 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
         # Type cast
         ExprKind.Cast(inner_expr, ty):
             let val = eval_expr(interp, inner_expr)
+            # `0.1 as fixed16_16`: an untyped literal is the decimal the author wrote, so
+            # it rounds to nearest like a contextual literal (runtime conversions truncate).
+            if is_untyped_numeric_literal(inner_expr):
+                if let lit = fixed_literal_for_cast_type(ty, val):
+                    return lit
             cast_value(interp, val, ty)
 
         # Range
@@ -1074,6 +1087,11 @@ def Value eval_binop(mut Interpreter interp, BinOp op, Expr lhs, Expr rhs):
             let coerced = coerce_float_literal_pair(l, r, lhs, rhs)
             l = coerced.0
             r = coerced.1
+            let fcoerced = coerce_fixed_literal_pair(l, r, lhs, rhs)
+            l = fcoerced.0
+            r = fcoerced.1
+            if value_is_fixed(l) or value_is_fixed(r):
+                return apply_binop_fixed(op, l, r)
             # Operator overloading: dispatch to struct methods
             var string? ov_method = nil
             if op == BinOp.Add: ov_method = "add"
@@ -1472,6 +1490,132 @@ bool is_untyped_numeric_literal(Expr e):
                 _: nil
         _: nil
     (l, r)
+
+# ─── Fixed-point (fixedN_M) ───────────────────────────────────────────────────
+#
+# Mirrors the Rust interpreter's `coerce_fixed_literal_pair` / `eval_fixed_arith`
+# (src/interpreter/eval_expr.rs): an untyped literal next to a fixed-point value
+# takes its format (rounded to nearest); two resolved values of different formats,
+# or fixed with int/float variables, never mix.
+
+# fixed -> int truncates toward zero, fixed -> float is the nearest float: hand the
+# ordinary numeric cast arms an Int128/Float64 stand-in for the fixed value.
+Value fixed_source_for_numeric_cast(Value v, string type_name):
+    match v:
+        Value.Fixed(raw, sg, n, m):
+            let f = FixedFmt(signed = sg, n = n, m = m)
+            if type_name == "float64" or type_name == "float" or type_name == "float32" or type_name == "float16" or type_name == "f32" or type_name == "f64":
+                Value.Float64(fixed_to_f64(f, raw))
+            elif type_name == "int" or type_name == "uint" or type_name.startsWith("int") or type_name.startsWith("uint"):
+                Value.Int128(fixed_to_int(f, raw))
+            else:
+                v
+        _: v
+
+# `x as fixedN_M`: fixed->fixed shifts by the difference of m (truncating), int->fixed
+# is exact, float->fixed truncates toward zero. Anything that does not fit is nil.
+Value cast_to_fixed(Value v, FixedFmt to):
+    var int128? raw = nil
+    match v:
+        Value.Fixed(r, sg, n, m): raw = fixed_convert(FixedFmt(signed = sg, n = n, m = m), r, to)
+        Value.Float64(x): raw = fixed_from_f64_trunc(to, x)
+        Value.Float32(x): raw = fixed_from_f64_trunc(to, x as float64)
+        Value.Float16(x): raw = fixed_from_f64_trunc(to, x as float64)
+        Value.Bool(b):
+            if b:
+                raw = fixed_from_int(to, 1 as int128)
+            else:
+                raw = fixed_from_int(to, 0 as int128)
+        _:
+            if let iv = value_as_i128(v):
+                raw = fixed_from_int(to, iv)
+    if let out = raw:
+        Value.Fixed(out, to.signed, to.n, to.m)
+    else:
+        Value.Nil
+
+Value? fixed_literal_for_cast_type(Type ty, Value val):
+    match ty:
+        Type.Named(tname):
+            if let lfmt = fixed_fmt_of_name(tname):
+                return fixed_literal_value(lfmt, val)
+            nil
+        _: nil
+
+bool value_is_fixed(Value v):
+    match v:
+        Value.Fixed(_, _, _, _): true
+        _: false
+
+# Value.Fixed for an untyped Int/Float64 literal value, nil when it is neither.
+# Throws if the literal does not fit the format.
+Value? fixed_literal_value(FixedFmt f, Value v):
+    match v:
+        Value.Int(n):
+            if let raw = fixed_from_int(f, n as int128):
+                Value.Fixed(raw, f.signed, f.n, f.m)
+            else:
+                throw "literal out of range for {f.name()}"
+        Value.Float64(x):
+            if let raw = fixed_from_decimal(f, "{x}"):
+                Value.Fixed(raw, f.signed, f.n, f.m)
+            else:
+                throw "literal out of range for {f.name()}"
+        _: nil
+
+(Value, Value) coerce_fixed_literal_pair(Value l, Value r, Expr lhs, Expr rhs):
+    match l:
+        Value.Fixed(_, sg, n, m):
+            if is_untyped_numeric_literal(rhs):
+                if let rv = fixed_literal_value(FixedFmt(signed = sg, n = n, m = m), r):
+                    return (l, rv)
+        _: nil
+    match r:
+        Value.Fixed(_, sg, n, m):
+            if is_untyped_numeric_literal(lhs):
+                if let lv = fixed_literal_value(FixedFmt(signed = sg, n = n, m = m), l):
+                    return (lv, r)
+        _: nil
+    (l, r)
+
+Value apply_binop_fixed(BinOp op, Value l, Value r):
+    match l:
+        Value.Fixed(a, sa, na, ma):
+            match r:
+                Value.Fixed(b, sb, nb, mb):
+                    if sa != sb or na != nb or ma != mb:
+                        throw "cannot mix {FixedFmt(signed = sa, n = na, m = ma).name()} and {FixedFmt(signed = sb, n = nb, m = mb).name()}; cast one with `as`"
+                    let f = FixedFmt(signed = sa, n = na, m = ma)
+                    if not fixed_supported(f):
+                        throw "{f.name()} is not supported yet: 128-bit fixed-point formats"
+                    var int128? res = nil
+                    match op:
+                        BinOp.Add: res = fixed_add(f, a, b)
+                        BinOp.Sub: res = fixed_sub(f, a, b)
+                        BinOp.Mul: res = fixed_mul(f, a, b)
+                        BinOp.Div:
+                            if b == 0:
+                                throw "division by zero"
+                            res = fixed_div(f, a, b)
+                        BinOp.Rem:
+                            if b == 0:
+                                throw "remainder by zero"
+                            res = fixed_rem(f, a, b)
+                        BinOp.Eq: return Value.Bool(a == b)
+                        BinOp.NotEq: return Value.Bool(a != b)
+                        BinOp.Lt: return Value.Bool(a < b)
+                        BinOp.Gt: return Value.Bool(a > b)
+                        BinOp.LtEq: return Value.Bool(a <= b)
+                        BinOp.GtEq: return Value.Bool(a >= b)
+                        _: throw "bitwise operators are not defined on fixed-point; use `.raw`"
+                    if let out = res:
+                        Value.Fixed(out, sa, na, ma)
+                    else:
+                        throw "fixed-point overflow in {f.name()}"
+                _:
+                    throw "cannot apply operator to {l.type_name()} and {r.type_name()}: fixed-point does not mix with other numeric types; cast with `as`"
+        _:
+            throw "cannot apply operator to {l.type_name()} and {r.type_name()}: fixed-point does not mix with other numeric types; cast with `as`"
 
 # Add/Sub/Mul/Div/Rem between two float64 values, or a float64 and any
 # numeric int-kind (the bare int/uint kind mixes freely, same precedent as
@@ -2028,6 +2172,11 @@ def Value coerce_declared_value(mut Interpreter interp, Value val, Type ty):
         Type.ArrayN(inner, _): coerce_array_elements(interp, val, inner)
         Type.Float16 | Type.Float32 | Type.Float64:
             cast_value(interp, val, ty)
+        Type.Named(fname):
+            if let ffmt = fixed_fmt_of_name(fname):
+                if let lit = fixed_literal_value(ffmt, val):
+                    return lit
+            val
         _:
             if let kind = type_to_num_kind(ty):
                 if let source_kind = num_kind_of(val):
@@ -2050,7 +2199,7 @@ def Value coerce_array_elements(mut Interpreter interp, Value val, Type elem):
 
 
 # Type cast
-def Value cast_value(mut Interpreter interp, Value val, Type ty):
+def Value cast_value(mut Interpreter interp, Value val0, Type ty):
     let type_name = match ty:
         Type.Named(name): name
         Type.Int: "int"
@@ -2071,6 +2220,10 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
         Type.Uint64: "uint64"
         Type.Uint128: "uint128"
         _: "unknown"
+    # Fixed-point (docs/fixed-point-types.md): `as fixedN_M`, and fixed -> int/float.
+    if let tfmt = fixed_fmt_of_name(type_name):
+        return cast_to_fixed(val0, tfmt)
+    let val = fixed_source_for_numeric_cast(val0, type_name)
     match type_name:
         "int":
             match val:
@@ -2306,6 +2459,16 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
             let val_type = val.type_name()
             if val_type == type_name:
                 return val
+            # A struct/enum value stored behind a trait type keeps its concrete
+            # runtime name. Casting it to another declared struct/enum is a
+            # checked downcast: mismatch produces nil rather than an exception.
+            let target_def = interp.global_env.get(type_name.clone())
+            var target_is_user_type = false
+            if let target = target_def:
+                match target:
+                    Value.StructDef(_): target_is_user_type = true
+                    Value.EnumDef(_): target_is_user_type = true
+                    _: nil
             match val:
                 Value.Object(inner):
                     # Try field named "base" or "value" (for newtypes), with recursive cast
@@ -2319,7 +2482,14 @@ def Value cast_value(mut Interpreter interp, Value val, Type ty):
                             return vv
                         # Try casting the underlying value to the target named type
                         return cast_value(interp, vv, Type.Named(type_name))
+                    if target_is_user_type:
+                        return Value.Nil
                     throw "cannot cast {val_type} to {type_name}"
+                Value.EnumVariant(_, _, _):
+                    if target_is_user_type:
+                        Value.Nil
+                    else:
+                        throw "unknown cast target type '{type_name}'"
                 _:
                     throw "unknown cast target type '{type_name}'"
 
@@ -2377,6 +2547,11 @@ req string format_value(Interpreter interp, Value val, string spec):
             else:
                 raw = "{fv}"
             if flag_plus and fv >= 0.0:
+                raw = "+" + raw
+        Value.Fixed(fraw, fsg, fn_, fm):
+            let ffmt = FixedFmt(signed = fsg, n = fn_, m = fm)
+            raw = fixed_format(ffmt, fraw, precision)
+            if flag_plus and fraw >= 0:
                 raw = "+" + raw
         Value.Float16(fv16):
             let fv = fv16 as float64
@@ -2529,6 +2704,7 @@ req string display_value(Interpreter interp, Value val):
         Value.Uint128(n): "{n}"
         Value.Float64(f): "{f}"
         Value.Float16(f): "{f}"
+        Value.Fixed(raw, sg, n, m): fixed_format(FixedFmt(signed = sg, n = n, m = m), raw, -1)
         Value.Float32(f): "{f}"
         Value.Str(s): s
         Value.Array(items):

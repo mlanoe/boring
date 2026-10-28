@@ -252,6 +252,18 @@ impl Parser {
         match self.peek().clone() {
             TokenKind::Ident(s) => {
                 let s = s.clone();
+                // `fixed10_10`, `fixed0_16`: the shape of a fixed-point type but not a
+                // valid format. The names are reserved, so say what is wrong instead of
+                // letting it fall through as an unknown user type.
+                if crate::fixed::FixedFmt::is_reserved_type_name(&s) {
+                    if let Some(Err(e)) = crate::fixed::FixedFmt::parse(&s) {
+                        return Err(ParseError::Generic {
+                            line: self.line(), col: self.col(),
+                            msg: e.message(&s),
+                            len: self.tok_len(),
+                        });
+                    }
+                }
                 self.advance();
                 let base = match s.as_str() {
                     "Int"     => Type::Int,
@@ -292,7 +304,7 @@ impl Parser {
                 // `T as Trait` bounds (bounds are silently ignored at use sites).
                 // Scalar types take no generic args, so a following `<` is an operator
                 // (`x as uint << 24`, `x as int < y`), not an argument list.
-                let takes_generics = !matches!(s.as_str(),
+                let takes_generics = !crate::fixed::FixedFmt::is_reserved_type_name(&s) && !matches!(s.as_str(),
                     "int" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uint128"
                     | "int8" | "int16" | "int32" | "int64" | "int128"
                     | "float" | "float16" | "float32" | "float64" | "f16" | "bool" | "string" | "str");

@@ -245,6 +245,7 @@ def string val_to_string(Value v):
         Value.Uint128(n): "{n}"
         Value.Float64(f): "{f}"
         Value.Float16(f): "{f}"
+        Value.Fixed(raw, sg, n, m): fixed_format(FixedFmt(signed = sg, n = n, m = m), raw, -1)
         Value.Float32(f): "{f}"
         Value.Str(s): s
         Value.Array(elems):

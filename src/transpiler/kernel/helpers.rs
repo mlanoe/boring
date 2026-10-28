@@ -120,6 +120,7 @@ impl KernelTranspiler {
             // float32/float64 are forbidden in kernel code (FPU disabled); emit a
             // comment as a fallback — the validator (src/validator/kernel.rs) is
             // what actually rejects these before codegen is reached.
+            Type::Fixed(fmt) => fmt.rust_name(),
             Type::Float16 => "/* float16 forbidden */ u16".into(),
             Type::Float32 => "/* float32 forbidden */ f32".into(),
             Type::Float64 => "/* float64 forbidden */ f64".into(),

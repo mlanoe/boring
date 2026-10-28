@@ -1504,6 +1504,10 @@ pub enum Type {
     Uint128,
     /// IEEE 754 binary16 floating-point (`half::f16` on the host).
     Float16,
+    /// Binary fixed-point `fixedN_M` / `ufixedN_M` (and `iN_M` / `uN_M`) —
+    /// see docs/fixed-point-types.md. The parser keeps the spelling as
+    /// `Named`; the interpreter's alias table resolves it to this variant.
+    Fixed(crate::fixed::FixedFmt),
     /// 32-bit floating-point (Rust `f32`) — distinct from `Float64`.
     Float32,
     /// 64-bit floating-point (Rust `f64`). `float` is a pure alias of this
@@ -1795,7 +1799,7 @@ impl Type {
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                | Type::Float16 | Type::Float32 | Type::Float64 | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+                | Type::Float16 | Type::Float32 | Type::Float64 | Type::Fixed(_) | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Optional(inner) => inner.is_copy(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_copy()),
             Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) | Type::Named(_) => false,
@@ -1829,7 +1833,7 @@ impl Type {
             Type::Int | Type::Uint | Type::Uint8
                 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                | Type::Float16 | Type::Float32 | Type::Float64 | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
+                | Type::Float16 | Type::Float32 | Type::Float64 | Type::Fixed(_) | Type::Str | Type::Bool | Type::Nil | Type::Void | Type::Never => true,
             Type::Fn(..) => true,
             Type::Optional(inner) => inner.is_task_safe(),
             Type::Tuple(elems) => elems.iter().all(|t| t.is_task_safe()),

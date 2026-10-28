@@ -3661,6 +3661,8 @@ impl Transpiler {
     pub(crate) fn is_copy_type(ty: &Type) -> bool {
         match ty {
             Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool | Type::Nil | Type::Void => true,
+            Type::Fixed(_) => true,
+            Type::Named(n) if crate::fixed::FixedFmt::from_name(n).is_some() => true,
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => true,
             // Lowercase aliases: `int`, `float`, `bool`, `uint` parse as Named in the user source.
@@ -3741,6 +3743,7 @@ impl Transpiler {
             Type::Uint64 => "u64".into(),
             Type::Uint128 => "u128".into(),
             Type::Float16 => "half::f16".into(),
+            Type::Fixed(fmt) => fmt.rust_name(),
             Type::Float32 => "f32".into(),
             Type::Float64 => "f64".into(),
             Type::Str   => if self.use_rc_str() { "Rc<str>".into() } else { "Arc<str>".into() },

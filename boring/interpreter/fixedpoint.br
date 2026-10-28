@@ -1,0 +1,300 @@
+# == FIXED-POINT (fixedN_M / ufixedN_M) ==
+#
+# Boring port of the reference semantics in the Rust interpreter's `src/fixed.rs`
+# (docs/fixed-point-types.md). A fixed-point value is `Value.Fixed(raw, signed, n, m)`:
+# a raw storage integer `raw` of width `n + m` bits whose real value is `raw / 2^m`.
+#
+# Supported widths are 8/16/32/64 (the 128-bit formats need a 256-bit intermediate
+# for `*` and `/`, docs Phasing §4). Every operation returns `nil` on overflow and
+# the caller turns that into a runtime error.
+#
+# The 2W-bit intermediate of `*` and `/` is computed on *magnitudes* in `uint128`
+# (|ra| * |rb| < 2^128 for every width up to 64), then the sign is re-applied, so
+# the result truncates toward zero exactly like the Rust interpreter and the
+# generated Rust newtype.
+
+struct FixedFmt:
+    bool signed
+    int n
+    int m
+
+    req int width():
+        self.n + self.m
+
+    # Canonical spelling: `fixed16_16`, `ufixed8_8`.
+    req string name():
+        if self.signed:
+            "fixed{self.n}_{self.m}"
+        else:
+            "ufixed{self.n}_{self.m}"
+
+# Canonical spelling from the raw `Value.Fixed` payload fields.
+string fixed_type_name(bool signed, int n, int m):
+    if signed:
+        "fixed{n}_{m}"
+    else:
+        "ufixed{n}_{m}"
+
+bool fixed_all_digits(string s):
+    if s.length == 0 or s.length > 3:
+        return false
+    # `i08_8`-style zero padding is not a spelling of the type.
+    if s.length > 1 and s.startsWith("0"):
+        return false
+    for c in s.chars():
+        if not "0123456789".contains(c):
+            return false
+    true
+
+# `fixed16_16`, `ufixed8_8` and the aliases `i16_16` / `u8_8` -> their format;
+# nil for any other name (including a fixed-shaped name that is not valid).
+FixedFmt? fixed_fmt_of_name(string name):
+    var signed = true
+    var rest = ""
+    if name.startsWith("ufixed"):
+        signed = false
+        rest = name.slice(6, name.length)
+    elif name.startsWith("fixed"):
+        rest = name.slice(5, name.length)
+    elif name.startsWith("i"):
+        rest = name.slice(1, name.length)
+    elif name.startsWith("u"):
+        signed = false
+        rest = name.slice(1, name.length)
+    else:
+        return nil
+    let parts = rest.split("_")
+    if parts.length != 2:
+        return nil
+    if not fixed_all_digits(parts[0]) or not fixed_all_digits(parts[1]):
+        return nil
+    let n = ((parts[0] as int) else -1)
+    let m = ((parts[1] as int) else -1)
+    if n < 0 or m < 0:
+        return nil
+    let w = n + m
+    if not (w == 8 or w == 16 or w == 32 or w == 64 or w == 128):
+        return nil
+    if signed and n == 0:
+        return nil
+    FixedFmt(signed = signed, n = n, m = m)
+
+int128 fixed_one():
+    1 as int128
+
+int128 fixed_pow2(int k):
+    fixed_one() << k
+
+# The widest supported storage is 64 bits: min/max always fit an int128.
+int128 fixed_min_raw(FixedFmt f):
+    if f.signed:
+        0 - fixed_pow2(f.width() - 1)
+    else:
+        0 as int128
+
+int128 fixed_max_raw(FixedFmt f):
+    if f.signed:
+        fixed_pow2(f.width() - 1) - fixed_one()
+    else:
+        fixed_pow2(f.width()) - fixed_one()
+
+bool fixed_supported(FixedFmt f):
+    f.width() <= 64
+
+int128? fixed_checked(FixedFmt f, int128 raw):
+    if raw < fixed_min_raw(f) or raw > fixed_max_raw(f):
+        return nil
+    raw
+
+uint128 fixed_abs(int128 a):
+    if a < 0:
+        (0 - a) as uint128
+    else:
+        a as uint128
+
+# magnitude + sign -> int128, nil if it cannot be represented or is out of range.
+int128? fixed_apply_sign(FixedFmt f, uint128 mag, bool neg):
+    let limit = (fixed_one() << 126) as uint128
+    if mag > limit:
+        return nil
+    let v = mag as int128
+    if neg:
+        fixed_checked(f, 0 - v)
+    else:
+        fixed_checked(f, v)
+
+int128? fixed_add(FixedFmt f, int128 a, int128 b):
+    fixed_checked(f, a + b)
+
+int128? fixed_sub(FixedFmt f, int128 a, int128 b):
+    fixed_checked(f, a - b)
+
+int128? fixed_neg(FixedFmt f, int128 a):
+    fixed_checked(f, 0 - a)
+
+# (ra * rb) >> m, truncating toward zero.
+int128? fixed_mul(FixedFmt f, int128 a, int128 b):
+    let neg = (a < 0) != (b < 0)
+    let prod = fixed_abs(a) * fixed_abs(b)
+    fixed_apply_sign(f, prod >> f.m, neg)
+
+# (ra << m) / rb, truncating toward zero. The caller reports division by zero.
+int128? fixed_div(FixedFmt f, int128 a, int128 b):
+    let neg = (a < 0) != (b < 0)
+    let num = fixed_abs(a) << f.m
+    fixed_apply_sign(f, num / fixed_abs(b), neg)
+
+int128? fixed_rem(FixedFmt f, int128 a, int128 b):
+    fixed_checked(f, a % b)
+
+# integer -> raw, exact; nil if it does not fit.
+int128? fixed_from_int(FixedFmt f, int128 i):
+    let bound = fixed_pow2(64)
+    if i > bound or i < 0 - bound:
+        return nil
+    fixed_checked(f, i * fixed_pow2(f.m))
+
+# A decimal literal as written, rounded to nearest (ties away from zero) with
+# exact integer arithmetic — never through an f64.
+int128? fixed_from_decimal(FixedFmt f, string text):
+    var body = text
+    var neg = false
+    if body.startsWith("-"):
+        neg = true
+        body = body.slice(1, body.length)
+    elif body.startsWith("+"):
+        body = body.slice(1, body.length)
+    var int_part = ""
+    var frac_part = ""
+    if body.contains("."):
+        let halves = body.split(".")
+        int_part = halves[0]
+        frac_part = halves[1]
+    else:
+        int_part = body
+    if int_part.length == 0 and frac_part.length == 0:
+        return nil
+    if frac_part.length > 36:
+        return nil
+    let digits = int_part + frac_part
+    let half_range = (fixed_one() << 126) as uint128
+    let u128_max = half_range + half_range + half_range + (half_range - (1 as uint128))
+    let scale = (fixed_one() << f.m) as uint128
+    var num = 0 as uint128
+    for c in digits.chars():
+        let d = ((c as int) else -1)
+        if d < 0:
+            return nil
+        if num > (u128_max - (d as uint128)) / (10 as uint128):
+            return nil
+        num = num * (10 as uint128) + (d as uint128)
+    if num > u128_max / scale:
+        return nil
+    var den = 1 as uint128
+    var k = 0
+    while k < frac_part.length:
+        den = den * (10 as uint128)
+        k += 1
+    let scaled = num * scale
+    var q = scaled / den
+    let r = scaled % den
+    if r >= den - r:
+        q = q + (1 as uint128)
+    fixed_apply_sign(f, q, neg)
+
+# fixed -> int, truncating toward zero.
+int128 fixed_to_int(FixedFmt f, int128 raw):
+    let mag = (fixed_abs(raw) >> f.m) as int128
+    if raw < 0:
+        0 - mag
+    else:
+        mag
+
+float64 fixed_pow2_f64(int k):
+    var r = 1.0
+    var i = 0
+    while i < k:
+        r = r * 2.0
+        i += 1
+    r
+
+float64 fixed_to_f64(FixedFmt f, int128 raw):
+    (raw as float64) / fixed_pow2_f64(f.m)
+
+# float -> fixed, truncating toward zero; nil for NaN/inf or out of range.
+int128? fixed_from_f64_trunc(FixedFmt f, float64 x):
+    if x != x:
+        return nil
+    if x > 1.0e30 or x < -1.0e30:
+        return nil
+    let scaled = x * fixed_pow2_f64(f.m)
+    fixed_checked(f, scaled as int128)
+
+# fixed -> other fixed: shift by the difference of m, truncating toward zero;
+# nil if the integer part does not fit the target.
+int128? fixed_convert(FixedFmt from, int128 raw, FixedFmt to):
+    let mag = fixed_abs(raw)
+    let neg = raw < 0
+    if to.m >= from.m:
+        let k = to.m - from.m
+        # |raw| < 2^64, so anything under 2^(127-k) cannot overflow the shift.
+        if mag >= (fixed_one() << (127 - k)) as uint128:
+            return nil
+        fixed_apply_sign(to, mag << k, neg)
+    else:
+        fixed_apply_sign(to, mag >> (from.m - to.m), neg)
+
+string fixed_digit_str(int d):
+    "{d}"
+
+# Exact decimal expansion with trailing zeros trimmed (`1.5`, `-3`), or rounded to
+# `places` decimals (ties away from zero) when `places >= 0`.
+string fixed_format(FixedFmt f, int128 raw, int places):
+    let neg = raw < 0
+    let mag = fixed_abs(raw)
+    let mask = (fixed_pow2(f.m) - fixed_one()) as uint128
+    var int_part = mag >> f.m
+    var frac = mag & mask
+    mut [int] digits = []
+    var round_up = false
+    let ten = 10 as uint128
+    if places >= 0:
+        var count = 0
+        while count < places:
+            frac = frac * ten
+            digits.push((frac >> f.m) as int)
+            frac = frac & mask
+            count += 1
+        round_up = f.m > 0 and frac >= (fixed_pow2(f.m - 1) as uint128)
+    else:
+        while frac != (0 as uint128):
+            frac = frac * ten
+            digits.push((frac >> f.m) as int)
+            frac = frac & mask
+    if round_up:
+        var i = digits.length
+        var carrying = true
+        while carrying:
+            if i == 0:
+                int_part = int_part + (1 as uint128)
+                carrying = false
+            else:
+                i -= 1
+                if digits[i] == 9:
+                    digits[i] = 0
+                else:
+                    digits[i] = digits[i] + 1
+                    carrying = false
+    var all_zero = int_part == (0 as uint128)
+    for d in digits:
+        if d != 0:
+            all_zero = false
+    var out = ""
+    if neg and not all_zero:
+        out = "-"
+    out = out + "{int_part}"
+    if digits.length > 0:
+        out = out + "."
+        for d in digits:
+            out = out + fixed_digit_str(d)
+    out

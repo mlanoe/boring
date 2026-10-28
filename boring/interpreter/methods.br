@@ -1638,7 +1638,12 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 var i = 0
                 while i < method_decl.params.length and i < bound_args.length:
                     let param = method_decl.params[i]
-                    env_define(interp, param.name, bound_args[i], param.mutable)
+                    # Same declared-type coercion `call_fn` applies (an untyped literal
+                    # narrows to a `float32`/`fixedN_M` parameter).
+                    var bound_arg = bound_args[i]
+                    if let param_ty = param.ty:
+                        bound_arg = coerce_declared_value(interp, bound_arg, param_ty)
+                    env_define(interp, param.name, bound_arg, param.mutable)
                     i += 1
                 let mutating = method_decl.mutating
                 let method_params = method_decl.params
@@ -1691,7 +1696,12 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 var i = 0
                 while i < method_decl.params.length and i < bound_args.length:
                     let param = method_decl.params[i]
-                    env_define(interp, param.name, bound_args[i], param.mutable)
+                    # Same declared-type coercion `call_fn` applies (an untyped literal
+                    # narrows to a `float32`/`fixedN_M` parameter).
+                    var bound_arg = bound_args[i]
+                    if let param_ty = param.ty:
+                        bound_arg = coerce_declared_value(interp, bound_arg, param_ty)
+                    env_define(interp, param.name, bound_arg, param.mutable)
                     i += 1
                 let method_params = method_decl.params
                 let result = exec_method_body(interp, method_decl)

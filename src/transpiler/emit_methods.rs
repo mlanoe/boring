@@ -4711,6 +4711,12 @@ impl Transpiler {
             // this is what lets `obj.method(.Left)` pick the right enum when multiple
             // enums share a `Left` variant.
             args.iter().enumerate().map(|(i, a)| {
+                // An untyped numeric literal for a fixed-point parameter takes its format.
+                if let Some(Some(pt)) = struct_method_param_types.get(i) {
+                    if let Some(lit) = Self::fixed_fmt_of_type(pt).and_then(|fmt| self.emit_fixed_literal(&a.value, &fmt)) {
+                        return lit;
+                    }
+                }
                 // `var` (rebindable) out-parameter: lend the caller's own place as
                 // `&mut <place>` instead of the by-value clone `emit_expr_owned` would
                 // produce — the callee's signature is `&mut T`, and a clone would also
@@ -5166,6 +5172,14 @@ impl Transpiler {
                 break;
             }
             if let Some(a) = args.get(i) {
+                // An untyped numeric literal passed for a fixed-point parameter takes its format.
+                if let Some(lit) = sig.get(i).and_then(Self::fixed_fmt_of_type)
+                    .and_then(|fmt| self.emit_fixed_literal(&a.value, &fmt))
+                {
+                    result.push(lit);
+                    i += 1;
+                    continue;
+                }
                 // Interprocedural GPU residency (docs/scoped-access-blocks.md): this
                 // position is known, via the checker's bounded body scan (mirrored
                 // here in `fn_gpu_arg_params`), to be consumed *only* as a kernel-

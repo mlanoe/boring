@@ -25,6 +25,7 @@ mod emit_let;
 mod emit_match;
 mod emit_loop;
 mod emit_flow;
+mod fixed_emit;
 mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
@@ -402,8 +403,16 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     } else {
         code
     };
+    // Fixed-point newtypes (docs/fixed-point-types.md): one definition per format that
+    // appears anywhere in the generated code, appended like the `Value` impl above.
+    let (fixed_prelude, fixed_errors) = fixed_emit::fixed_point_prelude(&all_code_combined);
+    let code = match fixed_prelude {
+        Some(prelude) => code + &prelude,
+        None => code,
+    };
     let mut errors = t.errors.into_inner();
     errors.extend(box_clash);
+    errors.extend(fixed_errors.into_iter().map(|m| TranspileError::at(m, 0, 0)));
     {
         // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).
         let failed = !errors.is_empty();

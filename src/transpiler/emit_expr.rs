@@ -1254,6 +1254,9 @@ impl Transpiler {
     /// `e as ty` — user-defined `into_type()` conversions, newtype wrap/unwrap,
     /// Optional-type parse, numeric/bool/string coercions, and the `'actor` wrap.
     fn emit_expr_cast(&self, e: &Expr, ty: &Type) -> String {
+        if let Some(code) = self.try_emit_fixed_cast(e, ty) {
+            return code;
+        }
         // `{} as {T}` (emitted by view-state lowering): a typed empty set.
         if let (ExprKind::Set(elems), Type::Set(elem)) = (&e.kind, ty.without_mut()) {
             if elems.is_empty() {
@@ -1962,6 +1965,9 @@ impl Transpiler {
     /// binary expression. `expr` (the whole `BinOp` node, not just its parts) is
     /// needed by the string-concatenation case, which walks the full `+` chain.
     fn emit_expr_binop(&self, expr: &Expr, op: &BinOp, l: &Expr, r: &Expr) -> String {
+        if let Some(code) = self.try_emit_fixed_binop(op, l, r) {
+            return code;
+        }
         // Reference equality ===
         if matches!(op, BinOp::RefEq) {
             let ls = self.emit_expr(l);
@@ -2978,6 +2984,15 @@ impl Transpiler {
     /// assignment desugaring (`x += y`), dict/array-index writes, and the general
     /// fallback (GPU-resident materialization, actor auto-clone, Optional auto-wrap).
     fn emit_expr_assign(&self, target: &Expr, value: &Expr) -> String {
+        // `x = 1.5` on a fixed-point target: the literal takes the target's format.
+        if let Some(fmt) = self.fixed_fmt_of_expr(target) {
+            if let Some(lit) = self.emit_fixed_literal(value, &fmt) {
+                self.in_lhs_assign.set(true);
+                let target_s = self.emit_expr(target);
+                self.in_lhs_assign.set(false);
+                return format!("{} = {}", target_s, lit);
+            }
+        }
         // `_ = arr.pop()` discards the result: emit the raw `Option<T>` so `T`
         // needs no `Default` (map_method's default `.unwrap_or_default()` would).
         if matches!(&target.kind, ExprKind::Var(n) if n == "_") && is_bare_pop_call(value) {
@@ -3659,6 +3674,12 @@ impl Transpiler {
                                     if matches!(inner.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_))))
                         {
                             rhs_s = format!("half::f16::from_f32(({}) as f32)", rhs_s);
+                        }
+                        // `acc += 0.1` on a fixed-point target: the literal takes its format.
+                        if let Some(fmt) = self.fixed_fmt_of_expr(lhs_copy) {
+                            if let Some(lit) = self.emit_fixed_literal(rhs, &fmt) {
+                                rhs_s = lit;
+                            }
                         }
                         return format!("{} {} {}", target_s, op_str, rhs_s);
                     }

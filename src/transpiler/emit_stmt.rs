@@ -213,6 +213,15 @@ impl Transpiler {
                 }
             }
             Stmt::Expr(e)           => {
+                // Tail literal of a fixed-point-returning function: `fixed16_16 one(): 1.0`.
+                if is_last && !self.fn_declared_void {
+                    if let Some(lit) = self.fn_return_ty.as_ref().and_then(Self::fixed_fmt_of_type)
+                        .and_then(|fmt| self.emit_fixed_literal(e, &fmt))
+                    {
+                        self.line(&if self.in_throws && !self.suppress_ok_wrap { format!("Ok({lit})") } else { lit });
+                        return;
+                    }
+                }
                 if is_last && self.in_throws && !self.suppress_ok_wrap && self.fn_declared_void {
                     // Void throws function: emit the expression as a statement (for side-effects/?)
                     // then Ok(()). Skip nil entirely (no side-effect).

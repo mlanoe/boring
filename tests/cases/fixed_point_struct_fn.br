@@ -1,0 +1,32 @@
+struct Particle:
+    var fixed16_16 x = 0.0
+    var fixed16_16 vx = 0.5
+
+    def step(fixed16_16 dt):
+        x = x + vx * dt
+
+fixed16_16 lerp(fixed16_16 a, fixed16_16 b, fixed16_16 t):
+    a + (b - a) * t
+
+fixed16_16 half(fixed16_16 v):
+    v / 2
+
+fixed16_16 one():
+    1.0
+
+def main():
+    var mut p = Particle()
+    for i in 0..<4:
+        p.step(0.25)
+    print "x = {p.x}"
+    print "lerp = {lerp(0.0, 10.0, 0.25)}"
+    print "half = {half(3.0)}  one = {one()}"
+    let arr = [1.5 as fixed16_16, 2.25 as fixed16_16]
+    var fixed16_16 s = 0.0
+    for v in arr:
+        s = s + v
+    print "s = {s}"
+    var fixed16_16 g = 9.8
+    g = 1.5
+    g += 0.25
+    print "g = {g} {-g}"

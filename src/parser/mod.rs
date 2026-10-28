@@ -686,6 +686,7 @@ impl Parser {
     /// Returns true if `s` looks like a type name: uppercase-starting OR a known lowercase alias.
     fn is_type_name(s: &str) -> bool {
         s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            || crate::fixed::FixedFmt::is_reserved_type_name(s)
             || matches!(
                 s,
                 "int"

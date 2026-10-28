@@ -1,0 +1,36 @@
+let fixed16_16 x = 1.5
+let y = x + 0.25
+print "y = {y}"
+let z = x * 2.25
+print "z = {z}"
+print "div = {x / 2.25}"
+print "neg = {-x}"
+print "rem = {(x + 3) % 2}"
+let ufixed8_8 u = 200.5
+print "u = {u}"
+let a = 0.1 as fixed16_16
+print "a = {a}"
+let b = a as fixed8_24
+print "b = {b}"
+let n = (x * 3) as int
+print "n = {n}"
+let f = x as float64
+print "f = {f}"
+let fixed16_16 w = 3
+print "w = {w}  {w:.3f}"
+print "lt {x < 2} {x == 1.5} {y >= x}"
+let i8_8 q = 1.5
+print "q = {q}"
+let m = 7 as fixed16_16
+print "m = {m}"
+var fixed16_16 acc = 0
+for k in 0..<4:
+    acc = acc + 0.1
+print "acc = {acc}"
+let fixed8_24 tiny = 0.000_001
+print "tiny = {tiny}"
+let ufixed0_16 frac = 0.75
+print "frac = {frac} {frac * 0.5}"
+let big = 3 as fixed32_32
+print "big = {big * big} {big / 7}"
+print "round {(-1.5 as fixed16_16) :.0f} {(2.5 as fixed16_16):.0f}"

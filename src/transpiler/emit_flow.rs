@@ -23,6 +23,12 @@ impl Transpiler {
                 self.line("return;")
             },
             Some(e) => {
+                if let Some(lit) = self.fn_return_ty.as_ref().and_then(Self::fixed_fmt_of_type)
+                    .and_then(|fmt| self.emit_fixed_literal(e, &fmt))
+                {
+                    self.line(&if self.in_throws { format!("return Ok({lit});") } else { format!("return {lit};") });
+                    return;
+                }
                 self.check_dyn_borrow_escape(e);
                 let is_optional_return = matches!(&self.fn_return_ty, Some(Type::Optional(_)));
                 // Check if the declared return type is a known trait → wrap value in Box::new().

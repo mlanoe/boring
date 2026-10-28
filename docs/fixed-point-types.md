@@ -1,10 +1,28 @@
 # `fixedN_M` / `ufixedN_M`: binary fixed-point scalar types
 
-> **Status: Draft — not implemented.** No lexer, parser, checker, interpreter,
-> transpiler, or GPU-backend changes exist yet for anything described here.
-> This document records the design as worked out in discussion, as a basis
-> for implementation. The former open questions are resolved in
-> [Decisions](#decisions).
+> **Status: Phase 1 (core) implemented** in the Rust interpreter, the
+> transpiler (generated newtype, `W ∈ {8, 16, 32, 64}`) and the self-hosted
+> interpreter, with a shared test corpus (`tests/cases/fixed_point_*.br`).
+> Not implemented yet: [Members](#members), `wrapping*`/`saturating*`/
+> `checked*`/`mulRound`/`divRound` (Phase 2), GPU backends (Phase 3),
+> 128-bit formats (Phase 4), math functions (Phase 5). The former open
+> questions are resolved in [Decisions](#decisions).
+>
+> **Implementation notes** (where the code differs from, or narrows, the text):
+>
+> - Names are reserved by shape: `fixedN_M`/`ufixedN_M` always (an invalid one
+>   is a parse error), `iN_M`/`uN_M` only when valid, so `i3_4` as a variable
+>   name still works. A *user type* named like a valid format is not rejected yet.
+> - `0.1 as fixed16_16` — a cast of an untyped literal — rounds to nearest like
+>   a contextual literal; only casts of *computed* values truncate.
+> - Strictness against int/float *variables* is enforced at `let` bindings and
+>   in operators; passing a `float64` variable to a `fixed` parameter/field is
+>   still accepted by the interpreters (same leniency `float32` has today).
+> - `fixed → fixed` / `int → fixed` / `float → fixed` casts that do not fit give
+>   `nil` in the interpreters and panic in generated Rust.
+> - The Rust newtype definitions are appended to the generated program for every
+>   format that appears in it; module-split output (`--emit-rust` with modules)
+>   is untested.
 
 ## Problem Statement
 

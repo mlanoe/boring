@@ -149,7 +149,7 @@ fn i128_to_kind(kind: NumKind, x: i128) -> Value {
 /// untyped-literal shapes eligible to resolve to whichever float width the other
 /// operand already has, mirroring how a bare `int`/`uint` *value* (not just a
 /// literal) already mixes freely with any fixed-width integer via `NumKind`.
-fn is_untyped_numeric_literal(e: &Expr) -> bool {
+pub(super) fn is_untyped_numeric_literal(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Float(_) | ExprKind::Int(_) => true,
         ExprKind::UnaryOp(UnaryOp::Neg, inner) => is_untyped_numeric_literal(inner),
@@ -179,6 +179,74 @@ fn coerce_float_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr) -> (Val
             (Value::Float32(*f as f32), r),
         _ => (l, r),
     }
+}
+
+/// A fixed-point operand next to an *untyped literal* resolves the literal to
+/// the fixed format (`a * 2`, `x + 0.25`, `x < 1.5`); the literal is rounded to
+/// nearest and an out-of-range one is a runtime error. Two resolved values of
+/// different formats (or fixed and int/float variables) are left mismatched so
+/// the operator reports the strict-mixing error.
+fn coerce_fixed_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Result<(Value, Value), Signal> {
+    fn lit(v: &Value, fmt: &crate::fixed::FixedFmt) -> Option<Option<Value>> {
+        match v {
+            Value::Int(n) => Some(fmt.from_int(*n as i128).map(|r| Value::Fixed(r, *fmt))),
+            Value::Float64(f) => Some(super::exec::fixed_from_f64_literal(*f, fmt).map(|r| Value::Fixed(r, *fmt))),
+            _ => None,
+        }
+    }
+    let oor = |fmt: &crate::fixed::FixedFmt, col, len| err_span(format!("literal out of range for {}", fmt.name()), line, col, len);
+    if let Value::Fixed(_, fmt) = &l {
+        if is_untyped_numeric_literal(rhs) {
+            if let Some(res) = lit(&r, fmt) {
+                return res.map(|v| (l.clone(), v)).ok_or_else(|| oor(fmt, rcol, rlen));
+            }
+        }
+    }
+    if let Value::Fixed(_, fmt) = &r {
+        if is_untyped_numeric_literal(lhs) {
+            if let Some(res) = lit(&l, fmt) {
+                return res.map(|v| (v, r.clone())).ok_or_else(|| oor(fmt, lcol, llen));
+            }
+        }
+    }
+    Ok((l, r))
+}
+
+/// `+ - * / %` where at least one side is fixed-point. `None` when neither is
+/// (the ordinary numeric arms handle it).
+fn eval_fixed_arith(op: &BinOp, l: &Value, r: &Value, line: usize, rcol: usize, rlen: usize) -> Option<Eval> {
+    if !matches!(l, Value::Fixed(..)) && !matches!(r, Value::Fixed(..)) {
+        return None;
+    }
+    let sym = match op {
+        BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/", BinOp::Rem => "%",
+        _ => return None,
+    };
+    let (Value::Fixed(a, fa), Value::Fixed(b, fb)) = (l, r) else {
+        return Some(Err(err_span(
+            format!("cannot apply `{sym}` to {} and {}: fixed-point does not mix with other numeric types; cast with `as`",
+                    l.type_name(), r.type_name()), line, rcol, rlen)));
+    };
+    if fa != fb {
+        return Some(Err(err_span(
+            format!("cannot mix {} and {}; cast one with `as`", fa.name(), fb.name()), line, rcol, rlen)));
+    }
+    if matches!(op, BinOp::Div | BinOp::Rem) && *b == 0 {
+        return Some(Err(err_span(if matches!(op, BinOp::Div) { "division by zero" } else { "remainder by zero" }, line, rcol, rlen)));
+    }
+    let res = match op {
+        BinOp::Add => fa.add(*a, *b),
+        BinOp::Sub => fa.sub(*a, *b),
+        BinOp::Mul => fa.mul(*a, *b),
+        BinOp::Div => fa.div(*a, *b),
+        _ => fa.rem(*a, *b),
+    };
+    Some(match res {
+        Some(raw) => Ok(Value::Fixed(raw, *fa)),
+        None if fa.width() > 64 && matches!(op, BinOp::Mul | BinOp::Div) =>
+            Err(err_span(format!("{} `{sym}` is not supported yet for 128-bit fixed-point formats", fa.name()), line, rcol, rlen)),
+        None => Err(err_span(format!("fixed-point overflow in {} `{sym}`", fa.name()), line, rcol, rlen)),
+    })
 }
 
 /// Inside a simulated kernel thread only: a `Float64` mixed with a `Float32` becomes `Float32`
@@ -1584,6 +1652,9 @@ impl Interpreter {
                         Value::Int128(n) => n.checked_neg().map(Value::Int128)
                             .ok_or_else(|| err("integer overflow: negation result cannot be represented", line)),
                         Value::Float64(f) => Ok(Value::Float64(-f)),
+                        Value::Fixed(raw, fmt) if fmt.signed => fmt.neg(raw).map(|r| Value::Fixed(r, fmt))
+                            .ok_or_else(|| err(format!("fixed-point overflow: negation in {}", fmt.name()), line)),
+                        Value::Fixed(_, fmt) => Err(err(format!("cannot negate unsigned {}", fmt.name()), line)),
                         Value::Float16(f) => Ok(Value::Float16(-f)),
                         Value::Float32(f) => Ok(Value::Float32(-f)),
                         Value::Object(ref inner_rc) => {
@@ -1954,6 +2025,21 @@ impl Interpreter {
 
             ExprKind::Cast(expr, ty) => {
                 let val = self.eval_expr(expr, Rc::clone(&env))?;
+                // `0.1 as fixed16_16`: an untyped literal is the decimal the author
+                // wrote, so it rounds to nearest like a contextual literal (runtime
+                // conversions truncate — docs/fixed-point-types.md, Mixing and casts).
+                if is_untyped_numeric_literal(expr) {
+                    let resolved = self.resolve_type(ty);
+                    if let Type::Fixed(fmt) = super::strip_qualifiers(&resolved) {
+                        let raw = match &val {
+                            Value::Int(n) => fmt.from_int(*n as i128),
+                            Value::Float64(f) => super::exec::fixed_from_f64_literal(*f, fmt),
+                            _ => None,
+                        };
+                        return raw.map(|r| Value::Fixed(r, *fmt))
+                            .ok_or_else(|| err_span(format!("literal out of range for {}", fmt.name()), line, expr.col, expr.len));
+                    }
+                }
                 self.cast_value(val, ty, line)
             }
 
@@ -2283,6 +2369,15 @@ impl Interpreter {
         let l = self.eval_expr(lhs, Rc::clone(&env))?;
         let r = self.eval_expr(rhs, env)?;
         let (l, r) = coerce_float_literal_pair(l, r, lhs, rhs);
+        let (l, r) = coerce_fixed_literal_pair(l, r, lhs, rhs, line, lcol, llen, rcol, rlen)?;
+        if let Some(res) = eval_fixed_arith(op, &l, &r, line, rcol, rlen) {
+            return res;
+        }
+        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr)
+            && (matches!(l, Value::Fixed(..)) || matches!(r, Value::Fixed(..)))
+        {
+            return Err(err_span("bitwise operators are not defined on fixed-point; use `.raw`", line, lcol, llen));
+        }
         let (l, r) = if self.kernel_thread { narrow_mixed_floats(l, r) } else { (l, r) };
 
         match op {
@@ -2889,7 +2984,14 @@ impl Interpreter {
     }
 
     pub(crate) fn compare_values(&self, l: Value, r: Value, pred: impl Fn(std::cmp::Ordering) -> bool, line: usize, col: usize) -> Eval {
-        let ord = if let (Value::Float64(a), Value::Float64(b)) = (&l, &r) {
+        let ord = if let (Value::Fixed(a, fa), Value::Fixed(b, fb)) = (&l, &r) {
+            if fa != fb {
+                return Err(err_at(format!("cannot compare {} and {}; cast one with `as`", fa.name(), fb.name()), line, col));
+            }
+            a.cmp(b)
+        } else if matches!(l, Value::Fixed(..)) || matches!(r, Value::Fixed(..)) {
+            return Err(err_at(format!("cannot compare {} and {}; fixed-point does not mix with other numeric types", l.type_name(), r.type_name()), line, col));
+        } else if let (Value::Float64(a), Value::Float64(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
         } else if let (Value::Float16(a), Value::Float16(b)) = (&l, &r) {
             a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)

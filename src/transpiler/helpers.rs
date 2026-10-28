@@ -586,6 +586,9 @@ pub(crate) fn normalize_type_name(name: &str, use_rc: bool) -> String {
         "void"   | "Void"   => "()".into(),
         "nil"    | "Nil"    => "()".into(),
         "never"  | "Never"  => "!".into(),
+        // Fixed-point formats (`fixed16_16`, `u8_8`, ...) -> generated newtype
+        other if crate::fixed::FixedFmt::from_name(other).is_some() =>
+            crate::fixed::FixedFmt::from_name(other).unwrap().rust_name(),
         // Rust numeric aliases pass through unchanged
         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => name.into(),
         "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => name.into(),

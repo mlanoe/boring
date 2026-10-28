@@ -306,6 +306,9 @@ pub enum Value {
     Uint128(u128),
     /// IEEE 754 binary16 value with real 16-bit storage and per-operation rounding.
     Float16(half::f16),
+    /// Binary fixed-point value: raw storage integer + its format
+    /// (`value = raw / 2^fmt.m`). See docs/fixed-point-types.md.
+    Fixed(i128, crate::fixed::FixedFmt),
     /// 32-bit float — genuine `f32` storage/precision, not a label over Float64.
     Float32(f32),
     Float64(f64),
@@ -431,6 +434,7 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Nil, Value::Nil) => true,
             (Value::Void, Value::Void) => true,
+            (Value::Fixed(a, fa), Value::Fixed(b, fb)) => fa == fb && a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Uint(a), Value::Uint(b)) => a == b,
@@ -488,6 +492,7 @@ impl fmt::Debug for Value {
             Value::Uninitialized => write!(f, "Uninitialized"),
             Value::Moved(name) => write!(f, "Moved({:?})", name),
             Value::Nil => write!(f, "Nil"),
+            Value::Fixed(raw, fmt) => write!(f, "Fixed({}, {:?})", fmt.format_exact(*raw), fmt),
             Value::Void => write!(f, "Void"),
             Value::Bool(b) => write!(f, "Bool({:?})", b),
             Value::Int(n) => write!(f, "Int({:?})", n),
@@ -559,6 +564,7 @@ impl Value {
             Value::Uninitialized => "Uninitialized".into(),
             Value::Moved(_) => "moved".into(),
             Value::Nil => "Nil".into(),
+            Value::Fixed(_, fmt) => fmt.name(),
             Value::Void => "Void".into(),
             Value::Bool(_) => "Bool".into(),
             Value::Int(_) => "Int".into(),
@@ -696,6 +702,7 @@ impl fmt::Display for Value {
             Value::Uninitialized => write!(f, "<uninitialized>"),
             Value::Moved(name) => write!(f, "<moved:{}>", name),
             Value::Nil => write!(f, "nil"),
+            Value::Fixed(raw, fmt) => write!(f, "{}", fmt.format_exact(*raw)),
             Value::Void => write!(f, "void"),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
@@ -3552,6 +3559,7 @@ impl Interpreter {
                 // Also try implicit user-defined `as T:` conversion when needed.
                 let val = if let Some(ty) = &stmt.ty {
                     let resolved = self.resolve_type(ty);
+                    Self::check_fixed_binding(&val, stmt_value, &resolved, &stmt.name, stmt.line)?;
                     let coerced = Self::coerce_to_type(val, &resolved);
                     if !self.value_matches_type(&coerced, &resolved) {
                         match self.cast_value(coerced.clone(), &resolved, stmt.line) {

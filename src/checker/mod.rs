@@ -953,7 +953,9 @@ impl Checker {
             | "int8" | "int16" | "int32" | "int64" | "int128"
             | "uint16" | "uint32" | "uint64" | "uint128"
             | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f16" | "f32" | "f64"))
+            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f16" | "f32" | "f64")
+            || crate::fixed::FixedFmt::from_name(n).is_some())
+        || matches!(ty, Type::Fixed(_))
     }
 
     fn check_scalar_mut_constraint(&mut self, binding: &BindingKind, var_mut: bool, ty: &Option<Type>, value: &Option<Expr>, line: usize, col: usize) {

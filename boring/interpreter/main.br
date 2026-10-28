@@ -1,4 +1,5 @@
 use tokens
+use fixedpoint
 use ast
 use lexer
 use value

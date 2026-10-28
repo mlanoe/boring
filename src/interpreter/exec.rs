@@ -43,6 +43,7 @@ impl Interpreter {
                 // directly match the annotation (e.g. `let Animal a = dog`).
                 let val = if let Some(ty) = &s.ty {
                     let resolved = self.resolve_type(ty);
+                    Self::check_fixed_binding(&val, s_val, &resolved, &s.name, s.line)?;
                     let coerced = Self::coerce_to_type(val, &resolved);
                     if !self.value_matches_type(&coerced, &resolved) {
                         match self.cast_value(coerced.clone(), &resolved, s.line) {
@@ -953,6 +954,10 @@ impl Interpreter {
                         return self.resolve_type(bound);
                     }
                 }
+                // Fixed-point names (`fixed16_16`, `u8_8`, ...) are reserved type names.
+                if let Some(Ok(fmt)) = crate::fixed::FixedFmt::parse(name) {
+                    return Type::Fixed(fmt);
+                }
                 // Then check aliases — recurse (like the type_param_stack branch just
                 // above) so a chained alias (`use Score as int`, where `int` is itself
                 // a builtin alias for `Type::Int` — see `register_misc_globals`) fully
@@ -1147,7 +1152,7 @@ impl Interpreter {
                 Type::Uint | Type::Uint8
                     | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                     | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128
-                    | Type::Float16 | Type::Float32 | Type::Float64 => Some(ty.clone()),
+                    | Type::Float16 | Type::Float32 | Type::Float64 | Type::Fixed(_) => Some(ty.clone()),
                 Type::Qualified(inner, _) => base(inner),
                 _ => None,
             }
@@ -1214,6 +1219,14 @@ impl Interpreter {
                 Value::Float64(f) => Value::Float16(half::f16::from_f32(f as f32)),
                 other => other,
             },
+            // An untyped literal narrows to the declared fixed-point format
+            // (rounded to nearest); out of range is left unchanged so the
+            // type check rejects it.
+            Some(Type::Fixed(fmt)) => match val {
+                Value::Int(n) => fmt.from_int(n as i128).map(|r| Value::Fixed(r, fmt)).unwrap_or(Value::Int(n)),
+                Value::Float64(f) => fixed_from_f64_literal(f, &fmt).map(|r| Value::Fixed(r, fmt)).unwrap_or(Value::Float64(f)),
+                other => other,
+            },
             Some(Type::Float32) => match val {
                 Value::Float16(f) => Value::Float32(f.to_f32()),
                 Value::Int(n) => Value::Float32(n as f32),
@@ -1245,6 +1258,7 @@ impl Interpreter {
     pub(crate) fn coerce_array_elem_literal(val: Value, existing: &Value) -> Value {
         let witness_ty = match existing {
             Value::Float16(_) => Type::Float16,
+            Value::Fixed(_, fmt) => Type::Fixed(*fmt),
             Value::Float32(_) => Type::Float32,
             Value::Float64(_) => Type::Float64,
             Value::Int8(_) => Type::Int8,
@@ -1340,6 +1354,28 @@ impl Interpreter {
 
     // ─── Type display ────────────────────────────────────────────────────────
 
+    /// Strict-mixing rule for fixed-point bindings: `let fixed16_16 x = <expr>`
+    /// accepts an untyped numeric *literal* (rounded to nearest, must be in
+    /// range) or a value already of that format; an `int`/`float` *variable*
+    /// needs an explicit `as`. Other values are left to the generic type check.
+    pub(crate) fn check_fixed_binding(val: &Value, init: &Expr, ty: &Type, name: &str, line: usize) -> Result<(), Signal> {
+        let Type::Fixed(fmt) = strip_qualifiers(ty.without_mut()) else { return Ok(()) };
+        if !matches!(val, Value::Int(_) | Value::Float64(_)) {
+            return Ok(());
+        }
+        if !super::eval_expr::is_untyped_numeric_literal(init) {
+            return Err(err(format!(
+                "cannot assign {} to '{name}': expected {}; convert explicitly with `as {}`",
+                val.type_name(), fmt.name(), fmt.name()), line));
+        }
+        if !fixed_literal_fits(val, fmt) {
+            return Err(err(format!(
+                "literal out of range for {} (range [{}, {}])",
+                fmt.name(), fmt.format_exact(fmt.min_raw()), fmt.format_exact(fmt.max_raw())), line));
+        }
+        Ok(())
+    }
+
     /// Returns a human-readable name for a type, used in type-mismatch error messages.
     pub(crate) fn display_type(ty: &Type) -> String {
         match ty {
@@ -1356,6 +1392,7 @@ impl Interpreter {
             Type::Uint64 => "uint64".into(),
             Type::Uint128 => "uint128".into(),
             Type::Float16  => "float16".into(),
+            Type::Fixed(fmt) => fmt.name(),
             Type::Float32  => "float32".into(),
             Type::Float64  => "float64".into(),
             Type::Str    => "string".into(),
@@ -1491,6 +1528,10 @@ impl Interpreter {
             Type::Uint64 => matches!(val, Value::Uint64(_)) || matches!(val, Value::Int(n) if *n >= 0),
             Type::Uint128 => matches!(val, Value::Uint128(_)) || matches!(val, Value::Int(n) if *n >= 0),
             Type::Float16  => matches!(val, Value::Float16(_)),
+            // An untyped literal (`Int`/`Float64`) is accepted when it can be
+            // represented in range; `coerce_to_type` converts it.
+            Type::Fixed(fmt) => matches!(val, Value::Fixed(_, f) if f == fmt)
+                || fixed_literal_fits(val, fmt),
             Type::Float32  => matches!(val, Value::Float32(_)),
             Type::Float64  => matches!(val, Value::Float64(_)),
             Type::Str    => matches!(val, Value::Str(_)),
@@ -1903,7 +1944,10 @@ impl Interpreter {
             }
             // default Display — with optional precision for floats
             _ => {
-                if let Some(p) = precision {
+                if let (Value::Fixed(raw, fmt), Some(p)) = (&val, precision) {
+                    // Exact decimal rounding on the raw integer, never via f64.
+                    fmt.format_places(*raw, p)
+                } else if let Some(p) = precision {
                     // Precision on a numeric value = decimal places
                     if let Ok(f) = to_float(&val) {
                         format!("{:.1$}", f, p)
@@ -1922,6 +1966,7 @@ impl Interpreter {
             match &val {
                 Value::Int(n) if *n >= 0 => format!("+{body}"),
                 Value::Uint(_) => format!("+{body}"),
+                Value::Fixed(raw, _) if *raw >= 0 => format!("+{body}"),
                 Value::Float16(f) if f.to_f32() >= 0.0 => format!("+{body}"),
                 Value::Float32(f) if *f >= 0.0 => format!("+{body}"),
                 Value::Float64(f) if *f >= 0.0 => format!("+{body}"),
@@ -2042,6 +2087,7 @@ impl Interpreter {
                 | Value::Uint64(_)
                 | Value::Uint128(_)
                 | Value::Float16(_)
+                | Value::Fixed(..)
                 | Value::Float32(_)
         )
     }
@@ -2267,4 +2313,23 @@ impl Interpreter {
 
     // ─── Expressions ────────────────────────────────────────────────────────
 
+}
+
+/// True when an untyped numeric literal value can be coerced into `fmt`
+/// (`let fixed16_16 x = 3` / `= 1.5`). `Float64` literals are checked via
+/// their shortest decimal text, the same exact path `coerce_to_type` uses.
+fn fixed_literal_fits(val: &Value, fmt: &crate::fixed::FixedFmt) -> bool {
+    match val {
+        Value::Int(n) => fmt.from_int(*n as i128).is_some(),
+        Value::Float64(f) => fixed_from_f64_literal(*f, fmt).is_some(),
+        _ => false,
+    }
+}
+
+/// An untyped float literal arrives as an `f64`; Rust's `{}` prints the
+/// shortest decimal that round-trips, which is the text the author wrote
+/// (`0.1` -> "0.1"), so rounding it exactly matches the documented
+/// "round to nearest on the written decimal" rule.
+pub(crate) fn fixed_from_f64_literal(f: f64, fmt: &crate::fixed::FixedFmt) -> Option<i128> {
+    fmt.from_f64_literal(f)
 }

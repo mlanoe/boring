@@ -3138,9 +3138,34 @@ impl Interpreter {
             }
         }
 
+        // Fixed-point sources of a cast to int/float go through the exact integer
+        // part / the nearest f64, then the ordinary numeric arms below
+        // (`fixed -> int` truncates toward zero; docs/fixed-point-types.md).
+        let val = match (&val, strip_qualifiers(ty)) {
+            (Value::Fixed(raw, fmt), Type::Int | Type::Uint | Type::Uint8
+                | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128) => Value::Int128(fmt.to_int(*raw)),
+            (Value::Fixed(raw, fmt), Type::Float16 | Type::Float32 | Type::Float64) => Value::Float64(fmt.to_f64(*raw)),
+            _ => val,
+        };
+
         match ty {
             // Strip ownership qualifiers — `int` = Qualified(Int, Copy), etc.
             Type::Qualified(inner, _) => self.cast_value(val, inner, line),
+            // `as fixedN_M`: fixed->fixed shifts by the difference of M, int->fixed is
+            // exact, float->fixed truncates toward zero. Anything that does not fit
+            // (or NaN/inf) is `nil`, like every other narrowing cast.
+            Type::Fixed(to) => {
+                let raw = match &val {
+                    Value::Fixed(raw, from) => from.convert_to(*raw, to),
+                    Value::Float64(f) => to.from_f64_trunc(*f),
+                    Value::Float32(f) => to.from_f64_trunc(*f as f64),
+                    Value::Float16(f) => to.from_f64_trunc(f.to_f64()),
+                    Value::Bool(b) => to.from_int(*b as i128),
+                    other => numeric_as_i128(other).and_then(|i| to.from_int(i)),
+                };
+                Ok(raw.map(|r| Value::Fixed(r, *to)).unwrap_or(Value::Nil))
+            }
             // `as int`/`as uint8`/`as int32`/... — every numeric kind is a valid source for
             // every other numeric kind's cast target (mirrors Rust's own `as` cast, which is
             // exactly the escape hatch users reach for since direct arithmetic between two
@@ -3464,7 +3489,7 @@ impl Interpreter {
             Type::Nil | Type::Void | Type::Never => Ok(()),
 
             // Bare primitive types: stack-allocated by default, always valid.
-            Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool => Ok(()),
+            Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Fixed(_) | Type::Float32 | Type::Float64 | Type::Bool => Ok(()),
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
                 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Ok(()),
             // Bare String without qualifier: requires explicit qualification.
@@ -3936,3 +3961,23 @@ impl Interpreter {
     }
 }
 
+
+/// Any integer `Value` as `i128` (`None` for non-integers, and for a `uint128`
+/// above `i128::MAX`).
+fn numeric_as_i128(v: &Value) -> Option<i128> {
+    Some(match v {
+        Value::Int(n) => *n as i128,
+        Value::Uint(n) => *n as i128,
+        Value::Uint8(n) => *n as i128,
+        Value::Int8(n) => *n as i128,
+        Value::Int16(n) => *n as i128,
+        Value::Int32(n) => *n as i128,
+        Value::Int64(n) => *n as i128,
+        Value::Int128(n) => *n,
+        Value::Uint16(n) => *n as i128,
+        Value::Uint32(n) => *n as i128,
+        Value::Uint64(n) => *n as i128,
+        Value::Uint128(n) => i128::try_from(*n).ok()?,
+        _ => return None,
+    })
+}

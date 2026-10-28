@@ -223,6 +223,9 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                             match val:
                                 Value.Float64(_): nil
                                 _: val = cast_value(interp, val, Type.Float64)
+                        # `let fixed16_16 x = 1.5` / `= 3`: an untyped literal takes the format.
+                        Type.Named(fixed_tname):
+                            val = coerce_declared_value(interp, val, declared_ty)
                         # `var float32 x = 0.0` parses as Qualified(Float32, BorrowMut)
                         # (apply_var_to_borrow) — unwrap so it gets the same narrowing.
                         Type.Qualified(inner_ty, _):
@@ -239,6 +242,8 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                                     match val:
                                         Value.Float64(_): nil
                                         _: val = cast_value(interp, val, Type.Float64)
+                                Type.Named(fixed_tname):
+                                    val = coerce_declared_value(interp, val, inner_ty)
                                 _: nil
                         # A fixed-shape `let [T, width = W, height = H] a = [...]`
                         # annotation is the only place a labeled array's shape can
@@ -1339,6 +1344,7 @@ def string value_type_name(Value val):
         Uint64(_): "uint64"
         Uint128(_): "uint128"
         Float16(_): "float16"
+        Fixed(_, fsg, fn_, fm): fixed_type_name(fsg, fn_, fm)
         Float32(_): "float32"
         Float64(_): "float"
         Str(_): "string"
