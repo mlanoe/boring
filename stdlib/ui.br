@@ -515,6 +515,13 @@ pub view Popover:
     [View] children
     body(): native
 
+# OnHover: writes into the bound `value` whether the pointer is over a control inside its child (the runtime's hover target is the deepest
+# enabled Button, Toggle, TextField or Slider under the pointer). Layout-transparent; `Tooltip` (boring-ui) is built on it.
+pub view OnHover:
+    bind bool value
+    [View] children
+    body(): native
+
 pub view DefaultFocus:
     bool enabled = true
     [View] children
