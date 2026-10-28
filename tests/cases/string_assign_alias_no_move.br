@@ -1,0 +1,36 @@
+enum Pol:
+    Named(string name)
+    Other
+
+def string pick(string s):
+    s
+
+def main():
+    let method = "wrappingAdd"
+    var policy = ""
+    var opname = ""
+    for p in ["wrapping", "saturating", "checked"]:
+        if method.startsWith(p):
+            policy = p
+            opname = method.slice(p.length, method.length)
+    print "{policy} {opname}"
+
+    let body = "1.5"
+    var int_part = body
+    var frac_part = ""
+    if body.contains("."):
+        let halves = body.split(".")
+        int_part = halves[0]
+        frac_part = halves[1]
+    print "{int_part} {frac_part}"
+
+    let e = Pol.Named("sat")
+    var mp = ""
+    var mo = ""
+    match e:
+        Named(p):
+            mp = p
+            mo = pick(p)
+        Other:
+            mp = "x"
+    print "{mp} {mo}"

@@ -501,6 +501,8 @@ impl Transpiler {
         let iterable_is_str_vec = match &s.iterable.kind {
             ExprKind::Var(v) => self.str_vec_vars.contains(v.as_str()),
             ExprKind::MethodCall(_, m, _) => m == "split" || m == "graphemes",
+            ExprKind::Array(elems) => !elems.is_empty()
+                && elems.iter().all(|e| matches!(&e.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))),
             _ => false,
         };
         if iterable_is_str_vec {

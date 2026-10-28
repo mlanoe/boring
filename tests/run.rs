@@ -213,6 +213,7 @@ interp_test!(numeric);
 interp_test!(float_width_cross_eq);
 interp_test!(int_width_cross_assert_eq);
 interp_test!(assert_eq_string_literal);
+interp_test!(string_assign_alias_no_move);
 interp_test!(scalar_catch);
 interp_test!(modules);
 // `use boring.collections` — the first-party stdlib mechanism (docs/cross-

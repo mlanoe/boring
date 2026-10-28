@@ -202,6 +202,7 @@ itest!(numeric);
 itest!(float_width_cross_eq);
 itest!(int_width_cross_assert_eq);
 itest!(assert_eq_string_literal);
+itest!(string_assign_alias_no_move);
 itest!(scalar_catch);
 itest!(modules);
 itest!(boring_stdlib_collections);

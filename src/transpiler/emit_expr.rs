@@ -4045,7 +4045,14 @@ impl Transpiler {
                     }
                 }
             }
-            self.emit_expr_owned(value)
+            let owned = self.emit_expr_owned(value);
+            // Strings are immutable shared values: `a = b` must not move `b` (it may be read again).
+            if matches!(&value.kind, ExprKind::Var(v) if self.string_vars.contains(v.as_str()) || self.string_arc_vars.contains(v.as_str()))
+                && !owned.ends_with(".clone()")
+            {
+                return format!("{owned}.clone()");
+            }
+            owned
         });
         // Array-element assignment has no Rust target annotation to coerce an untyped
         // numeric literal for us. Preserve a `[float16]` element's width explicitly,

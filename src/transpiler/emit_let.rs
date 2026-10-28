@@ -3103,6 +3103,12 @@ impl Transpiler {
             {
                 return format!("{}.clone()", s);
             }
+            // Strings are immutable shared values: `var a = b` must not move `b`.
+            if (self.string_vars.contains(v.as_str()) || self.string_arc_vars.contains(v.as_str()))
+                && !s.ends_with(".clone()")
+            {
+                return format!("{}.clone()", s);
+            }
             // If the param type is a user-defined enum, clone to avoid moves.
             // Enum values are Clone but not Copy; re-use in loops requires cloning.
             if let Some(Type::Named(type_name)) = declared_ty {
