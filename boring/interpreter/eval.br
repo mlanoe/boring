@@ -3036,6 +3036,12 @@ def Value eval_stmt_as_expr(mut Interpreter interp, Stmt stmt):
         Stmt.Match(s):
             let subject = eval_expr(interp, s.subject)
             eval_match(interp, subject, s.arms)
+        Stmt.IfLet(s):
+            let sig = exec_if_let_as_expr(interp, s)
+            match sig:
+                ReturnSignal(value): value
+                YieldSignal(value, _): value
+                _: Value.Nil
         _:
             exec_stmt(interp, stmt)
             Value.Nil

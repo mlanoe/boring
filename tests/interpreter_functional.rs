@@ -437,6 +437,7 @@ itest!(numeric_method_parity);
 // Optional dictionary lookup and associated-function parity.
 itest!(dict_index_optional_return);
 itest!(if_let_dict_index_no_else);
+itest!(if_let_expr_nested);
 itest!(dict_index_nil_context);
 itest!(trait_type_level_methods);
 itest!(type_def_typed_throws);
