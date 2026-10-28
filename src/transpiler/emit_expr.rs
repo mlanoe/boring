@@ -5728,8 +5728,12 @@ impl Transpiler {
                         // its argument's inferred width.
                         "sqrt" | "abs" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan"
                             | "asin" | "acos" | "atan" | "atan2" | "exp" | "tanh"
-                            | "log" | "log2" | "log10" | "pow" | "sign"
+                            | "log" | "log2" | "log10" | "sign"
                             if !args.is_empty() => return self.infer_float_width_inner(&args[0].value, visiting),
+                        // Two-operand math: either side may be an untyped literal, so
+                        // take the first operand with a known width.
+                        "pow" | "atan2" => return args.iter()
+                            .find_map(|arg| self.infer_float_width_inner(&arg.value, visiting)),
                         "min" | "max" | "clamp" => return args.iter()
                             .find_map(|arg| self.infer_float_width_inner(&arg.value, visiting)),
                         "sum" if !args.is_empty() =>
@@ -5761,6 +5765,13 @@ impl Transpiler {
             Some(width) => width,
             None => "f64",
         }
+    }
+
+    /// Like `math_builtin_float_ty` for two-operand builtins (`pow`, `atan2`):
+    /// the first operand with a known width wins, so `pow(2.0, x_f32)` stays f32.
+    pub(crate) fn math_builtin_pair_float_ty(&self, args: &[Arg]) -> &'static str {
+        let known = args.iter().take(2).find(|a| self.infer_float_width(&a.value).is_some());
+        self.math_builtin_float_ty(&known.unwrap_or(&args[0]).value)
     }
 
     pub(crate) fn wrap_math_result(&self, source: &Expr, result: String) -> String {
@@ -6009,7 +6020,7 @@ impl Transpiler {
                 format!("{}.atan()", self.emit_math_operand(&args[0].value, ty))
             }
             "atan2"      => {
-                let ty = self.math_builtin_float_ty(&args[0].value);
+                let ty = self.math_builtin_pair_float_ty(args);
                 let y = self.emit_math_operand(&args[0].value, ty);
                 let x = self.emit_math_operand(&args[1].value, ty);
                 format!("{}.atan2({})", y, x)
@@ -6035,7 +6046,7 @@ impl Transpiler {
                 format!("{}.log10()", self.emit_math_operand(&args[0].value, ty))
             }
             "pow"        => {
-                let ty = self.math_builtin_float_ty(&args[0].value);
+                let ty = self.math_builtin_pair_float_ty(args);
                 let b = self.emit_math_operand(&args[0].value, ty);
                 let e = self.emit_math_operand(&args[1].value, ty);
                 format!("{}.powf({})", b, e)

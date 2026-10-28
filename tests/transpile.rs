@@ -584,6 +584,7 @@ transpile_test!(enum_type_def_throws);
 transpile_test!(ref_identity);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);
+transpile_test!(float_math_builtins_width_all);
 transpile_test!(pow_method_float_width);
 transpile_test!(pow_method_int_unaffected);
 transpile_test!(pow_method_int_exponent_var);

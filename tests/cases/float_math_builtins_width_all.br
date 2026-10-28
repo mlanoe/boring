@@ -1,0 +1,42 @@
+# Regression test: every free-function math builtin must preserve its
+# argument's float width (float32 in -> float32 out, float64 in -> float64 out)
+# in the emitted Rust. Each result is bound/assigned to a typed `float32` /
+# `float64` slot and mixed with same-width operands, so any stray `as f64`
+# widening fails rustc (`f32 -= f64`, E0308/E0277). Includes literal-first
+# two-operand forms (`pow(2.0, x)`, `atan2(1.0, x)`) whose width comes from the
+# second operand.
+
+pub def float32 frac32(float32 h):
+    h - floor(h)
+
+pub def float64 frac64(float64 h):
+    h - floor(h)
+
+pub def float32 all32(float32 a, float32 b):
+    var float32 t = 0.0
+    t += floor(a) + ceil(a) + round(a) + abs(a) + sqrt(a)
+    t -= sin(0.0 * a) + cos(0.0 * a) + tan(0.0 * a)
+    t += asin(0.0 * a) + acos(1.0 + 0.0 * a) + atan(0.0 * a) + atan2(0.0 * a, b)
+    t += exp(0.0 * a) + tanh(0.0 * a) + log(1.0 + 0.0 * a) + log2(b * 0.0 + 1.0) + log10(b * 0.0 + 1.0)
+    t += pow(a, 2.0) + pow(2.0, b) + atan2(0.0, b)
+    t
+
+pub def float64 all64(float64 a, float64 b):
+    var float64 t = 0.0
+    t += floor(a) + ceil(a) + round(a) + abs(a) + sqrt(a)
+    t -= sin(0.0 * a) + cos(0.0 * a) + tan(0.0 * a)
+    t += asin(0.0 * a) + acos(1.0 + 0.0 * a) + atan(0.0 * a) + atan2(0.0 * a, b)
+    t += exp(0.0 * a) + tanh(0.0 * a) + log(1.0 + 0.0 * a) + log2(b * 0.0 + 1.0) + log10(b * 0.0 + 1.0)
+    t += pow(a, 2.0) + pow(2.0, b) + atan2(0.0, b)
+    t
+
+var float32 h = 1.5
+h = h - floor(h)
+let float32 hh = 2.25
+let float32 f = hh - floor(hh)
+print h
+print f
+print frac32(3.75)
+print frac64(3.75)
+print all32(4.0, 3.0)
+print all64(4.0, 3.0)

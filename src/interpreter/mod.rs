@@ -1887,6 +1887,11 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 };
                 return Ok(Value::Float32(base.powf(exp)));
             }
+            // Untyped-literal base with a float32 exponent (`pow(2.0, x32)`): the
+            // transpiler takes the width from the typed operand, so match it.
+            if let (Some(Value::Float64(base)), Some(Value::Float32(exp))) = (args.first(), args.get(1)) {
+                return Ok(Value::Float32((*base as f32).powf(*exp)));
+            }
             let base = match args.first() {
                 Some(Value::Float64(f)) => *f,
                 Some(Value::Int(n))   => *n as f64,
