@@ -2,12 +2,16 @@
 
 Companion to [`boring-ui-draft.md`](boring-ui-draft.md) (the design). This file tracks **what is
 implemented, what is decided, and what to do next**, so work can resume on another machine.
-Last updated: 2026-10-11.
+Last updated: 2026-10-28.
 
-The draft's "Implementation sequence" has 6 layers. **Layer 1 (language prerequisites)** is mostly
-done (view lowering below); **layer 2 (headless reactive core)** has a first slice in the sibling
-project `../boring-ui` (see "Layer 2" below); layers 3–6 (layout/scene, desktop host, controls, Todo
-acceptance app) have not been started.
+The draft's "Implementation sequence" has 6 layers, all started and the first vertical slice finished: **layer 1 (language
+prerequisites)** — view lowering, `state`/`bind`/`env`, keyed `for … with …`, identity — is done (view lowering below, and the
+2026-10 follow-ups in the compiler); **layer 2 (headless reactive core)**, **layer 3 (layout, scene, display list, accessibility
+tree)**, **layer 4 (desktop host: window, input, IME, clipboard, accessibility adapter, touch)**, **layer 5 (controls)** and the
+**Todo acceptance application** live in the sibling projects `../boring-ui` (core, layout, scene, events, animation, theme, composite
+controls), `../boring-ui/render` (kernel rasterizer, image decoders) and `../boring-ui/text` (shaping, fonts). Sections below are
+dated and kept as history; the latest state of each area is in the last sections ("2026-10-19 → 2026-10-25 — summary", the frame cost
+updates, and "2026-10-27/28 — controls, Popover, scrolling, Tooltip").
 
 ## Layer 1 — language prerequisites
 
@@ -341,10 +345,10 @@ the offending `for` subtree; hooks are an event log (`events`), not user callbac
 
 ## Next steps (suggested order)
 
-1. Layer 1 remainder: view lowering (item 1 above).
-2. Layer 2: headless reactive core as a Rust crate/module (mounted tree, typed slots, reconciliation,
-   event transactions, lifecycle, 64-pass loop guard) — independent of the language work, so it can
-   proceed in parallel.
+1. Horizontal flipping for `Popover`, a show delay for `Tooltip` (the host would pass a clock), animated programmatic scrolling.
+2. Layout cache for non-windowed trees; `scene.br` emitting glyphs directly.
+3. Hardware checks: real touch screen, real IME, VoiceOver.
+4. Remaining deferred items of the draft: `Alert`, navigation containers, `Video`, gradients/filters, two-axis scrolling.
 
 ## Decisions made while implementing
 
@@ -420,14 +424,15 @@ breaking (UAX #14), measurer width memo, per-platform system font discovery (`fo
 encode 43 ms, bin 11 ms. A 10-row tree costs ~10 ms per frame. Kernel time per frame: see `render/bench` (4.9 ms for
 1925 commands at 1920×1080).
 
-**Open**
-- Mount cost (card started), then incremental layout and a virtualized `List` (only visible rows laid out) and
-  per-identity invalidation (still "rebuild the window").
-- Accessibility: `semantics.br` is not connected to platform APIs (VoiceOver etc.).
-- Embedded font (system fonts make the picture differ per machine); `scene.br` emitting glyphs directly (today
-  `glyphify` converts `DrawText` before encoding).
-- Not verified on hardware: real touch screen, real IME. `task_4adfaf52` is fixed (compiler 2836d305: re-uploading a presented
-  `'unified` field re-points the blit); `todo_window` now reallocates `k.out` on resize instead of rebuilding the kernel (c7b9742).
+**Open** (as of 2026-10-28; the 2026-10-25 version of this list is superseded)
+- Done since: mount cost and incremental layout (see the frame cost updates below), a windowed `List`, per-identity invalidation
+  (`Runtime.applyPartial` re-expands only the dirty composites; the root-dirty case rebuilds the window), the accessibility tree
+  connected to the platform (`screen.setAccessibility` / `accessibilityRequests` in `todo_window`), the bundled Inter font.
+- Still open: `scene.br` emitting glyphs directly (today `glyphify` converts `DrawText` before encoding); layout cache for nodes
+  inside non-windowed trees; real touch screen and real IME not verified on hardware; a free-running animation loop (the animator is
+  value-triggered: a host drives anything that loops, e.g. `IndeterminateBar`'s `phase`); a hover/tooltip delay (no runtime clock).
+- `task_4adfaf52` is fixed (compiler 2836d305: re-uploading a presented `'unified` field re-points the blit); `todo_window` reallocates
+  `k.out` on resize instead of rebuilding the kernel (c7b9742).
 - Compiler gotchas seen in generated crates: struct names clashing with `boring.ui` views or Rust traits (`Image`, `Frame`,
   `Sized`) — prefix them.
 
@@ -479,3 +484,39 @@ sheets) are applied afterwards by `finishLayout` on a copy. `bench_tree`, 1000 r
 on a dict behind an `'actor` field holds the lock for the whole block (a later read of the same memory deadlocks: read through a
 `LayoutMemory` method that returns), and `let x = dict[key]` is typed as the value, not an Option. The interpreter shares the cached
 entry, so the copy before `finishLayout` stays explicit.
+
+## 2026-10-27/28 — composite controls, Popover, programmatic scrolling, Tooltip
+
+All in `../boring-ui` (README sections "Composite controls", "Popover", "Programmatic scrolling", "Tooltip"), shown in
+`examples/todo_window`'s "Controls" panel; each verified by a headless test (interpreter and `boring build`) and, for the window, by the user.
+
+- **Composite controls** (`src/controls.br`, plain `view`s over `boring.ui`, no native facade): `ProgressBar`, `IndeterminateBar` (a clipped
+  segment driven by a host-advanced `phase`: the animation system has no free-running loop), `SegmentedControl`, `TabView` (only the selected
+  child is mounted), `Picker`, `Stepper`, `DisclosureGroup` (declare its `state` before `children`: the trailing-block sugar takes the last
+  field, and a `state` seed field would be it).
+- **`Popover`** (native facade in `boring/stdlib/ui.br`; `bind bool isPresented`, two children: anchor + panel): the panel is mounted only
+  while presented (`core.br` `childrenOf`), placed below the anchor and moved above it when it does not fit below and the window has more room
+  above (`layout.br` `withPopovers`, run by `finishLayout`; `props["side"]`), painted last with a shadow (`scene.br` `paintPopovers`) and hit
+  first (`hitTest`). A press outside anchor and panel, or Escape, dismisses it (the generated `dismiss` action). Non-modal: focus is not
+  trapped. Layout trap met: a `Popover` needs a span of its anchor's (`spanUncached`), otherwise a stack around it mis-negotiates and overflows.
+- **Programmatic scrolling**: `Scroll(anchor, request)` + `ScrollAnchor(name)` (facades in `boring/stdlib/ui.br`). Request-driven:
+  `request > 0` and different from the last applied (`Runtime.scrollApplied`, keyed by node generation) scrolls the anchor to the viewport's
+  leading edge, clamped to the content; the host calls `events.br` `applyScrollRequests` after an update (`pace.br` `paceFrame`).
+- **`Tooltip`** = `Popover` + `OnHover(value)` (native facade; the runtime writes the bound `value` through `setBool` from
+  `events.br` `syncHoverScopes`, called by `pointerMove`/`pointerLeave`). The hover target is the deepest enabled Button/Toggle/TextField/
+  Slider, so a tooltip wraps a control; no delay yet.
+- **Window host**: the Controls panel sits in `Frame(maxHeight) + Scroll` (opening it used to push the content past the bottom edge); the
+  indeterminate bar's phase and busy flag are host cells (`BusyCells`, `pace.br` `syncBusy`/`phaseAt`).
+
+**Compiler bugs found and fixed through spawn tasks** (each with a regression case in `boring`): `bind` of a view declared in an imported
+file or `[deps]` project was not linked to the caller's `state` (`lower_view` now reads the imported files' view signatures, 3674e283); a
+closure-typed field forwarded as a constructor argument was wrapped twice (450caa35); a closure calling `self.method()` in a view with
+`[View] children` was not `Send` (0642ac42); a closure body of just `pass` commented out the closing delimiters (e78325c5); a generic struct
+(`Slot`) lost its type argument in a `Screen` program's setup (ef386904). Quirks worked around, not filed: a trait-object `Builder` parameter
+is moved by `rt.start(host)` in `boring build` (open the runtime at top level in tests), and `(x as int) as float` emits a string-parse cast
+(bind to a `let` first).
+
+**Process notes**: `boring` at its HEAD did not build on 2026-10-28 (another session's unfinished fixed-point work was committed
+half-way); boring-ui was built against `ddcc6a04` plus the `OnHover` facade. A `Background` (and other wrapper) with no child yields a nil
+`children` at run time: give it one (`Spacer()`).
+

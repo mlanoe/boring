@@ -1511,7 +1511,8 @@ the viewport and theme.
 
 Mounted identity already provides basic position restoration while a `Scroll` remains mounted.
 External/programmatic scroll position, named anchors, initial anchors, persistent restoration across
-unmount, and scrollbar policy modifiers are deferred until a concrete application needs them. Lazy
+unmount, and scrollbar policy modifiers are deferred until a concrete application needs them.
+*(2026-10-28: programmatic scrolling to a named anchor is implemented as `Scroll(anchor, request)` + `ScrollAnchor`, see `boring-ui-progress.md`; initial anchors, persistence across unmount and scrollbar policy stay deferred.)* Lazy
 child creation remains a separate container concern (`LazyColumn`/`LazyRow` or a keyed list), not an
 automatic property of `Scroll`.
 
@@ -2602,7 +2603,8 @@ focus into the content, traps traversal as required by the platform, restores fo
 control on dismissal when it still exists, and exposes the correct accessibility modality.
 
 `Alert` and `Popover` should be separate portal components because their action, focus, placement,
-and accessibility contracts differ. A file/photo picker or permission prompt remains a native
+and accessibility contracts differ.
+*(2026-10-28: a non-modal `Popover` (anchor + panel, below or above, light dismiss) is implemented; `Alert` is not. See `boring-ui-progress.md`.)* A file/photo picker or permission prompt remains a native
 `task ... throws` action: it is owned by the OS and does not mount a Boring view subtree.
 
 ## First implementation target and remaining design work
