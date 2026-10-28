@@ -1,0 +1,16 @@
+var fixed16_16 g = 9.8
+let fixed16_16 k = 0.5
+var fixed32_32 total = 1
+
+def bump():
+    g += 0.25
+    total = total + 2
+
+def main():
+    print "{g}"
+    g = 1.5
+    print "{g}"
+    bump()
+    print "{g}"
+    print "{g + k}"
+    print "{total}"

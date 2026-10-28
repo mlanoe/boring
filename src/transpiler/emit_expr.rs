@@ -2994,6 +2994,12 @@ impl Transpiler {
         // `x = 1.5` on a fixed-point target: the literal takes the target's format.
         if let Some(fmt) = self.fixed_fmt_of_expr(target) {
             if let Some(lit) = self.emit_fixed_literal(value, &fmt) {
+                // Lock-backed global: same write path as other scalar globals.
+                if let ExprKind::Var(n) = &target.kind {
+                    if self.global_vars_used_in_fns.contains(n.as_str()) {
+                        return format!("{{ let __gv = {}; *{}.lock().unwrap_or_else(|e| e.into_inner()) = __gv; }}", lit, n.to_uppercase());
+                    }
+                }
                 self.in_lhs_assign.set(true);
                 let target_s = self.emit_expr(target);
                 self.in_lhs_assign.set(false);

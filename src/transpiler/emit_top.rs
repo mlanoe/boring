@@ -186,7 +186,9 @@ impl Transpiler {
                         let ty_str = s.ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| {
                             s.value.as_ref().and_then(literal_ty_str).unwrap_or("_").to_string()
                         });
-                        let val_str = s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string());
+                        let fixed_lit = s.ty.as_ref().and_then(Self::fixed_fmt_of_type)
+                            .and_then(|fmt| s.value.as_ref().and_then(|v| self.emit_fixed_literal(v, &fmt)));
+                        let val_str = fixed_lit.unwrap_or_else(|| s.value.as_ref().map(|v| self.emit_expr(v)).unwrap_or_else(|| "()".to_string()));
                         // Uppercase the Rust identifier, on every target (not just GPU —
                         // see the matching, now target-agnostic comment on
                         // `gpu_top_level_const_names`'s population site, mod.rs). A fn

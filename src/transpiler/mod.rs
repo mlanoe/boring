@@ -3264,6 +3264,11 @@ impl Transpiler {
             }
         }
         if let Some(ty) = &s.ty {
+            // Fixed-point: `Fixed::from_raw` is const, but only a folded literal qualifies.
+            if Self::fixed_fmt_of_type(ty).is_some() {
+                return s.value.as_ref().is_some_and(|v| matches!(&v.kind, ExprKind::Int(_) | ExprKind::Float(_))
+                    || matches!(&v.kind, ExprKind::UnaryOp(UnaryOp::Neg, i) if matches!(i.kind, ExprKind::Int(_) | ExprKind::Float(_))));
+            }
             return is_scalar(ty);
         }
         // No declared type -- only trust a bare scalar literal initializer, unwrapping a
@@ -4941,7 +4946,10 @@ impl Transpiler {
                         // reader of it (this fn, below) already falls back to
                         // `Default::default()` when a name has none.
                         if let Some(value) = &s.value {
-                            let init_val = self.emit_expr_owned(value);
+                            let init_val = s.ty.as_ref()
+                                .and_then(Self::fixed_fmt_of_type)
+                                .and_then(|fmt| self.emit_fixed_literal(value, &fmt))
+                                .unwrap_or_else(|| self.emit_expr_owned(value));
                             self.global_var_inits.insert(s.name.clone(), init_val);
                         }
                     }

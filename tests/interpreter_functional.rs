@@ -466,6 +466,7 @@ itest!(float32_local_var_math);
 itest!(float32_array_literal_width_and_cast);
 itest!(float16_array_literal_width_and_cast);
 itest!(fixed_point_basic);
+itest!(fixed_point_globals);
 itest!(fixed_point_collections);
 itest!(fixed_point_struct_fn);
 itest!(fixed_point_members);
@@ -473,6 +474,8 @@ itest!(fixed_point_policies);
 itest!(float64_array_literal_width_and_cast);
 itest!(optional_interp_numeric);
 itest!(fixed_point_math);
+// fixed_point_tuples: blocked until the self-hosted parser handles plain-identifier tuple types `(fixed16_16, int) t`.
+// itest!(fixed_point_tuples);
 itest!(if_else_cast_numeric);
 itest!(unresolved_field_cast_numeric);
 

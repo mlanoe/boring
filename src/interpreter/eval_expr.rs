@@ -1711,6 +1711,18 @@ impl Interpreter {
                     }
                 }
                 let mut val = self.eval_expr(value, Rc::clone(&env))?;
+                // `g = 1.5` on a fixed-point variable: an untyped literal takes its format.
+                if let ExprKind::Var(name) = &target.kind {
+                    if matches!(val, Value::Int(_) | Value::Float64(_)) {
+                        let dt = env.borrow().get_declared_type(name);
+                        if let Some(ty) = dt {
+                            let ty = self.resolve_type(&ty);
+                            if matches!(super::strip_qualifiers(ty.without_mut()), Type::Fixed(_)) {
+                                val = Self::coerce_to_type(val, &ty);
+                            }
+                        }
+                    }
+                }
                 if matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
                     val = self.stored_copy(value, val, &env);
                 }

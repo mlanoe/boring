@@ -3356,7 +3356,18 @@ def void assign_target(mut Interpreter interp, Expr target, Value val):
             elif interp.current_env.is_lazy(name):
                 throw "cannot use '=' on lazy binding '{name}' — use '?=' instead"
             else:
-                let ok = interp.current_env.set(name, val)
+                var stored = val
+                # `g = 1.5` on a fixed-point variable: an untyped literal takes its format.
+                match val:
+                    Value.Int(_) | Value.Float64(_):
+                        if let cur = interp.current_env.get(name):
+                            match cur:
+                                Value.Fixed(_, sg, n, m):
+                                    if let lv = fixed_literal_value(FixedFmt(signed = sg, n = n, m = m), val):
+                                        stored = lv
+                                _: nil
+                    _: nil
+                let ok = interp.current_env.set(name, stored)
                 if not ok:
                     throw "cannot assign to immutable variable '{name}'"
         ExprKind.Field(obj_expr, field_name):

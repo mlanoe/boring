@@ -46,6 +46,18 @@ impl Transpiler {
                 visiting.remove(v.as_str());
                 r
             }
+            // `u.0` on an unannotated `let u = (a, 1)`: the tuple literal's element.
+            ExprKind::Field(inner, idx) if idx.parse::<usize>().is_ok() && self.resolve_expr_type(e).is_none() => {
+                let ExprKind::Var(v) = &inner.kind else { return None };
+                if !visiting.insert(v.clone()) { return None; }
+                let r = match self.var_init_exprs.get(v.as_str()).map(|i| &i.kind) {
+                    Some(ExprKind::Tuple(elems)) => elems.get(idx.parse::<usize>().ok()?)
+                        .and_then(|el| self.fixed_fmt_of_expr_inner(el, visiting)),
+                    _ => None,
+                };
+                visiting.remove(v.as_str());
+                r
+            }
             ExprKind::Cast(_, ty) => Self::fixed_fmt_of_type(ty),
             ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, l, r) =>
                 self.fixed_fmt_of_expr_inner(l, visiting).or_else(|| self.fixed_fmt_of_expr_inner(r, visiting)),

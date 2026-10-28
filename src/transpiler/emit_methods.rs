@@ -301,6 +301,15 @@ impl Transpiler {
             ExprKind::Field(inner, field) if self.kernel_field_decl(inner, field).is_some() => {
                 self.kernel_field_decl(inner, field).map(|f| f.ty.clone())
             }
+            // `t.0` on a tuple-typed receiver: the declared element type.
+            ExprKind::Field(inner, field) if field.parse::<usize>().is_ok()
+                && matches!(self.resolve_expr_type(inner).as_ref().map(Type::without_mut), Some(Type::Tuple(_))) =>
+            {
+                match self.resolve_expr_type(inner)?.without_mut() {
+                    Type::Tuple(ts) => ts.get(field.parse::<usize>().ok()?).cloned(),
+                    _ => None,
+                }
+            }
             ExprKind::Field(inner, field) => {
                 if let Some(owner) = self.resolve_expr_struct_type(inner) {
                     if let Some(fty) = self.struct_fields.get(owner.as_str())

@@ -1,0 +1,15 @@
+fixed16_16 first((fixed16_16, int) t):
+    t.0 + 1.0
+
+fixed16_16 second((int, fixed16_16) t):
+    t.1 * 2
+
+def main():
+    let fixed16_16 a = 2.5
+    let t = (a, 3)
+    print "first = {first(t)}"
+    print "second = {second((7, 0.25))}"
+    let (x, n) = t
+    print "x = {x + 0.5} n = {n}"
+    let u = (a, 1)
+    print "u0 = {u.0 + 1.0}"

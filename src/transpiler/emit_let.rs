@@ -3156,6 +3156,23 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let_destructure(&mut self, s: &LetDestructureStmt) {
+        // `let (a, b) = (x, y)` / `= t` (t bound to a tuple literal): remember each
+        // slot's initializer so literal folding can recover a fixed-point format.
+        {
+            let elems = match &s.value.kind {
+                ExprKind::Tuple(es) => Some(es.clone()),
+                ExprKind::Var(v) => match self.var_init_exprs.get(v.as_str()).map(|e| &e.kind) {
+                    Some(ExprKind::Tuple(es)) => Some(es.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(es) = elems.filter(|es| es.len() == s.bindings.len()) {
+                for (b, init) in s.bindings.iter().zip(es) {
+                    if b.name != "_" { self.var_init_exprs.insert(b.name.clone(), init); }
+                }
+            }
+        }
         // Track all bound names as known locals, and each slot's own
         // content-mutation permission — independent per-slot, may differ from
         // the statement's overall `binding` (docs/book.md).
