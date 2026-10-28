@@ -746,3 +746,186 @@ fn gpu_kinds_narrow_placement() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const DIMENSION_LIFE: &str = r#"
+let width = 64
+let height = 64
+
+kernel Step:
+    mut [uint]'unified cellsIn
+    mut [uint]'unified cellsOut
+    let Dimension dim
+
+    init(Dimension d):
+        cellsIn = [if (i * 7 + i / 5) % 3 == 0: 1 else 0 for i in 0..<d.width * d.height]
+        cellsOut = [0 for ..<d.width * d.height]
+        dim = d
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            var int n = 0
+            for dy in -1..<2:
+                for dx in -1..<2:
+                    if dx != 0 or dy != 0:
+                        let nx = (int(col) + dx + int(dim.width)) % int(dim.width)
+                        let ny = (int(row) + dy + int(dim.height)) % int(dim.height)
+                        n += int(cellsIn[ny * dim.width + nx])
+            let alive = cellsIn[row * dim.width + col]
+            cellsOut[row * dim.width + col] = if alive == 1: uint(n == 2 or n == 3) else uint(n == 3)
+
+kernel Render:
+    let [uint]'unified cells
+    mut [uint]'unified pixels
+    let Dimension dim
+
+    init(Dimension d):
+        cells = [0 for ..<d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
+        dim = d
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = if cells[row * dim.width + col] == 1: uint(255) else uint(17)
+
+var mut step = Step(Dimension(width, height))
+var mut render = Render(Dimension(width, height))
+
+for i in 0..<4096:
+    if (i * 7 + i / 5) % 3 == 0:
+        step.cellsIn[i] = 1
+kernel:
+    step(block = (16, 16))
+let a = step.cellsIn
+let b = step.cellsOut
+with a:
+    with b:
+        var sa = 0
+        var sb = 0
+        for c in a:
+            sa += int(c)
+        for c in b:
+            sb += int(c)
+        print "in {sa} out {sb}"
+"#;
+
+/// A kernel with a `Dimension` field is routed like any other: the backend builds its buffers
+/// from the size, and the results match the CPU.
+#[test]
+fn dimension_kernels_are_routed() {
+    let dir = project("dimension");
+    std::fs::write(source(&dir), DIMENSION_LIFE).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert_eq!(cpu.trim(), "in 1639 out 3224");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+        assert_eq!(stdout, cpu, "{stderr}");
+        assert!(stderr.contains("kernel Step -> wgpu"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const SCREEN_LIFE: &str = r#"
+let width = 64
+let height = 64
+let screen = Screen(Dimension(width, height), title = "life")
+
+kernel Step:
+    mut [uint]'surface cellsIn
+    mut [uint]'surface cellsOut
+    let Dimension dim
+
+    init(Dimension d):
+        cellsIn = [if (i * 7 + i / 5) % 3 == 0: 1 else 0 for i in 0..<d.width * d.height]
+        cellsOut = [0 for ..<d.width * d.height]
+        dim = d
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            var int n = 0
+            for dy in -1..<2:
+                for dx in -1..<2:
+                    if dx != 0 or dy != 0:
+                        let nx = (int(col) + dx + int(dim.width)) % int(dim.width)
+                        let ny = (int(row) + dy + int(dim.height)) % int(dim.height)
+                        n += int(cellsIn[ny * dim.width + nx])
+            let alive = cellsIn[row * dim.width + col]
+            cellsOut[row * dim.width + col] = if alive == 1: uint(n == 2 or n == 3) else uint(n == 3)
+
+kernel Render:
+    let [uint]'surface cells
+    mut [uint]'surface pixels
+    let Dimension dim
+
+    init(Dimension d):
+        cells = [0 for ..<d.width * d.height]
+        pixels = [0 for ..<d.width * d.height]
+        dim = d
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = if cells[row * dim.width + col] == 1: uint(255) else uint(17)
+
+var mut step = Step(Dimension(width, height))
+var mut render = Render(Dimension(width, height))
+
+var generation = 0
+kernel:
+    loop:
+        step(block = (16, 16))
+        step.cellsIn, step.cellsOut = step.cellsOut, step.cellsIn
+        render.cells = step.cellsIn
+        render(block = (16, 16))
+        generation += 1
+        if generation == 6:
+            break
+    let pixels = render.pixels
+    with pixels:
+        var total = 0
+        for p in pixels:
+            total += int(p)
+        print "pixels {total}"
+"#;
+
+/// A program with a `Screen` is routed too: its `'surface` buffers are ordinary buffers for the
+/// router, and the CPU host that presents them reads the newest pixels back from the backend.
+/// The window itself cannot open here, so the program computes and prints a checksum instead of
+/// presenting; `examples/game_of_life.br` is only built and started up to the backend list.
+#[test]
+fn screen_programs_route_their_surfaces() {
+    let dir = project("screen_life");
+    std::fs::write(source(&dir), SCREEN_LIFE).unwrap();
+    let target = if cfg!(target_os = "macos") { "metal,simd" } else { "simd" };
+    let out = build(&dir, target);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert_eq!(cpu.trim(), "pixels 306680");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("metal: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "metal,simd")]);
+        assert_eq!(stdout, cpu, "{stderr}");
+        assert!(stderr.contains("kernel Step -> metal") && stderr.contains("kernel Render -> metal"), "{stderr}");
+    }
+
+    // The shipped example, for every backend that can build it, still starts.
+    let example = project("screen_example");
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/game_of_life.br"), source(&example)).unwrap();
+    let out = build(&example, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (listed, _) = run_crate(&example, &cache, &[("BORING_BACKEND", "list")]);
+    assert!(listed.contains("simd: available"), "{listed}");
+    let _ = std::fs::remove_dir_all(&example);
+    let _ = std::fs::remove_dir_all(&dir);
+}

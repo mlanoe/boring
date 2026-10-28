@@ -199,7 +199,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
     let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
     let mut host_rs = host_rs;
     let mut routes = Vec::new();
-    if unified && !has_screen {
+    if unified {
         let kernels: Vec<crate::ast::KernelDecl> = program.items.iter().filter_map(|item| if let Item::Kernel(k) = item { Some(k.clone()) } else { None }).collect();
         let (adapters, covered) = unified_adapters(&kernels, &kernel_names);
         host_rs.push_str(&adapters);

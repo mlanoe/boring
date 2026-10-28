@@ -3061,6 +3061,10 @@ impl Transpiler {
             if let (ExprKind::Field(to, to_field), ExprKind::Field(from, from_field)) = (&target.kind, &value.kind) {
                 if let (ExprKind::Var(a), ExprKind::Var(b)) = (&to.kind, &from.kind) {
                     if self.kernel_vars.contains_key(a.as_str()) && self.kernel_vars.contains_key(b.as_str()) {
+                        if let (Some(dest), Some(_)) = (self.routed_array_field_of(a, to_field), self.routed_array_field_of(b, from_field)) {
+                            let inner = super::emit_kernel::kernel_host_scalar_type(&super::emit_kernel::array_inner_type(&dest.ty));
+                            return format!("{a}.copy_{to_field}_to_device(&{b}.copy_{from_field}_to_host().iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>())");
+                        }
                         return format!("{a}.{to_field} = {b}.{from_field}.clone()");
                     }
                 }
@@ -3108,8 +3112,10 @@ impl Transpiler {
                             return format!("{kvar}.{field} = (({}) as {t})", self.emit_expr(value));
                         }
                     }
+                    let routed_surface = matches!(field_decl.map(|f| &f.qual), Some(GpuQual::Surface))
+                        && self.routed_array_field(obj, field).is_some();
                     let field_ty = field_decl
-                        .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified))
+                        .filter(|f| matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified) || routed_surface)
                         .map(|f| f.ty.clone());
                     if let Some(fty) = field_ty {
                         if matches!(&fty, Type::Array(_) | Type::ArrayN(_, _)) || fty.as_labeled_array().is_some() {
@@ -3134,6 +3140,23 @@ impl Transpiler {
                     },
                     _ => None,
                 };
+                // Routed buffers: assign through the residency hooks, not to the `Vec` fields
+                // (a backend may hold the newest data, and keeps a copy of the old one).
+                let routed: Vec<Option<(String, String, &'static str)>> = lhs.iter().map(|e| match &e.kind {
+                    ExprKind::Field(obj, field) => match (&obj.kind, self.routed_array_field(obj, field)) {
+                        (ExprKind::Var(o), Some(decl)) => Some((o.clone(), field.clone(), super::emit_kernel::kernel_host_scalar_type(&super::emit_kernel::array_inner_type(&decl.ty)))),
+                        _ => None,
+                    },
+                    _ => None,
+                }).collect();
+                if !routed.is_empty() && lhs.len() == rhs.len() && routed.iter().all(|r| r.is_some()) {
+                    let temps: Vec<String> = (0..routed.len()).map(|i| format!("__t{i}")).collect();
+                    let values: Vec<String> = rhs.iter().map(|e| self.emit_expr_owned(e)).collect();
+                    let assigns: Vec<String> = routed.iter().flatten().zip(&temps).map(|((o, f, inner), t)| {
+                        format!("{o}.copy_{f}_to_device(&{t}.iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());")
+                    }).collect();
+                    return format!("{{ let ({}) = ({},); {} }}", temps.join(", "), values.join(", "), assigns.join(" "));
+                }
                 let places: Vec<Option<String>> = lhs.iter().map(place).collect();
                 if lhs.len() == rhs.len() && places.iter().all(|p| p.is_some()) {
                     let places: Vec<String> = places.into_iter().flatten().collect();

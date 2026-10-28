@@ -16,11 +16,16 @@ pub struct RouteField {
     pub array: bool,
     /// The adapter must copy this buffer back (`mut`/`var` field).
     pub mutable: bool,
+    /// A `Dimension` field (`let Dimension dim`), passed as `Arg::Dim([width, height])`.
+    pub dim: bool,
 }
 
 impl RouteField {
     /// `Arg` variant holding this field, e.g. `F32` / `BufF32`.
     pub fn variant(&self) -> String {
+        if self.dim {
+            return "Dim".into();
+        }
         if self.rust_ty == "half::f16" {
             return if self.array { "BufF16".into() } else { "F16".into() };
         }
@@ -32,6 +37,9 @@ impl RouteField {
 
     /// Accessor on `Arg`: `as_f32` for a scalar, `buf_f32` for a buffer.
     pub fn accessor(&self) -> String {
+        if self.dim {
+            return "as_dim".into();
+        }
         if self.rust_ty == "half::f16" {
             return if self.array { "buf_f16".into() } else { "as_f16".into() };
         }
@@ -87,7 +95,9 @@ pub fn route_fields(k: &KernelDecl) -> Option<Vec<RouteField>> {
     for f in &k.fields {
         match base(&f.ty) {
             Type::Array(element) => {
-                if !matches!(f.qual, GpuQual::Unified | GpuQual::Global) {
+                // A screen surface is a buffer like any other here: the CPU host presents its own
+                // copy, fetching the newest data from the backend first.
+                if !matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::Surface) {
                     return None;
                 }
                 fields.push(RouteField {
@@ -95,13 +105,20 @@ pub fn route_fields(k: &KernelDecl) -> Option<Vec<RouteField>> {
                     rust_ty: numeric_rust(element)?,
                     array: true,
                     mutable: !matches!(f.binding, FieldBinding::Let),
+                    dim: false,
                 });
+            }
+            Type::Named(n) if n == "Dimension" => {
+                if !matches!(f.qual, GpuQual::Const) {
+                    return None;
+                }
+                fields.push(RouteField { name: f.name.clone(), rust_ty: "u32", array: false, mutable: false, dim: true });
             }
             other => {
                 if !matches!(f.qual, GpuQual::Const) {
                     return None;
                 }
-                fields.push(RouteField { name: f.name.clone(), rust_ty: numeric_rust(other)?, array: false, mutable: false });
+                fields.push(RouteField { name: f.name.clone(), rust_ty: numeric_rust(other)?, array: false, mutable: false, dim: false });
             }
         }
     }
@@ -138,9 +155,19 @@ mod tests {
 
     #[test]
     fn other_field_kinds_keep_the_kernel_on_the_cpu() {
-        assert!(route_fields(&kernel("    mut [uint]'surface pixels\n")).is_none());
         assert!(route_fields(&kernel("    mut [int]'actor shared\n")).is_none());
-        assert!(route_fields(&kernel("    let [float32]'unified x\n    let Dimension dim\n")).is_none());
+        assert!(route_fields(&kernel("    let Dimension'global dim\n")).is_none());
+        assert!(route_fields(&kernel("    let [float32]'unified x\n    let Point p\n")).is_none());
+    }
+
+    #[test]
+    fn surfaces_and_dimensions_are_routable() {
+        let k = kernel("    mut [uint]'surface pixels\n    let [uint]'surface cells\n    let Dimension dim\n");
+        let fields = route_fields(&k).expect("routable");
+        let shapes: Vec<_> = fields.iter().map(|f| (f.name.as_str(), f.array, f.mutable, f.dim)).collect();
+        assert_eq!(shapes, [("pixels", true, true, false), ("cells", true, false, false), ("dim", false, false, true)]);
+        assert_eq!(fields[2].variant(), "Dim");
+        assert_eq!(fields[2].accessor(), "as_dim");
     }
 }
 
@@ -212,6 +239,9 @@ fn stream_adapter_fn(flavor: StreamFlavor, k: &KernelDecl, fields: &[RouteField]
         if matches!(decl.binding, FieldBinding::Let) { format!("Arc::new({upload})") } else { upload }
     };
     let scalar = |i: usize, f: &RouteField| {
+        if f.dim {
+            return format!("Dimension(args[{i}].as_dim()[0], args[{i}].as_dim()[1])");
+        }
         let target = scalar_ty(&decl_of(f).ty);
         cast(&format!("args[{i}].{}()", f.accessor()), f.rust_ty, &target)
     };

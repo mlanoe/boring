@@ -113,11 +113,21 @@ Scalars are re-sent at every launch. `BORING_BACKEND_VERBOSE=1` ends with
 Each host read of a buffer field downloads it whole; to read many elements after a launch, bind
 the field once (`let result = k.buf`) and read the binding.
 
-A kernel is routable when its fields are numeric/bool scalars and plain `[T]` buffers in
-`'unified` or `'global` memory. Anything else (`'surface`, shared memory, atomics, struct or
-fixed-array fields, generic kernels, programs with a `Screen`) runs on the CPU. An adapter can
-also decline one launch: wgpu fixes the workgroup size in the shader from the kernel's launch
-site, so a launch with another block size goes elsewhere.
+A kernel is routable when its fields are numeric/bool scalars, `Dimension`s and plain `[T]`
+buffers in `'unified`, `'global` or `'surface` memory. Anything else (shared memory, atomics,
+struct or fixed-array fields, generic kernels) runs on the CPU. An adapter can also decline one
+launch: wgpu fixes the workgroup size in the shader from the kernel's launch site, so a launch
+with another block size goes elsewhere.
+
+### Programs with a `Screen`
+
+The `Screen` lives on the CPU host, which presents its own copy of the pixels. A `'surface`
+buffer is a buffer like any other for the router: kernels that write it run on a backend, and
+`screen.present(k.pixels)` (or any host read) first brings the newest pixels back from it. A
+render loop such as `examples/game_of_life.br` therefore runs its kernels on the best GPU while
+the window stays on the CPU host. The pixels come back to the CPU every frame, and a ping-pong
+swap (`a.x, a.y = a.y, a.x`) or a kernel-to-kernel copy (`b.cells = a.cells`) goes through the
+CPU too, so a light kernel can still be faster left on the CPU: `@prefer(.cpu)` says so.
 
 ## The generated crate
 
@@ -173,6 +183,6 @@ there is no run-time compiler to build a benchmark with. The CUDA benchmark goes
 
 ## Not implemented yet
 
-- Finer device classes (`.discrete`, `.integrated`, a remote service).
-- Routing for programs with a `Screen`, and for kernels with shared memory, atomics or struct
-  fields.
+- A remote service as a backend.
+- Routing for kernels with shared memory, atomics or struct fields.
+- Keeping a ping-pong swap or a kernel-to-kernel copy on the backend (they go through the CPU).

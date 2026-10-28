@@ -257,7 +257,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
     let mut host_rs = host_rs;
     let mut routes = Vec::new();
-    if unified && !has_screen {
+    if unified {
         let kernels: Vec<crate::ast::KernelDecl> = program.items.iter().filter_map(|item| if let Item::Kernel(k) = item { Some(k.clone()) } else { None }).collect();
         let (adapters, covered) = crate::transpiler::unified::stream_adapters(
             crate::transpiler::unified::StreamFlavor::Cuda, &kernels, &kernel_names, host::elem_rust_type, host::rust_type,

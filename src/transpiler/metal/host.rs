@@ -1731,7 +1731,8 @@ impl HostEmitter {
                 GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface
                     if matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || field.ty.as_labeled_array().is_some() =>
                 {
-                    let elem = elem_rust_type(&field.ty);
+                    // A surface pixel buffer is 32-bit whatever the declared element type.
+                    let elem = if matches!(field.qual, GpuQual::Surface) { "u32".to_string() } else { elem_rust_type(&field.ty) };
                     self.line(&format!(
                         "fn read_{}(&self) -> Result<Vec<{}>, Box<dyn std::error::Error + Send + Sync>> {{",
                         field.name, elem

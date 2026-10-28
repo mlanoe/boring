@@ -148,7 +148,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some(), requires_f16, &general_out.screen_setup_fields);
     let mut host_rs = host_rs;
     let mut routes = Vec::new();
-    if unified && !has_screen {
+    if unified {
         let (adapters, covered) = unified_adapters(&effective_kernels, &kernel_names, &device::collect_block_sizes(program), device_wgsl_emulated.is_some(), requires_f16);
         host_rs.push_str(&adapters);
         routes = covered;

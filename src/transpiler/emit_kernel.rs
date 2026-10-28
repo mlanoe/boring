@@ -565,8 +565,14 @@ impl Transpiler {
                 // through `try_emit_kernel_field_read`'s unconditional download.
                 let resident_alias = self.resident_field_alias(&arg.value);
                 if let (true, Some((src_kvar, src_field))) = (self.config.is_simd_target, resident_alias.as_ref()) {
-                    // CPU buffers are ordinary vectors: an alias is a plain copy.
-                    self.line(&format!("{var_name}.{field_name} = {src_kvar}.{src_field}.clone();"));
+                    // CPU buffers are ordinary vectors: an alias is a plain copy (through the
+                    // residency hooks when a backend may hold the newest data).
+                    if self.routed_array_field_of(src_kvar, src_field).is_some() && self.routed_array_field_of(&var_name, field_name).is_some() {
+                        let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
+                        self.line(&format!("{var_name}.copy_{field_name}_to_device(&{src_kvar}.copy_{src_field}_to_host().iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"));
+                    } else {
+                        self.line(&format!("{var_name}.{field_name} = {src_kvar}.{src_field}.clone();"));
+                    }
                     param_to_len.insert(param_name, format!("({src_kvar}.{src_field}.len())"));
                 } else if let Some((src_kvar, src_field)) = resident_alias {
                     // `__boring_gpu_copy_d2d`, NOT `Arc::clone` -- see that helper's
@@ -1249,6 +1255,24 @@ impl Transpiler {
         self.kernel_decls.get(kname)?.fields.iter().find(|f| f.name == field)
     }
 
+    /// Is `obj.field` a buffer the multi-target CPU host routes to backends? Its reads and
+    /// writes then go through the residency hooks (`copy_<field>_to_host`/`_to_device`).
+    pub(crate) fn routed_array_field(&self, obj: &Expr, field: &str) -> Option<&KernelFieldDecl> {
+        let ExprKind::Var(var_name) = &obj.kind else { return None };
+        self.routed_array_field_of(var_name, field)
+    }
+
+    /// [`Self::routed_array_field`] for a kernel variable named `var_name`.
+    pub(crate) fn routed_array_field_of(&self, var_name: &str, field: &str) -> Option<&KernelFieldDecl> {
+        if !self.config.unified_routing {
+            return None;
+        }
+        let kname = self.kernel_vars.get(var_name)?;
+        let decl = self.kernel_decls.get(kname)?;
+        let f = decl.fields.iter().find(|f| f.name == field)?;
+        (matches!(f.ty, Type::Array(_)) && crate::transpiler::unified::route_fields(decl).is_some()).then_some(f)
+    }
+
     /// If `obj.field` reads a `'unified`/`'global` array field on a tracked
     /// kernel variable, emit the GPU read-back call (converted back to the
     /// host's f64/i64 element type) instead of a plain field access.
@@ -1274,6 +1298,11 @@ impl Transpiler {
                 && matches!(field_decl.ty, Type::Array(_))
                 && crate::transpiler::unified::route_fields(decl).is_some();
             return routable.then(|| format!("{var_name}.__cpu_{field}()"));
+        }
+        // A routed screen surface: the CPU host presents its own `Vec`, brought up to date from
+        // the backend that holds the newest pixels.
+        if matches!(field_decl.qual, GpuQual::Surface) {
+            return self.routed_array_field(obj, field).map(|_| format!("{var_name}.copy_{field}_to_host()"));
         }
         if !matches!(
             field_decl.qual,

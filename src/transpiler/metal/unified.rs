@@ -31,12 +31,17 @@ fn cast(value: &str, from: &str, to: &str) -> String {
     if from == to { value.to_string() } else { format!("{value} as {to}") }
 }
 
+/// The element type of a field's Metal buffer: a surface pixel buffer is always 32-bit.
+fn device_elem(decl: &KernelFieldDecl) -> String {
+    if matches!(decl.qual, GpuQual::Surface) { "u32".to_string() } else { elem_rust_type(&decl.ty) }
+}
+
 fn adapter_fn(k: &KernelDecl, fields: &[RouteField]) -> String {
     let name = &k.name;
     let decl_of = |f: &RouteField| k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
     // A buffer from the CPU copy, converted to the element type Metal uses.
     let buffer = |i: usize, f: &RouteField| {
-        let target = elem_rust_type(&decl_of(f).ty);
+        let target = device_elem(decl_of(f));
         let convert = cast("e", f.rust_ty, &target);
         format!(
             "{{ let v: Vec<{target}> = args[{i}].{}().iter().map(|&e| {convert}).collect(); device.new_buffer_with_data(v.as_ptr() as *const _, (v.len() * std::mem::size_of::<{target}>()) as u64, MTLResourceOptions::StorageModeShared) }}",
@@ -44,6 +49,9 @@ fn adapter_fn(k: &KernelDecl, fields: &[RouteField]) -> String {
         )
     };
     let scalar = |i: usize, f: &RouteField| {
+        if f.dim {
+            return format!("Dimension(args[{i}].as_dim()[0], args[{i}].as_dim()[1])");
+        }
         let target = rust_type(&decl_of(f).ty);
         cast(&format!("args[{i}].{}()", f.accessor()), f.rust_ty, &target)
     };
@@ -91,7 +99,7 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
     ));
     for (i, f) in fields.iter().enumerate() {
         if f.array && f.mutable {
-            let source = elem_rust_type(&decl_of(f).ty);
+            let source = device_elem(decl_of(f));
             let convert = cast("e", &source, f.rust_ty);
             s.push_str(&format!("        {i} => *out.{}() = k.0.read_{}()?.into_iter().map(|e| {convert}).collect(),\n", f.accessor(), f.name));
         }

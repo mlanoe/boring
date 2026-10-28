@@ -61,6 +61,11 @@ fn init_fn(needs_subgroups: bool, needs_f16: bool) -> String {
 fn adapter_fn(k: &KernelDecl, fields: &[RouteField], block: (u32, u32, u32)) -> String {
     let (bx, by, bz) = block;
     let name = &k.name;
+    // A kernel with a `Dimension` field is constructed with its size (grid-sized buffers).
+    let construct = match fields.iter().position(|f| f.dim) {
+        Some(i) => format!("{name}::new(args[{i}].as_dim()[0] as i32, args[{i}].as_dim()[1] as i32, __boring_gpu_device(), __boring_gpu_queue())"),
+        None => format!("{name}::new(__boring_gpu_device(), __boring_gpu_queue())"),
+    };
     let mut s = format!(
         "static __BORING_STORE_{name}: std::sync::Mutex<Option<std::collections::HashMap<u64, crate::unified::AssertSend<{name}>>>> = std::sync::Mutex::new(None);
 pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], upload: &[bool], grid: [u32; 3], block: [u32; 3]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
@@ -72,11 +77,14 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
     let k = &mut store
         .get_or_insert_with(Default::default)
         .entry(id)
-        .or_insert_with(|| crate::unified::AssertSend({name}::new(__boring_gpu_device(), __boring_gpu_queue())))
+        .or_insert_with(|| crate::unified::AssertSend({construct}))
         .0;
 "
     );
     for (i, f) in fields.iter().enumerate() {
+        if f.dim {
+            continue; // fixed at construction
+        }
         if f.array {
             s.push_str(&format!("    if upload[{i}] {{ k.copy_{}_to_device(args[{i}].{}().as_slice()); }}\n", f.name, f.accessor()));
         } else {

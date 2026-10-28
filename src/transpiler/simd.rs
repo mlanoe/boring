@@ -6798,7 +6798,9 @@ fn unified_route_args(k: &KernelDecl) -> Option<Vec<String>> {
         fields
             .iter()
             .map(|f| {
-                if f.array {
+                if f.dim {
+                    format!("crate::unified::Arg::Dim([self.{n}.width as u32, self.{n}.height as u32])", n = f.name)
+                } else if f.array {
                     format!("crate::unified::Arg::{}(&mut self.{})", f.variant(), f.name)
                 } else {
                     format!("crate::unified::Arg::{}(self.{})", f.variant(), f.name)

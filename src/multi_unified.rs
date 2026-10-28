@@ -92,6 +92,8 @@ macro_rules! arg_types {
         /// One kernel field: a scalar by value, or a buffer borrowed from the CPU host copy.
         pub enum Arg<'a> {
             $($scalar($ty), $buffer(&'a mut Vec<$ty>),)*
+            /// A `Dimension` field: `[width, height]`.
+            Dim([u32; 2]),
         }
 
         impl<'a> Arg<'a> {
@@ -105,6 +107,16 @@ macro_rules! arg_types {
             )*
         }
     };
+}
+
+impl<'a> Arg<'a> {
+    /// A `Dimension` field's `[width, height]`.
+    pub fn as_dim(&self) -> [u32; 2] {
+        match self {
+            Arg::Dim(v) => *v,
+            _ => panic!("kernel argument is not a Dimension"),
+        }
+    }
 }
 
 arg_types!(
