@@ -476,6 +476,9 @@ def bool parser_is_type_start_before_ident(mut Parser p):
                 return false
             i = i + 1
         return false
+    if k0 == "LParen":
+        # Tuple type before the binding name: `(int, int) t`.
+        return parser_paren_group_then_ident(p, 0)
     if k0 != "Ident":
         return false
     if k1 == "Ident":
@@ -509,6 +512,25 @@ def bool parser_is_type_start_before_ident(mut Parser p):
         false
     false
 
+def bool parser_paren_group_then_ident(mut Parser p, int off):
+    # At `(` (offset `off`): true when the matching `)` is followed by an
+    # identifier — i.e. the group is a tuple *type* (`(int, int) t`), not a
+    # destructuring pattern (`(a, b) = ...`) or a parenthesised expression.
+    var depth = 0
+    var i = off
+    while i < off + 60:
+        let k = token_kind_name(parser_peek_token_at(p, i).kind)
+        if k == "LParen":
+            depth = depth + 1
+        elif k == "RParen":
+            depth = depth - 1
+            if depth == 0:
+                return parser_token_at_offset_is(p, i + 1, "Ident")
+        elif k == "Eof" or k == "Newline":
+            return false
+        i = i + 1
+    false
+
 def bool parser_is_let_destructure(mut Parser p) throws:
     # At let/var/static. Check for `let x, y = ...` or `let (x, y) = ...`
     # `var mut (...)` / `var mut x, y = ...` — skip an optional second `mut`
@@ -519,7 +541,7 @@ def bool parser_is_let_destructure(mut Parser p) throws:
     else:
         1
     if parser_token_at_offset_is(p, base, "LParen"):
-        return true
+        return not parser_paren_group_then_ident(p, base)
     # `let x, ...` - ident then comma
     if parser_token_at_offset_is(p, base, "Ident") and parser_token_at_offset_is(p, base + 1, "Comma"):
         return true
@@ -569,6 +591,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
                     if p0 == "LBracket" and p1 == "Ident": return true
                     if p0 == "LBrace" and p1 == "Ident": return true
                     if p0 == "Var" or p0 == "Mut": return true
+                    if p0 == "LParen" and parser_paren_group_then_ident(p, params_off): return true
                     return false
             if tuple_tok == "Eof" or tuple_depth < 0:
                 return false
@@ -607,6 +630,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
             # `mut`/`var` param prefix — an expression call's arguments can never start
             # with either token, so this alone proves it's a typed parameter list.
             if p0 == "Var" or p0 == "Mut": return true
+            if p0 == "LParen" and parser_paren_group_then_ident(p, params_off): return true
             return false
     # Pattern: [ ... ] [Question] Ident LParen → array return type
     if parser_token_at_offset_is(p, 0, "LBracket"):
@@ -635,6 +659,7 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
                         if p0 == "LBracket" and p1 == "Ident": return true
                         if p0 == "LBrace" and p1 == "Ident": return true
                         if p0 == "Var" or p0 == "Mut": return true
+                        if p0 == "LParen" and parser_paren_group_then_ident(p, after_lparen): return true
                         return false
             if tok == "Eof": return false
             i = i + 1

@@ -383,13 +383,14 @@ interp_test!(float32_local_var_math);
 interp_test!(float16_array_literal_width_and_cast);
 interp_test!(fixed_point_basic);
 interp_test!(fixed_point_globals);
+interp_test!(fixed_point_tuples);
 interp_test!(fixed_point_collections);
+interp_test!(typed_tuple_idents);
 interp_test!(fixed_point_struct_fn);
 interp_test!(fixed_point_members);
 interp_test!(fixed_point_policies);
-interp_test!(float32_array_literal_width_and_cast);
 interp_test!(fixed_point_math);
-interp_test!(fixed_point_tuples);
+interp_test!(float32_array_literal_width_and_cast);
 interp_test!(float64_array_literal_width_and_cast);
 interp_test!(optional_interp_numeric);
 // Generic METHOD call via turbofish (`obj.method<T>(...)`, V1 monomorphization
