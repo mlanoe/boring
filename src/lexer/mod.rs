@@ -306,6 +306,11 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
                         result.push(chars[i]);
                         i += 1;
                     }
+                } else if c == '{' && chars.get(i) == Some(&'{') {
+                    // `{{` is a literal brace, not a hole: copy it as a pair so an
+                    // unbalanced `"{{"` doesn't swallow the rest of the file.
+                    result.push('{');
+                    i += 1;
                 } else if c == '{' {
                     // Interpolation hole: copy until the matching `}` at depth 0.
                     let mut depth = 1usize;

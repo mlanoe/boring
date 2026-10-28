@@ -1,0 +1,7 @@
+# An unbalanced `{{` in a regular string must not swallow later `$"..."` literals.
+let a = "{{"
+let c = $"x"
+let d = $"""y ${c}"""
+print a
+print c
+print d
