@@ -5827,6 +5827,9 @@ impl Transpiler {
                 Some(_) => continue,
                 None => ("", a.as_str()),
             };
+        for a in args.iter_mut() {
+            if let Some(owned) = Self::own_borrow_into_guard(a) { *a = owned; }
+        }
             if core.starts_with('{') || !Self::LOCK_TOKENS.iter().any(|t| core.contains(t)) { continue; }
             *a = format!("{}{{ let __a = {}; __a }}", prefix, core);
         }
@@ -5834,6 +5837,24 @@ impl Transpiler {
 
     /// True when `ty` (transitively, through user structs' fields) holds a trait object
     /// (`Box<dyn Trait>`): such a type cannot be `Clone`/`PartialEq`, and is `Debug` only if
+    /// `&x.lock().unwrap().field` passed to a *locked-receiver* call (universal borrow inference makes
+    /// by-value struct/collection parameters `&T`): the reference points into a second guard of the
+    /// same non-reentrant lock the receiver already holds -> self-deadlock. Snapshot the place
+    /// instead (`&{ let __a = x.lock().unwrap().field.clone(); __a }`): the guard is dropped at the
+    /// inner `;`, and the temporary lives to the end of the call statement. Only plain field paths
+    /// (no calls besides the lock accessors) are rewritten.
+    fn own_borrow_into_guard(a: &str) -> Option<String> {
+        let rest = a.strip_prefix('&')?;
+        if rest.starts_with("mut ") || rest.starts_with('{') || rest.starts_with("Arc::clone(") || rest.starts_with("Rc::clone(") { return None; }
+        if !Self::LOCK_TOKENS.iter().any(|t| rest.contains(t)) { return None; }
+        let mut plain = rest.to_string();
+        for t in [".lock().unwrap()", ".read().unwrap()", ".write().unwrap()", ".borrow_mut()", ".borrow()"] {
+            plain = plain.replace(t, "");
+        }
+        if plain.contains('(') || plain.contains('[') || plain.contains(' ') { return None; }
+        Some(format!("&{{ let __a = {}.clone(); __a }}", rest))
+    }
+
     /// the trait requires it. `debug_only` asks the `Debug` question alone.
     pub(crate) fn type_holds_dyn(&self, ty: &Type, debug_only: bool, visiting: &mut Vec<String>) -> bool {
         match ty {

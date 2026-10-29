@@ -7352,7 +7352,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         assert!(code.contains("({ let __arg1 = &Holder { xs: v.clone() }; grow_with(&mut v, __arg1) })"),
             "free-function call must hoist the by-value argument, got:\n{code}");
-        assert!(code.contains("({ let __arg1 = Holder { xs: w.clone() }; b.grow_with(&mut w, __arg1) })"),
+        assert!(code.contains("({ let __arg1 = &Holder { xs: w.clone() }; b.grow_with(&mut w, __arg1) })"),
             "method call must hoist the by-value argument, got:\n{code}");
         // No overlap -> the call is left exactly as before.
         assert!(code.contains("other(&mut v, &w)"), "non-overlapping call must stay untouched, got:\n{code}");
@@ -7370,10 +7370,10 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         let src = "struct Holder:\n    pub [int] xs\n\nstruct Bag:\n    pub int n\n\n    def int grow_with(mut [int] a, Holder h):\n        a.push(9)\n        a.length + h.xs.length\n\nstruct Wrap:\n    mut Bag'actor inner = Bag(1)\n\n    def int via_self(mut [int] a):\n        self.inner.grow_with(a, Holder(a))\n\ndef main():\n    mut [int] v = [1]\n    var mut Bag'actor x = Bag(1)\n    print x.grow_with(v, Holder(v))\n    mut [int] w = [2]\n    var mut Bag'guard y = Bag(1)\n    print y.grow_with(w, Holder(w))\n    mut [int] u = [3]\n    var mut Bag'actor'observed z = Bag(1)\n    print z.grow_with(u, Holder(u))\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
         for (lock, v) in [("x.lock().unwrap()", "v"), ("y.write().unwrap()", "w"), ("z.value.lock().unwrap()", "u")] {
-            let want = format!("({{ let __arg1 = Holder {{ xs: {v}.clone() }}; {lock}.grow_with(&mut {v}, __arg1) }})");
+            let want = format!("({{ let __arg1 = &Holder {{ xs: {v}.clone() }}; {lock}.grow_with(&mut {v}, __arg1) }})");
             assert!(code.contains(&want), "lock-wrapper call must hoist the by-value argument ({want}), got:\n{code}");
         }
-        assert!(code.contains("({ let __arg1 = Holder { xs: a.clone() }; self.inner.lock().unwrap().grow_with(&mut *a, __arg1) })"),
+        assert!(code.contains("({ let __arg1 = &Holder { xs: a.clone() }; self.inner.lock().unwrap().grow_with(&mut *a, __arg1) })"),
             "`self.field'actor` call must hoist the by-value argument, got:\n{code}");
     }
 
@@ -7437,7 +7437,7 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
         ] {
             let code = transpile_src_with_config(src, TranspileConfig { threading, ..TranspileConfig::default() });
             for (i, field) in [(0, "log"), (1, "table")] {
-                let want = format!("let __arg{i} = {{ let __a = {tok}.{field}.clone(); __a }};");
+                let want = format!("let __arg{i} = &{{ let __a = {tok}.{field}.clone(); __a }};");
                 assert!(code.contains(&want), "by-value field read must clone ({want}), got:\n{code}");
             }
         }
@@ -7464,11 +7464,12 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
             "|v| v + x.lock().unwrap().hits",
             "7",
         ]);
-        // A reference into a guard is never hoisted into a `let` (it would dangle).
+        // A locked-receiver call must not borrow into a second guard of the same lock (self-deadlock):
+        // the place is snapshotted inside a guard-releasing block, then hoisted like any owned argument.
         let mut args = vec!["{ let __a = x.lock().unwrap().n; __a }".to_string(), "&y.lock().unwrap().log".to_string()];
         let prelude = Transpiler::hoist_lent_conflicts_locked(&mut args);
-        assert_eq!(prelude, "let __arg0 = { let __a = x.lock().unwrap().n; __a }; ");
-        assert_eq!(args, vec!["__arg0", "&y.lock().unwrap().log"]);
+        assert_eq!(prelude, "let __arg0 = { let __a = x.lock().unwrap().n; __a }; let __arg1 = &{ let __a = y.lock().unwrap().log.clone(); __a }; ");
+        assert_eq!(args, vec!["__arg0", "__arg1"]);
     }
 
     #[test]
