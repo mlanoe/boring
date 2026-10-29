@@ -5793,7 +5793,9 @@ impl Transpiler {
                 // used to compile by luck (`add(10, )`) when a nested `def` shadowed a global one
                 // whose signature has more parameters.
                 if let Some(d) = defaults.get(i).and_then(|d| d.clone()) {
-                    result.push(d);
+                    // A borrowed parameter (`&T`) takes the default by reference too.
+                    let borrowed = matches!(sig.get(i), Some(Type::Qualified(_, OwnerQual::Borrow)));
+                    result.push(if borrowed && !d.starts_with('&') { format!("&{}", d) } else { d });
                 }
             }
             i += 1;

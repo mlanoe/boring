@@ -2730,6 +2730,11 @@ impl Transpiler {
                     _ => self.emit_expr(value),
                 }
             }
+            // Empty `{}` for any other declared element type (user struct, qualified, ...):
+            // take the element type from the declaration instead of defaulting to `isize`.
+            Some(Type::Set(elem_ty)) if matches!(&value.kind, ExprKind::Set(e) if e.is_empty()) => {
+                format!("HashSet::<{}>::new()", self.emit_type(elem_ty))
+            }
             // T'borrow (e.g. Task& or MyStruct&): pass by reference.
             Some(Type::Qualified(_, OwnerQual::Borrow)) => {
                 let s = self.emit_expr(value);

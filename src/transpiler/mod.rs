@@ -5128,7 +5128,11 @@ impl Transpiler {
 
         let param_types: Vec<Type> = f.params.iter().filter_map(helpers::sig_param_type).collect();
         let defaults: Vec<Option<String>> = f.params.iter().map(|p| {
-            p.default.as_ref().map(|d| self.emit_expr_owned(d))
+            p.default.as_ref().map(|d| match (&p.ty, &d.kind) {
+                // Empty `{}` default: element type comes from the declared parameter type.
+                (Some(t @ Type::Set(_)), ExprKind::Set(e)) if e.is_empty() => self.emit_let_value(Some(t), d),
+                _ => self.emit_expr_owned(d),
+            })
         }).collect();
         // Register under both the plain name (for non-overloaded path) and the mangled name
         // (for overloaded dispatch, so emit_args_coerced can find the correct param types).

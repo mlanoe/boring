@@ -1,0 +1,27 @@
+struct Key:
+    var int id
+
+struct Holder:
+    var {int} ints = {}
+
+def int count({Key'shared} s = {}):
+    return s.len()
+
+def int countA([int] s = []):
+    return s.len()
+
+def int countD({string=int} s = {=}):
+    return s.len()
+
+def main():
+    mut h = Holder()
+    print h.ints.len()
+    let {Key'shared} localShared = {}
+    let {Key'owned} localOwned = {}
+    let {Key} localPlain = {}
+    print localShared.len()
+    print localOwned.len()
+    print localPlain.len()
+    print count()
+    print countA()
+    print countD()

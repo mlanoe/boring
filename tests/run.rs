@@ -649,6 +649,7 @@ error_test_exact!(error_immutable_let);
 // A lent `mut` struct/collection parameter cannot be stored in a member by bare name (`kept = p`,
 // `all.push(p)`): the interpreter aliased, the transpiled Rust silently cloned. `.clone()` is explicit.
 error_test!(error_mut_param_store);
+interp_test!(empty_set_default_struct_elem);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
 interp_test!(qualified_member_store);
