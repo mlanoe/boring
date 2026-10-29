@@ -4654,3 +4654,51 @@ kernel Histogram:
         }
     }
 }
+
+// The ping-pong swap `k.a, k.b = k.b, k.a` of two buffer fields used to emit
+// `(k.a.clone(), k.b.clone()) = (k.copy_b_to_host()..., ...)` (rustc E0070); it now
+// exchanges the device buffers (and the element counts of packed byte kinds) and rebuilds
+// the bind group. Runs against a real GPU adapter, like the tests above.
+#[test]
+fn ping_pong_swap_of_two_buffer_fields_exchanges_device_buffers() {
+    for (ty, packed) in [("uint", false), ("uint8", true)] {
+        let src = format!(r#"
+kernel Step:
+    mut [{ty}]'unified a
+    mut [{ty}]'unified b
+    init(mut [{ty}]'unified a0, mut [{ty}]'unified b0):
+        a = a0
+        b = b0
+    def ():
+        let i = .thread.x
+        a[i] = a[i] + 1
+        b[i] = b[i] * 2
+mut k = Step([{ty}(i + 1) for i in 0..<10], [{ty}(i + 1) for i in 0..<10])
+kernel:
+    k(block = 10)
+k.a, k.b = k.b, k.a
+kernel:
+    k(block = 10)
+print "{{k.a[1]}} {{k.b[1]}}"
+"#);
+        let name = format!("ping_pong_swap_{ty}");
+        let (_wgsl, _emulated, rs, _toml) = run_wgpu(&name, &src);
+        assert!(rs.contains("std::mem::swap(&mut k.a_buf, &mut k.b_buf); "), "{rs}");
+        assert_eq!(rs.contains("std::mem::swap(&mut k.a_len, &mut k.b_len);"), packed, "{rs}");
+        assert!(rs.contains("k.rebuild_bind_group();"), "{rs}");
+        assert!(!rs.contains("(k.a.clone(), k.b.clone())"), "{rs}");
+
+        let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("wgpu_codegen").join(&name).join("test_wgpu").join("Cargo.toml");
+        let run = common::SharedCargo::new("wgpu_codegen")
+            .args(["run", "--quiet", "--manifest-path"])
+            .arg(&manifest)
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "[{ty}] build/run failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+        // Element 1 starts at 2/2: 3/4 after step one; swapped 4/3; step two: 5/6 (no swap gives 4 8).
+        assert!(stdout.contains("5 6"), "[{ty}] expected `5 6`, got:\n{stdout}");
+    }
+}

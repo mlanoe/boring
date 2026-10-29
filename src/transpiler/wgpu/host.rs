@@ -2875,6 +2875,24 @@ fn is_packed_byte_field(inner_ty: &Type) -> bool {
     super::device::packed_byte_kind_of_ty(inner_ty).is_some()
 }
 
+/// Host code for the ping-pong swap `k.a, k.b = k.b, k.a` of two buffer fields of one
+/// kernel instance: exchanges the device buffer handles (and the element counts of packed
+/// byte kinds) and rebuilds the bind group. The `Vec` mirrors are unused placeholders, and
+/// `copy_<f>_to_host()` is an rvalue, so the generic tuple assignment cannot express this.
+/// `None` unless both fields are buffer fields of the same element type.
+pub(crate) fn kernel_field_swap(decl: &KernelDecl, kvar: &str, fa: &str, fb: &str) -> Option<String> {
+    let find = |n: &str| decl.fields.iter().find(|f| f.name == n && is_buffer_array_ty(&f.ty)
+        && matches!(f.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified));
+    let (a, b) = (find(fa)?, find(fb)?);
+    if array_inner(&a.ty) != array_inner(&b.ty) { return None; }
+    let mut out = format!("std::mem::swap(&mut {kvar}.{fa}_buf, &mut {kvar}.{fb}_buf); ");
+    if is_packed_byte_field(&array_inner(&a.ty)) {
+        out.push_str(&format!("std::mem::swap(&mut {kvar}.{fa}_len, &mut {kvar}.{fb}_len); "));
+    }
+    out.push_str(&format!("{kvar}.rebuild_bind_group();"));
+    Some(format!("{{ {out} }}"))
+}
+
 /// Rounds a byte-length Rust expression (a `usize`-typed source string) up to the next
 /// multiple of 4 and casts to `u64` — the buffer-size unit `wgpu::BufferDescriptor`
 /// wants. Needed only for packed-byte-kind fields (`is_packed_byte_field`): every other

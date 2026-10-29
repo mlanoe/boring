@@ -21,6 +21,7 @@ use crate::ast::{Program, Item, KernelDecl, KernelFieldDecl, Type, Expr, ExprKin
 
 mod device;
 mod host;
+pub(crate) use host::kernel_field_swap;
 mod unified;
 use unified::adapters as unified_adapters;
 

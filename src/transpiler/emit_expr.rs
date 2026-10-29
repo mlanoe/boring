@@ -3114,6 +3114,25 @@ impl Transpiler {
                 }
             }
         }
+        // wgpu host: the ping-pong swap `k.a, k.b = k.b, k.a` of two buffer fields exchanges the
+        // device buffers (the generic tuple assignment would assign to read-back rvalues).
+        if self.config.is_gpu_target && !self.config.is_simd_target && !self.kernel_decls.is_empty() {
+            if let (ExprKind::Tuple(lhs), ExprKind::Tuple(rhs)) = (&target.kind, &value.kind) {
+                if let ([l0, l1], [r0, r1]) = (lhs.as_slice(), rhs.as_slice()) {
+                    if let (ExprKind::Field(lo0, lf0), ExprKind::Field(lo1, lf1), ExprKind::Field(ro0, rf0), ExprKind::Field(ro1, rf1)) = (&l0.kind, &l1.kind, &r0.kind, &r1.kind) {
+                        if let (ExprKind::Var(v0), ExprKind::Var(v1), ExprKind::Var(w0), ExprKind::Var(w1)) = (&lo0.kind, &lo1.kind, &ro0.kind, &ro1.kind) {
+                            if v0 == v1 && v0 == w0 && v0 == w1 && lf0 == rf1 && lf1 == rf0 && lf0 != lf1 {
+                                if let Some(decl) = self.kernel_vars.get(v0.as_str()).and_then(|k| self.kernel_decls.get(k)) {
+                                    if let Some(code) = crate::transpiler::wgpu::kernel_field_swap(decl, v0, lf0, lf1) {
+                                        return code;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // CPU/SIMD: `k.colors = <host array>` re-uploads the whole array through the
         // kernel's own `copy_<field>_to_device` (element-converted to the field's width),
         // so a render loop can replace an array of any length between frames.
