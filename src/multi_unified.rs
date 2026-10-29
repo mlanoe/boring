@@ -244,6 +244,11 @@ struct State {
     initialized: Mutex<HashMap<&'static str, bool>>,
     last: Mutex<HashMap<String, &'static str>>,
     instances: Mutex<HashMap<u64, Instance>>,
+    /// Backends whose launch failed with a device error: no kernel is sent to them any more.
+    failed: Mutex<Vec<&'static str>>,
+    /// `BORING_FAULT=<backend>:<kernel>:reject|fail`: make that backend refuse (`reject`) or
+    /// fail with a device error on (`fail`) that kernel. For testing the fallbacks.
+    fault: Option<(String, String, bool)>,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -290,6 +295,12 @@ pub fn install(order: Vec<Routes>, forced: bool, infos: Vec<BackendInfo>, on_use
         initialized: Mutex::new(HashMap::new()),
         last: Mutex::new(HashMap::new()),
         instances: Mutex::new(HashMap::new()),
+        failed: Mutex::new(Vec::new()),
+        fault: std::env::var("BORING_FAULT").ok().and_then(|v| {
+            let mut parts = v.split(':');
+            let (backend, kernel, mode) = (parts.next()?, parts.next()?, parts.next()?);
+            Some((backend.to_string(), kernel.to_string(), mode == "fail"))
+        }),
     });
 }
 
@@ -334,7 +345,7 @@ pub fn dispatch(spec: &Spec, id: u64, args: &mut [Arg<'_>], grid: [u32; 3], bloc
                 }
             }
             let Some(route) = routes.kernels.iter().find(|r| r.name == kernel) else { continue };
-            if !state.ensure_init(routes) {
+            if state.has_failed(routes.name) || !state.ensure_init(routes) {
                 continue;
             }
             match state.launch_on(routes, route, spec, id, args, grid, block) {
@@ -377,7 +388,11 @@ pub fn fetch(id: u64, index: usize, out: &mut Arg<'_>) -> bool {
     }
     let Some(read) = state.read_of(inst.backend, inst.kernel) else { return false };
     DOWNLOADS.fetch_add(1, Ordering::Relaxed);
-    read(id, index, out).is_ok()
+    let read_back = read(id, index, out);
+    if let Err(e) = &read_back {
+        eprintln!("boring: buffer {index} could not be read back from its device, its data is lost: {e}");
+    }
+    read_back.is_ok()
 }
 
 /// The CPU host reads elements `start..start + len` of buffer `index` of instance `id`: when the
@@ -537,6 +552,10 @@ impl State {
         })
     }
 
+    fn has_failed(&self, backend: &str) -> bool {
+        self.failed.lock().unwrap().contains(&backend)
+    }
+
     fn route_of(&self, backend: &str, kernel: &str) -> Option<&KernelRoute> {
         self.order.iter().find(|r| r.name == backend)?.kernels.iter().find(|k| k.name == kernel)
     }
@@ -598,7 +617,27 @@ impl State {
             }
         }
         let upload: Vec<bool> = spec.args.iter().enumerate().map(|(i, kind)| *kind != Kind::Scalar && !inst.device_valid[i]).collect();
-        (route.run)(id, args, &upload, grid, block)?;
+        let ran = match &self.fault {
+            Some((backend, kernel, fails)) if backend == routes.name && kernel == spec.name => {
+                if *fails {
+                    Err("injected device error".into())
+                } else {
+                    Err(Box::new(Unsupported("injected refusal".into())) as BoxError)
+                }
+            }
+            _ => (route.run)(id, args, &upload, grid, block),
+        };
+        if let Err(e) = ran {
+            if e.is::<Unsupported>() {
+                return Err(e);
+            }
+            // A device error (lost context, out of memory, failed launch): this backend is
+            // given up, and the launch goes to the next one with the data the CPU or this
+            // device still holds. Data the device cannot give back is reported when it is read.
+            self.failed.lock().unwrap().push(routes.name);
+            eprintln!("boring: {} failed on kernel {}: {e}; falling back to another backend", routes.name, spec.name);
+            return Err(Box::new(Unsupported(format!("backend failed: {e}"))));
+        }
         UPLOADS.fetch_add(upload.iter().filter(|u| **u).count() as u64, Ordering::Relaxed);
         for (i, kind) in spec.args.iter().enumerate() {
             match kind {
@@ -641,6 +680,9 @@ mod tests {
         let factor = args[0].as_f32();
         if backend == "a" && factor == 99.0 {
             return Err(Box::new(Unsupported("factor 99".into())));
+        }
+        if backend == "a" && factor == 77.0 {
+            return Err("device lost".into());
         }
         for i in 1..3 {
             if upload[i] {
@@ -819,6 +861,20 @@ mod tests {
         assert!(!swap(id, 2, 424242, 2), "an unknown instance is not resident");
         assert!(!copy(424242, 2, id, 2));
         release(other);
+
+        // A device error on backend "a" (not a refusal): the data it held comes back, the launch
+        // runs on "b", and "a" is not tried again.
+        let lost = new_instance();
+        let (mut bias3, mut data3) = (vec![1.0f32], vec![2.0f32, 3.0]);
+        let cpu_first = launch(lost, 1.0, &mut bias3, &mut data3, Hints { prefer: None, only: Some(Class::Cpu) });
+        assert!(cpu_first.is_none());
+        assert!(matches!(launch(lost, 77.0, &mut bias3, &mut data3, Hints::default()), Some(Ok(()))));
+        assert_eq!(last_choice("Affine"), Some("b"));
+        assert_eq!(with_device(|d| d[&("b", lost, 2)].clone()), vec![155.0, 232.0]);
+        assert!(with_device(|d| d.keys().all(|(b, i, _)| !(*b == "a" && *i == lost))));
+        assert!(matches!(launch(lost, 99.0, &mut bias3, &mut data3, Hints::default()), Some(Ok(()))));
+        assert_eq!(last_choice("Affine"), Some("b"), "a failed: it is skipped, not asked again");
+        release(lost);
 
         // Dropping the instance frees the device side.
         release(id);

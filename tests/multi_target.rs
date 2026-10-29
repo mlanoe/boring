@@ -1037,20 +1037,24 @@ fn shared_memory_and_atomics_are_routed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A kernel a backend cannot compile is run elsewhere, not reported as the program's error.
+/// A kernel a backend refuses is run elsewhere, not reported as the program's error; so is one
+/// whose launch fails with a device error, and that backend is given up. `BORING_FAULT` injects
+/// the refusal or the error on wgpu (no portable kernel is rejected by a real backend any more).
 #[test]
 fn a_kernel_a_backend_rejects_runs_elsewhere() {
     let dir = project("rejected_kernel");
-    // `int32` atomics are rejected by wgpu's validation (a non-atomic buffer declaration).
-    std::fs::write(source(&dir), ATOMIC_HISTOGRAM.replace("[int]", "[int32]").replace("[i * 3 for", "[int32(i * 3) for").replace("[0, 0, 0, 0]", "[int32(0), int32(0), int32(0), int32(0)]")).unwrap();
+    std::fs::write(source(&dir), ATOMIC_HISTOGRAM).unwrap();
     let out = build(&dir, "wgpu,simd");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let cache = dir.join("cache");
     let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
     if listed.contains("wgpu: available") {
-        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd")]);
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd"), ("BORING_FAULT", "wgpu:Histogram:reject")]);
         assert_eq!(stdout.trim(), "counts 64 64 64 64", "{stderr}");
         assert!(stderr.contains("wgpu cannot run kernel Histogram") && stderr.contains("kernel Histogram -> cpu"), "{stderr}");
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd"), ("BORING_FAULT", "wgpu:Histogram:fail")]);
+        assert_eq!(stdout.trim(), "counts 64 64 64 64", "{stderr}");
+        assert!(stderr.contains("wgpu failed on kernel Histogram") && stderr.contains("falling back") && stderr.contains("kernel Histogram -> cpu"), "{stderr}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -132,6 +132,11 @@ with another block size goes elsewhere. A backend that cannot compile a kernel (
 next backend, or the CPU, runs it (`BORING_BACKEND_VERBOSE=1` says why). A backend compiles its
 kernels together, so one kernel it rejects takes the others of the program with it.
 
+A device error during a launch (a lost context, out of memory, a failed launch) is not fatal
+either: the backend is given up for the rest of the run (`boring: <backend> failed on kernel <K>:
+...` on stderr), the instance's data comes back from it, and the launch goes to the next backend
+or the CPU. If the device cannot give the data back, the read reports it and the data is lost.
+
 ### Programs with a `Screen`
 
 The `Screen` lives on the CPU host, which presents its own copy of the pixels. A `'surface`
@@ -201,6 +206,7 @@ it. Run with `BORING_BACKEND_VERBOSE=1` to see which scores are priors.
 | `BORING_BENCH=off` | measure nothing: rank by the embedded device table and the load |
 | `BORING_BENCH=force` | measure again, ignoring the cache |
 | `BORING_BACKEND_VERBOSE=1` | print the ranking and where each kernel runs |
+| `BORING_FAULT=backend:Kernel:reject\|fail` | testing: make a backend refuse, or fail with a device error on, a kernel |
 | `BORING_GPU_MIN_THREADS=n` | launches under `n` threads stay on the CPU (default 16384) |
 | `BORING_CACHE_DIR=dir` | where scores and leases are kept |
 
