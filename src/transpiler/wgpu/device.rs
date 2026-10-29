@@ -1184,6 +1184,44 @@ impl DeviceEmitter {
     /// anywhere but the entire RHS of a `let`/assignment must be hoisted out
     /// into its own preceding statement first. Only `Emulated` mode calls this;
     /// mirrors exactly the shapes `collect_shuffle_types_expr` scans for.
+    /// Best-effort: true when `e` is statically an `i32` (a thread/block/dim builtin,
+    /// an integer-typed tracked local, or arithmetic over those).
+    fn wgsl_is_int_expr(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Field(obj, f) => {
+                matches!(&obj.kind, ExprKind::Field(o2, n) if matches!(&o2.kind, ExprKind::Var(g) if g == "gpu")
+                    && matches!(n.as_str(), "thread" | "block" | "block_dim" | "blockDim" | "grid_dim" | "gridDim"))
+                    && matches!(f.as_str(), "x" | "y" | "z")
+            }
+            ExprKind::Var(n) => self.locals.get(n).is_some_and(|t| wgsl_scalar(t) == "i32"),
+            ExprKind::BinOp(op, l, r) => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                && self.wgsl_is_int_expr(l) && self.wgsl_is_int_expr(r),
+            ExprKind::Cast(_, ty) => wgsl_scalar(ty) == "i32",
+            _ => false,
+        }
+    }
+
+    /// Best-effort: true when `e` is statically an `f32` (a float literal/cast/local, an
+    /// element of a float array field, or arithmetic over those).
+    fn wgsl_is_float_expr(&self, e: &Expr) -> bool {
+        let is_f = |t: &Type| wgsl_scalar(t) == "f32";
+        match &e.kind {
+            ExprKind::Float(_) => true,
+            ExprKind::Cast(_, ty) => is_f(ty),
+            ExprKind::Var(n) => self.locals.get(n).is_some_and(|t| is_f(t) || matches!(t, Type::Float64)),
+            ExprKind::Index(arr, _) => match &arr.kind {
+                ExprKind::Var(n) => self.current_fields.iter().find(|f| f.name == *n).is_some_and(|f| match &f.ty {
+                    Type::Array(inner) | Type::ArrayN(inner, _) => is_f(inner),
+                    ty => ty.as_labeled_array().is_some_and(|(inner, _)| is_f(inner)),
+                }),
+                _ => false,
+            },
+            ExprKind::BinOp(op, l, r) => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+                && (self.wgsl_is_float_expr(l) || self.wgsl_is_float_expr(r)),
+            _ => false,
+        }
+    }
+
     fn hoist_shuffles(&mut self, e: &Expr) -> Expr {
         if let ExprKind::MethodCall(obj, method, args) = &e.kind {
             if is_gpu_warp_receiver(obj) && is_gpu_warp_shuffle(method) && !args.is_empty() {
@@ -1227,6 +1265,7 @@ impl DeviceEmitter {
                     Some(ExprKind::Int(_)) => Some(Type::Int),
                     Some(ExprKind::Float(_)) => Some(Type::Float64),
                     Some(ExprKind::Cast(_, ty)) => Some(ty.clone()),
+                    Some(_) if s.value.as_ref().is_some_and(|v| self.wgsl_is_int_expr(v)) => Some(Type::Int32),
                     _ => None,
                 });
                 if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
@@ -1820,8 +1859,19 @@ impl DeviceEmitter {
                         }
                     }
                 }
-                let l = self.expr(lhs);
-                let r = self.expr(rhs);
+                let mut l = self.expr(lhs);
+                let mut r = self.expr(rhs);
+                // WGSL has no implicit i32 -> f32 conversion (Metal/CUDA/simd do): an
+                // arithmetic/comparison op mixing a known-`i32` operand (a thread/block
+                // builtin, or a local bound from one) with a known-`f32` one is rejected
+                // by naga, so convert the integer side.
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq | BinOp::Eq | BinOp::NotEq) {
+                    if self.wgsl_is_int_expr(lhs) && self.wgsl_is_float_expr(rhs) {
+                        l = format!("f32({l})");
+                    } else if self.wgsl_is_float_expr(lhs) && self.wgsl_is_int_expr(rhs) {
+                        r = format!("f32({r})");
+                    }
+                }
                 // WGSL's `<<`/`>>` require the shift-amount (RHS) operand to be `u32`
                 // specifically, with no implicit i32->u32 conversion. Boring's `int`
                 // (and every other signed integer type) transpiles to `i32` on this

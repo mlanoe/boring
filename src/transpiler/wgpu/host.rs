@@ -745,6 +745,19 @@ impl<'a> HostEmitter<'a> {
 
     fn emit_kernel_copy_accessors(&mut self, decl: &KernelDecl) {
         for f in &decl.fields {
+            // A `'const` fixed-array field lives in the params uniform (a host `[T; N]`
+            // mirror written at every dispatch), not in a storage buffer. Init-literal
+            // fields (`w = [1.0, 2.0]`) reach it through the same `copy_{field}_to_device`
+            // call `emit_kernel::kernel_output_fill_map` emits for every backend.
+            if matches!(f.qual, GpuQual::Const) {
+                if let Type::ArrayN(inner, n) = &f.ty {
+                    let host_ty = host_scalar_type(inner);
+                    self.line(&format!("    fn copy_{}_to_device(&mut self, data: &[{}]) {{", f.name, host_ty));
+                    self.line(&format!("        self.{}[..data.len().min({})].copy_from_slice(&data[..data.len().min({})]);", f.name, n, n));
+                    self.line("    }");
+                }
+                continue;
+            }
             // 'global fields are host-supplied inputs; 'unified fields are typically
             // kernel-written outputs (e.g. StftPower's `power`) but are just as much a
             // Vec<T> mirror on the host struct (see the field-emission loop above) and

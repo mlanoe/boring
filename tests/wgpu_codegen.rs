@@ -80,6 +80,30 @@ kernel LocalField:
 }
 
 #[test]
+fn const_fixed_array_filled_by_init_literal_uses_params_and_promotes_thread_index() {
+    let (wgsl, rs) = wgpu_codegen("const_array_init_literal", r#"
+mut [float32]'kernel'unified out = [0.0 for ..<8]
+kernel FA:
+    let [float32, 4]'const w
+    mut [float32]'unified out
+    init(mut [float32]'unified o):
+        w = [1.0, 2.0, 3.0, 4.0]
+        out = o
+    def ():
+        let i = .thread.x
+        out[i] = w[0] + w[3] + i
+mut fa = FA(out)
+kernel:
+    fa(block = 8)
+print "{fa.out[0]} {fa.out[7]}"
+"#);
+    // The init literal reaches the params-uniform host mirror (was E0599: no `copy_w_to_device`).
+    assert!(rs.contains("fn copy_w_to_device(&mut self, data: &[f32])"), "{rs}");
+    // `float32 + int` must convert the integer side: WGSL has no implicit i32 -> f32.
+    assert!(wgsl.contains("+ f32(i))"), "{wgsl}");
+}
+
+#[test]
 fn unsupported_fixed_array_local_initializer_is_a_build_error() {
     let bin = env!("CARGO_BIN_EXE_boring");
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
