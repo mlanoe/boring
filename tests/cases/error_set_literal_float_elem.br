@@ -1,0 +1,6 @@
+struct Key:
+    var float x
+
+def main():
+    mut s = {Key(1.0)}
+    print s.len()

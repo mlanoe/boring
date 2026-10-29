@@ -1,0 +1,8 @@
+struct Key:
+    var int id
+
+def main():
+    mut s = {Key(1), Key(2)}
+    let d = {Key(3) = 4}
+    print s.len()
+    print d.len()

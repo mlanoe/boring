@@ -1,0 +1,6 @@
+struct Key:
+    var float x
+
+def main():
+    let d = {Key(1.0) = 2}
+    print d.len()

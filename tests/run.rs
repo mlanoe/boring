@@ -653,6 +653,10 @@ error_test!(error_mut_param_store);
 error_test!(error_struct_set_float_elem);
 error_test!(error_set_actor_elem);
 error_test!(error_enum_set_float_elem);
+// Same check for an unannotated set/dict literal whose element/key is a struct constructor call.
+error_test!(error_set_literal_float_elem);
+error_test!(error_dict_literal_float_key);
+interp_test!(ok_set_literal_hashable_ctor);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
 interp_test!(qualified_member_store);

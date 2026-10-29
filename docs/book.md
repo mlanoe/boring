@@ -1115,7 +1115,7 @@ let empty_set: HashSet<isize> = HashSet::new();
 
 A user struct can be a set element or a dict key (`{Key}`, `{Key = V}`, `{Key'shared}`, `{Key'owned}`). The generated Rust struct automatically derives `Eq, Hash` (next to `PartialEq`) whenever every field is hashable: integers, `bool`, `string`, enums whose variant payloads are all hashable (unit or not), arrays/optionals/tuples of those, `'shared`/`'owned` fields of those, and other structs that qualify. Not hashable: `float` (Rust floats are not `Eq`/`Hash`), sets, dicts, `'actor`/`'guard` handles, generic enums, external types, and structs with a custom `eq` operator; such a struct simply gets no `Hash`. An explicit `@derive(...)` is taken at its word and must list `Eq, Hash` itself.
 
-The checker rejects a declared `{T}` / `{K = V}` type whose element/key is a `float`, an `'actor`/`'guard` handle, or a struct/enum holding one (e.g. "this type cannot be a set element: field `x` of `Key`: a float is not `Eq`/`Hash`"). A set/dict literal without a type annotation isn't checked and fails in rustc instead.
+The checker rejects a declared `{T}` / `{K = V}` type whose element/key is a `float`, an `'actor`/`'guard` handle, or a struct/enum holding one (e.g. "this type cannot be a set element: field `x` of `Key`: a float is not `Eq`/`Hash`"). A set/dict literal without a type annotation is checked only when the element/key is a direct struct constructor call (`{Key(1.0)}`, `{Key(1.0) = 2}`); any other unannotated element expression isn't checked and fails in rustc instead.
 
 #### Set methods
 

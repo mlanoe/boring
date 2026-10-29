@@ -1127,6 +1127,20 @@ impl Checker {
         }
     }
 
+    /// The unannotated counterpart of `check_hashable_elements`: an element/key of a set or dict
+    /// *literal* (`{Key(1.0)}`, `{Key(1.0) = 2}`) has no declared type to inspect, so it is only
+    /// checked when it is a direct constructor call of a known struct, the one shape whose type is
+    /// positively known here (same rule as the `let` constructor-type inference above) — anything
+    /// else is left alone rather than risk a false positive.
+    fn check_hashable_literal_elem(&mut self, e: &Expr, what: &str) {
+        let ExprKind::Call(callee, _) = &e.kind else { return };
+        let ExprKind::Var(n) = &callee.kind else { return };
+        if !self.struct_field_types.contains_key(n.as_str()) { return; }
+        if let Some(why) = self.unhashable_reason(&Type::Named(n.clone()), &mut vec![]) {
+            self.error(format!("this type cannot be a {what}: {why} (sets and dicts are hash-based and need `Eq` + `Hash`)"), e.line, e.col);
+        }
+    }
+
     // ── Top-level ─────────────────────────────────────────────────────────────
 
     fn check_program(&mut self, program: &Program) {
@@ -2652,9 +2666,17 @@ impl Checker {
             }
             ExprKind::Tuple(elems) => { for e in elems { self.check_expr(e); } }
             ExprKind::Dict(pairs)  => {
-                for (k, v) in pairs { self.check_expr(k); self.check_expr(v); }
+                for (k, v) in pairs {
+                    self.check_hashable_literal_elem(k, "dict key");
+                    self.check_expr(k); self.check_expr(v);
+                }
             }
-            ExprKind::Set(elems)   => { for e in elems { self.check_expr(e); } }
+            ExprKind::Set(elems)   => {
+                for e in elems {
+                    self.check_hashable_literal_elem(e, "set element");
+                    self.check_expr(e);
+                }
+            }
             ExprKind::Range { start, end, .. } => { self.check_expr(start); self.check_expr(end); }
             ExprKind::SliceRange { start, end, .. } => {
                 if let Some(s) = start { self.check_expr(s); }
