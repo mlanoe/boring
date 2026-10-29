@@ -1564,10 +1564,11 @@ impl DeviceEmitter {
     /// backend's own `wgsl_scalar` narrows the corresponding *scalar* field to
     /// elsewhere in this file, so arithmetic mixing a packed-buffer read with an
     /// ordinary scalar of the same declared Boring type stays well-typed in WGSL.
-    fn packed_byte_read(arr_name: &str, idx_s: &str, kind: PackedByteKind) -> String {
+    fn packed_byte_read(arr_name: &str, idx_s: &str, kind: PackedByteKind, atomic: bool) -> String {
         let per_word = kind.elems_per_word();
         let bits = kind.bits();
         let word = format!("{}[u32({}) / {}u]", arr_name, idx_s, per_word);
+        let word = if atomic { format!("atomicLoad(&{})", word) } else { word };
         let offset = format!("((u32({}) % {}u) * {}u)", idx_s, per_word, bits);
         if kind.signed() {
             format!("extractBits(bitcast<i32>({}), {}, {}u)", word, offset, bits)
@@ -1585,16 +1586,41 @@ impl DeviceEmitter {
     /// bit-preserving reinterpretation per the WGSL spec (not a saturating/wrapping
     /// numeric conversion), so a negative `i32` input (the `I8`/`I16` case) still
     /// masks down to the correct unsigned bit pattern.
-    fn packed_byte_store_stmt(arr_name: &str, idx_s: &str, val_s: &str, kind: PackedByteKind) -> String {
+    ///
+    /// A writable packed buffer is declared `array<atomic<u32>>` (see
+    /// `packed_field_is_atomic`) and the store becomes an `atomicAnd` (clear the
+    /// element's bits) + `atomicOr` (set the new bits) pair: threads writing
+    /// *neighbouring* elements of one word touch disjoint bits, so a plain
+    /// read-modify-write of the whole word would lose updates but the two atomics
+    /// cannot. The pair is not atomic as a whole, which is fine because only the
+    /// element's owner thread writes those bits.
+    fn packed_byte_store_stmt(arr_name: &str, idx_s: &str, val_s: &str, kind: PackedByteKind, atomic: bool) -> String {
         let per_word = kind.elems_per_word();
         let bits = kind.bits();
         let mask: u32 = if bits == 8 { 0xFF } else { 0xFFFF };
         let word_ref = format!("{}[u32({}) / {}u]", arr_name, idx_s, per_word);
         let offset = format!("((u32({}) % {}u) * {}u)", idx_s, per_word, bits);
+        if atomic {
+            // Index and value are bound first: the RHS usually re-reads this very word
+            // (`a[i] = a[i] + 1`), which must happen before `atomicAnd` clears the bits.
+            let word = format!("{}[bp_pi / {}u]", arr_name, per_word);
+            let offset = format!("((bp_pi % {}u) * {}u)", per_word, bits);
+            return format!(
+                "{{ let bp_pi = u32({idx}); let bp_pv = u32({val}) & {mask:#x}u; atomicAnd(&{word}, ~({mask:#x}u << {offset})); atomicOr(&{word}, (bp_pv << {offset})); }}",
+                idx = idx_s, val = val_s, word = word, offset = offset, mask = mask
+            );
+        }
         format!(
             "{word} = (({word} & ~({mask:#x}u << {offset})) | ((u32({val}) & {mask:#x}u) << {offset}));",
             word = word_ref, offset = offset, val = val_s, mask = mask
         )
+    }
+
+    /// Is the packed buffer field `name` declared `array<atomic<u32>>`? True for every
+    /// packed field the kernel may write (anything but a `let` binding), matching
+    /// `wgsl_buffer_type`; read-only (`let`) ones stay a plain `array<u32>`.
+    fn packed_field_is_atomic(&self, name: &str) -> bool {
+        self.current_fields.iter().find(|f| f.name == *name).is_some_and(packed_buffer_is_atomic)
     }
 
     /// `arr[i] = v` (or the RHS of a desugared `arr[i] OP= v`, which reaches here as an
@@ -1613,7 +1639,8 @@ impl DeviceEmitter {
         let idx_s = self.expr(idx);
         let val_s = self.expr(rhs);
         let arr_name = self.current_buffer_renames.get(name).cloned().unwrap_or_else(|| name.clone());
-        Some(Self::packed_byte_store_stmt(&arr_name, &idx_s, &val_s, kind))
+        let atomic = self.packed_field_is_atomic(name);
+        Some(Self::packed_byte_store_stmt(&arr_name, &idx_s, &val_s, kind, atomic))
     }
 
     /// Detect `arr[i].min/max/swap/cas(...)` where `arr` is an
@@ -1941,7 +1968,8 @@ impl DeviceEmitter {
                     if let Some(kind) = self.packed_field_kind(name) {
                         let arr_name = self.current_buffer_renames.get(name).cloned().unwrap_or_else(|| name.clone());
                         let idx_s = self.expr(idx);
-                        return Self::packed_byte_read(&arr_name, &idx_s, kind);
+                        let atomic = self.packed_field_is_atomic(name);
+                        return Self::packed_byte_read(&arr_name, &idx_s, kind, atomic);
                     }
                 }
                 format!("{}[u32({})]", self.expr(arr), self.expr(idx))
@@ -2306,6 +2334,15 @@ fn is_32bit_int_spelling(ty: &Type) -> bool {
     }
 }
 
+/// A packed `uint8`/`int8`/`uint16`/`int16` buffer the kernel may write (not a `let`
+/// binding, and not an `'actor` buffer, which takes the atomic-scalar path instead).
+fn packed_buffer_is_atomic(f: &KernelFieldDecl) -> bool {
+    !matches!(f.binding, FieldBinding::Let)
+        && !matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified)
+        && is_buffer_field(f)
+        && buffer_field_elem_ty(f).and_then(packed_byte_kind_of_ty).is_some()
+}
+
 /// Returns the WGSL storage access modifier and array type for a buffer field.
 fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     let access = match f.qual {
@@ -2329,7 +2366,9 @@ fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
                 // `packed_byte_read`/`try_packed_byte_assign` instead of a plain
                 // WGSL index, so the declared type here never needs to (and cannot)
                 // reflect the narrower logical width.
-                "u32".to_string()
+                // A writable one is `atomic<u32>` so neighbouring elements of one word
+                // can be written by different threads (`packed_byte_store_stmt`).
+                if packed_buffer_is_atomic(f) { "atomic<u32>".to_string() } else { "u32".to_string() }
             } else {
                 wgsl_scalar(inner)
             }

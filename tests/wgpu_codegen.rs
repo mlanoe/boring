@@ -3519,6 +3519,54 @@ for i in 0..<2:
     assert!(stdout.contains("out_header[1] = 25620"), "expected out_header[1] = 20 + 100*256 = 25620, got:\n{stdout}");
 }
 
+/// Threads writing neighbouring elements of one packed `uint8`/`int16` word used to lose
+/// updates: the store was a plain read-modify-write of the whole `array<u32>` word. A
+/// writable packed buffer is now `array<atomic<u32>>` with an `atomicAnd`/`atomicOr` store
+/// and `atomicLoad` reads; a `let` (read-only) one stays a plain `array<u32>`.
+#[test]
+fn wgpu_packed_byte_writes_to_one_word_are_atomic() {
+    let test_name = "packed_byte_atomic_writes";
+    let src = r#"
+kernel Bytes:
+    mut [uint8]'unified a
+    mut [int16]'unified s
+    let [uint8]'global ro
+    init(mut [uint8]'unified a0, mut [int16]'unified s0, [uint8] r):
+        a = a0
+        s = s0
+        ro = r
+    def ():
+        let i = .thread.x
+        a[i] = a[i] + ro[i]
+        s[i] = s[i] - 1
+mut k = Bytes([uint8(i) for i in 0..<10], [int16(i) for i in 0..<10], [uint8(1) for i in 0..<10])
+kernel:
+    k(block = 10)
+print "a {k.a[0]} {k.a[3]} {k.a[9]}"
+print "s {k.s[0]} {k.s[3]} {k.s[9]}"
+"#;
+    let (wgsl, _emulated, _rs, _toml) = run_wgpu(test_name, src);
+    assert!(wgsl.contains("array<atomic<u32>>"), "writable packed buffers must be atomic:\n{wgsl}");
+    assert!(wgsl.contains("atomicAnd(") && wgsl.contains("atomicOr(") && wgsl.contains("atomicLoad("),
+        "packed stores must be atomicAnd/atomicOr pairs:\n{wgsl}");
+    assert!(wgsl.contains(": array<u32>;"), "the `let` packed buffer stays a plain array<u32>:\n{wgsl}");
+
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join(test_name);
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = common::SharedCargo::new("wgpu_codegen")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "run failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(stdout.contains("a 1 4 10"), "lost update on a packed uint8 word:\n{stdout}");
+    assert!(stdout.contains("s -1 2 8"), "lost update on a packed int16 word:\n{stdout}");
+}
+
 /// `request_device` used to hardcode `required_limits: wgpu::Limits::default()`
 /// (via `..Default::default()`, no `required_limits` field at all) -- wgpu's
 /// conservative, portable-across-everything default, capping every buffer at
