@@ -943,6 +943,63 @@ fn packed_buffers_stay_on_the_device() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const DEVICE_COPY: &str = r#"
+kernel Add:
+    mut [float32]'unified a
+    mut [float32]'unified b
+
+    init(mut [float32]'unified a0, mut [float32]'unified b0):
+        a = a0
+        b = b0
+
+    def ():
+        let i = .thread.x
+        a[i] = a[i] + 1.0
+        b[i] = b[i] * 2.0
+
+mut k = Add([float32(i) for i in 0..<10], [float32(i) for i in 0..<10])
+mut k2 = Add([float32(7) for i in 0..<10], [float32(8) for i in 0..<10])
+kernel:
+    k(block = 10)
+kernel:
+    k2(block = 10)
+k2.a = k.a
+kernel:
+    k2(block = 10)
+print "ka {k.a[3]} {k.a[9]}"
+print "k2a {k2.a[3]} {k2.a[9]}"
+"#;
+
+/// The kernel-to-kernel copy and the single-element reads of a ROCm buffer stay on the device
+/// (HIP `hipMemcpyDtoD` and a ranged `hipMemcpyDtoH`). Runs only where a ROCm device exists: the
+/// adapters were written without one and are otherwise only type-checked.
+#[test]
+fn rocm_copies_and_reads_ranges_on_the_device() {
+    let dir = project("rocm_device_copy");
+    std::fs::write(source(&dir), DEVICE_COPY).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert_eq!(cpu.trim(), "ka 4 10\nk2a 5 11");
+    // The ROCm crate needs `hipcc` to build at all.
+    if std::process::Command::new("hipcc").arg("--version").output().is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let out = build(&dir, "rocm,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("rocm: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "rocm,simd"), ("BORING_BACKEND_VERBOSE", "1")]);
+        assert_eq!(stdout, cpu, "{stderr}");
+        assert!(stderr.contains("kernel Add -> rocm"), "{stderr}");
+        // Two instances of two buffers each go up once; the copy adds no upload.
+        assert!(stderr.contains("buffer transfers: 4 up"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SCREEN_LIFE: &str = r#"
 let width = 64
 let height = 64

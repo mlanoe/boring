@@ -410,81 +410,82 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 "
     ));
     s.push_str(&swap_adapter(name, fields, &|f| !is_const(f), &|obj, field| format!("{obj}.{field}"), &|_, _, _, _| String::new(), &|_| String::new()));
-    match flavor {
-        StreamFlavor::Cuda => {
-            // `CudaSlice::clone` is a device-to-device copy.
-            s.push_str(&format!(
-                "pub fn __boring_unified_export_{name}(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{
+    // Device-to-device copy and ranged read. CUDA: `CudaSlice::clone` and a device view; HIP:
+    // `DeviceBuffer::try_clone` (hipMemcpyDtoD) and a ranged hipMemcpyDtoH.
+    let (slice_ty, copy) = match flavor {
+        StreamFlavor::Cuda => ("CudaSlice", "(%).clone()"),
+        StreamFlavor::Rocm => ("DeviceBuffer", "{ k.__stream.synchronize()?; (%).try_clone()? }"),
+    };
+    s.push_str(&format!(
+        "pub fn __boring_unified_export_{name}(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{
     let store = __BORING_STORE_{name}.lock().unwrap();
     let Some(resident) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
     let k = &resident.0;
     match index {{
 "
-            ));
-            for (i, f) in fields.iter().enumerate() {
-                if f.array && !is_const(f) {
-                    let deref = if matches!(decl_of(f).binding, FieldBinding::Let) { "(*" } else { "(" };
-                    s.push_str(&format!("        {i} => Ok(Box::new({deref}k.{}).clone())),\n", f.name));
-                }
-            }
-            s.push_str("        _ => Err(\"not a buffer\".into()),\n    }\n}\n");
-            s.push_str(&format!(
-                "pub fn __boring_unified_import_{name}(id: u64, index: usize, handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array && !is_const(f) {
+            let deref = if matches!(decl_of(f).binding, FieldBinding::Let) { format!("(*k.{})", f.name) } else { format!("(k.{})", f.name) };
+            s.push_str(&format!("        {i} => Ok(Box::new({})),\n", copy.replace('%', &deref)));
+        }
+    }
+    s.push_str("        _ => Err(\"not a buffer\".into()),\n    }\n}\n");
+    s.push_str(&format!(
+        "pub fn __boring_unified_import_{name}(id: u64, index: usize, handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let mut store = __BORING_STORE_{name}.lock().unwrap();
     let Some(resident) = store.as_mut().and_then(|instances| instances.get_mut(&id)) else {{ return Err(\"no resident instance\".into()) }};
     let k = &mut resident.0;
     match index {{
 "
-            ));
-            for (i, f) in fields.iter().enumerate() {
-                if f.array && !is_const(f) {
-                    let target = element_ty(&decl_of(f).ty);
-                    let value = if matches!(decl_of(f).binding, FieldBinding::Let) { "Arc::new(*buffer)" } else { "*buffer" };
-                    s.push_str(&format!(
-                        "        {i} => {{ let buffer = handle.downcast::<CudaSlice<{target}>>().map_err(|_| crate::unified::Unsupported(\"another element type\".into()))?; k.{} = {value}; }}\n",
-                        f.name
-                    ));
-                }
-            }
-            s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array && !is_const(f) {
+            let target = element_ty(&decl_of(f).ty);
+            let value = if matches!(decl_of(f).binding, FieldBinding::Let) { "Arc::new(*buffer)" } else { "*buffer" };
             s.push_str(&format!(
-                "pub fn __boring_unified_read_range_{name}(id: u64, index: usize, start: usize, len: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+                "        {i} => {{ let buffer = handle.downcast::<{slice_ty}<{target}>>().map_err(|_| crate::unified::Unsupported(\"another element type\".into()))?; k.{} = {value}; }}\n",
+                f.name
+            ));
+        }
+    }
+    s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
+    s.push_str(&format!(
+        "pub fn __boring_unified_read_range_{name}(id: u64, index: usize, start: usize, len: usize, out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let store = __BORING_STORE_{name}.lock().unwrap();
     let Some(resident) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
     let k = &resident.0;
     match index {{
 "
-            ));
-            for (i, f) in fields.iter().enumerate() {
-                if f.array && f.mutable {
-                    let source = element_ty(&decl_of(f).ty);
-                    let convert = cast("e", &source, f.rust_ty);
-                    s.push_str(&format!(
-                        "        {i} => {{
-            let end = (start + len).min(k.{field}.len());
+    ));
+    for (i, f) in fields.iter().enumerate() {
+        if f.array && f.mutable {
+            let source = element_ty(&decl_of(f).ty);
+            let convert = cast("e", &source, f.rust_ty);
+            let read = match flavor {
+                StreamFlavor::Cuda => format!(
+                    "let end = (start + len).min(k.{field}.len());
             let begin = start.min(end);
             let v = k.__stream.clone_dtoh(&k.{field}.slice(begin..end)).map_err(__boring_cuda_classify_error)?;
-            k.__stream.synchronize().map_err(__boring_cuda_classify_error)?;
+            k.__stream.synchronize().map_err(__boring_cuda_classify_error)?;",
+                    field = f.name
+                ),
+                StreamFlavor::Rocm => format!(
+                    "let v = k.__stream.clone_dtoh_range(&k.{field}, start, start + len)?;
+            k.__stream.synchronize()?;",
+                    field = f.name
+                ),
+            };
+            s.push_str(&format!(
+                "        {i} => {{
+            {read}
             *out.{acc}() = v.into_iter().map(|e| {convert}).collect();
         }}
 ",
-                        field = f.name,
-                        acc = f.accessor()
-                    ));
-                }
-            }
-            s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
-        }
-        StreamFlavor::Rocm => {
-            // The HIP wrapper has no device-to-device copy or ranged read: these go through the CPU.
-            let unsupported = "Err(Box::new(crate::unified::Unsupported(\"no device-side copy on this backend\".into())))";
-            s.push_str(&format!(
-                "pub fn __boring_unified_export_{name}(_id: u64, _index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{ {unsupported} }}
-pub fn __boring_unified_import_{name}(_id: u64, _index: usize, _handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{ {unsupported} }}
-pub fn __boring_unified_read_range_{name}(_id: u64, _index: usize, _start: usize, _len: usize, _out: &mut crate::unified::Arg<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{ {unsupported} }}
-"
+                acc = f.accessor()
             ));
         }
     }
+    s.push_str("        _ => return Err(\"not a buffer\".into()),\n    }\n    Ok(())\n}\n");
     s
 }

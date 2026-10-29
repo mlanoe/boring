@@ -394,6 +394,21 @@ impl HipStream {
         Ok(out)
     }
 
+    /// Elements `begin..end` of `buf` (clamped to its length), copied to the CPU.
+    fn clone_dtoh_range<T: Copy + Default>(&self, buf: &DeviceBuffer<T>, begin: usize, end: usize) -> Result<Vec<T>, HipError> {
+        let end = end.min(buf.len);
+        let begin = begin.min(end);
+        let mut out = vec![T::default(); end - begin];
+        let byte_len = (end - begin) * std::mem::size_of::<T>();
+        if byte_len > 0 {
+            unsafe {
+                let source = (buf.ptr as *mut u8).add(begin * std::mem::size_of::<T>()) as *mut c_void;
+                __boring_hip_check(__boring_hip_ffi::hipMemcpyDtoHAsync(out.as_mut_ptr() as *mut c_void, source, byte_len, self.raw))?;
+            }
+        }
+        Ok(out)
+    }
+
     fn launch_builder<'a>(&'a self, func: &'a HipFunction) -> LaunchBuilder<'a> {
         LaunchBuilder { func, stream: self, ptrs: Vec::new() }
     }
@@ -446,6 +461,21 @@ unsafe impl<T> Sync for DeviceBuffer<T> {}
 impl<T> DeviceBuffer<T> {
     #[allow(dead_code)]
     fn len(&self) -> usize { self.len }
+
+    /// A device-to-device copy that reports a failure instead of panicking (`Clone` asserts).
+    /// Waits for the copy, so the new buffer is complete whichever stream uses it next.
+    #[allow(dead_code)]
+    fn try_clone(&self) -> Result<DeviceBuffer<T>, HipError> {
+        let byte_len = self.len * std::mem::size_of::<T>();
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            __boring_hip_check(__boring_hip_ffi::hipMalloc(&mut ptr, byte_len.max(1)))?;
+            let copied = DeviceBuffer { ptr, len: self.len, stream: Arc::clone(&self.stream), _marker: PhantomData };
+            __boring_hip_check(__boring_hip_ffi::hipMemcpyDtoDAsync(copied.ptr, self.ptr, byte_len, self.stream.raw))?;
+            self.stream.synchronize()?;
+            Ok(copied)
+        }
+    }
 }
 
 impl<T> Drop for DeviceBuffer<T> {
