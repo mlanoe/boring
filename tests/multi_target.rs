@@ -835,6 +835,49 @@ fn dimension_kernels_are_routed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const CONST_ARRAY: &str = r#"
+mut [float32]'kernel'unified out = [0.0 for ..<8]
+kernel Weights:
+    let [float32, 4]'const w
+    mut [float32]'unified out
+
+    init(mut [float32]'unified o):
+        w = [1.0, 2.0, 3.0, 4.0]
+        out = o
+
+    def ():
+        let i = .thread.x
+        out[i] = w[0] + w[3] + i
+
+mut weights = Weights(out)
+kernel:
+    weights(block = 8)
+print "out {weights.out[0]} {weights.out[7]}"
+"#;
+
+/// A kernel with a fixed array in constant memory is routed: the array is a read-only buffer the
+/// router sends to each backend, and the results match the CPU.
+#[test]
+fn constant_fixed_arrays_are_routed() {
+    let dir = project("const_array");
+    std::fs::write(source(&dir), CONST_ARRAY).unwrap();
+    let target = if cfg!(target_os = "macos") { "wgpu,metal,simd" } else { "wgpu,simd" };
+    let out = build(&dir, target);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert_eq!(cpu.trim(), "out 5 12");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    for backend in ["wgpu", "metal"] {
+        if listed.contains(&format!("{backend}: available")) {
+            let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", &format!("{backend},simd")), ("BORING_BACKEND_VERBOSE", "1")]);
+            assert_eq!(stdout.trim(), "out 5 12", "{backend}: {stderr}");
+            assert!(stderr.contains(&format!("kernel Weights -> {backend}")), "{backend} did not run it: {stderr}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SCREEN_LIFE: &str = r#"
 let width = 64
 let height = 64

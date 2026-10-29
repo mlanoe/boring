@@ -124,8 +124,10 @@ CPU as before.
 A kernel is routable when its fields are numeric/bool scalars, `Dimension`s and plain `[T]`
 buffers in `'unified`, `'global`, `'surface`, `'actor'unified` or `'actor'global` memory.
 Block-shared (`'actor`) and per-thread (`'local`) fields have no host data and are simply not
-arguments, so a kernel with a shared-memory tile is routed; an atomic buffer is a buffer. Struct
-or fixed-array fields and generic kernels run on the CPU. An adapter can also decline one
+arguments, so a kernel with a shared-memory tile is routed; an atomic buffer is a buffer. A
+fixed array in `'const` memory is a read-only buffer, and a buffer of structs is already split into
+one buffer per field before the backends see it, so both are routed. Generic kernels and fields of
+any other type run on the CPU. An adapter can also decline one
 launch: wgpu fixes the workgroup size in the shader from the kernel's launch site, so a launch
 with another block size goes elsewhere. A backend that cannot compile a kernel (Metal has no
 64-bit signed atomics, wgpu rejects a shader it cannot validate) declines it the same way: the
@@ -213,5 +215,4 @@ it. Run with `BORING_BACKEND_VERBOSE=1` to see which scores are priors.
 ## Not implemented yet
 
 - A remote service as a backend.
-- Routing for kernels with struct or fixed-array fields.
 - Device-side copy and ranged reads on ROCm, and for wgpu buffers of 8/16/64-bit elements.

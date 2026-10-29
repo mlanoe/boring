@@ -123,7 +123,9 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
     ));
     // Packed byte kinds keep their element count beside the buffer; only 32-bit elements take
     // the device-side paths below, everything else goes through the CPU.
-    let plain = |f: &RouteField| matches!(f.rust_ty, "f32" | "i32" | "u32");
+    // A `'const` fixed array lives in the params uniform, not in a buffer of its own.
+    let in_uniform = |f: &RouteField| k.fields.iter().any(|d| d.name == f.name && matches!(d.qual, GpuQual::Const));
+    let plain = |f: &RouteField| matches!(f.rust_ty, "f32" | "i32" | "u32") && !in_uniform(f);
     s.push_str(&crate::transpiler::unified::swap_adapter(name, fields, &plain, &|obj, field| format!("{obj}.{field}_buf"), &|obj| format!("{obj}.rebuild_bind_group();")));
     s.push_str(&format!(
         "pub fn __boring_unified_export_{name}(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{

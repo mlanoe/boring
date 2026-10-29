@@ -115,6 +115,11 @@ pub fn route_fields(k: &KernelDecl) -> Option<Vec<RouteField>> {
                     dim: false,
                 });
             }
+            // A fixed array in constant memory is a read-only buffer to the router: each backend
+            // fills it through its own `copy_<field>_to_device`, as its init code does.
+            Type::ArrayN(element, _) if matches!(f.qual, GpuQual::Const) => {
+                fields.push(RouteField { name: f.name.clone(), rust_ty: numeric_rust(element)?, array: true, mutable: false, dim: false });
+            }
             Type::Named(n) if n == "Dimension" => {
                 if !matches!(f.qual, GpuQual::Const) {
                     return None;
@@ -174,6 +179,15 @@ mod tests {
         let fields = route_fields(&k).expect("routable");
         let shapes: Vec<_> = fields.iter().map(|f| (f.name.as_str(), f.rust_ty, f.array, f.mutable)).collect();
         assert_eq!(shapes, [("input", "f32", true, false), ("counts", "i32", true, true), ("totals", "u32", true, true)]);
+    }
+
+    #[test]
+    fn constant_fixed_arrays_are_routable() {
+        // A fixed array in constant memory is a read-only buffer; one in another memory is not.
+        let k = kernel("    let [float32, 4]'const w\n    mut [float32]'unified out\n");
+        let fields = route_fields(&k).expect("routable");
+        let shapes: Vec<_> = fields.iter().map(|f| (f.name.as_str(), f.rust_ty, f.array, f.mutable)).collect();
+        assert_eq!(shapes, [("w", "f32", true, false), ("out", "f32", true, true)]);
     }
 
     #[test]
@@ -296,11 +310,17 @@ fn cast(value: &str, from: &str, to: &str) -> String {
 fn stream_adapter_fn(flavor: StreamFlavor, k: &KernelDecl, fields: &[RouteField], element_ty: fn(&Type) -> String, scalar_ty: fn(&Type) -> String) -> String {
     let name = &k.name;
     let decl_of = |f: &RouteField| k.fields.iter().find(|d| d.name == f.name).expect("route field of this kernel");
+    // A `'const` fixed array is a host `Vec` that the launch copies into the module's constant
+    // symbol: it has no device buffer to exchange, copy or read back.
+    let is_const = |f: &RouteField| matches!(decl_of(f).qual, GpuQual::Const);
     // A buffer from the CPU copy, converted to the element type the backend uses.
     let buffer = |i: usize, f: &RouteField| {
         let decl = decl_of(f);
         let target = element_ty(&decl.ty);
         let convert = cast("e", f.rust_ty, &target);
+        if is_const(f) {
+            return format!("args[{i}].{}().iter().map(|&e| {convert}).collect::<Vec<{target}>>()", f.accessor());
+        }
         let upload = match flavor {
             StreamFlavor::Cuda => format!("stream.clone_htod::<{target}, _>(&v)?"),
             StreamFlavor::Rocm => format!("stream.clone_htod::<{target}>(&v)?"),
@@ -389,7 +409,7 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 }}
 "
     ));
-    s.push_str(&swap_adapter(name, fields, &|_| true, &|obj, field| format!("{obj}.{field}"), &|_| String::new()));
+    s.push_str(&swap_adapter(name, fields, &|f| !is_const(f), &|obj, field| format!("{obj}.{field}"), &|_| String::new()));
     match flavor {
         StreamFlavor::Cuda => {
             // `CudaSlice::clone` is a device-to-device copy.
@@ -402,7 +422,7 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 "
             ));
             for (i, f) in fields.iter().enumerate() {
-                if f.array {
+                if f.array && !is_const(f) {
                     let deref = if matches!(decl_of(f).binding, FieldBinding::Let) { "(*" } else { "(" };
                     s.push_str(&format!("        {i} => Ok(Box::new({deref}k.{}).clone())),\n", f.name));
                 }
@@ -417,7 +437,7 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 "
             ));
             for (i, f) in fields.iter().enumerate() {
-                if f.array {
+                if f.array && !is_const(f) {
                     let target = element_ty(&decl_of(f).ty);
                     let value = if matches!(decl_of(f).binding, FieldBinding::Let) { "Arc::new(*buffer)" } else { "*buffer" };
                     s.push_str(&format!(
