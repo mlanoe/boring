@@ -1000,6 +1000,62 @@ fn rocm_copies_and_reads_ranges_on_the_device() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const PACKED_SWAP: &str = r#"
+kernel Bytes:
+    mut [uint8]'unified a
+    mut [uint8]'unified b
+    mut [uint16]'unified c
+    mut [uint16]'unified d
+
+    init(mut [uint8]'unified a0, mut [uint8]'unified b0, mut [uint16]'unified c0, mut [uint16]'unified d0):
+        a = a0
+        b = b0
+        c = c0
+        d = d0
+
+    def ():
+        if .thread.x == 0:
+            for i in 0..<10:
+                a[i] = a[i] + 1
+                b[i] = b[i] + 2
+                c[i] = c[i] + 3
+                d[i] = d[i] + 4
+
+mut k = Bytes([uint8(i) for i in 0..<10], [uint8(i * 2) for i in 0..<10], [uint16(i * 100) for i in 0..<10], [uint16(i * 1000) for i in 0..<10])
+kernel:
+    k(block = 10)
+kernel:
+    k(block = 10)
+k.a, k.b = k.b, k.a
+k.c, k.d = k.d, k.c
+kernel:
+    k(block = 10)
+print "a {k.a[0]} {k.a[3]} {k.a[9]}"
+print "b {k.b[0]} {k.b[3]} {k.b[9]}"
+print "c {k.c[0]} {k.c[3]} {k.c[9]}"
+print "d {k.d[0]} {k.d[3]} {k.d[9]}"
+"#;
+
+/// The ping-pong swap of 8- and 16-bit buffers stays on the wgpu device, element counts included:
+/// no buffer is uploaded again after the first launch.
+#[test]
+fn packed_buffers_swap_on_the_device() {
+    let dir = project("packed_swap");
+    std::fs::write(source(&dir), PACKED_SWAP).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert!(cpu.contains("a 5 11 23") && cpu.contains("d 10 310 910"), "{cpu}");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd"), ("BORING_BACKEND_VERBOSE", "1")]);
+        assert_eq!(stdout, cpu, "{stderr}");
+        assert!(stderr.contains("kernel Bytes -> wgpu") && stderr.contains("buffer transfers: 4 up"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SCREEN_LIFE: &str = r#"
 let width = 64
 let height = 64
