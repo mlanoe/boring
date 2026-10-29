@@ -1200,7 +1200,7 @@ kernel B:
 fn device_actor_global_compound_assign_uses_atomic_fetch_add() {
     let (msl, _) = metal_codegen("atomic_add", r#"
 kernel A:
-    mut [int]'actor'global counts
+    mut [int32]'actor'global counts
     def ():
         let tid = .thread.x
         counts[0] += tid
@@ -1212,7 +1212,7 @@ kernel A:
 }
 
 // Regression test: `try_atomic_assign`/`try_atomic_method_call` used to cast
-// every atomic op through `(device atomic_long*)` unconditionally (8 bytes),
+// every atomic op through `(device atomic_int*)` unconditionally (8 bytes),
 // regardless of the field's real element type — a 4-byte `int32`/`uint32`
 // field got the same 8-byte cast, corrupting adjacent GPU memory or producing
 // a wrong numeric result (the bit pattern of a neighboring element folded
@@ -1258,13 +1258,13 @@ kernel A:
 fn device_actor_global_field_has_device_ptr_param() {
     let (msl, _) = metal_codegen("atomic_ptr_param", r#"
 kernel A:
-    mut [int]'actor'global counts
+    mut [int32]'actor'global counts
     def ():
         let tid = .thread.x
         counts[0] += tid
 "#);
-    assert!(msl.contains("device int64_t* counts [[buffer(0)]]"),
-        "expected device int64_t* counts [[buffer(0)]] for 'actor'global;\ngot:\n{msl}");
+    assert!(msl.contains("device int* counts [[buffer(0)]]"),
+        "expected device int* counts [[buffer(0)]] for 'actor'global;\ngot:\n{msl}");
 }
 
 // ─── device/host — 'actor'unified atomics on host+device DRAM ───────────────
@@ -1273,15 +1273,15 @@ kernel A:
 fn device_actor_unified_compound_assign_uses_atomic_fetch_add() {
     let (msl, rs) = metal_codegen("actor_unified_add", r#"
 kernel A:
-    mut [int]'actor'unified counts
+    mut [int32]'actor'unified counts
     def ():
         let tid = .thread.x
         counts[0] += tid
 "#);
     assert!(msl.contains("atomic_fetch_add_explicit"),
         "expected atomic_fetch_add_explicit for 'actor'unified += ;\ngot:\n{msl}");
-    assert!(msl.contains("device int64_t* counts [[buffer(0)]]"),
-        "expected device int64_t* counts [[buffer(0)]] for 'actor'unified;\ngot:\n{msl}");
+    assert!(msl.contains("device int* counts [[buffer(0)]]"),
+        "expected device int* counts [[buffer(0)]] for 'actor'unified;\ngot:\n{msl}");
     // Unlike 'actor'global, 'actor'unified is host-visible — it must get the same
     // D2H read accessor 'unified fields get.
     assert!(rs.contains("fn read_counts(&self)"),
@@ -2284,8 +2284,8 @@ fn device_atomic_method_calls_map_to_msl_intrinsics() {
     // Metal's Clang-based compiler) so it's still usable as one expression.
     let (msl, _) = metal_codegen("atomic_methods", r#"
 kernel Histogram:
-    mut [int]'actor'global counts
-    init([int]'actor'global data):
+    mut [int32]'actor'global counts
+    init([int32]'actor'global data):
         counts = data
     def ():
         let bucket = .thread.x
@@ -2294,13 +2294,13 @@ kernel Histogram:
         let old_swap = counts[bucket].swap(0)
         let old_cas = counts[bucket].cas(0, 1)
 "#);
-    assert!(msl.contains("atomic_fetch_min_explicit((device atomic_long*)&counts[bucket], (long)(5), memory_order_relaxed)"),
+    assert!(msl.contains("atomic_fetch_min_explicit((device atomic_int*)&counts[bucket], (int)(5), memory_order_relaxed)"),
         "expected atomic_fetch_min_explicit;\ngot:\n{msl}");
-    assert!(msl.contains("atomic_fetch_max_explicit((device atomic_long*)&counts[bucket], (long)(5), memory_order_relaxed)"),
+    assert!(msl.contains("atomic_fetch_max_explicit((device atomic_int*)&counts[bucket], (int)(5), memory_order_relaxed)"),
         "expected atomic_fetch_max_explicit;\ngot:\n{msl}");
-    assert!(msl.contains("atomic_exchange_explicit((device atomic_long*)&counts[bucket], (long)(0), memory_order_relaxed)"),
+    assert!(msl.contains("atomic_exchange_explicit((device atomic_int*)&counts[bucket], (int)(0), memory_order_relaxed)"),
         "expected atomic_exchange_explicit;\ngot:\n{msl}");
-    assert!(msl.contains("atomic_compare_exchange_weak_explicit((device atomic_long*)&counts[bucket], &__boring_cas_exp, (long)(1), memory_order_relaxed, memory_order_relaxed); __boring_cas_exp; }"),
+    assert!(msl.contains("atomic_compare_exchange_weak_explicit((device atomic_int*)&counts[bucket], &__boring_cas_exp, (int)(1), memory_order_relaxed, memory_order_relaxed); __boring_cas_exp; }"),
         "expected atomic_compare_exchange_weak_explicit bridged via a statement-expression;\ngot:\n{msl}");
 }
 
@@ -4306,4 +4306,28 @@ fn fixed_point_kernel_runs_on_metal_and_matches_interpreter() {
     let reference = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(dir.join("test.br")).output().unwrap();
     assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
     assert_eq!(stdout.trim_end(), String::from_utf8_lossy(&reference.stdout).trim_end());
+}
+
+#[test]
+fn device_actor_unified_int_atomic_is_a_clear_build_error_not_msl_atomic_long() {
+    // `int` is 64-bit on Metal and MSL has no `atomic_long`; one such kernel used to
+    // break the whole Metal library at run time. Now a transpile-time diagnostic.
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join("atomic_int64_error");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, r#"
+kernel Histogram:
+    let [int]'unified values
+    mut [int]'actor'unified counts
+    def ():
+        let i = .block.x * .block_dim.x + .thread.x
+        counts[values[i] % 4] += 1
+"#).unwrap();
+    let result = Command::new(bin).args(["build", "--target", "metal"]).arg(&br_file).output().unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "build unexpectedly succeeded");
+    assert!(stderr.contains("counts") && stderr.contains("int32"),
+        "expected a diagnostic naming the field and suggesting int32;\ngot:\n{stderr}");
 }

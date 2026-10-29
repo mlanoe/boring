@@ -2244,6 +2244,18 @@ pub(super) fn packed_byte_kind_of_ty(ty: &Type) -> Option<PackedByteKind> {
     }
 }
 
+/// Every spelling of a 32-bit (or narrowed-to-32-bit) integer element: `int`/`uint`
+/// (narrowed), `int32`/`uint32`, and the `i32`/`u32` aliases. Only these get an
+/// `atomic<..>` declaration for `'actor'global`/`'actor'unified` buffers.
+fn is_32bit_int_spelling(ty: &Type) -> bool {
+    match ty {
+        Type::Int | Type::Uint | Type::Int32 | Type::Uint32 => true,
+        Type::Named(n) => matches!(n.as_str(), "int" | "uint" | "i32" | "u32" | "int32" | "uint32"),
+        Type::Qualified(inner, _) => is_32bit_int_spelling(inner),
+        _ => false,
+    }
+}
+
 /// Returns the WGSL storage access modifier and array type for a buffer field.
 fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     let access = match f.qual {
@@ -2255,12 +2267,10 @@ fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
         Some(inner) => {
             if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
                 // atomic<i32> for int, atomic<u32> for uint
-                match inner {
-                    Type::Int => "atomic<i32>".into(),
-                    Type::Named(n) if matches!(n.as_str(), "int" | "i32" | "i64") => "atomic<i32>".into(),
-                    Type::Uint => "atomic<u32>".into(),
-                    Type::Named(n) if matches!(n.as_str(), "uint" | "u32" | "u64") => "atomic<u32>".into(),
-                    other => wgsl_scalar(other),
+                match wgsl_scalar_bare(inner).as_str() {
+                    "i32" if is_32bit_int_spelling(inner) => "atomic<i32>".into(),
+                    "u32" if is_32bit_int_spelling(inner) => "atomic<u32>".into(),
+                    _ => wgsl_scalar(inner),
                 }
             } else if packed_byte_kind_of_ty(inner).is_some() {
                 // Backing storage is `array<u32>` regardless of the logical element

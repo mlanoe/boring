@@ -4558,3 +4558,27 @@ kernel Neighbors:
         assert!(squashed.contains(&want), "missing continuing increment for {v}:\n{wgsl}");
     }
 }
+
+// Every 32-bit integer spelling must get an `array<atomic<..>>` declaration on an
+// `'actor'unified`/`'actor'global` buffer (int32/uint32/uint used to be missed,
+// leaving `atomicAdd` on a non-atomic `array<i32>`).
+#[test]
+fn atomic_buffer_declared_atomic_for_every_32bit_int_spelling() {
+    for (ty, wgsl_ty) in [("int", "i32"), ("int32", "i32"), ("uint", "u32"), ("uint32", "u32")] {
+        for qual in ["'actor'unified", "'actor'global"] {
+            let src = format!(r#"
+kernel Histogram:
+    let [{ty}]'unified values
+    mut [{ty}]{qual} counts
+    def ():
+        let i = .block.x * .block_dim.x + .thread.x
+        counts[values[i] % 4] += 1
+"#);
+            let name = format!("atomic_spelling_{}_{}", ty, qual.replace('\'', "_"));
+            let (wgsl, _rs) = wgpu_codegen(&name, &src);
+            assert!(wgsl.contains(&format!("array<atomic<{wgsl_ty}>>")),
+                "`[{ty}]{qual}` should be declared array<atomic<{wgsl_ty}>>;\ngot:\n{wgsl}");
+            assert!(wgsl.contains("atomicAdd"), "missing atomicAdd for `[{ty}]{qual}`;\ngot:\n{wgsl}");
+        }
+    }
+}

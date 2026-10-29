@@ -266,6 +266,20 @@ impl DeviceEmitter {
         self.line(&format!("// ─── kernel {} ───", decl.name));
         self.blank();
 
+        // MSL has no signed 64-bit atomic (`atomic_long` doesn't exist; `atomic_ulong`
+        // lacks add/sub/and/or/xor on most GPUs) — reject at transpile time instead of
+        // emitting MSL that fails to compile and takes every kernel in the library down.
+        for f in &decl.fields {
+            if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified)
+                && matches!(elem_msl_type(&f.ty).as_str(), "int64_t" | "uint64_t") {
+                self.errors.push(crate::transpiler::TranspileError::at(format!(
+                    "kernel {}: atomic buffer field '{}' has a 64-bit element type (`int`/`uint` \
+                     are 64-bit on --target metal), and MSL has no usable 64-bit signed atomic \
+                     (`atomic_long` does not exist). Use `int32`/`uint32` instead",
+                    decl.name, f.name), f.line, f.col));
+            }
+        }
+
         // Device helper methods.
         for method in &decl.methods {
             if !method.name.is_empty() {
