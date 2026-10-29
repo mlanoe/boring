@@ -3522,6 +3522,9 @@ impl Transpiler {
                         || self.struct_rwlock_fields.contains(&key)
                         || self.struct_rwlock_task_fields.contains(&key)
                         || self.observed_fields.contains_key(&key)
+                        || self.struct_fields.get(st).and_then(|fs| fs.iter().find(|(f, _)| f == n))
+                            .is_some_and(|(_, t)| matches!(t.without_mut(), Type::Qualified(i, OwnerQual::Shared | OwnerQual::Owned)
+                                if matches!(i.as_ref(), Type::Named(sn) if self.struct_fields.contains_key(sn.as_str()))))
                     {
                         let self_target = Expr {
                             kind: ExprKind::Field(
@@ -3580,6 +3583,19 @@ impl Transpiler {
                     let obj_s = self.emit_expr(obj);
                     let rhs = self.emit_expr(value);
                     return format!("{}.{} = {}", obj_s, field, rhs);
+                }
+                // `'shared`/`'owned` struct-typed field (`Arc<T>`/`Box<T>`): wrap the RHS the way
+                // `let T'shared x = v` does (an already-qualified value is aliased, not re-wrapped).
+                if !rhs_already_wrapped && !rhs_is_wrapped_field {
+                    let fty = self.struct_fields.get(sn.as_str())
+                        .and_then(|fs| fs.iter().find(|(f, _)| f == field))
+                        .map(|(_, t)| t.clone());
+                    if let Some(rhs) = fty.as_ref().and_then(|t| self.emit_qualified_struct_store(t, value)) {
+                        if !matches!(fty.as_ref().map(|t| t.without_mut()), Some(Type::Qualified(_, OwnerQual::Actor))) {
+                            let obj_s = self.emit_expr(obj);
+                            return format!("{}.{} = {}", obj_s, field, rhs);
+                        }
+                    }
                 }
                 if !rhs_already_wrapped {
                     if let Some((inner_struct_name, base)) = self.observed_fields.get(&key).cloned() {
@@ -3945,7 +3961,7 @@ impl Transpiler {
             if let ExprKind::Var(dict_name) = &dict_obj.kind {
                 if self.dict_vars.contains(dict_name.as_str()) {
                     let key_owned = self.emit_dict_key_owned(key);
-                    let val_s = self.emit_expr_owned(value);
+                    let val_s = self.emit_dict_value_store(dict_obj, value);
                     return format!("{}.insert({}, {})", dict_name, key_owned, val_s);
                 }
             }
@@ -3972,7 +3988,7 @@ impl Transpiler {
                     .unwrap_or(false);
                 if is_dict_field {
                     let key_owned = self.emit_dict_key_owned(key);
-                    let val_s = self.emit_expr_owned(value);
+                    let val_s = self.emit_dict_value_store(dict_obj, value);
                     // `d[k].field[k2] = v`: the element is a place (`get_mut`), not a clone.
                     let in_place = matches!(&inner_obj.kind, ExprKind::Index(..));
                     let old = self.in_lhs_assign.replace(in_place || self.in_lhs_assign.get());
@@ -3986,7 +4002,7 @@ impl Transpiler {
             // cell (`counts[k] = counts.length`) doesn't re-lock it while the write guard is held.
             if matches!(&dict_obj.kind, ExprKind::Field(_, f) if f == "value") && self.expr_is_dict(dict_obj) {
                 let key_owned = self.emit_dict_key_owned(key);
-                let val_s = self.emit_expr_owned(value);
+                let val_s = self.emit_dict_value_store(dict_obj, value);
                 let old = self.in_lhs_assign.replace(true);
                 let place_s = self.emit_expr(dict_obj);
                 self.in_lhs_assign.set(old);
@@ -4005,7 +4021,7 @@ impl Transpiler {
                         .unwrap_or(false);
                     if is_dict_field {
                         let key_owned = self.emit_dict_key_owned(key);
-                        let val_s = self.emit_expr_owned(value);
+                        let val_s = self.emit_dict_value_store(dict_obj, value);
                         return format!("self.{}.insert({}, {})", field_name, key_owned, val_s);
                     }
                 }
@@ -4035,7 +4051,7 @@ impl Transpiler {
                 let place_s = self.emit_expr(dict_obj);
                 self.in_lhs_assign.set(false);
                 let key_owned = self.emit_dict_key_owned(key);
-                let val_s = self.emit_expr_owned(value);
+                let val_s = self.emit_dict_value_store(dict_obj, value);
                 return format!("{}.insert({}, {})", place_s, key_owned, val_s);
             }
         }

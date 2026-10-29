@@ -2782,7 +2782,7 @@ impl Transpiler {
             }
             "set" | "put" if args.len() >= 2 => {
                 let key_s = self.emit_expr_owned(&args[0].value);
-                let val_s = self.emit_expr_owned(&args[1].value);
+                let val_s = self.emit_dict_value_store(obj, &args[1].value);
                 return Some(format!("{}.insert({}, {})", obj_s, key_s, val_s));
             }
             "contains" | "containsKey" | "has" if !args.is_empty() => {
@@ -3765,6 +3765,74 @@ impl Transpiler {
         let Some(obj_ty) = self.resolve_expr_type(obj) else { return };
         let Some(Type::Array(elem)) = Some(obj_ty.without_mut()) else { return };
         self.closure_param_hints.borrow_mut().insert((p.line, p.col), elem.without_mut().clone());
+    }
+
+    /// Storing a plain struct value into a `Struct'shared`/`'actor`/`'owned` slot (a field or a
+    /// collection element): wrap an independent copy in the slot's pointer. A value already
+    /// known to be qualified is aliased through `emit_let_value` instead (never double-wrapped).
+    /// `None` when the slot type is not such a qualified user struct.
+    pub(crate) fn emit_qualified_struct_store(&self, slot_ty: &Type, value: &Expr) -> Option<String> {
+        let Type::Qualified(inner, q @ (OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Owned)) = slot_ty.without_mut() else { return None };
+        if !matches!(inner.as_ref(), Type::Named(n) if self.struct_fields.contains_key(n.as_str())) { return None; }
+        let qualified_ty = |t: &Type| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Owned | OwnerQual::ActorTask | OwnerQual::GuardTask));
+        let already = match &value.kind {
+            // A parameter's own declared type is authoritative (`inferred_qualifiers` is keyed by bare name).
+            ExprKind::Var(v) if self.fn_current_params.contains_key(v.as_str()) =>
+                self.fn_current_params.get(v.as_str()).is_some_and(qualified_ty),
+            ExprKind::Var(v) => self.inferred_qualifiers.get(v.as_str()).is_some_and(|q| !matches!(q, OwnerQual::Inline))
+                || self.var_types.get(v.as_str()).is_some_and(qualified_ty)
+                || self.arc_vars.contains(v.as_str()) || self.rc_vars.contains(v.as_str())
+                || self.var_mutex_types.contains(v.as_str()) || self.var_rwlock_types.contains(v.as_str()),
+            _ => self.resolve_expr_type(value).is_some_and(|t| qualified_ty(&t)),
+        };
+        if already { return Some(self.emit_let_value(Some(slot_ty), value)); }
+        let raw = self.emit_expr_owned(value);
+        let single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+        Some(match q {
+            OwnerQual::Shared => format!("{}::new({raw})", if single { "Rc" } else { "Arc" }),
+            OwnerQual::Actor => self.emit_actor_new(&raw),
+            _ if self.is_managed_owned_user(slot_ty.without_mut()) => {
+                if single { format!("RefCell::new({raw})") } else { self.emit_actor_new(&raw) }
+            }
+            _ => format!("Box::new({raw})"),
+        })
+    }
+
+    /// Arguments of `dict.insert(k, v)` whose value type is a qualified
+    /// user struct and whose stored argument is wrapped by `emit_qualified_struct_store`.
+    fn qualified_dict_set_store_args(&self, obj: &Expr, rust_method: &str, args: &[Arg]) -> Option<Vec<String>> {
+        if rust_method != "insert" || args.len() != 2 { return None; }
+        let ty = self.resolve_expr_type(obj)?;
+        let (slot, idx) = match (ty.without_mut(), args.len()) {
+            (Type::Dict(_, v), 2) => (v.without_mut().clone(), 1),
+            _ => return None,
+        };
+        let stored = self.emit_qualified_struct_store(&slot, &args[idx].value)?;
+        let mut out: Vec<String> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            out.push(if i == idx { stored.clone() } else { self.emit_dict_key_owned(&a.value) });
+        }
+        Some(out)
+    }
+
+    /// The value stored into `dict[key] = v` / `dict.set(k, v)`: wrapped for a `'shared`/`'actor`/
+    /// `'owned` struct value type (see `emit_qualified_struct_store`), plainly owned otherwise.
+    pub(crate) fn emit_dict_value_store(&self, dict: &Expr, value: &Expr) -> String {
+        self.dict_value_type(dict)
+            .and_then(|vt| self.emit_qualified_struct_store(&vt, value))
+            .unwrap_or_else(|| self.emit_expr_owned(value))
+    }
+
+    /// Value type of a dict-typed expression, resolving a bare name as an implicit-self field too.
+    fn dict_value_type(&self, dict: &Expr) -> Option<Type> {
+        let ty = self.resolve_expr_type(dict).or_else(|| match &dict.kind {
+            ExprKind::Var(f) if !self.known_local_vars.contains(f.as_str()) => self.self_type.as_ref()
+                .and_then(|t| self.struct_fields.get(t))
+                .and_then(|fs| fs.iter().find(|(n, _)| n == f))
+                .map(|(_, t)| t.clone()),
+            _ => None,
+        })?;
+        match ty.without_mut() { Type::Dict(_, v) => Some(v.without_mut().clone()), _ => None }
     }
 
     /// An element argument to a mutating collection call (`xs.push(v)`), emitted owned. A
@@ -4799,6 +4867,9 @@ impl Transpiler {
                 }
                 self.emit_expr_owned(&a.value)
             }).collect()
+        } else if let Some(args_s) = self.qualified_dict_set_store_args(obj, &rust_method, args) {
+            // `d.insert(k, p)` into a `'shared`/`'actor`/`'owned` struct value type.
+            args_s
         } else if (rust_method == "push" || rust_method == "extend" || (rust_method == "insert" && args.len() == 2)) && {
             // Use emit_expr_owned for any vec push so non-Copy values (e.g. Value enum) are cloned.
             match &obj.kind {
@@ -4838,7 +4909,13 @@ impl Transpiler {
                 },
                 _ => None,
             });
-            if let (Some(elem), "push") = (&shared_elem, method) {
+            let struct_elem = self.resolve_expr_type(obj).and_then(|t| match t.without_mut() {
+                Type::Array(inner) => Some(inner.without_mut().clone()),
+                _ => None,
+            }).filter(|e| matches!(e, Type::Qualified(i, _) if matches!(i.as_ref(), Type::Named(n) if self.struct_fields.contains_key(n.as_str()))));
+            if let (Some(elem), "push") = (&struct_elem, method) {
+                args.iter().map(|a| self.emit_qualified_struct_store(elem, &a.value).unwrap_or_else(|| self.emit_collection_elem_arg(obj, &a.value))).collect()
+            } else if let (Some(elem), "push") = (&shared_elem, method) {
                 args.iter().map(|a| self.emit_let_value(Some(elem), &a.value)).collect()
             } else {
             match trait_name {
@@ -5750,11 +5827,32 @@ impl Transpiler {
     /// its own guard. When any argument takes a lock, every hoistable argument is therefore
     /// evaluated into a `let __argN` temporary, left to right, *before* the receiver is locked.
     pub(crate) fn hoist_lent_conflicts_locked(args: &mut [String]) -> String {
+        for a in args.iter_mut() {
+            if let Some(owned) = Self::own_borrow_into_guard(a) { *a = owned; }
+        }
         Self::release_guard_temps(args);
         if args.iter().any(|a| Self::is_guard_released_block(a)) {
             return Self::hoist_args(args);
         }
         Self::hoist_lent_conflicts(args)
+    }
+
+    /// `&x.lock().unwrap().field` passed to a *locked-receiver* call (universal borrow inference makes
+    /// by-value struct/collection parameters `&T`): the reference points into a second guard of the
+    /// same non-reentrant lock the receiver already holds -> self-deadlock. Snapshot the place
+    /// instead (`&{ let __a = x.lock().unwrap().field.clone(); __a }`): the guard is dropped at the
+    /// inner `;`, and the temporary lives to the end of the call statement. Only plain field paths
+    /// (no calls besides the lock accessors) are rewritten.
+    fn own_borrow_into_guard(a: &str) -> Option<String> {
+        let rest = a.strip_prefix('&')?;
+        if rest.starts_with("mut ") || rest.starts_with('{') || rest.starts_with("Arc::clone(") || rest.starts_with("Rc::clone(") { return None; }
+        if !Self::LOCK_TOKENS.iter().any(|t| rest.contains(t)) { return None; }
+        let mut plain = rest.to_string();
+        for t in [".lock().unwrap()", ".read().unwrap()", ".write().unwrap()", ".borrow_mut()", ".borrow()"] {
+            plain = plain.replace(t, "");
+        }
+        if plain.contains('(') || plain.contains('[') || plain.contains(' ') { return None; }
+        Some(format!("&{{ let __a = {}.clone(); __a }}", rest))
     }
 
     /// Evaluate every by-value argument into a `let __argN` temporary (left to right) and replace
@@ -5827,9 +5925,6 @@ impl Transpiler {
                 Some(_) => continue,
                 None => ("", a.as_str()),
             };
-        for a in args.iter_mut() {
-            if let Some(owned) = Self::own_borrow_into_guard(a) { *a = owned; }
-        }
             if core.starts_with('{') || !Self::LOCK_TOKENS.iter().any(|t| core.contains(t)) { continue; }
             *a = format!("{}{{ let __a = {}; __a }}", prefix, core);
         }
@@ -5837,24 +5932,6 @@ impl Transpiler {
 
     /// True when `ty` (transitively, through user structs' fields) holds a trait object
     /// (`Box<dyn Trait>`): such a type cannot be `Clone`/`PartialEq`, and is `Debug` only if
-    /// `&x.lock().unwrap().field` passed to a *locked-receiver* call (universal borrow inference makes
-    /// by-value struct/collection parameters `&T`): the reference points into a second guard of the
-    /// same non-reentrant lock the receiver already holds -> self-deadlock. Snapshot the place
-    /// instead (`&{ let __a = x.lock().unwrap().field.clone(); __a }`): the guard is dropped at the
-    /// inner `;`, and the temporary lives to the end of the call statement. Only plain field paths
-    /// (no calls besides the lock accessors) are rewritten.
-    fn own_borrow_into_guard(a: &str) -> Option<String> {
-        let rest = a.strip_prefix('&')?;
-        if rest.starts_with("mut ") || rest.starts_with('{') || rest.starts_with("Arc::clone(") || rest.starts_with("Rc::clone(") { return None; }
-        if !Self::LOCK_TOKENS.iter().any(|t| rest.contains(t)) { return None; }
-        let mut plain = rest.to_string();
-        for t in [".lock().unwrap()", ".read().unwrap()", ".write().unwrap()", ".borrow_mut()", ".borrow()"] {
-            plain = plain.replace(t, "");
-        }
-        if plain.contains('(') || plain.contains('[') || plain.contains(' ') { return None; }
-        Some(format!("&{{ let __a = {}.clone(); __a }}", rest))
-    }
-
     /// the trait requires it. `debug_only` asks the `Debug` question alone.
     pub(crate) fn type_holds_dyn(&self, ty: &Type, debug_only: bool, visiting: &mut Vec<String>) -> bool {
         match ty {
