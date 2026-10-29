@@ -471,7 +471,14 @@ impl PartialEq for Value {
                 if a.len() != b.len() { return false; }
                 a.iter().all(|x| b.contains(x))
             }
-            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            // User structs compare by value (same type, fields recursively) like the derived
+            // Rust `PartialEq`; `===` (`BinOp::RefEq`) is the identity comparison.
+            (Value::Object(a), Value::Object(b)) => {
+                Rc::ptr_eq(a, b) || {
+                    let (a, b) = (a.borrow(), b.borrow());
+                    a.type_name == b.type_name && a.fields == b.fields
+                }
+            }
             (Value::EnumVariant { type_name: tn1, variant: v1, fields: f1 },
              Value::EnumVariant { type_name: tn2, variant: v2, fields: f2 }) => {
                 tn1 == tn2 && v1 == v2 && f1 == f2

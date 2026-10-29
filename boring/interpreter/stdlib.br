@@ -470,6 +470,34 @@ def bool values_equal(Value a, Value b):
             match b:
                 Value.Range(s2, e2, inc2, _): s1 == s2 and e1 == e2 and inc1 == inc2
                 _: false
+        # User structs compare by value (same type, fields recursively), like the derived
+        # Rust `PartialEq`; `===` is the identity comparison. `__ref_id` is the
+        # per-instance identity tag, not a field.
+        Value.Object(x):
+            match b:
+                Value.Object(y):
+                    if x.type_name != y.type_name:
+                        false
+                    else:
+                        var [(string, Value)] xs = []
+                        var [(string, Value)] ys = []
+                        for f in x.fields:
+                            if f.0 != "__ref_id":
+                                xs.push(f)
+                        for f in y.fields:
+                            if f.0 != "__ref_id":
+                                ys.push(f)
+                        if xs.length != ys.length:
+                            false
+                        else:
+                            var i = 0
+                            var eq = true
+                            while i < xs.length:
+                                if xs[i].0 != ys[i].0 or not values_equal(xs[i].1, ys[i].1):
+                                    eq = false
+                                i = i + 1
+                            eq
+                _: false
         # Any of the 12 numeric int-kinds (Int/Uint/Uint8/Int8../Uint128) — same-kind
         # and cross-kind (including vs. Float) numeric equality, generalized instead
         # of one hand-written match arm per pair.

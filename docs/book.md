@@ -846,7 +846,7 @@ Supported cast targets: `int`, `uint`, `float`, `string`, `bool`, and any type t
 
 ### Reference identity — `===`
 
-`===` tests whether two variables point to the **exact same object in memory**, bypassing any user-defined `==`. Two objects may compare equal with `==` while being distinct instances; `===` distinguishes them. `==` on structs is by value: same type and every field equal (recursively, also inside arrays, tuples, optionals and enum payloads), matching the derived Rust `PartialEq`; a user-defined `eq` takes precedence. In `boring run`, a struct whose Rust derive would drop `PartialEq` (`'actor`/`'guard`/`dyn`/`Fn` fields) is still compared field by field.
+`===` tests whether two variables point to the **exact same object in memory**, bypassing any user-defined `==`. Two objects may compare equal with `==` while being distinct instances; `===` distinguishes them. `==` on structs is by value: same type and every field equal (recursively, also inside arrays, tuples, optionals and enum payloads), matching the derived Rust `PartialEq`; a user-defined `eq` takes precedence. In `boring run`, a struct whose Rust derive would drop `PartialEq` (`'actor`/`'guard`/`dyn`/`Fn` fields) is still compared field by field. `==` on structs is by value: same type and every field equal (recursively, also inside arrays, tuples, optionals and enum payloads), matching the derived Rust `PartialEq`; a user-defined `eq` takes precedence. In `boring run`, a struct whose Rust derive would drop `PartialEq` (`'actor`/`'guard`/`dyn`/`Fn` fields) is still compared field by field.
 
 ```boring
 struct Point:
