@@ -216,7 +216,7 @@ pub fn single_backends_fn(name: &str, kind: &str, class: &str) -> String {
 /// device buffer on the kernel `obj`, `after(obj)` a statement to run on each kernel once its
 /// buffers moved (wgpu rebuilds its bind group), empty when none. Only mutable buffers of one
 /// element type (and `allow`ed by the backend) can be exchanged; any other pair is `Unsupported`.
-pub fn swap_adapter(name: &str, fields: &[RouteField], allow: &dyn Fn(&RouteField) -> bool, place: &dyn Fn(&str, &str) -> String, after: &dyn Fn(&str) -> String) -> String {
+pub fn swap_adapter(name: &str, fields: &[RouteField], allow: &dyn Fn(&RouteField) -> bool, place: &dyn Fn(&str, &str) -> String, extra: &dyn Fn(&RouteField, &str, &RouteField, &str) -> String, after: &dyn Fn(&str) -> String) -> String {
     let swappable: Vec<(usize, &RouteField)> = fields.iter().enumerate().filter(|(_, f)| f.array && f.mutable && allow(f)).collect();
     let mut same = String::new();
     let mut cross = String::new();
@@ -227,13 +227,13 @@ pub fn swap_adapter(name: &str, fields: &[RouteField], allow: &dyn Fn(&RouteFiel
             }
             if i != j {
                 same.push_str(&format!(
-                    "            ({i}, {j}) => {{ std::mem::swap(&mut {}, &mut {}); {} Ok(()) }}\n",
-                    place("k", &fi.name), place("k", &fj.name), after("k")
+                    "            ({i}, {j}) => {{ std::mem::swap(&mut {}, &mut {}); {} {} Ok(()) }}\n",
+                    place("k", &fi.name), place("k", &fj.name), extra(fi, "k", fj, "k"), after("k")
                 ));
             }
             cross.push_str(&format!(
-                "                ({i}, {j}) => {{ std::mem::swap(&mut {}, &mut {}); {} {} Ok(()) }}\n",
-                place("x.0", &fi.name), place("y.0", &fj.name), after("x.0"), after("y.0")
+                "                ({i}, {j}) => {{ std::mem::swap(&mut {}, &mut {}); {} {} {} Ok(()) }}\n",
+                place("x.0", &fi.name), place("y.0", &fj.name), extra(fi, "x.0", fj, "y.0"), after("x.0"), after("y.0")
             ));
         }
     }
@@ -409,7 +409,7 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 }}
 "
     ));
-    s.push_str(&swap_adapter(name, fields, &|f| !is_const(f), &|obj, field| format!("{obj}.{field}"), &|_| String::new()));
+    s.push_str(&swap_adapter(name, fields, &|f| !is_const(f), &|obj, field| format!("{obj}.{field}"), &|_, _, _, _| String::new(), &|_| String::new()));
     match flavor {
         StreamFlavor::Cuda => {
             // `CudaSlice::clone` is a device-to-device copy.

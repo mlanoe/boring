@@ -878,6 +878,71 @@ fn constant_fixed_arrays_are_routed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const PACKED_BUFFERS: &str = r#"
+kernel Bytes:
+    mut [uint8]'unified a
+    mut [uint8]'unified b
+    mut [uint16]'unified c
+    mut [uint16]'unified d
+
+    init(mut [uint8]'unified a0, mut [uint8]'unified b0, mut [uint16]'unified c0, mut [uint16]'unified d0):
+        a = a0
+        b = b0
+        c = c0
+        d = d0
+
+    def ():
+        if .thread.x == 0:
+            for i in 0..<10:
+                a[i] = a[i] + 1
+                b[i] = b[i] + 2
+                c[i] = c[i] + 3
+                d[i] = d[i] + 4
+
+mut k = Bytes([uint8(i) for i in 0..<10], [uint8(i * 2) for i in 0..<10], [uint16(i * 100) for i in 0..<10], [uint16(i * 1000) for i in 0..<10])
+kernel:
+    k(block = 10)
+kernel:
+    k(block = 10)
+print "a {k.a[0]} {k.a[3]} {k.a[9]}"
+print "b {k.b[0]} {k.b[3]} {k.b[9]}"
+print "c {k.c[0]} {k.c[3]} {k.c[9]}"
+print "d {k.d[0]} {k.d[3]} {k.d[9]}"
+mut k2 = Bytes([uint8(7) for i in 0..<10], [uint8(8) for i in 0..<10], [uint16(9) for i in 0..<10], [uint16(10) for i in 0..<10])
+kernel:
+    k2(block = 10)
+k2.a = k.a
+k2.c = k.c
+kernel:
+    k2(block = 10)
+print "k2a {k2.a[0]} {k2.a[3]} {k2.a[9]}"
+print "k2c {k2.c[0]} {k2.c[3]} {k2.c[9]}"
+"#;
+
+/// Buffers of 8- and 16-bit elements (packed into 32-bit words on wgpu, with their element count
+/// beside them) are copied between kernels and read element by element without leaving the
+/// device: the copy moves the count along with the buffer, the ranged read cuts the range out of
+/// the words around it. A single thread writes, because threads of one word race on wgpu.
+#[test]
+fn packed_buffers_stay_on_the_device() {
+    let dir = project("packed_buffers");
+    std::fs::write(source(&dir), PACKED_BUFFERS).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    let (cpu, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "simd")]);
+    assert!(cpu.contains("k2a 3 6 12") && cpu.contains("d 8 3008 9008"), "{cpu}");
+    let (listed, _) = run_crate(&dir, &cache, &[("BORING_BACKEND", "list")]);
+    if listed.contains("wgpu: available") {
+        let (stdout, stderr) = run_crate(&dir, &cache, &[("BORING_BACKEND", "wgpu,simd"), ("BORING_BACKEND_VERBOSE", "1")]);
+        assert_eq!(stdout, cpu, "{stderr}");
+        assert!(stderr.contains("kernel Bytes -> wgpu"), "{stderr}");
+        // Two instances of four buffers each go up once; the two copies add no upload.
+        assert!(stderr.contains("buffer transfers: 8 up"), "{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SCREEN_LIFE: &str = r#"
 let width = 64
 let height = 64

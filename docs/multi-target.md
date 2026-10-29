@@ -118,7 +118,7 @@ small transfer of its own. An element read of a buffer the CPU already holds cos
 The ping-pong swap `a.x, a.y = a.y, a.x` and the copy `b.cells = a.cells` also stay on the
 backend when both buffers are resident on it: the swap exchanges the two device buffers, the copy
 is a device-side copy. Otherwise (another backend, a buffer the CPU changed, a backend with no
-device-side copy: ROCm has none, wgpu does it for 32-bit element types only) they go through the
+device-side copy: ROCm has none, wgpu does it for 8-, 16- and 32-bit element types) they go through the
 CPU as before.
 
 A kernel is routable when its fields are numeric/bool scalars, `Dimension`s and plain `[T]`
@@ -215,4 +215,4 @@ it. Run with `BORING_BACKEND_VERBOSE=1` to see which scores are priors.
 ## Not implemented yet
 
 - A remote service as a backend.
-- Device-side copy and ranged reads on ROCm, and for wgpu buffers of 8/16/64-bit elements.
+- Device-side copy and ranged reads on ROCm (needs a HIP device-to-device copy in its wrapper).

@@ -121,35 +121,46 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 }}
 "
     ));
-    // Packed byte kinds keep their element count beside the buffer; only 32-bit elements take
-    // the device-side paths below, everything else goes through the CPU.
+    // Packed byte kinds (8/16-bit elements) are stored as `array<u32>` with their element count
+    // beside the buffer (`<field>_len`): that count travels with the buffer.
     // A `'const` fixed array lives in the params uniform, not in a buffer of its own.
     let in_uniform = |f: &RouteField| k.fields.iter().any(|d| d.name == f.name && matches!(d.qual, GpuQual::Const));
     let plain = |f: &RouteField| matches!(f.rust_ty, "f32" | "i32" | "u32") && !in_uniform(f);
-    s.push_str(&crate::transpiler::unified::swap_adapter(name, fields, &plain, &|obj, field| format!("{obj}.{field}_buf"), &|obj| format!("{obj}.rebuild_bind_group();")));
+    let packed = |f: &RouteField| matches!(f.rust_ty, "u8" | "i8" | "u16" | "i16") && !in_uniform(f);
+    let exchangeable = |f: &RouteField| plain(f) || packed(f);
+    s.push_str(&crate::transpiler::unified::swap_adapter(
+        name,
+        fields,
+        &exchangeable,
+        &|obj, field| format!("{obj}.{field}_buf"),
+        &|fi, oi, fj, oj| if packed(fi) { format!("std::mem::swap(&mut {oi}.{}_len, &mut {oj}.{}_len);", fi.name, fj.name) } else { String::new() },
+        &|obj| format!("{obj}.rebuild_bind_group();"),
+    ));
     s.push_str(&format!(
         "pub fn __boring_unified_export_{name}(id: u64, index: usize) -> Result<Box<dyn std::any::Any + Send>, Box<dyn std::error::Error + Send + Sync>> {{
     let store = __BORING_STORE_{name}.lock().unwrap();
     let Some(k) = store.as_ref().and_then(|instances| instances.get(&id)) else {{ return Err(\"no resident instance\".into()) }};
-    let (tag, source): (&'static str, &std::sync::Arc<wgpu::Buffer>) = match index {{
+    let (tag, source, len): (&'static str, &std::sync::Arc<wgpu::Buffer>, usize) = match index {{
 "
     ));
     for (i, f) in fields.iter().enumerate() {
         if f.array && plain(f) {
-            s.push_str(&format!("        {i} => (\"{}\", &k.0.{}_buf),\n", f.rust_ty, f.name));
+            s.push_str(&format!("        {i} => (\"{}\", &k.0.{}_buf, 0),\n", f.rust_ty, f.name));
+        } else if f.array && packed(f) {
+            s.push_str(&format!("        {i} => (\"{}\", &k.0.{}_buf, k.0.{}_len),\n", f.rust_ty, f.name, f.name));
         }
     }
     s.push_str(
-        "        _ => return Err(Box::new(crate::unified::Unsupported(\"not a 32-bit buffer\".into()))),
+        "        _ => return Err(Box::new(crate::unified::Unsupported(\"not a 32-bit, 16-bit or 8-bit buffer\".into()))),
     };
     let copy = __boring_gpu_copy_d2d(&__boring_gpu_device(), &__boring_gpu_queue(), source);
-    Ok(Box::new((tag, copy)))
+    Ok(Box::new((tag, copy, len)))
 }
 ",
     );
     s.push_str(&format!(
         "pub fn __boring_unified_import_{name}(id: u64, index: usize, handle: Box<dyn std::any::Any + Send>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
-    let (tag, buffer) = *handle.downcast::<(&'static str, std::sync::Arc<wgpu::Buffer>)>().map_err(|_| crate::unified::Unsupported(\"foreign buffer handle\".into()))?;
+    let (tag, buffer, len) = *handle.downcast::<(&'static str, std::sync::Arc<wgpu::Buffer>, usize)>().map_err(|_| crate::unified::Unsupported(\"foreign buffer handle\".into()))?;
     let mut store = __BORING_STORE_{name}.lock().unwrap();
     let Some(k) = store.as_mut().and_then(|instances| instances.get_mut(&id)) else {{ return Err(\"no resident instance\".into()) }};
     match index {{
@@ -158,6 +169,8 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
     for (i, f) in fields.iter().enumerate() {
         if f.array && plain(f) {
             s.push_str(&format!("        {i} if tag == \"{}\" => k.0.{}_buf = buffer,\n", f.rust_ty, f.name));
+        } else if f.array && packed(f) {
+            s.push_str(&format!("        {i} if tag == \"{}\" => {{ k.0.{}_buf = buffer; k.0.{}_len = len; }}\n", f.rust_ty, f.name, f.name));
         }
     }
     s.push_str("        _ => return Err(Box::new(crate::unified::Unsupported(\"another element type\".into()))),\n    }\n    k.0.rebuild_bind_group();\n    Ok(())\n}\n");
@@ -171,14 +184,44 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
     for (i, f) in fields.iter().enumerate() {
         if f.array && f.mutable && plain(f) {
             s.push_str(&format!("        {i} => *out.{}() = __boring_gpu_copy_d2h_range::<{}>(&__boring_gpu_device(), &__boring_gpu_queue(), &k.0.{}_buf, start, len),\n", f.accessor(), f.rust_ty, f.name));
+        } else if f.array && f.mutable && packed(f) {
+            s.push_str(&format!("        {i} => *out.{}() = __boring_gpu_copy_d2h_range_packed::<{}>(&__boring_gpu_device(), &__boring_gpu_queue(), &k.0.{}_buf, start, len, k.0.{}_len),\n", f.accessor(), f.rust_ty, f.name, f.name));
         }
     }
-    s.push_str("        _ => return Err(Box::new(crate::unified::Unsupported(\"not a 32-bit buffer\".into()))),\n    }\n    Ok(())\n}\n");
+    s.push_str("        _ => return Err(Box::new(crate::unified::Unsupported(\"not a 32-bit, 16-bit or 8-bit buffer\".into()))),\n    }\n    Ok(())\n}\n");
     s
 }
 
 /// Reads `len` elements from element `start` of a buffer: a staging buffer of just that range.
-const RANGE_HELPER: &str = "fn __boring_gpu_copy_d2h_range<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, start: usize, len: usize) -> Vec<T> {
+const RANGE_HELPER: &str = "fn __boring_gpu_copy_d2h_range_packed<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, start: usize, len: usize, count: usize) -> Vec<T> {
+    // 8- and 16-bit elements share 32-bit words: copy the words around the range, cut it out.
+    let width = std::mem::size_of::<T>() as u64;
+    let end = (start as u64 + len as u64).min(count as u64);
+    let begin = (start as u64).min(end);
+    if end == begin { return Vec::new(); }
+    let first = begin * width / 4 * 4;
+    let last = ((end * width + 3) / 4 * 4).min(src.size());
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: last - first,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_buffer_to_buffer(src, first, &staging, 0, last - first);
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+    let _ = device.poll(wgpu::MaintainBase::Wait);
+    rx.recv().unwrap().unwrap();
+    let bytes = staging.slice(..).get_mapped_range().to_vec();
+    staging.unmap();
+    let from = (begin * width - first) as usize;
+    let to = from + ((end - begin) * width) as usize;
+    bytemuck::pod_collect_to_vec::<u8, T>(&bytes[from..to])
+}
+fn __boring_gpu_copy_d2h_range<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, start: usize, len: usize) -> Vec<T> {
     let width = std::mem::size_of::<T>() as u64;
     let total = src.size() / width;
     let end = (start as u64 + len as u64).min(total);

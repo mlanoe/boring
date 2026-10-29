@@ -112,7 +112,7 @@ pub fn __boring_unified_{name}(id: u64, args: &mut [crate::unified::Arg<'_>], up
 }}
 "
     ));
-    s.push_str(&crate::transpiler::unified::swap_adapter(name, fields, &|_| true, &|obj, field| format!("{obj}.{field}"), &|_| String::new()));
+    s.push_str(&crate::transpiler::unified::swap_adapter(name, fields, &|_| true, &|obj, field| format!("{obj}.{field}"), &|_, _, _, _| String::new(), &|_| String::new()));
     // A device-side copy of one buffer (handle: its element type and the new `Buffer`), and the
     // matching replacement. Metal buffers are shared memory: the copy is a `memcpy` once the
     // launches in flight finished.
