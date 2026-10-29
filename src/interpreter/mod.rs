@@ -487,6 +487,26 @@ impl PartialEq for Value {
     }
 }
 
+impl Value {
+    /// Equality for set elements and dict keys: user structs compare by value (the generated Rust
+    /// derives `Eq + Hash` on them), everything else as `==`.
+    pub(crate) fn key_eq(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) => {
+                if Rc::ptr_eq(x, y) { return true; }
+                let (x, y) = (x.borrow(), y.borrow());
+                x.type_name == y.type_name && x.fields.len() == y.fields.len()
+                    && x.fields.iter().zip(y.fields.iter()).all(|((n1, v1), (n2, v2))| n1 == n2 && Value::key_eq(v1, v2))
+            }
+            (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| Value::key_eq(p, q)),
+            (Value::Tuple(x), Value::Tuple(y)) => x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| Value::key_eq(p, q)),
+            (Value::EnumVariant { type_name: t1, variant: v1, fields: f1 }, Value::EnumVariant { type_name: t2, variant: v2, fields: f2 }) =>
+                t1 == t2 && v1 == v2 && f1.len() == f2.len() && f1.iter().zip(f2.iter()).all(|(p, q)| Value::key_eq(p, q)),
+            _ => a == b,
+        }
+    }
+}
+
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

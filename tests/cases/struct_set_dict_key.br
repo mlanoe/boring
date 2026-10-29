@@ -1,0 +1,14 @@
+struct Key:
+    var int id
+
+def main():
+    mut s = {Key(1)}
+    s.add(Key(2))
+    s.add(Key(1))
+    print s.len()
+    print s.contains(Key(2))
+    mut d = {Key(1) = 5}
+    d[Key(2)] = 6
+    d[Key(1)] = 7
+    print d.len()
+    print d[Key(1)]

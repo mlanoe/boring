@@ -987,6 +987,8 @@ transpile_test!(mut_param_store_clone);
 // A plain value stored into a `'actor` member (implicit-self `kept = p`) is wrapped and independent.
 transpile_test!(mut_param_store_actor);
 transpile_test!(qualified_member_store);
+// A struct is a set element / dict key: auto-derived `Eq + Hash` when every field is hashable.
+transpile_test!(struct_set_dict_key);
 transpile_test!(empty_set_default_struct_elem);
 // Bare read-only struct/enum/collection params of non-trait methods are lent as `&T` like free
 // functions' (trait methods, shared names and stored params stay by value); also across files.

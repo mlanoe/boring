@@ -1111,6 +1111,12 @@ let empty_set: HashSet<isize> = HashSet::new();
 
 `{mut T}` (element-`mut` on a set) is rejected outright — not a Boring design choice, a hard Rust limitation: `HashSet<T>` deliberately exposes no mutable element access at all (no `iter_mut()`, no `get_mut()`), because mutating an element in place could change its `Hash`/`Eq` behavior and silently corrupt the set's buckets. `mut {T}` (mutable on the *set itself* — structural `add`/`remove`) is unaffected and works normally.
 
+#### Struct elements and dict keys — `Eq`/`Hash`
+
+A user struct can be a set element or a dict key (`{Key}`, `{Key = V}`, `{Key'shared}`, `{Key'owned}`). The generated Rust struct automatically derives `Eq, Hash` (next to `PartialEq`) whenever every field is hashable: integers, `bool`, `string`, unit enums, arrays/optionals/tuples of those, `'shared`/`'owned` fields of those, and other structs that qualify. Not hashable: `float` (Rust floats are not `Eq`/`Hash`), sets, dicts, `'actor`/`'guard` handles, non-unit enums, external types, and structs with a custom `eq` operator; such a struct simply gets no `Hash`. An explicit `@derive(...)` is taken at its word and must list `Eq, Hash` itself.
+
+The checker rejects a declared `{T}` / `{K = V}` type whose element/key is a `float`, an `'actor`/`'guard` handle, or a struct holding one (e.g. "this type cannot be a set element: field `x` of `Key`: a float is not `Eq`/`Hash`"). A set/dict literal without a type annotation isn't checked and fails in rustc instead.
+
 #### Set methods
 
 | Boring                | Rust                          |

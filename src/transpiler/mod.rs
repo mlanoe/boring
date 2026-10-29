@@ -6950,7 +6950,7 @@ def main():\n    let [Drawable] shapes = [Circle(r = 1.0)]\n    for s in shapes:
 trait Named:\n    req string name()\n\n\
 struct Point as Hash, Eq, Named:\n    int x\n    int y\n\n    req string name():\n        \"point\"\n";
         let code = transpile_src_with_config(src, TranspileConfig::default());
-        assert!(code.contains("#[derive(Debug, Clone, PartialEq, Hash, Eq)]"),
+        assert!(code.contains("#[derive(Debug, Clone, PartialEq, Eq, Hash)]"),
             "whitelisted names should merge into the struct's single derive line, got:\n{}", code);
         assert!(code.contains("impl Named for Point {"),
             "user-declared trait must still get a manual impl block, got:\n{}", code);

@@ -1059,12 +1059,60 @@ impl Checker {
     fn check_set_mut_constraint(&mut self, ty: &Option<Type>, line: usize, col: usize) {
         if self.kernel_dispatch_only { return; }
         if let Some(ty) = ty {
+            self.check_hashable_elements(ty, line, col);
             if ty.contains_illegal_mut_set() {
                 self.error(
                     "cannot use `mut` on a set's element type (`{mut T}`): mutating a set element in place could change its hash/equality behavior and silently corrupt the set's internal bucket placement — sets never expose mutable element access for this reason; `mut {T}` (mutable on the set itself, for structural add/remove) is unaffected",
                     line, col,
                 );
             }
+        }
+    }
+
+    /// Why a value of type `ty` can't be a set element / dict key (a hash-based collection needs
+    /// `Eq + Hash`): a `float`, an `'actor`/`'guard` handle, or a user struct holding one
+    /// (transitively). `None` = hashable as far as this check can tell. Struct fields are read
+    /// from `struct_field_types`; `visiting` stops recursion on self-referential structs.
+    fn unhashable_reason(&self, ty: &Type, visiting: &mut Vec<String>) -> Option<String> {
+        match ty {
+            Type::Float16 | Type::Float32 | Type::Float64 => Some("a float is not `Eq`/`Hash`".to_string()),
+            Type::Named(n) if matches!(n.as_str(), "float" | "float16" | "float32" | "float64") =>
+                Some("a float is not `Eq`/`Hash`".to_string()),
+            Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask) =>
+                Some("an `'actor`/`'guard` handle (a lock around the value) has no hash".to_string()),
+            Type::Qualified(i, _) | Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) =>
+                self.unhashable_reason(i, visiting),
+            Type::Tuple(es) => es.iter().find_map(|e| self.unhashable_reason(e, visiting)),
+            Type::Named(n) => {
+                if visiting.contains(n) { return None; }
+                let fields = self.struct_field_types.get(n)?;
+                visiting.push(n.clone());
+                let r = fields.iter().find_map(|(fname, fty)| {
+                    self.unhashable_reason(fty, visiting).map(|why| format!("field `{}` of `{}`: {}", fname, n, why))
+                });
+                visiting.pop();
+                r
+            }
+            _ => None,
+        }
+    }
+
+    /// `{T}` / `{K = V}` need `T`/`K` to be hashable: reject the ones that can never be, with a
+    /// Boring diagnostic instead of a rustc "trait bound `Eq`/`Hash` is not satisfied" error.
+    fn check_hashable_elements(&mut self, ty: &Type, line: usize, col: usize) {
+        match ty {
+            Type::Set(e) | Type::Dict(e, _) => {
+                let what = if matches!(ty, Type::Set(_)) { "set element" } else { "dict key" };
+                if let Some(why) = self.unhashable_reason(e, &mut vec![]) {
+                    self.error(format!("this type cannot be a {what}: {why} (sets and dicts are hash-based and need `Eq` + `Hash`)"), line, col);
+                }
+                self.check_hashable_elements(e, line, col);
+                if let Type::Dict(_, v) = ty { self.check_hashable_elements(v, line, col); }
+            }
+            Type::Tuple(es) => for e in es { self.check_hashable_elements(e, line, col); },
+            Type::Array(i) | Type::ArrayN(i, _) | Type::ArrayNExpr(i, _) | Type::LabeledArray(i, _)
+                | Type::Optional(i) | Type::Mut(i) | Type::Qualified(i, _) => self.check_hashable_elements(i, line, col),
+            _ => {}
         }
     }
 
@@ -3169,7 +3217,7 @@ mod set_mut_tests {
     fn mut_on_the_set_itself_is_unaffected() {
         // `mut {T}`/`var mut {T}` (structural mutation of the set) is a
         // different axis and must stay legal.
-        let src = "struct Point:\n    var float x\ndef main():\n    var mut {Point} pts = {}\n    pts.add(Point(1.0))\n    print \"ok\"\n";
+        let src = "struct Point:\n    var int x\ndef main():\n    var mut {Point} pts = {}\n    pts.add(Point(1))\n    print \"ok\"\n";
         let errs = errors_for(src);
         assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }

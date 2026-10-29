@@ -1995,7 +1995,7 @@ impl Interpreter {
                 let mut vals: Vec<Value> = Vec::new();
                 for e in elems {
                     let v = self.eval_expr(e, Rc::clone(&env))?;
-                    if !vals.contains(&v) {
+                    if !vals.iter().any(|x| Value::key_eq(x, &v)) {
                         vals.push(v);
                     }
                 }

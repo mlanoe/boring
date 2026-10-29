@@ -1,0 +1,8 @@
+struct Key:
+    var float x
+
+struct Holder:
+    var {Key} keys
+
+def main():
+    print 1

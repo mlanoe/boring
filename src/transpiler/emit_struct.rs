@@ -77,6 +77,48 @@ impl Transpiler {
         }
     }
 
+    /// True when the struct `name` ends up WITHOUT `Eq + Hash` (so a `HashSet<Name>` /
+    /// `HashMap<Name, _>` over it can't compile). Auto-derived structs get `Eq, Hash` exactly when
+    /// they get `PartialEq` and every field type is hashable (`type_lacks_hash`); an explicit
+    /// `@derive(...)` is taken at its word (it must list `Hash`).
+    pub(crate) fn struct_lacks_hash(&self, name: &str, visiting: &mut Vec<String>) -> bool {
+        if visiting.iter().any(|v| v == name) { return false; }
+        let Some(s) = self.struct_decls.get(name) else { return true };
+        if s.is_native { return true; }
+        if s.attrs.iter().any(|a| a.name == "derive") {
+            return !s.attrs.iter().filter(|a| a.name == "derive")
+                .flat_map(|a| a.args.iter()).any(|a| a == "Hash")
+                && !s.protocols.iter().any(|p| p == "Hash");
+        }
+        if self.struct_lacks_partial_eq(name, &mut vec![]) { return true; }
+        visiting.push(name.to_string());
+        let r = s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, visiting));
+        visiting.pop();
+        r
+    }
+
+    /// True when a value of type `ty` can't be `Hash`ed in the generated Rust: floats (not `Eq`/`Hash`
+    /// in Rust), sets/dicts, actor/guard handles, and any user type that doesn't derive `Eq + Hash`.
+    /// Unknown (external) types count as unhashable — the derive is simply withheld.
+    pub(crate) fn type_lacks_hash(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) => self.type_lacks_hash(i, visiting),
+            Type::Qualified(i, q) => {
+                if matches!(q, OwnerQual::Shared) || q.is_owned_or_new() { self.type_lacks_hash(i, visiting) } else { true }
+            }
+            Type::Tuple(es) => es.iter().any(|e| self.type_lacks_hash(e, visiting)),
+            Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+            | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 | Type::Str | Type::Bool => false,
+            Type::Named(n) => match n.as_str() {
+                "int" | "uint" | "string" | "bool" | "char" | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint8" | "uint16" | "uint32" | "uint64" | "uint128" => false,
+                _ if self.struct_decls.contains_key(n.as_str()) => self.struct_lacks_hash(n, visiting),
+                _ => !self.unit_enums.contains(n.as_str()),
+            },
+            _ => true,
+        }
+    }
+
     /// The field-local reasons an auto-derived struct drops `PartialEq` (mirrors the branch
     /// chain in `emit_struct`; the transitive reason is `struct_lacks_partial_eq`).
     fn struct_local_drops_partial_eq(&self, s: &StructDecl) -> bool {
@@ -232,6 +274,14 @@ impl Transpiler {
                 // actor/dyn/fn field, say — makes this struct's derive fail with E0369.
                 if !s.fields.iter().any(|f| self.type_lacks_partial_eq(&f.ty, &mut vec![s.name.clone()])) {
                     names.push("PartialEq".to_string());
+                }
+                // `Eq + Hash` too when every field supports them, so the struct can be a set
+                // element / dict key (`{Key}`, `{Key = V}` → `HashSet<Key>` / `HashMap<Key, V>`).
+                if names.iter().any(|n| n == "PartialEq")
+                    && !s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, &mut vec![s.name.clone()]))
+                {
+                    names.push("Eq".to_string());
+                    names.push("Hash".to_string());
                 }
             }
             names

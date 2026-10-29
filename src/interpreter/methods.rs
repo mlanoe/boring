@@ -1986,17 +1986,17 @@ impl Interpreter {
             "len" => Ok(Some(Value::Int(pairs.len() as i64))),
             "contains" | "containsKey" | "has" => {
                 let key = args.first().cloned().unwrap_or(Value::Nil);
-                Ok(Some(Value::Bool(pairs.iter().any(|(k, _)| k == &key))))
+                Ok(Some(Value::Bool(pairs.iter().any(|(k, _)| Value::key_eq(k, &key)))))
             }
             "get" => {
                 let key = args.first().cloned().unwrap_or(Value::Nil);
                 let default = args.get(1).cloned().unwrap_or(Value::Nil);
-                let found = pairs.into_iter().find(|(k, _)| k == &key).map(|(_, v)| v);
+                let found = pairs.into_iter().find(|(k, _)| Value::key_eq(k, &key)).map(|(_, v)| v);
                 Ok(Some(found.unwrap_or(default)))
             }
             "remove" => {
                 let key = args.first().cloned().unwrap_or(Value::Nil);
-                let new_pairs: Vec<(Value, Value)> = pairs.into_iter().filter(|(k, _)| k != &key).collect();
+                let new_pairs: Vec<(Value, Value)> = pairs.into_iter().filter(|(k, _)| !Value::key_eq(k, &key)).collect();
                 Ok(Some(Value::Dict(new_pairs)))
             }
             "map" => {
@@ -2025,7 +2025,7 @@ impl Interpreter {
                 let mut new_pairs = pairs;
                 let mut found = false;
                 for (k, v) in &mut new_pairs {
-                    if k == &key { *v = val.clone(); found = true; break; }
+                    if Value::key_eq(k, &key) { *v = val.clone(); found = true; break; }
                 }
                 if !found { new_pairs.push((key, val)); }
                 Ok(Some(Value::Dict(new_pairs)))
@@ -2075,17 +2075,17 @@ impl Interpreter {
             "add" => {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
                 let mut new_set = set;
-                if !new_set.contains(&val) { new_set.push(val); }
+                if !new_set.iter().any(|x| Value::key_eq(x, &val)) { new_set.push(val); }
                 Ok(Some(Value::Set(new_set)))
             }
             "remove" => {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
-                let new_set: Vec<Value> = set.into_iter().filter(|v| v != &val).collect();
+                let new_set: Vec<Value> = set.into_iter().filter(|v| !Value::key_eq(v, &val)).collect();
                 Ok(Some(Value::Set(new_set)))
             }
             "contains" => {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
-                Ok(Some(Value::Bool(set.contains(&val))))
+                Ok(Some(Value::Bool(set.iter().any(|x| Value::key_eq(x, &val)))))
             }
             "toArray" => Ok(Some(Value::Array(set.into()))),
             "isEmpty" => Ok(Some(Value::Bool(set.is_empty()))),
@@ -2098,7 +2098,7 @@ impl Interpreter {
                 };
                 let mut new_set = set;
                 for v in other {
-                    if !new_set.contains(&v) { new_set.push(v); }
+                    if !new_set.iter().any(|x| Value::key_eq(x, &v)) { new_set.push(v); }
                 }
                 Ok(Some(Value::Set(new_set)))
             }
@@ -2108,7 +2108,7 @@ impl Interpreter {
                     Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
-                let new_set: Vec<Value> = set.into_iter().filter(|v| other.contains(v)).collect();
+                let new_set: Vec<Value> = set.into_iter().filter(|v| other.iter().any(|o| Value::key_eq(o, v))).collect();
                 Ok(Some(Value::Set(new_set)))
             }
             "difference" => {
@@ -2117,7 +2117,7 @@ impl Interpreter {
                     Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
-                let new_set: Vec<Value> = set.into_iter().filter(|v| !other.contains(v)).collect();
+                let new_set: Vec<Value> = set.into_iter().filter(|v| !other.iter().any(|o| Value::key_eq(o, v))).collect();
                 Ok(Some(Value::Set(new_set)))
             }
             "isSubset" => {
@@ -2126,7 +2126,7 @@ impl Interpreter {
                     Some(Value::Array(a)) => Value::rc_vec_into_owned(a),
                     _ => vec![],
                 };
-                Ok(Some(Value::Bool(set.iter().all(|v| other.contains(v)))))
+                Ok(Some(Value::Bool(set.iter().all(|v| other.iter().any(|o| Value::key_eq(o, v))))))
             }
             // ── Index API ──────────────────────────────────────────────────────────
             // Set indices are READ-ONLY — writing through them is forbidden because
@@ -2420,7 +2420,7 @@ impl Interpreter {
                     other => other,
                 };
                 for (k, v) in &pairs {
-                    if k == &key { return Ok(v.clone()); }
+                    if Value::key_eq(k, &key) { return Ok(v.clone()); }
                 }
                 Ok(Value::Nil) // Dict access returns nil for missing keys
             }
@@ -2990,7 +2990,7 @@ impl Interpreter {
                         };
                         let mut found = false;
                         for (k, v) in &mut pairs {
-                            if k == &key { *v = val.clone(); found = true; break; }
+                            if Value::key_eq(k, &key) { *v = val.clone(); found = true; break; }
                         }
                         if !found { pairs.push((key, val)); }
                         self.assign_content(obj_expr, Value::Dict(pairs), env, line)?;
