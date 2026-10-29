@@ -81,7 +81,9 @@ impl ParseError {
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     let mut p = Parser::new(tokens);
-    p.parse_program()
+    let mut program = p.parse_program()?;
+    crate::infer_actor_params::infer_actor_params(&mut program);
+    Ok(program)
 }
 
 /// Free-function wrapper around `Parser::infer_throws_task`, callable from

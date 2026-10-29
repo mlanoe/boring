@@ -829,6 +829,25 @@ impl Transpiler {
                 for arg in args {
                     self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 }
+                // A parameter of a method declared `'actor`/`'guard` (explicitly, or inferred by
+                // `infer_actor_params` for a stored `mut` parameter) takes the caller's value as
+                // a shared handle: like for a free function, the argument variable is promoted.
+                if let ExprKind::Var(recv) = &obj.kind {
+                    let decl = var_struct_types.get(recv.as_str())
+                        .and_then(|t| self.struct_method_overload_decls.get(&format!("{}::{}", t, method)))
+                        .filter(|ds| ds.len() == 1)
+                        .map(|ds| ds[0].clone());
+                    if let Some(decl) = decl {
+                        for (i, arg) in args.iter().enumerate() {
+                            let ExprKind::Var(var_name) = &arg.value.kind else { continue };
+                            if !anonymous_vars.contains(var_name.as_str()) { continue; }
+                            let Some(param_ty) = decl.params.get(i).and_then(|p| p.ty.as_ref()) else { continue };
+                            let Some(demanded @ (OwnerQual::Actor | OwnerQual::Guard)) = qual_of_type(param_ty.without_mut()) else { continue };
+                            constrain_candidates(candidates, var_name, &[demanded], alias_of);
+                            has_qualifier_constraint.insert(var_name.clone());
+                        }
+                    }
+                }
                 // def (mutating) method call: variable must support direct mutation.
                 // Eliminates Shared from the candidate set.
                 // For auto-ref params declared without `mut`: this is a compile error.
@@ -2578,6 +2597,16 @@ pub struct CpuDecision {
 
 thread_local! {
     static CPU_DECISIONS: std::cell::RefCell<Vec<CpuDecision>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Records a `mut` method parameter that `infer_actor_params` rewrote to `'actor`.
+pub fn note_inferred_actor_param(method: &str, param: &str, line: usize, col: usize) {
+    CPU_DECISIONS.with(|d| d.borrow_mut().push(CpuDecision {
+        scope: method.to_string(), name: param.to_string(), line, col,
+        qual: "'actor".into(), kind: "param",
+        why: Some("`mut` parameter stored by bare name into an 'actor member: shares the caller's object, so the caller's argument is 'actor too".into()),
+        note: None,
+    }));
 }
 
 /// Drains the CPU qualifiers inferred by earlier transpiles on this thread.

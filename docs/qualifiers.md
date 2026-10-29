@@ -767,6 +767,28 @@ def Value eval_expr(Interpreter interp, Expr e):
     …
 ```
 
+### A `mut` parameter stored in an `'actor` member
+
+A `mut` struct parameter of a struct method is lent (`&mut T`) whatever the body does, and storing it by bare name (`kept = p`, `self.kept = p`) used to be a checker error: a `&mut T` cannot be kept in `self`, and the only meaning of the store is "the member and the caller's variable are the same object". When the destination is a member declared `T'actor`, that meaning has a representation (`Arc<Mutex<T>>` / `Rc<RefCell<T>>`), so the parameter is **inferred `'actor`** instead (`infer_actor_params`, a rewrite right after parsing, so the checker, `boring run` and `boring build` see one signature):
+
+```boring
+struct Holder:
+    var Point'actor kept = Point(0.0, 0.0)
+    def keep(mut Point p):      # inferred: mut Point'actor p
+        kept = p
+
+mut p = Point(1.0, 2.0)         # inferred 'actor: promoted by the call below
+mut h = Holder()
+h.keep(p)
+p.x = 9.0
+print h.kept.x                  # 9
+```
+
+- **Signal.** In a non-trait, non-overloaded, non-generic method of a struct, a `mut` parameter `p` whose type is exactly `T` stored by bare name — `member = p` or `self.member = p`, `member` a field (not shadowed by a parameter) declared `T'actor` (looking through `mut`/`var`) — and stored nowhere else.
+- **Not inferred (the store diagnostic stays):** a trait method or a method named like a method of a trait of the same file (the trait fixes the signature), a `T'shared` member (`'shared` has no interior mutability, so it cannot alias a mutable value), a plain or `'owned` member, an element of `[T'actor]` / `{K = T'actor}` (reading those back is not supported by the transpiler yet), `obj.field = p` on another object (its type is not known to the pass), and a `p` also stored into any non-`'actor` place.
+- **Effect on callers.** The caller's argument becomes `'actor` through the ordinary qualifier propagation, now also for method calls whose receiver has a known struct type (a method parameter declared `'actor`/`'guard` promotes its argument like a free function's parameter does): `p` is an `Arc<Mutex<Point>>` for its whole scope, so *all* its uses change representation. Passing it to a plain `mut` parameter lends the locked value (`&mut *p.lock().unwrap()`, `borrow_mut()` in single-thread mode). A variable is promoted (a `let` binding too, the handle is never reseated); a struct-field or element argument (`h.keep(o.inner)`) is a checker error (`check_actor_param_args`), not a silent copy. A caller variable that is also an explicitly annotated `mut Point'actor q` is not in the inferred table, so lending it to a plain `mut` parameter is not supported yet (same as for a free function).
+- **`--show-qualifiers`.** Both choices are listed: `Holder.keep::p 'actor - param: ...stored by bare name into an 'actor member` and `main::p 'actor - let: the usage constraints leave only 'actor`.
+
 ### Design: borrow inference for bare-trait parameters (phases 1–4 implemented)
 
 **Status: phases 1–4 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions and struct methods; borrowed trait-method contracts).** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is

@@ -2597,6 +2597,7 @@ impl Checker {
                 }
                 if matches!(&expr.kind, ExprKind::MethodCall(..)) {
                     self.check_same_object_lend(recv, method, args);
+                    self.check_actor_param_args(recv, method, args);
                     self.check_method_arg_types(recv, method, args);
                 }
             }

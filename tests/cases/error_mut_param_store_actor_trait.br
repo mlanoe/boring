@@ -1,0 +1,18 @@
+# A trait method's `mut` parameter stays lent (`&mut T`): storing it in an `'actor` member is still
+# rejected, the signature must not depend on the body.
+struct TraitPoint:
+    var float x
+
+trait Keeper:
+    def keep(mut TraitPoint p)
+
+struct TraitHolder as Keeper:
+    var TraitPoint'actor kept = TraitPoint(0.0)
+
+    def keep(mut TraitPoint p):
+        kept = p
+
+def main():
+    mut p = TraitPoint(1.0)
+    mut h = TraitHolder()
+    h.keep(p)

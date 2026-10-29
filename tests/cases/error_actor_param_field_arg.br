@@ -1,0 +1,18 @@
+# The argument of an `'actor` parameter (here inferred from a stored `mut` parameter) must be an
+# `'actor` variable: a plain struct inside another object has no handle to share.
+struct ArgPoint:
+    var float x
+
+struct ArgHolder:
+    var ArgPoint'actor kept = ArgPoint(0.0)
+
+    def keep(mut ArgPoint p):
+        kept = p
+
+struct ArgOuter:
+    var ArgPoint inner = ArgPoint(1.0)
+
+def main():
+    mut h = ArgHolder()
+    mut o = ArgOuter()
+    h.keep(o.inner)

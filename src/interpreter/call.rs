@@ -90,6 +90,14 @@ impl Interpreter {
             } else {
                 fn_env.borrow_mut().define(&param.name, val);
             }
+            // An `'actor`/`'guard` parameter (declared, or inferred by `infer_actor_params` for a
+            // stored `mut` one) is a shared handle: storing it keeps aliasing the caller's value.
+            if let Some(ty) = &param.ty {
+                if matches!(self.resolve_type(ty).without_mut(),
+                    Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)) {
+                    fn_env.borrow_mut().mark_actor(&param.name);
+                }
+            }
             // Task-safe qualifier: a `'shared`/`'rc`/`'static`/etc.-typed *parameter*
             // needs the exact same `mark_task_safe` treatment a `let`/`var` binding of
             // the same type already gets (`Stmt::Let` handling, exec.rs/mod.rs) — this

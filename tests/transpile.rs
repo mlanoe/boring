@@ -986,15 +986,18 @@ transpile_test!(mut_param_type_method);
 transpile_test!(mut_param_store_clone);
 // A plain value stored into a `'actor` member (implicit-self `kept = p`) is wrapped and independent.
 transpile_test!(mut_param_store_actor);
+// A `mut` param stored by bare name into a `T'actor` member is inferred `'actor`: the caller's variable
+// (promoted to `'actor`) and the member are one object, and a non-stored `mut` param still lends `&mut`.
+transpile_test!(mut_param_store_actor_infer);
 transpile_test!(qualified_member_store);
 // Managed mode: a `T'owned` member is an `Arc<Mutex<T>>`/`RefCell<T>`, read and written through its guard.
 transpile_test!(managed_owned_member_read);
 // A struct is a set element / dict key: auto-derived `Eq + Hash` when every field is hashable.
 transpile_test!(struct_set_dict_key);
+transpile_test!(struct_transient_hash);
 transpile_test!(struct_value_eq);
 // Non-unit enums too (`{Shape}`, `{Shape = V}`, a struct field of enum type).
 transpile_test!(enum_set_dict_key);
-transpile_test!(struct_transient_hash);
 transpile_test!(empty_set_default_struct_elem);
 // Bare read-only struct/enum/collection params of non-trait methods are lent as `&T` like free
 // functions' (trait methods, shared names and stored params stay by value); also across files.

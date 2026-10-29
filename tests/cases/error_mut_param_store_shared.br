@@ -1,0 +1,14 @@
+# A `'shared` member cannot alias a `mut` value (no interior mutability): the store stays rejected.
+struct SharedPoint:
+    var float x
+
+struct SharedHolder:
+    var SharedPoint'shared kept = SharedPoint(0.0)
+
+    def keep(mut SharedPoint p):
+        kept = p
+
+def main():
+    mut p = SharedPoint(1.0)
+    mut h = SharedHolder()
+    h.keep(p)

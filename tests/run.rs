@@ -649,26 +649,31 @@ error_test_exact!(error_immutable_let);
 // A lent `mut` struct/collection parameter cannot be stored in a member by bare name (`kept = p`,
 // `all.push(p)`): the interpreter aliased, the transpiled Rust silently cloned. `.clone()` is explicit.
 error_test!(error_mut_param_store);
+error_test!(error_mut_param_store_actor_trait);
+error_test!(error_mut_param_store_shared);
+error_test!(error_mut_param_store_actor_elems);
+error_test!(error_actor_param_field_arg);
 // Unhashable set elements / dict keys (a float field, an `'actor` element) are checker errors.
 error_test!(error_struct_set_float_elem);
 error_test!(error_set_actor_elem);
 error_test!(error_enum_set_float_elem);
+error_test!(error_struct_set_transient_elem);
 // Same check for an unannotated set/dict literal whose element/key is a struct constructor call.
 error_test!(error_set_literal_float_elem);
 error_test!(error_dict_literal_float_key);
 interp_test!(ok_set_literal_hashable_ctor);
-error_test!(error_struct_set_transient_elem);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
+interp_test!(mut_param_store_actor_infer);
 interp_test!(qualified_member_store);
 interp_test!(managed_owned_member_read);
 interp_test!(struct_set_dict_key);
+interp_test!(struct_transient_hash);
 interp_test!(struct_value_eq);
 interp_test!(enum_set_dict_key);
 interp_test!(empty_set_default_struct_elem);
 interp_test!(method_param_borrow);
 interp_test!(method_param_borrow_xfile_main);
-interp_test!(struct_transient_hash);
 interp_test!(method_param_borrow_def);
 // A bare `var` collection (local or parameter) is rebindable only: `.push()`/`v[i] = x`/`d[k] = x`/
 // `s.add()` need `mut`/`var mut` — same content-mutation rule user structs follow.

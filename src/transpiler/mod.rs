@@ -31,7 +31,7 @@ mod emit_methods;
 mod emit_kernel;
 pub(crate) mod unified;
 mod infer_qualifiers;
-pub use infer_qualifiers::{take_cpu_decisions, CpuDecision};
+pub use infer_qualifiers::{note_inferred_actor_param, take_cpu_decisions, CpuDecision};
 mod infer_trait_borrow;
 mod share_dyn_traits;
 mod last_use;

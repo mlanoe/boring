@@ -705,6 +705,34 @@ impl Checker {
             || is_mut_user_type_param_shape(p).is_some_and(|n| self.user_types.contains(n))
     }
 
+    /// The argument of an `'actor` method parameter (declared, or inferred by `infer_actor_params`
+    /// for a stored `mut` parameter) must itself be an `'actor` handle; a struct-typed place
+    /// that is not a variable (`b.inner`, `xs[0]`) is a plain value with no handle to share, so the
+    /// generated Rust would not type-check. Only places positively known to be plain structs are
+    /// reported.
+    pub(super) fn check_actor_param_args(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
+        if self.kernel_dispatch_only { return; }
+        let Some(owner) = self.static_struct_of(recv) else { return };
+        let Some(overloads) = self.struct_methods.get(&(owner, method.to_string())) else { return };
+        if overloads.len() != 1 { return; }
+        let params = overloads[0].clone();
+        for (i, a) in args.iter().enumerate() {
+            if a.spread || a.label.is_some() { continue; }
+            let Some(p) = params.get(i) else { continue };
+            let actor = matches!(p.ty.as_ref().map(|t| t.without_mut()), Some(Type::Qualified(_, OwnerQual::Actor)));
+            if !actor || matches!(a.value.kind, ExprKind::Var(_)) { continue; }
+            if !matches!(a.value.kind, ExprKind::Field(..) | ExprKind::Index(..)) { continue; }
+            if self.static_struct_of(&a.value).is_none() { continue; }
+            let text = Self::place_text(&a.value);
+            self.error(format!(
+                "cannot pass `{text}` to the `'actor` parameter `{}` of `{}()`: the argument must be an `'actor` variable \
+                 (the parameter shares the caller's object), but `{text}` is a plain value inside another object. \
+                 Fix: declare the place `'actor` (`Type'actor`), or pass a copy (`{text}.clone()`) through a local `'actor` variable",
+                p.name, method
+            ), a.value.line, a.value.col);
+        }
+    }
+
     pub(super) fn check_same_object_lend(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
         if self.kernel_dispatch_only { return; }
         let Some(recv_path) = self.lend_place_path(recv) else { return };
@@ -798,8 +826,9 @@ impl Checker {
             self.error(format!(
                 "cannot store the `mut` parameter `{n}` in `{place}`: a `mut` parameter is lent (`&mut`) from the caller, \
                  so it cannot be kept past the call, and a stored copy would silently stop aliasing the caller's value. \
-                 Fix: store an explicit copy (`{n}.clone()`), or use a `'shared`/`'actor` type \
-                 (`Type'shared {n}`) if the field must keep sharing it"
+                 Fix: store an explicit copy (`{n}.clone()`); or, to keep sharing the caller's object, declare the member \
+                 `Type'actor` (a plain member, a `'shared` member or an element of a collection cannot alias a `mut` value) \
+                 and store `{n}` into it by bare name in a non-trait method, which infers `{n}` as `'actor`"
             ), line, col);
         }
     }

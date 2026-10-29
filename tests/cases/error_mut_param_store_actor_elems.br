@@ -1,0 +1,14 @@
+# An element of a `[T'actor]` member is not covered by the `'actor` inference: still rejected.
+struct ElemPoint:
+    var float x
+
+struct ElemHolder:
+    var [ElemPoint'actor] all = []
+
+    def add(mut ElemPoint p):
+        all.push(p)
+
+def main():
+    mut p = ElemPoint(1.0)
+    mut h = ElemHolder()
+    h.add(p)

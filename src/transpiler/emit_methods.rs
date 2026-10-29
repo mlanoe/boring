@@ -6465,6 +6465,13 @@ impl Transpiler {
             if v == "self" {
                 return "self".to_string();
             }
+            // An `'actor` binding (declared, or promoted by a stored `mut` parameter,
+            // `infer_actor_params`) is an `Arc<Mutex<T>>`: lend the locked value. The guard is a
+            // temporary living to the end of the call statement.
+            if !self.fn_current_params.contains_key(v.as_str())
+                && matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Actor)) {
+                return format!("&mut *{}", self.actor_write_guard(v));
+            }
             let already_ref = self.var_primitive_params.contains(v.as_str())
                 || matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::BorrowMut));
             return if already_ref { format!("&mut *{}", v) } else { format!("&mut {}", v) };
