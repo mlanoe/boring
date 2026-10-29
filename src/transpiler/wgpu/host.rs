@@ -545,9 +545,32 @@ impl<'a> HostEmitter<'a> {
             self.line("                })");
         }
         self.line("            });");
+        // Explicit layout holding every binding the host binds: the automatic one drops a
+        // binding the entry point never touches, and `new()`/`rebuild_bind_group` bind all
+        // of the kernel's buffer fields (an unused one used to fail bind group creation).
+        self.line("            let layout_entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {");
+        self.line("                binding,");
+        self.line("                visibility: wgpu::ShaderStages::COMPUTE,");
+        self.line("                ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },");
+        self.line("                count: None,");
+        self.line("            };");
+        self.line("            let layout_entries = [");
+        let mut layout_idx: u32 = 0;
+        for f in &buf_fields {
+            let read_only = super::device::wgsl_buffer_type(f).0 == "read";
+            self.line(&format!("                layout_entry({layout_idx}, wgpu::BufferBindingType::Storage {{ read_only: {read_only} }}),"));
+            layout_idx += 1;
+        }
+        if !params_fields.is_empty() {
+            let ty = if super::kernel_params_use_storage(decl) { "wgpu::BufferBindingType::Storage { read_only: true }" } else { "wgpu::BufferBindingType::Uniform" };
+            self.line(&format!("                layout_entry({layout_idx}, {ty}),"));
+        }
+        self.line("            ];");
+        self.line("            let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &layout_entries });");
+        self.line("            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&bind_group_layout], push_constant_ranges: &[] });");
         self.line("            std::sync::Arc::new(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {");
         self.line("                label: None,");
-        self.line("                layout: None,");
+        self.line("                layout: Some(&pipeline_layout),");
         self.line("                module: shader,");
         self.line(&format!("                entry_point: Some(\"{}_main\"),", name));
         self.line("                compilation_options: wgpu::PipelineCompilationOptions::default(),");

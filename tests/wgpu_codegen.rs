@@ -3385,27 +3385,47 @@ kernel Q:
     }
 }
 
-/// An atomic (`'actor'global`/`'actor'unified`) buffer field needs a real 32-bit element for
-/// WGSL's `atomicAdd`/`atomicMin`/... intrinsics -- there's no sub-word atomic op, so a
-/// packed-byte-kind element type is rejected there even though it's supported on an ordinary
-/// (non-atomic) buffer field (see `packed_byte_kind_of_ty`'s doc comment and the
-/// `wgpu_packed_byte_buffer_field_*` tests below).
+/// `'actor` packed `uint8`/`int8`/`uint16`/`int16` buffers: WGSL has no sub-word atomics, so
+/// `+=`/`min`/`max`/`swap`/`cas` go through a compare-exchange loop on the containing word
+/// (`bp_packed_rmw`). Pairs of threads share one element, neighbouring elements share words.
 #[test]
-fn wgpu_atomic_packed_byte_buffer_field_is_rejected_not_silently_corrupted() {
+fn wgpu_atomic_packed_byte_buffer_field_uses_cas_loop() {
+    let test_name = "atomic_packed_byte_buffer_field";
     let src = r#"
 kernel Q:
-    mut [float32]'unified out
-    mut [uint8]'actor'global counters
+    mut [uint8]'actor'unified counters
+    mut [int8]'actor'unified lows
+    mut [uint16]'actor'unified swaps
+    init(mut [uint8]'unified c, mut [int8]'unified l, mut [uint16]'unified s):
+        counters = c
+        lows = l
+        swaps = s
     def ():
-        let tid = .thread.x
-        out[tid] = counters[tid] as float32
+        let i = .thread.x
+        counters[i / 2] += 1
+        lows[i / 2].min(0 - i)
+        let old = swaps[i / 2].swap(i + 100)
+mut k = Q([uint8(0) for i in 0..<10], [int8(0) for i in 0..<10], [uint16(0) for i in 0..<10])
+kernel:
+    k(block = 10)
+print "c {k.counters[0]} {k.counters[1]} {k.counters[4]}"
+print "l {k.lows[0]} {k.lows[1]} {k.lows[4]}"
 "#;
-    let stderr = run_wgpu_expect_failure("atomic_packed_byte_buffer_field_rejected", src);
-    assert!(
-        stderr.contains("atomic buffer field 'counters'") && stderr.contains("no atomic form"),
-        "expected the atomic packed-byte buffer field to be rejected with a clear diagnostic \
-         instead of silently corrupting data, got:\n{stderr}"
-    );
+    let (wgsl, _emulated, _rs, _toml) = run_wgpu(test_name, src);
+    assert!(wgsl.contains("fn bp_rmw_q_counters("), "expected the CAS helper:\n{wgsl}");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wgpu_codegen").join(test_name);
+    let manifest = tmp.join("test_wgpu").join("Cargo.toml");
+    let run = common::SharedCargo::new("wgpu_codegen")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "run failed:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+    assert!(stdout.contains("c 2 2 2"), "lost atomic add on packed uint8:\n{stdout}");
+    assert!(stdout.contains("l -1 -3 -9"), "wrong signed min on packed int8:\n{stdout}");
 }
 
 /// The wgpu-backend regression test for the packed-byte-kind buffer field feature: a
@@ -4701,4 +4721,44 @@ print "{{k.a[1]}} {{k.b[1]}}"
         // Element 1 starts at 2/2: 3/4 after step one; swapped 4/3; step two: 5/6 (no swap gives 4 8).
         assert!(stdout.contains("5 6"), "[{ty}] expected `5 6`, got:\n{stdout}");
     }
+}
+
+// A buffer field the kernel body never touches used to make the host's bind group (all
+// fields) disagree with the pipeline's automatic layout (only used bindings): wgpu rejected it
+// with "Number of bindings in bind group descriptor (2) does not match ... layout (1)".
+// The pipeline now has an explicit layout covering every buffer field. Real-GPU run.
+#[test]
+fn unused_buffer_field_does_not_break_bind_group_creation() {
+    let src = r#"
+kernel Unused:
+    mut [uint]'unified a
+    mut [uint]'unified b
+    init(mut [uint]'unified a0, mut [uint]'unified b0):
+        a = a0
+        b = b0
+    def ():
+        let i = .thread.x
+        a[i] = a[i] + 1
+mut k = Unused([uint(i) for i in 0..<10], [uint(i * 2) for i in 0..<10])
+kernel:
+    k(block = 10)
+k.a, k.b = k.b, k.a
+kernel:
+    k(block = 10)
+print "{k.a[1]} {k.b[1]}"
+"#;
+    let (_wgsl, _emulated, rs, _toml) = run_wgpu("unused_buffer_field_bind_group", src);
+    assert!(rs.contains("create_pipeline_layout"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("unused_buffer_field_bind_group").join("test_wgpu").join("Cargo.toml");
+    let run = common::SharedCargo::new("wgpu_codegen")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "build/run failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    // a: 1 -> 2; b untouched (2); swapped: a=2, b=2; step two: a=3.
+    assert!(stdout.contains("3 2"), "expected `3 2`, got:\n{stdout}");
 }

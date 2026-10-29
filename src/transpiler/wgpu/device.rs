@@ -827,23 +827,6 @@ impl DeviceEmitter {
                                 if name.starts_with('u') { "u32" } else { "i32" }, name
                             );
                         self.errors.push(TranspileError::at(message, f.line, f.col));
-                    } else if packed_byte_kind_of_ty(inner).is_some()
-                        && matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
-                        // `uint8`/`int8`/`uint16`/`int16` are otherwise supported on a buffer
-                        // field (packed into `array<u32>` words, see `PackedByteKind`), but an
-                        // atomic field needs a real whole-word element for WGSL's
-                        // `atomicAdd`/`atomicMin`/... intrinsics to operate on — there's no
-                        // sub-word atomic op to extend `packed_byte_read`/
-                        // `try_packed_byte_assign`'s plain-index codegen to. Reject explicitly
-                        // instead of silently falling through to `wgsl_scalar`'s
-                        // `/* ERROR */`-commented fallback (which doesn't fail the naga build).
-                        self.errors.push(TranspileError::at(format!(
-                            "kernel {}: atomic buffer field '{}' has element type `uint8`/`int8`/\
-                             `uint16`/`int16`, which has no atomic form on --target wgpu — WGSL's \
-                             atomic intrinsics need a whole 32-bit element, not a packed sub-word \
-                             one. Use `int32`/`uint32` instead",
-                            decl.name, f.name
-                        ), f.line, f.col));
                     }
                 }
             }
@@ -861,10 +844,13 @@ impl DeviceEmitter {
         for f in &decl.fields {
             if is_buffer_field(f) {
                 let (access, ty) = wgsl_buffer_type(f);
-                let var_name = &self.current_buffer_renames[&f.name];
+                let var_name = self.current_buffer_renames[&f.name].clone();
                 self.line(&format!("@group(0) @binding({}) var<storage, {}> {}: {};",
                     binding, access, var_name, ty));
                 binding += 1;
+                if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) && packed_buffer_is_atomic(f) {
+                    for l in PACKED_RMW_WGSL.replace("{BUF}", &var_name).lines() { self.line(l); }
+                }
             }
         }
 
@@ -1517,6 +1503,14 @@ impl DeviceEmitter {
 
         let i = self.expr(idx);
         let v = self.expr(value);
+        if let Some(kind) = self.packed_field_kind(&arr_name) {
+            let code = match op {
+                BinOp::Add => 0, BinOp::Sub => 1, BinOp::BitOr => 2, BinOp::BitAnd => 3, BinOp::BitXor => 4,
+                _ => return None,
+            };
+            let renamed = self.current_buffer_renames.get(&arr_name).cloned().unwrap_or(arr_name);
+            return Some(format!("_ = {};", Self::packed_rmw_call(&renamed, &i, kind, code, &v, "0")));
+        }
         // Same cross-kernel namespacing as the general Var case (see its comment) —
         // this bypasses self.expr() entirely so it needs its own rename lookup.
         let arr_name = self.current_buffer_renames.get(&arr_name).cloned().unwrap_or(arr_name);
@@ -1616,6 +1610,17 @@ impl DeviceEmitter {
         )
     }
 
+    /// Call of the `bp_rmw_<buf>`/`bp_rmw_s_<buf>` helper (`PACKED_RMW_WGSL`) returning the element's
+    /// previous value as a `u32` (`U8`/`U16`) or sign-extended `i32` (`I8`/`I16`).
+    fn packed_rmw_call(arr_name: &str, idx_s: &str, kind: PackedByteKind, op: u32, a: &str, b: &str) -> String {
+        let bits = kind.bits();
+        format!(
+            "{}_{}(u32({}), {}u, {}u, {}, {}u, u32({}), u32({}))",
+            if kind.signed() { "bp_rmw_s" } else { "bp_rmw" },
+            arr_name, idx_s, kind.elems_per_word(), bits, kind.signed(), op, a, b
+        )
+    }
+
     /// Is the packed buffer field `name` declared `array<atomic<u32>>`? True for every
     /// packed field the kernel may write (anything but a `let` binding), matching
     /// `wgsl_buffer_type`; read-only (`let`) ones stay a plain `array<u32>`.
@@ -1682,6 +1687,17 @@ impl DeviceEmitter {
             ));
         }
         let i = self.expr(idx);
+        if let Some(kind) = self.packed_field_kind(&arr_name) {
+            let renamed = self.current_buffer_renames.get(&arr_name).cloned().unwrap_or(arr_name);
+            let call = |code: u32, a: &str, b: &str| Self::packed_rmw_call(&renamed, &i, kind, code, a, b);
+            return match (method, args_s) {
+                ("min", [v]) => Some(call(5, v, "0")),
+                ("max", [v]) => Some(call(6, v, "0")),
+                ("swap", [v]) => Some(call(7, v, "0")),
+                ("cas", [expected, new]) => Some(call(8, expected, new)),
+                _ => None,
+            };
+        }
         let arr_name = self.current_buffer_renames.get(&arr_name).cloned().unwrap_or(arr_name);
         // `u32(...)`, not `... as u32` — see `try_atomic_assign`'s identical fix.
         let ptr = format!("&{}[u32({})]", arr_name, i);
@@ -2334,17 +2350,57 @@ fn is_32bit_int_spelling(ty: &Type) -> bool {
     }
 }
 
+/// Sub-word atomic read-modify-write for an `'actor` packed buffer: a compare-exchange
+/// loop on the containing word. `{BUF}` is the buffer's WGSL variable name (one pair of
+/// helpers per buffer, since naga rejects storage pointers as function arguments). Ops: 0 add, 1 sub, 2 or, 3 and, 4 xor, 5 min, 6 max,
+/// 7 swap, 8 cas (`a` expected, `b` new). Returns the element's previous (masked) value.
+const PACKED_RMW_WGSL: &str = "fn bp_rmw_{BUF}(idx: u32, per_word: u32, bits: u32, is_signed: bool, op: u32, a: u32, b: u32) -> u32 {
+    let mask = select(0xffffu, 0xffu, bits == 8u);
+    let sh = 32u - bits;
+    let w = idx / per_word;
+    let off = (idx % per_word) * bits;
+    var old = atomicLoad(&{BUF}[w]);
+    loop {
+        let cur = (old >> off) & mask;
+        var nv = cur;
+        let cs = bitcast<i32>(cur << sh) >> sh;
+        let av = bitcast<i32>(a << sh) >> sh;
+        switch op {
+            case 0u: { nv = cur + a; }
+            case 1u: { nv = cur - a; }
+            case 2u: { nv = cur | a; }
+            case 3u: { nv = cur & a; }
+            case 4u: { nv = cur ^ a; }
+            case 5u: { if (is_signed) { if (av < cs) { nv = a; } } else { if ((a & mask) < cur) { nv = a; } } }
+            case 6u: { if (is_signed) { if (av > cs) { nv = a; } } else { if ((a & mask) > cur) { nv = a; } } }
+            case 7u: { nv = a; }
+            case 8u: { if (cur != (a & mask)) { return cur; } nv = b; }
+            default: {}
+        }
+        let neww = (old & ~(mask << off)) | ((nv & mask) << off);
+        let r = atomicCompareExchangeWeak(&{BUF}[w], old, neww);
+        if (r.exchanged) { return cur; }
+        old = r.old_value;
+    }
+    return 0u;
+}
+
+fn bp_rmw_s_{BUF}(idx: u32, per_word: u32, bits: u32, is_signed: bool, op: u32, a: u32, b: u32) -> i32 {
+    let sh = 32u - bits;
+    return bitcast<i32>(bp_rmw_{BUF}(idx, per_word, bits, is_signed, op, a, b) << sh) >> sh;
+}";
+
 /// A packed `uint8`/`int8`/`uint16`/`int16` buffer the kernel may write (not a `let`
-/// binding, and not an `'actor` buffer, which takes the atomic-scalar path instead).
+/// binding). `'actor` ones are included: their `+=`/`min`/`cas`/... go through the
+/// `bp_rmw_<buf>` compare-exchange helper.
 fn packed_buffer_is_atomic(f: &KernelFieldDecl) -> bool {
     !matches!(f.binding, FieldBinding::Let)
-        && !matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified)
         && is_buffer_field(f)
         && buffer_field_elem_ty(f).and_then(packed_byte_kind_of_ty).is_some()
 }
 
 /// Returns the WGSL storage access modifier and array type for a buffer field.
-fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
+pub(super) fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     let access = match f.qual {
         GpuQual::ActorGlobal | GpuQual::ActorUnified => "read_write", // atomics need read_write
         _ => if matches!(f.binding, FieldBinding::Let) { "read" } else { "read_write" },
@@ -2352,7 +2408,7 @@ fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     let inner_ty: Option<&Type> = buffer_field_elem_ty(f);
     let elem = match inner_ty {
         Some(inner) => {
-            if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
+            if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) && packed_byte_kind_of_ty(inner).is_none() {
                 // atomic<i32> for int, atomic<u32> for uint
                 match wgsl_scalar_bare(inner).as_str() {
                     "i32" if is_32bit_int_spelling(inner) => "atomic<i32>".into(),
