@@ -7285,6 +7285,7 @@ impl Transpiler {
             struct_protocols: self.struct_protocols.clone(),
             struct_derives_clone: self.struct_derives_clone.clone(),
             struct_decls: self.struct_decls.clone(),
+            enum_decls: self.enum_decls.clone(),
             shared_dyn_traits: self.shared_dyn_traits.clone(),
             dyn_fact_pass: false,
             dyn_facts: Default::default(),

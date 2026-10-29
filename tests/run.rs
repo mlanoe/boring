@@ -652,9 +652,11 @@ error_test!(error_mut_param_store);
 // Unhashable set elements / dict keys (a float field, an `'actor` element) are checker errors.
 error_test!(error_struct_set_float_elem);
 error_test!(error_set_actor_elem);
+error_test!(error_enum_set_float_elem);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
 interp_test!(qualified_member_store);
+interp_test!(enum_set_dict_key);
 interp_test!(struct_set_dict_key);
 interp_test!(empty_set_default_struct_elem);
 interp_test!(method_param_borrow);

@@ -281,6 +281,8 @@ struct Checker {
     struct_methods: HashMap<(String, String), Vec<Vec<Param>>>,
     /// Struct name -> its fields' declared types, for resolving `a.b.c` receiver chains.
     struct_field_types: HashMap<String, Vec<(String, Type)>>,
+    /// enum name -> (variant name, payload types), for `unhashable_reason`.
+    enum_variant_types: HashMap<String, Vec<(String, Vec<Type>)>>,
     /// Enum name -> its variant names in declaration order, collected once up
     /// front (mirrors `kernel_decls`) for `check_enum_match_exhaustiveness`. A
     /// `native` enum (body is `native`, see `EnumDecl::is_native`) parses with
@@ -380,6 +382,7 @@ impl Checker {
             type_traits: crate::downcast::TypeTraits::default(),
             struct_methods: HashMap::new(),
             struct_field_types: HashMap::new(),
+            enum_variant_types: HashMap::new(),
             struct_ctor_owned: HashMap::new(),
             moved: vec![HashMap::new()],
             kernel_dispatch_only: false,
@@ -620,7 +623,7 @@ impl Checker {
             Item::Fn(f)     => self.collect_fn_signature(f),
             Item::Struct(s) => self.collect_struct_signature(s),
             Item::Kernel(k) => { self.kernel_decls.insert(k.name.clone(), k.clone()); }
-            Item::Enum(e)   => { self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); }
+            Item::Enum(e)   => { self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); self.enum_variant_types.insert(e.name.clone(), e.variants.iter().map(|v| (v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect())).collect()); }
             Item::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
             Item::Stmt(s)   => self.collect_stmt_signatures(s),
             _ => {}
@@ -1085,6 +1088,14 @@ impl Checker {
             Type::Tuple(es) => es.iter().find_map(|e| self.unhashable_reason(e, visiting)),
             Type::Named(n) => {
                 if visiting.contains(n) { return None; }
+                if let Some(variants) = self.enum_variant_types.get(n) {
+                    visiting.push(n.clone());
+                    let r = variants.iter().find_map(|(vname, tys)| tys.iter().find_map(|t| {
+                        self.unhashable_reason(t, visiting).map(|why| format!("variant `{}` of `{}`: {}", vname, n, why))
+                    }));
+                    visiting.pop();
+                    return r;
+                }
                 let fields = self.struct_field_types.get(n)?;
                 visiting.push(n.clone());
                 let r = fields.iter().find_map(|(fname, fty)| {

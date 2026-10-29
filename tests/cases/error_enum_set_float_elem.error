@@ -1,0 +1,1 @@
+this type cannot be a set element: variant `Circle` of `Shape`: a float is not `Eq`/`Hash`

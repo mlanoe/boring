@@ -1,0 +1,26 @@
+enum Shape:
+    Circle(int)
+    Rect(int, int)
+    Dot
+
+struct Tagged:
+    var Shape shape
+    var string name
+
+def main():
+    mut s = {Shape.Circle(1)}
+    s.add(Shape.Rect(2, 3))
+    s.add(Shape.Circle(1))
+    s.add(Shape.Dot)
+    print s.len()
+    print s.contains(Shape.Rect(2, 3))
+    print s.contains(Shape.Rect(3, 2))
+    mut d = {Shape.Circle(1) = 10}
+    d[Shape.Dot] = 20
+    d[Shape.Circle(1)] = 30
+    print d.len()
+    print d[Shape.Circle(1)]
+    mut t = {Tagged(Shape.Dot, "a")}
+    t.add(Tagged(Shape.Dot, "a"))
+    t.add(Tagged(Shape.Circle(1), "a"))
+    print t.len()

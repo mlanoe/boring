@@ -97,6 +97,39 @@ impl Transpiler {
         r
     }
 
+    /// True when the (non-unit) enum `name` ends up WITHOUT `Eq + Hash`: it derives them exactly
+    /// when `emit_enum`'s auto-derive does (no actor/guard/shared field, every variant field type
+    /// hashable); an explicit `@derive(...)` must list `Hash` itself.
+    pub(crate) fn enum_lacks_hash(&self, name: &str, visiting: &mut Vec<String>) -> bool {
+        if visiting.iter().any(|v| v == name) { return false; }
+        let Some(e) = self.enum_decls.get(name) else { return true };
+        if e.is_native || !e.type_params.is_empty() { return true; }
+        if e.attrs.iter().any(|a| a.name == "derive") {
+            return !e.attrs.iter().filter(|a| a.name == "derive")
+                .flat_map(|a| a.args.iter()).any(|a| a == "Hash")
+                && !e.protocols.iter().any(|p| p == "Hash");
+        }
+        self.enum_fields_lack_hash(e, visiting)
+    }
+
+    /// The field-based half of `enum_lacks_hash` (ignores attrs): some variant field isn't hashable.
+    fn enum_fields_lack_hash(&self, e: &EnumDecl, visiting: &mut Vec<String>) -> bool {
+        if e.is_native || !e.type_params.is_empty() { return true; }
+        visiting.push(e.name.clone());
+        let r = e.variants.iter().any(|v| v.fields.iter().any(|f| self.type_lacks_hash(&f.ty, visiting)));
+        visiting.pop();
+        r
+    }
+
+    /// Whether `emit_enum` should add `Eq, Hash` to its auto-derive (explicit `Eq`/`Hash` in a
+    /// user `@derive` would otherwise be derived twice).
+    fn enum_auto_eq_hash(&self, e: &EnumDecl) -> bool {
+        !e.attrs.iter().filter(|a| a.name == "derive").flat_map(|a| a.args.iter())
+            .any(|a| a == "Eq" || a == "Hash")
+            && !e.protocols.iter().any(|p| p == "Eq" || p == "Hash")
+            && !self.enum_fields_lack_hash(e, &mut vec![])
+    }
+
     /// True when a value of type `ty` can't be `Hash`ed in the generated Rust: floats (not `Eq`/`Hash`
     /// in Rust), sets/dicts, actor/guard handles, and any user type that doesn't derive `Eq + Hash`.
     /// Unknown (external) types count as unhashable — the derive is simply withheld.
@@ -113,7 +146,9 @@ impl Transpiler {
                 "int" | "uint" | "string" | "bool" | "char" | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint8" | "uint16" | "uint32" | "uint64" | "uint128" => false,
                 _ if self.struct_decls.contains_key(n.as_str()) => self.struct_lacks_hash(n, visiting),
-                _ => !self.unit_enums.contains(n.as_str()),
+                _ if self.unit_enums.contains(n.as_str()) => false,
+                _ if self.enum_decls.contains_key(n.as_str()) => self.enum_lacks_hash(n, visiting),
+                _ => true,
             },
             _ => true,
         }
@@ -2305,6 +2340,8 @@ impl Transpiler {
                 _ => false,
             })
         });
+        // Auto-derive `Eq, Hash` too when every variant field is hashable (set element / dict key).
+        let eq_hash = if !is_unit_enum && !has_actor_field && self.enum_auto_eq_hash(e) { ", Eq, Hash" } else { "" };
         if !has_clone_derive {
             // When thiserror will auto-inject Debug below, omit Debug here to avoid duplicates.
             let thiserror_will_add_debug = has_variant_error_attr && !has_debug_derive;
@@ -2322,9 +2359,9 @@ impl Transpiler {
                 }
             } else {
                 if thiserror_will_add_debug {
-                    self.line("#[derive(Clone, PartialEq)]");
+                    self.line(&format!("#[derive(Clone, PartialEq{})]", eq_hash));
                 } else {
-                    self.line("#[derive(Debug, Clone, PartialEq)]");
+                    self.line(&format!("#[derive(Debug, Clone, PartialEq{})]", eq_hash));
                 }
             }
         }
@@ -2372,6 +2409,9 @@ impl Transpiler {
             } else {
                 if !thiserror_will_add_debug { emitted_derives.insert("Debug".to_string()); }
                 emitted_derives.extend(["Clone", "PartialEq"].map(String::from));
+                if self.enum_auto_eq_hash(e) {
+                    emitted_derives.extend(["Eq", "Hash"].map(String::from));
+                }
             }
         }
         if has_variant_error_attr && !already_has_thiserror {

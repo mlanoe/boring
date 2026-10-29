@@ -1,0 +1,9 @@
+enum Shape:
+    Circle(float)
+    Dot
+
+struct Holder:
+    var {Shape} shapes
+
+def main():
+    print 1

@@ -1250,6 +1250,8 @@ struct Transpiler {
     pub(crate) arc_qualified_types: std::collections::HashSet<String>,
     /// Enum names where every variant has no fields — inferred as T'copy (non-parametric enums).
     pub(crate) unit_enums: std::collections::HashSet<String>,
+    /// Every user enum declaration by name (for `enum_lacks_hash`).
+    pub(crate) enum_decls: std::collections::HashMap<String, crate::ast::EnumDecl>,
     /// "StructName::field_name" and "EnumName::VariantName::N" pairs that need Box wrapping
     /// because the field type directly or indirectly refers back to the containing type (recursion).
     pub(crate) recursive_fields: std::collections::HashSet<String>,
@@ -1781,6 +1783,7 @@ impl Transpiler {
             overloaded_method_keys: std::collections::HashSet::new(),
             arc_qualified_types: std::collections::HashSet::new(),
             unit_enums: std::collections::HashSet::new(),
+            enum_decls: std::collections::HashMap::new(),
             recursive_fields: std::collections::HashSet::new(),
             user_types: std::collections::HashSet::new(),
             uses_local_channel: std::rc::Rc::new(std::cell::Cell::new(false)),
@@ -4442,6 +4445,7 @@ impl Transpiler {
         for item in &program.items {
             match item {
                 Item::Enum(e) => {
+                    self.enum_decls.insert(e.name.clone(), e.clone());
                     // Priority 2: non-parametric enum → infer T'copy.
                     if e.variants.iter().all(|v| v.fields.is_empty()) {
                         self.unit_enums.insert(e.name.clone());
