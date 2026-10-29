@@ -1,0 +1,21 @@
+struct Point:
+    var float x
+    var float y
+
+struct Holder:
+    var mut Point'owned one = Point(1.0, 2.0)
+
+    def setOne(Point p):
+        one = p
+    req float readOne():
+        one.x + one.y
+
+def main():
+    mut h = Holder()
+    print h.one.x
+    print h.one.y
+    h.one.x = 10.0
+    print h.one.x
+    h.setOne(Point(3.0, 4.0))
+    print h.one.x
+    print h.readOne()

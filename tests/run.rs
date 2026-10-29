@@ -660,6 +660,7 @@ interp_test!(ok_set_literal_hashable_ctor);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
 interp_test!(qualified_member_store);
+interp_test!(managed_owned_member_read);
 interp_test!(struct_set_dict_key);
 interp_test!(struct_value_eq);
 interp_test!(enum_set_dict_key);

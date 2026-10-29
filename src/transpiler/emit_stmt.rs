@@ -729,6 +729,18 @@ impl Transpiler {
         }
     }
 
+    /// `holds_arc_qualified`'s managed-mode counterpart: a field whose (possibly nested) element
+    /// type is `T'owned` over a user struct/enum is an `Arc<Mutex<T>>`/`RefCell<T>` in managed mode
+    /// (`is_managed_owned_user`), not a `Box<T>`.
+    pub(crate) fn holds_managed_owned(&self, ty: &Type) -> bool {
+        match ty.without_mut() {
+            Type::Optional(i) | Type::Array(i) | Type::Set(i) => self.holds_managed_owned(i),
+            Type::Dict(_, v) => self.holds_managed_owned(v),
+            Type::Tuple(ts) => ts.iter().any(|t| self.holds_managed_owned(t)),
+            t => self.is_managed_owned_user(t),
+        }
+    }
+
     pub(crate) fn is_arc_qualified(ty: &Type) -> bool {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
     }

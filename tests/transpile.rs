@@ -987,6 +987,8 @@ transpile_test!(mut_param_store_clone);
 // A plain value stored into a `'actor` member (implicit-self `kept = p`) is wrapped and independent.
 transpile_test!(mut_param_store_actor);
 transpile_test!(qualified_member_store);
+// Managed mode: a `T'owned` member is an `Arc<Mutex<T>>`/`RefCell<T>`, read and written through its guard.
+transpile_test!(managed_owned_member_read);
 // A struct is a set element / dict key: auto-derived `Eq + Hash` when every field is hashable.
 transpile_test!(struct_set_dict_key);
 transpile_test!(struct_value_eq);

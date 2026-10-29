@@ -164,7 +164,7 @@ impl Transpiler {
         });
         let has_sync_mutex_field = !self.use_async_actors()
             && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-            && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty)) || s.fields.iter().any(|f| {
+            && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty) || self.holds_managed_owned(&f.ty)) || s.fields.iter().any(|f| {
                 self.observed_fields.get(&format!("{}::{}", s.name, f.name))
                     .is_some_and(|(_, base)| matches!(base,
                         OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
@@ -280,7 +280,7 @@ impl Transpiler {
             // recurse through an extra `Observed` layer.
             let has_sync_mutex_field = !self.use_async_actors()
                 && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-                && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty)) || s.fields.iter().any(|f| {
+                && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty) || self.holds_managed_owned(&f.ty)) || s.fields.iter().any(|f| {
                     self.observed_fields.get(&format!("{}::{}", s.name, f.name))
                         .is_some_and(|(_, base)| matches!(base,
                             OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))

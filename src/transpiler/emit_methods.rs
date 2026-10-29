@@ -6940,11 +6940,15 @@ impl Transpiler {
         };
         let key = format!("{}::{}", struct_name, field);
         let rwlock = self.struct_rwlock_fields.contains(&key) || self.struct_rwlock_task_fields.contains(&key);
-        if !rwlock && !self.struct_mutex_fields.contains(&key) && !self.struct_mutex_task_fields.contains(&key) {
-            return None;
-        }
         let field_ty = self.struct_fields.get(struct_name.as_str())?
             .iter().find(|(n, _)| *n == field).map(|(_, t)| t.clone())?;
+        // A managed-mode `T'owned` field is an `Arc<Mutex<T>>` (multi) / `RefCell<T>` (single): read
+        // and written through the same guard as an `'actor` field.
+        if !rwlock && !self.struct_mutex_fields.contains(&key) && !self.struct_mutex_task_fields.contains(&key)
+            && !self.is_managed_owned_user(field_ty.without_mut())
+        {
+            return None;
+        }
         Some(LockFieldRef { key, handle: format!("{}.{}", base, field), rwlock, field_ty })
     }
 
