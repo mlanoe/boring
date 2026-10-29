@@ -281,6 +281,8 @@ struct Checker {
     struct_methods: HashMap<(String, String), Vec<Vec<Param>>>,
     /// Struct name -> its fields' declared types, for resolving `a.b.c` receiver chains.
     struct_field_types: HashMap<String, Vec<(String, Type)>>,
+    /// First `transient` field of each struct that has one (emitted as a `Cell`/`RefCell`: no `Hash`).
+    struct_transient_field: HashMap<String, String>,
     /// enum name -> (variant name, payload types), for `unhashable_reason`.
     enum_variant_types: HashMap<String, Vec<(String, Vec<Type>)>>,
     /// Enum name -> its variant names in declaration order, collected once up
@@ -382,6 +384,7 @@ impl Checker {
             type_traits: crate::downcast::TypeTraits::default(),
             struct_methods: HashMap::new(),
             struct_field_types: HashMap::new(),
+            struct_transient_field: HashMap::new(),
             enum_variant_types: HashMap::new(),
             struct_ctor_owned: HashMap::new(),
             moved: vec![HashMap::new()],
@@ -697,6 +700,9 @@ impl Checker {
         self.generic_names.extend(s.type_params.iter().cloned());
         for m in &s.methods { self.generic_names.extend(m.type_params.iter().cloned()); }
         self.struct_field_types.insert(s.name.clone(), s.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect());
+        if let Some(f) = s.fields.iter().find(|f| f.transient) {
+            self.struct_transient_field.insert(s.name.clone(), f.name.clone());
+        }
         for m in &s.methods {
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
             self.struct_methods.entry((s.name.clone(), m.name.clone())).or_default().push(m.params.clone());
@@ -1097,6 +1103,9 @@ impl Checker {
                     return r;
                 }
                 let fields = self.struct_field_types.get(n)?;
+                if let Some(f) = self.struct_transient_field.get(n) {
+                    return Some(format!("field `{}` of `{}`: a `transient` field (a `Cell`/`RefCell`) has no hash", f, n));
+                }
                 visiting.push(n.clone());
                 let r = fields.iter().find_map(|(fname, fty)| {
                     self.unhashable_reason(fty, visiting).map(|why| format!("field `{}` of `{}`: {}", fname, n, why))

@@ -1,0 +1,9 @@
+struct Memo:
+    int base
+    transient int? _cached = nil
+
+struct Holder:
+    var {Memo} keys
+
+def main():
+    print 1

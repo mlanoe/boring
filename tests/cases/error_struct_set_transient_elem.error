@@ -1,0 +1,1 @@
+this type cannot be a set element: field `_cached` of `Memo`: a `transient` field (a `Cell`/`RefCell`) has no hash

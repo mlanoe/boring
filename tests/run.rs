@@ -657,6 +657,7 @@ error_test!(error_enum_set_float_elem);
 error_test!(error_set_literal_float_elem);
 error_test!(error_dict_literal_float_key);
 interp_test!(ok_set_literal_hashable_ctor);
+error_test!(error_struct_set_transient_elem);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
 interp_test!(qualified_member_store);
@@ -667,6 +668,7 @@ interp_test!(enum_set_dict_key);
 interp_test!(empty_set_default_struct_elem);
 interp_test!(method_param_borrow);
 interp_test!(method_param_borrow_xfile_main);
+interp_test!(struct_transient_hash);
 interp_test!(method_param_borrow_def);
 // A bare `var` collection (local or parameter) is rebindable only: `.push()`/`v[i] = x`/`d[k] = x`/
 // `s.add()` need `mut`/`var mut` — same content-mutation rule user structs follow.

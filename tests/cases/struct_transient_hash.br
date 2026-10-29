@@ -1,0 +1,14 @@
+# A struct with a `transient` field (a Cell/RefCell) still compiles: it simply derives no Hash.
+struct Memo:
+    int base
+    transient int? _cached = nil
+
+    req int value():
+        if let v = self._cached:
+            return v
+        self._cached = self.base * 2
+        self._cached else 0
+
+let m = Memo(base= 4)
+print m.value()
+print m.value()

@@ -91,6 +91,8 @@ impl Transpiler {
                 && !s.protocols.iter().any(|p| p == "Hash");
         }
         if self.struct_lacks_partial_eq(name, &mut vec![]) { return true; }
+        // A `transient` field is a `Cell`/`RefCell`, which has no `Hash`.
+        if s.fields.iter().any(|f| f.transient) { return true; }
         visiting.push(name.to_string());
         let r = s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, visiting));
         visiting.pop();
@@ -313,6 +315,7 @@ impl Transpiler {
                 // `Eq + Hash` too when every field supports them, so the struct can be a set
                 // element / dict key (`{Key}`, `{Key = V}` → `HashSet<Key>` / `HashMap<Key, V>`).
                 if names.iter().any(|n| n == "PartialEq")
+                    && !s.fields.iter().any(|f| f.transient)
                     && !s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, &mut vec![s.name.clone()]))
                 {
                     names.push("Eq".to_string());
