@@ -5,9 +5,7 @@
 
 use crate::fixed::FixedFmt;
 use crate::ast::*;
-use crate::transpiler::tensor_host::{
-    Q4K_ROWS_PER_SIMDGROUP, Q6K_ROWS_PER_SIMDGROUP, Q8_ROWS_PER_SIMDGROUP,
-};
+use crate::transpiler::tensor_host::{Q4K_ROWS_PER_SIMDGROUP, Q8_ROWS_PER_SIMDGROUP};
 use crate::transpiler::helpers::{
     reachable_free_fns,
     labeled_array_at_index, labeled_array_dim_literal,
@@ -1011,81 +1009,11 @@ impl DeviceEmitter {
         self.line("}");
     }
 
-    /// Metal single-token Q6_K schedule following llama.cpp's lane-paired
-    /// layout: a SIMD group computes two rows, adjacent lanes alternate K
-    /// super-blocks, and every lane keeps sixteen activation values in
-    /// registers for four vectorized sub-dots shared by both output rows.
-    fn emit_q6_k_rows_decode(&mut self, has_bias: bool) {
-        self.line("constexpr uint bp_rows = 2;");
-        self.line("const uint bp_lane = __simd_lane_id;");
-        self.line("const uint bp_warp = __thread_pos.x / 32;");
-        self.line("const ulong bp_row0 = ((ulong)__block_pos.x * 8 + bp_warp) * bp_rows;");
-        self.line("float bp_sumf[bp_rows] = {0.0f, 0.0f};");
-        self.line("const uint bp_tid = bp_lane / 2, bp_ix = bp_lane % 2;");
-        self.line("const uint bp_ip = bp_tid / 8, bp_il = bp_tid % 8, bp_l0 = 4 * bp_il;");
-        self.line("const uint bp_is = 8 * bp_ip + bp_l0 / 16;");
-        self.line("const uint bp_y_offset = 128 * bp_ip + bp_l0;");
-        self.line("const uint bp_q_offset_l = 64 * bp_ip + bp_l0;");
-        self.line("const uint bp_q_offset_h = 32 * bp_ip + bp_l0;");
-        self.line("const ulong bp_nb = (ulong)k / 256;");
-        self.line("for (ulong bp_ib = bp_ix; bp_ib < bp_nb; bp_ib += 2) {");
-        self.indent += 1;
-        self.line("float bp_yl[16];");
-        self.line("device const float* bp_y = a + bp_ib * 256 + bp_y_offset;");
-        self.line("for (uint bp_l = 0; bp_l < 4; ++bp_l) {");
-        self.indent += 1;
-        self.line("bp_yl[4 * bp_l] = bp_y[bp_l];");
-        self.line("bp_yl[4 * bp_l + 1] = bp_y[bp_l + 32];");
-        self.line("bp_yl[4 * bp_l + 2] = bp_y[bp_l + 64];");
-        self.line("bp_yl[4 * bp_l + 3] = bp_y[bp_l + 96];");
-        self.indent -= 1;
-        self.line("}");
-        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
-        self.indent += 1;
-        self.line("const ulong bp_row = min(bp_row0 + bp_r, (ulong)n - 1);");
-        self.line("const ulong bp_block = (bp_row * bp_nb + bp_ib) * 210;");
-        self.line("device const uchar* bp_q1 = b + bp_block + bp_q_offset_l;");
-        self.line("device const uchar* bp_q2 = bp_q1 + 32;");
-        self.line("device const uchar* bp_qh = b + bp_block + 128 + bp_q_offset_h;");
-        self.line("device const char* bp_sc = (device const char*)(b + bp_block + 192 + bp_is);");
-        self.line("const float bp_d = float(as_type<half>(*(device const ushort*)(b + bp_block + 208)));");
-        self.line("float4 bp_sums = float4(0.0f);");
-        self.line("for (uint bp_l = 0; bp_l < 4; ++bp_l) {");
-        self.indent += 1;
-        self.line("bp_sums.x += bp_yl[4 * bp_l] * float(int((bp_q1[bp_l] & 15) | ((bp_qh[bp_l] & 3) << 4)) - 32);");
-        self.line("bp_sums.y += bp_yl[4 * bp_l + 1] * float(int((bp_q2[bp_l] & 15) | ((bp_qh[bp_l] & 12) << 2)) - 32);");
-        self.line("bp_sums.z += bp_yl[4 * bp_l + 2] * float(int((bp_q1[bp_l] >> 4) | (bp_qh[bp_l] & 48)) - 32);");
-        self.line("bp_sums.w += bp_yl[4 * bp_l + 3] * float(int((bp_q2[bp_l] >> 4) | ((bp_qh[bp_l] & 192) >> 2)) - 32);");
-        self.indent -= 1;
-        self.line("}");
-        self.line("bp_sumf[bp_r] += bp_d * (bp_sums.x * float(bp_sc[0]) + bp_sums.y * float(bp_sc[2]) + bp_sums.z * float(bp_sc[4]) + bp_sums.w * float(bp_sc[6]));");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
-        self.indent += 1;
-        self.line("const float bp_total = simd_sum(bp_sumf[bp_r]);");
-        self.line("if (bp_lane == 0 && bp_row0 + bp_r < (ulong)n) {");
-        self.indent += 1;
-        if has_bias {
-            self.line("c[bp_row0 + bp_r] = bp_total + bias[bp_row0 + bp_r];");
-        } else {
-            self.line("c[bp_row0 + bp_r] = bp_total;");
-        }
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-    }
-
     fn emit_dynamic_k_quant_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool, activation: &str, weight: &str) {
         self.line("if (m == 1) {");
         self.indent += 1;
         if warp_decode && matches!(format, "q4_k" | "q5_k") {
             self.emit_q4_k_rows_decode(has_bias, format == "q5_k");
-        } else if warp_decode && format == "q6_k" {
-            self.emit_q6_k_rows_decode(has_bias);
         } else {
         if warp_decode {
             self.line("const uint bp_lane = __simd_lane_id;");
