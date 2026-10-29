@@ -160,6 +160,37 @@ mod macos {
         }
     }
 
+    #[test]
+    fn native_q6_k_decode_lane_paired_schedule_matches_scalar_on_real_metal() {
+        let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_q6_k_decode_accuracy");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let scalar = build_in(
+            &base,
+            "scalar",
+            "[tensor.linear.decode]\nq6_k = \"scalar\"\n",
+        );
+        let native = build_in(&base, "native", "");
+        for (n, k) in [(1, 256), (17, 512), (33, 3584), (65, 18944)] {
+            for with_bias in [false, true] {
+                let expected = run(&scalar, "q6_k", 1, n, k, with_bias);
+                let actual = run(&native, "q6_k", 1, n, k, with_bias);
+                assert_eq!(actual.len(), expected.len());
+                for (index, (&a, &s)) in actual.iter().zip(expected.iter()).enumerate() {
+                    let error = (a - s).abs();
+                    // The lane-paired schedule sums alternating super-blocks
+                    // before the SIMD reduction, so its float32 association
+                    // differs from the scalar left-to-right reference.
+                    let bound = 1.0e-4 * (s.abs() + 1.0);
+                    assert!(
+                        error <= bound,
+                        "q6_k decode n={n} k={k} bias={with_bias}, output {index}: native={a}, scalar={s}, error={error}, bound={bound}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Formats without a native Metal kernel (Q4_0, Q5_0, IQ4_NL, Q3_K, Q2_K) use the shared-memory
     /// tiled prefill by default; `algorithm = "scalar"` keeps the per-element reference. Both run
     /// on the real GPU and must agree (same inner-K accumulation order).
