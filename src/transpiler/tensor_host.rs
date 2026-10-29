@@ -9,6 +9,11 @@ use std::collections::{HashMap, HashSet};
 /// and the shader (`transpiler::metal::device`) both derive from this.
 pub(crate) const Q4K_ROWS_PER_SIMDGROUP: usize = 2;
 
+/// Output rows one Metal SIMD group computes in the native Q6_K single-token
+/// schedule. Adjacent lanes alternate super-blocks and reuse their activation
+/// register tile across both rows.
+pub(crate) const Q6K_ROWS_PER_SIMDGROUP: usize = 2;
+
 /// Output rows one Metal SIMD group computes in the native Q8_0 single-token
 /// schedule. Four eight-lane partitions walk four packed blocks concurrently;
 /// keeping four row accumulators amortizes each activation load across four
@@ -1084,7 +1089,8 @@ fn parse_dynamic_replacement_stmts(
         let rows_per_block = 8 * Q4K_ROWS_PER_SIMDGROUP;
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed && call.format == Some("q6_k") {
-        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 7) / 8)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
+        let rows_per_block = 8 * Q6K_ROWS_PER_SIMDGROUP;
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed {
         let rows_per_block = 8 * Q8_ROWS_PER_SIMDGROUP;
         if call.format == Some("q8_0") && tensor_config.prefill_precision.as_deref() != Some("half") {

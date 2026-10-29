@@ -896,12 +896,13 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
             assert!(!msl.contains("simd_shuffle_xor"), "{format}: {msl}");
             continue;
         }
-        assert!(msl.contains("simd_shuffle_xor"), "{format}: {msl}");
         if format == "q6_k" {
-            assert!(msl.contains("bp_d = simd_shuffle(bp_d, 0)"), "{format}: {msl}");
-            assert!(msl.contains("bp_scale = simd_shuffle"), "{format}: {msl}");
+            assert!(msl.contains("simd_sum(bp_sumf[bp_r])"), "{format}: {msl}");
+            assert!(msl.contains("constexpr uint bp_rows = 2"), "{format}: {msl}");
+            assert!(msl.contains("bp_tid = bp_lane / 2, bp_ix = bp_lane % 2"), "{format}: {msl}");
+            assert!(msl.contains("float bp_yl[16]"), "{format}: {msl}");
+            assert!(host.contains("+ 15) / 16"), "{format}: {host}");
         }
-        assert!(host.contains("+ 7") || host.contains("/ 8"), "{format}: {host}");
     }
 }
 
