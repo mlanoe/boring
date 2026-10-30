@@ -2251,6 +2251,15 @@ impl Transpiler {
                 self.var_types.get(v.as_str()),
                 Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "float16" | "float32" | "float64" | "bool")
             ) => format!("&{}", v),
+            // Untracked local (e.g. `let id = ids[i]` over `d.keys()`): fall back on the
+            // resolved expression type before assuming `Arc<str>`.
+            ExprKind::Var(v) if matches!(
+                self.resolve_expr_type(key),
+                Some(Type::Int | Type::Uint | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool)
+            ) || matches!(
+                self.resolve_expr_type(key),
+                Some(Type::Named(n)) if matches!(n.as_str(), "int" | "uint" | "float" | "float16" | "float32" | "float64" | "bool")
+            ) => format!("&{}", v),
             ExprKind::Var(v) => format!("&*{}", v), // Arc<str> → &str via Deref
             _ => {
                 let k = self.emit_expr(key);

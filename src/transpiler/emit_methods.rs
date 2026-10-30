@@ -400,6 +400,17 @@ impl Transpiler {
                     _ => None,
                 }
             }
+            // `dict.keys()` / `dict.values()` are arrays of the key / value type, so an
+            // unannotated `let id = ks[i]` over them resolves to the (primitive) key type.
+            ExprKind::MethodCall(recv, method, _) if matches!(method.as_str(), "keys" | "values")
+                && matches!(self.resolve_expr_type(recv).as_ref().map(Type::without_mut), Some(Type::Dict(..))) =>
+            {
+                match self.resolve_expr_type(recv)?.without_mut() {
+                    Type::Dict(k, v) => Some(Type::Array(Box::new(
+                        if method == "keys" { k.without_mut().clone() } else { v.without_mut().clone() }))),
+                    _ => None,
+                }
+            }
             ExprKind::MethodCall(recv, method, _) => {
                 // A call through a trait object (a trait-typed local/param/field) is typed by the
                 // trait's own declaration.

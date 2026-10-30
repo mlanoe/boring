@@ -1,0 +1,12 @@
+# Regression fixture: indexing a `{int=float}` dict with an unannotated int local
+# bound from `d.keys()[i]` — see tests/dict_int_key_local_from_keys.rs.
+
+def main():
+    mut {int=float} d = {=}
+    d[3] = 1.0
+    let ks = d.keys()
+    let id = ks[0]
+    let v = d[id]
+    print v
+    let w = d[id] else (-1.0)
+    print w
