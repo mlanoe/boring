@@ -2575,6 +2575,15 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let_value(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
+        // `let q = coll[i]` over a managed-mode `'owned` element (a bare lock cell, not a shareable
+        // handle): `q` is an independent copy of the held value, like the `Box<T>` clone of strict mode.
+        if matches!(&value.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..)) {
+            if let Some(r) = self.resolve_lock_field_ref(value) {
+                if self.is_managed_owned_user(r.field_ty.without_mut()) {
+                    return format!("{}.clone()", self.lock_field_read(&r));
+                }
+            }
+        }
         // Implicit Arc::clone for auto-ref parameters assigned to an owned context.
         // e.g. `counter = c` where `c: Counter'actor` (emitted as &Arc<Mutex<Counter>>)
         // and `counter` expects an owned Arc<Mutex<Counter>>.

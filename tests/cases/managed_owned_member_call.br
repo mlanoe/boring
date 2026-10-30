@@ -35,3 +35,6 @@ def main():
     print h.byName["k"].x
     h.byName["k"].bump()
     print h.byName["k"].sum()
+    let q = h.many[0]
+    print q.x
+    print q.sum()
