@@ -59,6 +59,8 @@ pub struct WgpuOutput {
     /// with their argument lists (see `transpiler::unified`). Empty otherwise.
     pub routes: Vec<(String, Vec<crate::transpiler::unified::RouteField>)>,
     pub errors: Vec<crate::transpiler::TranspileError>,
+    /// Non-fatal diagnostics from the general pass (e.g. an assignment that forces a GPU readback).
+    pub warnings: Vec<crate::transpiler::TranspileError>,
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -160,6 +162,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     if uses_clipboard { cargo_toml.push_str("arboard = \"3\"\n"); }
     if host_rs.contains("fn __boring_ax_tree(") { cargo_toml.push_str(crate::transpiler::screen_input::AX_DEPS); }
 
+    let warnings = general_out.warnings;
     let mut errors = general_out.errors;
     errors.extend(device_errors);
     errors.extend(host_errors);
@@ -169,7 +172,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "wgpu host", failed));
     let failed = !errors.is_empty();
     errors.extend(crate::transpiler::helpers::placeholder_errors(&device_wgsl, "wgpu device", failed));
-    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, routes, errors }
+    WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, routes, errors, warnings }
 }
 
 /// Does this kernel's body use `.warp.*` anywhere? WGSL subgroup builtins

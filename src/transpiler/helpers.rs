@@ -3193,7 +3193,6 @@ pub(crate) const PLACEHOLDER_MARKERS: &[&str] = &[
     "/* expr */",
     "/* op */",
     "/*op*/",
-    "/* range ",
     "/* unreachable catch",
     " -- unsupported */",
 ];

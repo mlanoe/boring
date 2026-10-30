@@ -99,6 +99,8 @@ pub struct CudaOutput {
     /// with their argument lists (see `transpiler::unified`). Empty otherwise.
     pub routes: Vec<(String, Vec<crate::transpiler::unified::RouteField>)>,
     pub errors: Vec<crate::transpiler::TranspileError>,
+    /// Non-fatal diagnostics from the general pass (e.g. an assignment that forces a GPU readback).
+    pub warnings: Vec<crate::transpiler::TranspileError>,
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -267,6 +269,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
     }
     crate::transpiler::screen_input::add_clipboard(&mut host_rs, &mut cargo_toml);
 
+    let warnings = general_out.warnings;
     let mut errors = general_out.errors;
     errors.extend(device_errors);
     errors.extend(struct_errors);
@@ -277,7 +280,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
     errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "CUDA host", failed));
     let failed = !errors.is_empty();
     errors.extend(crate::transpiler::helpers::placeholder_errors(&device_cu, "CUDA device", failed));
-    CudaOutput { host_rs, device_cu, kernel_names, build_rs, cargo_toml, routes, errors }
+    CudaOutput { host_rs, device_cu, kernel_names, build_rs, cargo_toml, routes, errors, warnings }
 }
 
 // ─── build.rs generation ─────────────────────────────────────────────────────

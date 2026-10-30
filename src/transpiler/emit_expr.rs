@@ -4142,6 +4142,22 @@ impl Transpiler {
             ExprKind::Var(v) => self.resident_call_vars.get(v.as_str()).map(|ty| (v.clone(), ty.clone())),
             _ => None,
         };
+        // A `'kernel'unified`/`'kernel'global` local that stayed a host `Vec<T>` (non-empty
+        // literal initialiser) turns this assignment into a blocking device-to-host readback.
+        if let ExprKind::Var(name) = &target.kind {
+            if !target_is_resident
+                && self.is_gpu_target
+                && !self.config.is_simd_target
+                && self.var_types.get(name.as_str()).is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
+                && (rhs_resident_var.is_some() || self.try_materialize_resident_call(value).is_some())
+            {
+                self.push_warning(target.line, target.col, format!(
+                    "assigning a GPU-resident value to `{name}` forces a device-to-host readback \
+                     (a blocking GPU sync): `{name}` is a host array because its initialiser is a literal; \
+                     declare it with an empty `[]` initialiser (or initialise it from a resident value) to keep it resident"
+                ));
+            }
+        }
         let rhs_s = if target_is_resident {
             self.try_emit_gpu_resident_return(value)
                 .or_else(|| rhs_resident_var.as_ref().map(|(v, _)| format!("{v}.clone()")))

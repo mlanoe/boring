@@ -3217,6 +3217,10 @@ fn emit_cuda(path: &str, version: &str) {
 
     let tensor_config = tensor_linear_config_for_source(&path);
     let cuda_out = transpiler::cuda::transpile_cuda_with_tensor_config(&program, &stem, version, &tensor_config);
+    if !cuda_out.warnings.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_warnings(&path, &source, &cuda_out.warnings);
+    }
     if !cuda_out.errors.is_empty() {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         report_transpile_errors(&path, &source, &cuda_out.errors);
@@ -3289,6 +3293,10 @@ fn emit_rocm(path: &str, version: &str) {
 
     let tensor_config = tensor_linear_config_for_source(&path);
     let rocm_out = transpiler::rocm::transpile_rocm_with_tensor_config(&program, &stem, version, &tensor_config);
+    if !rocm_out.warnings.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_warnings(&path, &source, &rocm_out.warnings);
+    }
     if !rocm_out.errors.is_empty() {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         report_transpile_errors(&path, &source, &rocm_out.errors);
@@ -3361,6 +3369,10 @@ fn emit_metal(path: &str, version: &str) {
 
     let tensor_config = tensor_linear_config_for_source(&path);
     let metal_out = transpiler::metal::transpile_metal_with_tensor_config(&program, &stem, version, &tensor_config);
+    if !metal_out.warnings.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_warnings(&path, &source, &metal_out.warnings);
+    }
     if !metal_out.errors.is_empty() {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
         report_transpile_errors(&path, &source, &metal_out.errors);
@@ -3426,6 +3438,10 @@ fn emit_wgpu(path: &str, version: &str) {
 
     let tensor_config = tensor_linear_config_for_source(&path);
     let wgpu_out = transpiler::wgpu::transpile_wgpu_with_tensor_config(&program, &stem, version, &tensor_config);
+    if !wgpu_out.warnings.is_empty() {
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        report_transpile_warnings(&path, &source, &wgpu_out.warnings);
+    }
     if !wgpu_out.errors.is_empty() {
         // Best-effort source for pretty-printing (line/col + a caret under the
         // offending text) -- accurate for errors in the entry file itself; an error

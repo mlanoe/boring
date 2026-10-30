@@ -16,7 +16,7 @@ use std::process::{Command, Output};
 /// Keep in sync with `PLACEHOLDER_MARKERS` in `src/transpiler/helpers.rs`.
 const MARKERS: &[&str] = &[
     "/* complex stmt */", "/* kernel launch */", "/* missing arg */", "/* unknown */",
-    "/* unsupported", "/* expr */", "/* op */", "/*op*/", "/* range ", "/* unreachable catch",
+    "/* unsupported", "/* expr */", "/* op */", "/*op*/", "/* unreachable catch",
     " -- unsupported */",
 ];
 

@@ -4331,3 +4331,109 @@ kernel Histogram:
     assert!(stderr.contains("counts") && stderr.contains("int32"),
         "expected a diagnostic naming the field and suggesting int32;\ngot:\n{stderr}");
 }
+
+/// `mut [T]'kernel'unified v = []` in an ordinary (non-resident-returning) function used to
+/// be a host `Vec<T>`: every later `v = <resident call>` downloaded the result
+/// (`__boring_gpu_copy_d2h`, a blocking Metal batch flush) and re-uploaded it when passed on.
+/// It must stay a `BoringKernelArg`, so the only readback is the explicit `with`.
+#[test]
+fn mut_resident_placeholder_slot_stays_resident() {
+    let src = r#"
+kernel Saxpy:
+    let float32 alpha
+    let [float32]'unified x
+    mut [float32]'unified y
+
+    init(float32 a, [float32]'unified xs, [float32]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+req [float32]'kernel'unified scale_gpu([float32]'kernel'unified xv, float32 factor) throws:
+    var [float32] zero = [0.0 as float32, 0.0 as float32]
+    mut k = Saxpy(factor, xv, zero)
+    kernel:
+        k(block = 2)
+    k.y
+
+def run([float32] ha, bool flag) throws:
+    let a = scale_gpu(ha, 2.0 as float32)
+    mut [float32]'kernel'unified v = []
+    if flag:
+        v = scale_gpu(a, 3.0 as float32)
+    else:
+        v = a
+    v = scale_gpu(v, 4.0 as float32)
+    let b = scale_gpu(v, 5.0 as float32)
+    with b:
+        print "{b[0]}"
+
+run([1.0 as float32, 2.0 as float32], true)
+"#;
+    let (_msl, rs) = metal_codegen("mut_resident_placeholder_slot", src);
+    let run_fn = rs.split("fn run(").nth(1).and_then(|s| s.split("\nfn ").next()).expect("run fn");
+    assert!(run_fn.contains("let mut v = BoringKernelArg::Host(vec![]);"), "{run_fn}");
+    assert!(!rs.contains("let mut v: Vec<f32>"), "{rs}");
+    assert!(run_fn.contains("v = scale_gpu(v.clone(), (4.0 as f32))?;") || run_fn.contains("v = scale_gpu(v.clone(), (4.0 as f32))"), "{run_fn}");
+    assert_eq!(run_fn.matches("__boring_gpu_copy_d2h").count(), 1,
+        "only the explicit `with b:` may read back, not the assignments to `v`:\n{run_fn}");
+}
+
+/// A non-empty literal initialiser keeps the slot a host array, so assigning a resident value
+/// to it is a readback: `boring build --target metal` must warn, naming the variable. The
+/// empty-placeholder form (stays resident) must not warn.
+#[test]
+fn host_array_resident_slot_assignment_warns() {
+    let build = |target: &str, name: &str, init: &str| -> String {
+        let src = format!(r#"
+kernel Saxpy:
+    let float32 alpha
+    let [float32]'unified x
+    mut [float32]'unified y
+
+    init(float32 a, [float32]'unified xs, [float32]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+req [float32]'kernel'unified scale_gpu([float32]'kernel'unified xv, float32 factor) throws:
+    var [float32] zero = [0.0 as float32, 0.0 as float32]
+    mut k = Saxpy(factor, xv, zero)
+    kernel:
+        k(block = 2)
+    k.y
+
+def run([float32] ha) throws:
+    let a = scale_gpu(ha, 2.0 as float32)
+    mut [float32]'kernel'unified v = {init}
+    v = scale_gpu(a, 3.0 as float32)
+    with v:
+        print "{{v[0]}}"
+
+run([1.0 as float32, 2.0 as float32])
+"#);
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join(format!("{name}_{target}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let br = dir.join("main.br");
+        fs::write(&br, src).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target]).arg(&br).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    for target in ["metal", "cuda", "rocm", "wgpu"] {
+        let warned = build(target, "resident_slot_warn_literal", "[0.0 as float32, 0.0 as float32]");
+        assert!(warned.contains("assigning a GPU-resident value to `v` forces a device-to-host readback"), "{target}: {warned}");
+        let quiet = build(target, "resident_slot_warn_empty", "[]");
+        assert!(!quiet.contains("device-to-host readback"), "{target}: {quiet}");
+    }
+}

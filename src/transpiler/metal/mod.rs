@@ -57,6 +57,8 @@ pub struct MetalOutput {
     /// with their argument lists (see `transpiler::unified`). Empty otherwise.
     pub routes: Vec<(String, Vec<crate::transpiler::unified::RouteField>)>,
     pub errors: Vec<crate::transpiler::TranspileError>,
+    /// Non-fatal diagnostics from the general pass (e.g. an assignment that forces a GPU readback).
+    pub warnings: Vec<crate::transpiler::TranspileError>,
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -212,6 +214,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
         crate::transpiler::fixed_emit::fixed_point_prelude_ext(&host_rs, host_rs.contains("mod __fxm {"));
     if let Some(prelude) = fixed_prelude { host_rs.push_str(&prelude); }
 
+    let warnings = general_out.warnings;
     let mut errors = general_out.errors;
     errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
@@ -223,7 +226,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
     errors.extend(crate::transpiler::helpers::placeholder_errors(&host_rs, "Metal host", failed));
     let failed = !errors.is_empty();
     errors.extend(crate::transpiler::helpers::placeholder_errors(&device_msl, "Metal device", failed));
-    MetalOutput { host_rs, device_msl, kernel_names, cargo_toml, routes, errors }
+    MetalOutput { host_rs, device_msl, kernel_names, cargo_toml, routes, errors, warnings }
 }
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
