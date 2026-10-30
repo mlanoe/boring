@@ -516,9 +516,11 @@ pub view Popover:
     body(): native
 
 # OnHover: writes into the bound `value` whether the pointer is over a control inside its child (the runtime's hover target is the deepest
-# enabled Button, Toggle, TextField or Slider under the pointer). Layout-transparent; `Tooltip` (boring-ui) is built on it.
+# enabled Button, Toggle, TextField or Slider under the pointer). With `delay` > 0 (milliseconds) `value` turns true only once the pointer has
+# stayed that long (the host ticks the runtime's clock); it turns false at once. Layout-transparent; `Tooltip` (boring-ui) is built on it.
 pub view OnHover:
     bind bool value
+    int delay = 0
     [View] children
     body(): native
 
