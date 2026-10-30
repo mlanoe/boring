@@ -792,7 +792,7 @@ impl Transpiler {
     /// `emit_expr_owned` fallback correctly. Mirrors the same known-struct/enum check
     /// `try_emit_qualified_let` runs on `constructor_type_name` for its own `var_struct_types`
     /// bookkeeping.
-    fn is_fresh_struct_ctor(&self, e: &Expr) -> bool {
+    pub(crate) fn is_fresh_struct_ctor(&self, e: &Expr) -> bool {
         crate::transpiler::emit_let::constructor_type_name(e).is_some_and(|type_name| {
             type_name.chars().next().is_some_and(|c| c.is_uppercase())
                 && (self.struct_fields.contains_key(type_name)

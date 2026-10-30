@@ -58,6 +58,10 @@ struct HostEmitter {
     /// `.get(&key).cloned()`/`.insert(key, v)` instead of Vec-style `[key as usize]`
     /// indexing (see `is_dict_obj`). Mirrors `cuda::host`'s identical fields.
     dict_vars: std::collections::HashSet<String>,
+    /// `'actor` collections / handles (`track_actor_var`).
+    actor_coll_vars: std::collections::HashSet<String>,
+    actor_vars: std::collections::HashSet<String>,
+    actor_coll_fields: std::collections::HashSet<String>,
     /// Struct field names (flat, not namespaced by struct) declared with a `{K=V}`
     /// dict type, so `self.field[key]`/`self.field[key] = v` get the same HashMap
     /// treatment as `dict_vars`. Populated once from every `Item::Struct`.
@@ -262,6 +266,9 @@ impl HostEmitter {
             setup_fields: Vec::new(),
             in_render_loop: false,
             dict_vars: std::collections::HashSet::new(),
+            actor_coll_vars: std::collections::HashSet::new(),
+            actor_vars: std::collections::HashSet::new(),
+            actor_coll_fields: std::collections::HashSet::new(),
             dict_fields: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
             string_fields: std::collections::HashSet::new(),
@@ -365,6 +372,95 @@ impl HostEmitter {
         }
     }
 
+    /// Record `name` as an `'actor` collection (`[mut T'actor]` / `{K = mut V'actor}`) or an
+    /// `'actor` handle (a declared `T'actor`, or `let q = coll[i]` over such a collection).
+    fn track_actor_var(&mut self, name: &str, ty: Option<&Type>, val: Option<&Expr>) {
+        fn is_actor(t: &Type) -> bool { matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Actor)) }
+        if let Some(ty) = ty {
+            if actor_elem_coll(ty) {
+                self.actor_coll_vars.insert(name.to_string());
+            } else if is_actor(ty) {
+                self.actor_vars.insert(name.to_string());
+            }
+        }
+        if let Some(ExprKind::Index(c, _)) = val.map(|v| &v.kind) {
+            if self.is_actor_coll(c) { self.actor_vars.insert(name.to_string()); }
+        }
+    }
+
+    /// `c` names an `'actor` collection: a tracked local, or a struct field declared as one.
+    fn is_actor_coll(&self, c: &Expr) -> bool {
+        match &c.kind {
+            ExprKind::Var(v) => self.actor_coll_vars.contains(v.as_str()),
+            ExprKind::Field(_, f) => self.actor_coll_fields.contains(f.as_str()),
+            _ => false,
+        }
+    }
+
+    /// The `Arc<Mutex<T>>` handle `e` names: an `'actor` local, or an element of an `'actor`
+    /// collection (`arr[i]`, `d[k]`), emitted without the `.clone()` a plain index read adds.
+    fn actor_place(&mut self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Var(v) if self.actor_vars.contains(v.as_str()) => Some(crate::transpiler::helpers::escape_rust_keyword(v)),
+            ExprKind::Index(c, idx) => {
+                if !self.is_actor_coll(c) || matches!(idx.kind, ExprKind::SliceRange { .. }) { return None; }
+                let cs = match &c.kind {
+                    ExprKind::Var(cv) => crate::transpiler::helpers::escape_rust_keyword(cv),
+                    ExprKind::Field(o, f) if matches!(&o.kind, ExprKind::Var(_)) => format!("{}.{}", self.expr(o), f),
+                    _ => return None,
+                };
+                let i = self.expr(idx);
+                Some(if self.is_dict_obj(c) {
+                    if matches!(idx.kind, ExprKind::Str(_)) { format!("{cs}[{i}]") } else { format!("{cs}[&({i})]") }
+                } else { format!("{cs}[({i}) as usize]") })
+            }
+            _ => None,
+        }
+    }
+
+    /// `T(..)` of a program struct: a fresh value that still needs its actor wrapper.
+    fn is_fresh_struct_ctor(&self, e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Call(c, _) if matches!(&c.kind, ExprKind::Var(n) if self.struct_names.contains(n.as_str())))
+    }
+
+    /// `let [mut T'actor] a = [T(..)]` / `{K = mut V'actor}`: wraps each fresh constructor element.
+    fn actor_literal(&mut self, ty: Option<&Type>, val: &Expr) -> Option<String> {
+        // `let q = coll[i]` over an `'actor` collection: a clone of the element's handle.
+        if matches!(val.kind, ExprKind::Index(..)) {
+            if let Some(p) = self.actor_place(val) { return Some(format!("{p}.clone()")); }
+        }
+        let mut t = ty?.without_mut();
+        while let Type::Qualified(inner, _) = t { t = inner.without_mut(); }
+        let elem = match (t, &val.kind) {
+            (Type::Array(e), ExprKind::Array(_)) | (Type::Dict(_, e), ExprKind::Dict(_)) => e,
+            _ => return None,
+        };
+        if !matches!(elem.without_mut(), Type::Qualified(_, OwnerQual::Actor)) { return None; }
+        let mut wrap = |s: &mut Self, e: &Expr| {
+            let v = s.expr(e);
+            if s.is_fresh_struct_ctor(e) { format!("std::sync::Arc::new(std::sync::Mutex::new({v}))") } else { v }
+        };
+        match &val.kind {
+            ExprKind::Array(es) if !es.is_empty() => {
+                let parts: Vec<String> = es.iter().map(|e| wrap(self, e)).collect();
+                Some(format!("vec![{}]", parts.join(", ")))
+            }
+            ExprKind::Dict(ps) if !ps.is_empty() => {
+                let parts: Vec<String> = ps.iter().map(|(k, e)| { let ks = self.expr(k); let ks = if matches!(k.kind, ExprKind::Str(_)) { format!("{ks}.to_string()") } else { ks }; format!("({ks}, {})", wrap(self, e)) }).collect();
+                Some(format!("std::collections::HashMap::from([{}])", parts.join(", ")))
+            }
+            _ => None,
+        }
+    }
+
+    /// RHS of `coll[i] = v` / `coll[k] = v`: a fresh struct value stored into an `'actor`
+    /// collection gets its actor wrapper.
+    fn actor_store_rhs(&mut self, obj: &Expr, rhs: &Expr) -> String {
+        let v = self.expr(rhs);
+        let into_actor = self.is_actor_coll(obj);
+        if into_actor && self.is_fresh_struct_ctor(rhs) { format!("std::sync::Arc::new(std::sync::Mutex::new({v}))") } else { v }
+    }
+
     fn line(&mut self, s: &str) {
         let ind = "    ".repeat(self.indent);
         self.out.push_str(&ind);
@@ -446,6 +542,9 @@ impl HostEmitter {
                 for f in &s.fields {
                     if is_gpu_array_param(&f.ty) {
                         self.gpu_fields.insert(f.name.clone());
+                    }
+                    if actor_elem_coll(&f.ty) {
+                        self.actor_coll_fields.insert(f.name.clone());
                     }
                     if matches!(f.ty, Type::Dict(..)) {
                         self.dict_fields.insert(f.name.clone());
@@ -604,6 +703,7 @@ impl HostEmitter {
                             if let Some(val) = &s.value {
                                 self.track_kernel_var(&s.name, val);
                                 self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
+                    self.track_actor_var(&s.name, s.ty.as_ref(), Some(val));
                                 self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                                 let rhs = self.expr_for_type(s.ty.as_ref(), val);
                                 let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
@@ -1579,7 +1679,19 @@ impl HostEmitter {
             ExprKind::Var(name) if self.global_statics.get(name) == Some(&true) && !self.fn_locals.contains(name) =>
                 format!("*{}.lock().unwrap_or_else(|e| e.into_inner())", name.to_uppercase()),
             ExprKind::Var(name) => crate::transpiler::helpers::escape_rust_keyword(name),
+            ExprKind::Field(obj, field) if self.actor_place(obj).is_some() => {
+                format!("{}.lock().unwrap().{}", self.actor_place(obj).unwrap(), field)
+            }
             ExprKind::Field(obj, field) => format!("{}.{}", self.emit_assign_target(obj), field),
+            // `arr[i].x = v` writes the element in place: the read form's `.clone()` would
+            // assign to a temporary.
+            ExprKind::Index(arr, idx) if !matches!(idx.kind, ExprKind::SliceRange { .. })
+                && !self.is_dict_obj(arr) && !self.is_str_obj(arr) =>
+            {
+                let base = self.emit_assign_target(arr);
+                let base = if base.starts_with('*') { format!("({base})") } else { base };
+                format!("{}[({}) as usize]", base, self.expr(idx))
+            }
             ExprKind::Tuple(elems) => {
                 let parts: Vec<String> = elems.iter().map(|e| self.emit_assign_target(e)).collect();
                 format!("({})", parts.join(", "))
@@ -2630,12 +2742,15 @@ impl HostEmitter {
                 if let Some(val) = &s.value {
                     self.track_kernel_var(&s.name, val);
                     self.track_dict_var(&s.name, s.ty.as_ref(), Some(val));
+                    self.track_actor_var(&s.name, s.ty.as_ref(), Some(val));
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
-                    let rhs = if is_resident_preserving && !is_materializing_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr_for_type(s.ty.as_ref(), val) };
+                    let actor_rhs = self.actor_literal(s.ty.as_ref(), val);
+                    let rhs = if let Some(r) = actor_rhs { r } else if is_resident_preserving && !is_materializing_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr_for_type(s.ty.as_ref(), val) };
                     self.line(&format!("{} {}{} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);
+                    self.track_actor_var(&s.name, s.ty.as_ref(), None);
                     self.track_string_var(&s.name, s.ty.as_ref(), None);
                     self.line(&format!("{} {}{};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann));
                 }
@@ -2676,7 +2791,8 @@ impl HostEmitter {
                             if self.is_dict_obj(obj) {
                                 let obj_s = self.expr(obj);
                                 let idx_s = self.expr(idx);
-                                let rhs_s = self.expr(rhs);
+                                let idx_s = if matches!(idx.kind, ExprKind::Str(_)) && self.is_actor_coll(obj) { if matches!(obj.kind, ExprKind::Field(..)) { format!("std::sync::Arc::<str>::from({idx_s})") } else { format!("{idx_s}.to_string()") } } else { idx_s };
+                                let rhs_s = self.actor_store_rhs(obj, rhs);
                                 self.line(&format!("{}.insert(({}).clone(), ({}).clone());", obj_s, idx_s, rhs_s));
                                 return;
                             }
@@ -2686,7 +2802,7 @@ impl HostEmitter {
                             // safe reads). See `cuda::host`'s identical case.
                             let obj_s = self.expr(obj);
                             let idx_s = self.expr(idx);
-                            let rhs_s = self.expr(rhs);
+                            let rhs_s = self.actor_store_rhs(obj, rhs);
                             self.line(&format!("{}[({}) as usize] = {};", obj_s, idx_s, rhs_s));
                             return;
                         }
@@ -3105,6 +3221,9 @@ impl HostEmitter {
             setup_fields: self.setup_fields.clone(),
             in_render_loop: self.in_render_loop,
             dict_vars: self.dict_vars.clone(),
+            actor_coll_vars: self.actor_coll_vars.clone(),
+            actor_vars: self.actor_vars.clone(),
+            actor_coll_fields: self.actor_coll_fields.clone(),
             dict_fields: self.dict_fields.clone(),
             string_vars: self.string_vars.clone(),
             string_fields: self.string_fields.clone(),
@@ -3285,6 +3404,10 @@ impl HostEmitter {
                 // `Stmt::Expr(Assign(..))` bypasses this case entirely for an
                 // assignment TARGET.
                 format!("{}[{} as usize].clone()", self.expr(arr), self.expr(idx))
+            }
+            ExprKind::Field(obj, field) if self.actor_place(obj).is_some() => {
+                let p = self.actor_place(obj).unwrap();
+                format!("{{ let __a = {}.lock().unwrap().{}.clone(); __a }}", p, field)
             }
             ExprKind::Field(obj, field) => {
                 // Input members of the shared runtime (`screen.text`, `.shift`, `.focused`, `screen.mouse.scroll_y`, ...).
@@ -3693,6 +3816,21 @@ impl HostEmitter {
                     kind: ExprKind::Call(callee.clone(), args.clone()),
                     line: e.line, col: e.col, len: e.len,
                 })
+            }
+            ExprKind::MethodCall(obj, method, args) if self.is_actor_coll(obj)
+                && matches!(method.as_str(), "push" | "insert" | "append") && args.iter().any(|a| self.is_fresh_struct_ctor(&a.value)) =>
+            {
+                let recv = self.expr(obj);
+                let args_s: Vec<String> = args.iter().map(|a| {
+                    let v = self.expr(&a.value);
+                    if self.is_fresh_struct_ctor(&a.value) { format!("std::sync::Arc::new(std::sync::Mutex::new({v}))") } else { v }
+                }).collect();
+                format!("{}.{}({})", recv, method, args_s.join(", "))
+            }
+            ExprKind::MethodCall(obj, method, args) if self.actor_place(obj).is_some() && !matches!(method.as_str(), "clone" | "lock") => {
+                let p = self.actor_place(obj).unwrap();
+                let args_s: Vec<String> = args.iter().map(|a| self.expr(&a.value)).collect();
+                format!("{{ let __a = {}.lock().unwrap().{}({}); __a }}", p, method, args_s.join(", "))
             }
             ExprKind::MethodCall(obj, method, args) => {
                 // Associated function on an external Rust type. The general emitter
@@ -4381,6 +4519,16 @@ fn general_host_elem_type(ty: &Type) -> String {
     }
 }
 
+/// `[mut T'actor]` / `{K = mut V'actor}` (through `mut` and non-actor qualifiers).
+fn actor_elem_coll(ty: &Type) -> bool {
+    let mut t = ty.without_mut();
+    while let Type::Qualified(inner, q) = t {
+        if matches!(q, OwnerQual::Actor) { return false; }
+        t = inner.without_mut();
+    }
+    matches!(t, Type::Array(e) | Type::Dict(_, e) if matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
+}
+
 pub(super) fn rust_type(ty: &Type) -> String {
     if let Some(f) = fixed_fmt_of_type(ty) {
         // The generated newtype (`Fixed16_16(pub i32)`, `repr(transparent)`), so a `Vec` of
@@ -4459,6 +4607,7 @@ pub(super) fn rust_type(ty: &Type) -> String {
         }.into(),
         Type::TypeParam(p)     => p.clone(),
         Type::Mut(inner)       => rust_type(inner),
+        Type::Qualified(inner, OwnerQual::Actor) => format!("std::sync::Arc<std::sync::Mutex<{}>>", rust_type(inner)),
         Type::Qualified(inner, _) => rust_type(inner),
         Type::Generic(n, args) => {
             let s: Vec<String> = args.iter().map(rust_type).collect();

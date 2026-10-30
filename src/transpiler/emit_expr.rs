@@ -477,6 +477,21 @@ impl Transpiler {
             ExprKind::Array(_) if self.hoisted_ext_arrays.borrow().contains_key(&(expr.line, expr.col)) => {
                 self.hoisted_ext_arrays.borrow()[&(expr.line, expr.col)].clone()
             }
+            ExprKind::Array(elems) if self.actor_elem_lits.borrow().contains(&(expr.line, expr.col)) => {
+                let es: Vec<String> = elems.iter().map(|e| {
+                    let v = self.emit_expr_owned(e);
+                    if self.is_fresh_struct_ctor(e) { self.emit_actor_new(&v) } else { v }
+                }).collect();
+                format!("vec![{}]", es.join(", "))
+            }
+            ExprKind::Dict(pairs) if !pairs.is_empty() && self.actor_elem_lits.borrow().contains(&(expr.line, expr.col)) => {
+                let ps: Vec<String> = pairs.iter().map(|(k, e)| {
+                    let v = self.emit_expr_owned(e);
+                    let v = if self.is_fresh_struct_ctor(e) { self.emit_actor_new(&v) } else { v };
+                    format!("({}, {})", self.emit_expr_owned(k), v)
+                }).collect();
+                format!("HashMap::from([{}])", ps.join(", "))
+            }
             ExprKind::Array(elems) => {
                 // [TypeName] where TypeName is a known struct/enum → typed empty Vec::<T>::new()
                 // This handles Boring's `[T]{}` typed-empty-array idiom (parser splits it into

@@ -435,6 +435,9 @@ struct Transpiler {
     /// List literals bound to a hidden `let __extN` ahead of the current statement, keyed by the
     /// literal's source position — see `hoist_external_borrowed_arrays`. `emit_expr` consults it.
     pub(crate) hoisted_ext_arrays: std::cell::RefCell<std::collections::HashMap<(usize, usize), String>>,
+    /// Position of an array/dict literal initializing a declared `[mut T'actor]` / `{K = mut V'actor}`
+    /// binding: its fresh struct-constructor elements are wrapped in the actor constructor.
+    pub(crate) actor_elem_lits: std::cell::RefCell<std::collections::HashSet<(usize, usize)>>,
     pub(crate) warnings: std::cell::RefCell<Vec<TranspileError>>,
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
@@ -1531,6 +1534,7 @@ impl Transpiler {
             out: String::new(),
             errors: std::cell::RefCell::new(Vec::new()),
             hoisted_ext_arrays: Default::default(),
+            actor_elem_lits: Default::default(),
             warnings: std::cell::RefCell::new(Vec::new()),
             indent: 0,
             in_throws: false,

@@ -915,6 +915,9 @@ let [Point] b = [Point(0, 0)]
 
 This is checked for a bare `Var` collection with an explicit type annotation (an inferred-type collection's element permission isn't tracked).
 
+**Aliasing an element (`let q = arr[0]`).** In `boring run` a struct element read is the element itself, so `let q = arr[0]; arr[0].x = 9.0; print q.x` prints `9`. A `Vec<Point>` cannot do that in Rust (an index read copies; a borrow would forbid the later write), so when a file contains such an element binding (`let`/`mut`/`var` initialized by `coll[i]` / `d[k]`), every declared `[mut T]` / `{K = mut V}` type in it whose element is a non-generic struct declared in the same file is inferred `[mut T'actor]` / `{K = mut V'actor}` (`Arc<Mutex<T>>`, `Rc<RefCell<T>>` in single-thread mode), and `q` is a handle to the same element: `boring build` prints `9` too, in all four configs. The cost is a lock per element access, so write `[mut T'inline]` (or `'owned`) to opt out of the inference and keep a plain value with copy semantics. Not rewritten: plain `[T]` (nothing can be written through the alias), generic or foreign-file struct elements, a struct a kernel mentions (or a field type of one), and `boring build --linux` (the `no_std` emitter has no lock-aware element access). Array/dict literals wrapped automatically are the ones initializing a declared `let`; assign `[Point(..)]` elsewhere through `push`/`d[k] = ...`. See `--show-qualifiers`.
+
+
 #### Array fill and comprehension
 
 Two shorthand forms create arrays without listing every element:

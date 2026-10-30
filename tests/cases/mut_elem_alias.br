@@ -1,0 +1,39 @@
+struct Point:
+    var float x
+    var float y
+    def bump():
+        x += 1.0
+
+struct Board:
+    var [mut Point] cells = []
+    var {string = mut Point} named = {=}
+    def add(Point p):
+        cells.push(p)
+    def name(string k, Point p):
+        named[k] = p
+
+def poke(mut [mut Point] a):
+    a[0].x = 7.0
+
+def main():
+    mut [mut Point] arr = [Point(1.0, 2.0)]
+    let q = arr[0]
+    arr[0].x = 9.0
+    print q.x
+    poke(arr)
+    print q.x
+    arr[0].bump()
+    print q.x
+    mut {string = mut Point} d = {"a" = Point(3.0, 4.0)}
+    let r = d["a"]
+    d["a"].y = 8.0
+    print r.y
+    mut b = Board()
+    b.add(Point(5.0, 6.0))
+    b.name("k", Point(1.0, 1.0))
+    let s = b.cells[0]
+    b.cells[0].x = 50.0
+    print s.x
+    let t = b.named["k"]
+    b.named["k"].bump()
+    print t.x

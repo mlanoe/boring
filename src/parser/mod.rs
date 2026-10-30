@@ -88,6 +88,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     let mut p = Parser::new(tokens);
     let mut program = p.parse_program()?;
     crate::infer_actor_params::infer_actor_params(&mut program);
+    crate::infer_actor_elems::infer_actor_elems(&mut program);
     Ok(program)
 }
 

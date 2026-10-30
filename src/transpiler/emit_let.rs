@@ -1660,6 +1660,20 @@ impl Transpiler {
                 }
             }
         }
+        // `let [mut T'actor] a = [T(..)]` / `{K = mut V'actor}`: each fresh constructor element is
+        // wrapped in the actor constructor when the literal is emitted.
+        if let (Some(ty), Some(v)) = (&s.ty, &s.value) {
+            let mut dty = ty.without_mut();
+            while let Type::Qualified(inner, _) = dty { dty = inner.without_mut(); }
+            let elem = match (dty, &v.kind) {
+                (Type::Dict(_, vt), ExprKind::Dict(_)) => Some(&**vt),
+                (Type::Array(et), ExprKind::Array(_)) => Some(&**et),
+                _ => None,
+            };
+            if elem.is_some_and(|e| matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor))) {
+                self.actor_elem_lits.borrow_mut().insert((v.line, v.col));
+            }
+        }
         // Untyped `let hit = dict[key]` whose name is later tested against `nil` is an
         // optional lookup (`HashMap::get(..).cloned()`), not the panicking read.
         if s.ty.is_none() && self.nil_tested_vars.contains(s.name.as_str()) {

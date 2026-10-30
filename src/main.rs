@@ -22,6 +22,7 @@ pub mod fixed_wide_core;
 mod fixed_wide_vectors;
 pub mod parser;
 pub mod infer_actor_params;
+pub mod infer_actor_elems;
 pub mod desugar_labeled_array;
 pub mod desugar_inline_kernel;
 pub mod desugar_tensor_fields;
@@ -3617,6 +3618,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
     };
 
     infer_actor_params::set_import_context(&path);
+    infer_actor_elems::disable();
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {

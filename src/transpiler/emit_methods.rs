@@ -7264,6 +7264,7 @@ impl Transpiler {
             out: String::new(),
             errors: std::cell::RefCell::new(Vec::new()),
             hoisted_ext_arrays: Default::default(),
+            actor_elem_lits: Default::default(),
             warnings: std::cell::RefCell::new(Vec::new()),
             indent: self.indent,
             in_throws: self.in_throws,

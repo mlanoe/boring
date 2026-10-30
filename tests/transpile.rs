@@ -1001,6 +1001,7 @@ transpile_test!(qualified_member_store);
 transpile_test!(managed_owned_member_read);
 transpile_test!(managed_owned_member_call);
 transpile_test!(actor_collection_element_access);
+transpile_test!(mut_elem_alias);
 // A struct is a set element / dict key: auto-derived `Eq + Hash` when every field is hashable.
 transpile_test!(struct_set_dict_key);
 transpile_test!(struct_transient_hash);
