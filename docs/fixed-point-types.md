@@ -11,10 +11,10 @@
 > `T?`) and `mulRound`/`divRound`.
 > Also implemented, as **native methods** rather than library code:
 > `sqrt`, `sin`, `cos`, `tan`, `exp`, `ln` (Phase 5 — see below).
-> GPU backends: **CUDA, ROCm/HIP and Metal (`W ≤ 64`) and wgpu (`W ≤ 32`) are implemented** (see [GPU backends](#gpu-backends);
+> GPU backends: **CUDA, ROCm/HIP and Metal and wgpu (`W ≤ 64`) are implemented** (see [GPU backends](#gpu-backends);
 > CUDA/ROCm verified by codegen tests only, no NVIDIA/AMD hardware was available; Metal and wgpu
 > are also verified on the device, byte for byte against `boring run`; Metal's 64-bit formats use
-> `mulhi` plus a shift-subtract division). 128-bit formats (Phase 4) are signed-only. The former open
+> `mulhi` plus a shift-subtract division, wgpu's a `vec2<u32>` limb pair with emulated 128-bit product / division). 128-bit formats (Phase 4) are signed-only. The former open
 > questions are resolved in [Decisions](#decisions).
 >
 > **Implementation notes** (where the code differs from, or narrows, the text):
@@ -264,7 +264,7 @@ multiply/shift.
 |---|---|
 | CUDA | any `W ≤ 64` (native `long long` for the intermediate) |
 | Metal (MSL) | `W ≤ 32` with a `long` intermediate; `W = 64` (with `M < 64`) through emitted-on-demand `bp_fx_*` helpers (`mulhi` product, shift-subtract 128/64 division); 128-bit is a compile error |
-| wgpu (WGSL) | no 64-bit integers: `W ≤ 16` direct in `i32`/`u32`; `W = 32` through `u32` limb helpers (emulated 64-bit product and 64/32 division); `W = 64` and 128-bit are compile errors |
+| wgpu (WGSL) | no 64-bit integers: `W ≤ 16` direct in `i32`/`u32`; `W = 32` through `u32` limb helpers (emulated 64-bit product and 64/32 division); `W = 64` (with `M < 64`) as a `vec2<u32>` limb pair with `bp_fx_*64` helpers (128-bit product, shift-subtract 128/64 division); 128-bit is a compile error |
 | ROCm | as CUDA |
 
 First cut: formats not supported by a backend are a **compile error on that
@@ -350,7 +350,7 @@ bit-identical to the device buffer, and literals/casts fold as in the general pa
   results (the interpreter reports overflow instead of wrapping, so overflowing cases are checked against
   exact math, not `boring run`).
 
-### wgpu (implemented, `W ≤ 32`)
+### wgpu (implemented, `W ≤ 64`)
 
 `src/transpiler/wgpu/device/fixed.rs` (kernel code), `wgpu/host.rs` + `wgpu/mod.rs` (host). Same rules as
 CUDA/Metal, lowered to WGSL's only integer scalars: a fixed-point value is an `i32` (`ufixed`: `u32`) holding
@@ -364,6 +364,11 @@ operation that can leave its range (`extractBits(x, 0u, W)`), so `+ - %` wrap li
 | `W ≤ 16`: `a * b`, `a / b` | `((a * b) / 2^M)` and `(((a << M)) / b)` in 32 bits (`|ra·rb| ≤ 2^30`, `ra << M < 2^32`), `/` truncating toward zero, then re-narrowed |
 | `W = 32`: `a * b`, `a / b` | `bp_fx_mul_i32(a, b, M)` / `bp_fx_div_i32(a, b, M)` (`…_u32` unsigned): the 64-bit product / shifted dividend of the magnitudes is built from 16-bit `u32` limbs (`bp_fx_umul64`) and a 64-step restoring division (`bp_fx_udiv64`), the sign is applied last — truncation toward zero, never `>>` |
 | `x as int32`, `x.trunc()`, `x.fract()` | `x / 2^M` (`W ≤ 16`) or `bp_fx_tdiv_i32(x, M)` (magnitude shift, sign reapplied) |
+| `W = 64`: field / local / param / buffer | `vec2<u32>` (`.x` low word, `.y` high word, two's complement for both signednesses); buffers `array<vec2<u32>>`, bit-identical to the host's `Vec<Fixed32_32>` (little-endian) |
+| `W = 64`: `+ - -x %`, compares, `abs/min/max`, `floor/ceil/trunc/fract`, shifts | `bp_fx_add64/sub64/neg64/rem_i64|urem64`, `bp_fx_slt64/ult64`, `bp_fx_abs64/smin64/…`, `x & ~mask`, `bp_fx_shl64/lshr64/tdiv64` (carry-propagating two-word ops, magnitude shift for the truncating right shift) |
+| `W = 64`: `a * b` | `bp_fx_mul_i64(a, b, M)` / `bp_fx_mul_u64`: the 128-bit product of the magnitudes from four 32×32 partial products (`bp_fx_umul64`) with explicit carries, bits `M..M+64` kept, sign applied last |
+| `W = 64`: `a / b` | `bp_fx_div_i64(a, b, M)` / `bp_fx_div_u64`: a `63 + M`-step shift-subtract division of `\|a\| << M` by `\|b\|` (the dividend is never materialised: bits are fed one at a time), low 64 bits of the quotient, sign applied last |
+| `W = 64`: casts | an `int`/narrower fixed raw is sign-/zero-extended to a limb pair (`bp_fx_i32to64`) and shifted; `-> int` truncates toward zero and keeps the low 32 bits; `-> float32` is `f32(hi) * 2^32 + f32(lo)` over `2^M`; `float32 ->` is `bp_fx_f2raw64` (exact split into words, truncating) |
 | `x as float32` / `f as fixed` | `f32(x) / 2^M` / `i32(f32(f) * 2^M)` (the float → int conversion truncates toward zero) |
 | `n as fixed`, other-format casts | `i32(n) << M`; left shift / truncating right shift by the fraction-bit difference, re-narrowed |
 | `floor` / `ceil` | `x & ~mask` / `(x + mask) & ~mask` |
@@ -371,23 +376,33 @@ operation that can leave its range (`extractBits(x, 0u, W)`), so `+ - %` wrap li
 
 The `bp_fx_*` helpers are module-level WGSL functions emitted once, only when a kernel uses them (a program
 with `+ - %`, compares and `W ≤ 16` operations carries none). A scalar `let fixed16_16 k` kernel field is
-uploaded as its raw `i32`/`u32` in the params struct. On the host, buffers are `Vec<FixedN_M>` — the generated
+uploaded as its raw `i32`/`u32` in the params struct (a 64-bit one as two `u32` slots `k_lo` / `k_hi`, a `[T, N]'const` array of 64-bit raws as `2N` `u32` words read back as limb pairs, the host struct staying free of padding). On the host, buffers are `Vec<FixedN_M>` — the generated
 `repr(transparent)` newtype, marked `bytemuck::Pod`, so it is bit-identical to the device buffer and needs no
 conversion (the shared kernel-host emitters' `x as <fixed>` casts are dropped).
 
-- **Compile errors on wgpu**, never a silent narrowing: any `W = 64` format (no 128-bit product emulation) and
-  128-bit formats — as a kernel field, parameter, return type or in an operation; a fixed-point `'actor` buffer
+- **Compile errors on wgpu**, never a silent narrowing: 128-bit formats, `ufixed0_64` (`M = 64`, whose scale has no
+  64-bit constant) and a labeled (`[T, width = …]`) `'const` array of a 64-bit format — as a kernel field, parameter, return type or in an operation; a fixed-point `'actor` buffer
   (WGSL atomics are 32-bit `i32`/`u32` only); `sqrt/sin/cos/tan/exp/ln`, `round`, `signum`, `clamp`,
   `wrapping*`/`saturating*`/`checked*`, `mulRound`/`divRound`; a literal out of range.
 - Overflow wraps and division by zero is undefined, as for any GPU integer op. `.raw` is a 32-bit `int` on this
-  target, so the raw of a `ufixed` with `W = 32` above 2^31 wraps; `fixed -> float` goes through `f32`, so a
-  32-bit raw above 2^24 may round.
+  target, so the raw of a `ufixed` with `W = 32` above 2^31 wraps and the raw of a 64-bit format is its **low 32
+  bits** (read the full raw back by copying the buffer to the host, where `.raw` is 64-bit); `fixed -> float` goes
+  through `f32`, so a raw above 2^24 may round, and `float -> fixed` (64-bit too) is exact only to `f32`'s 24-bit
+  mantissa. `int` fields are `i32` on wgpu, so integer buffers fed to / read from a 64-bit kernel must fit 32 bits.
+- A 64-bit `*` / `/` costs one 128-bit multiply / up to 126 shift-subtract steps per element: correct but slower
+  than Metal/CUDA's native 64-bit path; prefer a ≤ 32-bit format when the range allows.
 - Verified on a real GPU (wgpu over Metal on Apple silicon):
   `tests/wgpu_codegen.rs::fixed_point_kernel_runs_on_wgpu_and_matches_interpreter` runs
   `examples/fixed_point_kernel.br` and `fixed_point_edge_values_run_on_wgpu_and_match_interpreter` sweeps
   `* / %`, `floor/ceil/trunc/fract/min/max`, casts and `-`/`abs` on mixed signs and magnitudes for `fixed16_16`,
   `fixed8_24`, `ufixed16_16`, `ufixed0_32`, `fixed8_8`, `ufixed8_8` and `fixed4_4`, both compared with
-  `boring run` byte for byte. The WGSL of every supported width and every lowered operation is also validated
+  `boring run` byte for byte.
+  The 64-bit formats are verified the same way: `fixed_point_w64_kernel_runs_on_wgpu_and_matches_interpreter`
+  (`examples/fixed_point_kernel64.br`, with its `int` `.raw` sums replaced by a 32-bit-safe expression),
+  `fixed_point_w64_params_casts_and_compares_run_on_wgpu_and_match_interpreter` (64-bit scalar parameters, casts,
+  comparisons, members), `fixed_point_w64_const_array_runs_on_wgpu_and_matches_interpreter` (`'const` arrays) and `fixed_point_w64_mul_div_edge_sweep_matches_exact_math_on_wgpu`, a 288-pair sweep of
+  `* / %` over `fixed32_32`, `fixed48_16`, `fixed1_63` and their unsigned forms (raws around 2^32, 2^62, 2^63-1,
+  both signs, top bit set) whose full 64-bit raws equal exact 128-bit math. The WGSL of every supported width and every lowered operation is also validated
   with naga (`fixed_point_ops_validate_in_naga_for_every_supported_width`).
 - `buf[i].min(x)` / `buf[i].max(x)` on a fixed-point element of a kernel array is the plain member (the
   extremum; the buffer is untouched) in `boring run` and on every GPU target. (For integer elements the same
@@ -413,7 +428,7 @@ conversion (the shared kernel-host emitters' `x as <fixed>` casts are dropped).
    newtype for `W ∈ {8, 16, 32, 64}`, tests in the shared corpus.
 2. **Members**: `floor/ceil/round/fract/abs/min/max/clamp`, `wrapping*`/
    `saturating*`/`checked*`, and `mulRound`/`divRound` (round to nearest).
-3. **GPU**: CUDA first, then Metal, then wgpu (with the limb emulation) — all done for `W ≤ 32` (CUDA/ROCm and Metal also `W = 64`).
+3. **GPU**: CUDA first, then Metal, then wgpu (with the limb emulation) — all done for `W ≤ 32`, and for `W = 64` on every backend.
 4. **128-bit formats** (`fixed64_64`, `fixed32_96`, `fixed128_0`, …).
    **Implemented for signed formats with at most 126 fractional bits.**
    - `src/fixed_wide_core.rs` (dual-use like `fixed_math_core.rs`: compiled into the

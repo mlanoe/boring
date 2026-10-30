@@ -4839,6 +4839,9 @@ fn fixed_point_ops_validate_in_naga_for_every_supported_width() {
         ("fixed8_8", true), ("ufixed8_8", false), ("fixed4_12", true), ("ufixed12_4", false),
         ("fixed16_16", true), ("ufixed16_16", false), ("fixed8_24", true), ("ufixed8_24", false),
         ("fixed2_30", true), ("fixed24_8", true),
+        // 64-bit raws: `vec2<u32>` limb pairs.
+        ("fixed32_32", true), ("ufixed32_32", false), ("fixed48_16", true), ("ufixed48_16", false),
+        ("fixed16_48", true), ("ufixed16_48", false),
     ] {
         let name = format!("fixed_ops_{t}");
         let (wgsl, _, _, _) = run_wgpu(&name, &fixed_ops_kernel(t, signed));
@@ -5054,26 +5057,15 @@ kernel F:
 
 #[test]
 fn fixed_point_unsupported_cases_are_compile_errors_on_wgpu() {
-    let cases: [(&str, &str, &str); 7] = [
-        ("w64_field", r#"
+    let cases: [(&str, &str, &str); 6] = [
+        ("m64_fraction_only", r#"
 kernel F:
-    mut [fixed32_32]'unified out
-    init([fixed32_32]'unified o):
+    mut [ufixed0_64]'unified out
+    init([ufixed0_64]'unified o):
         out = o
     def ():
-        out[.thread.x] = out[.thread.x] * out[.thread.x]
-"#, "fixed32_32"),
-        ("w64_param_only", r#"
-fixed32_32 id(fixed32_32 x):
-    x
-
-kernel F:
-    mut [int32]'unified out
-    init([int32]'unified o):
-        out = o
-    def ():
-        out[.thread.x] = id(1.0 as fixed32_32) as int32
-"#, "fixed32_32"),
+        out[.thread.x] = out[.thread.x] + out[.thread.x]
+"#, "ufixed0_64"),
         ("w128", r#"
 kernel F:
     mut [fixed64_64]'unified out
@@ -5229,4 +5221,283 @@ for i in 0..<N:
     for (t, signed, ra, rb) in cases {
         assert_wgpu_matches_interpreter(&format!("fixed_edge_{t}"), &program(t, signed, &ra, &rb));
     }
+}
+
+/// 64-bit raws are `vec2<u32>` limb pairs: buffers are `array<vec2<u32>>`, a scalar parameter
+/// crosses the params struct as two `u32` slots, and the `bp_fx_*64` helpers are emitted only when used.
+#[test]
+fn fixed_point_w64_lowers_to_limb_pairs_and_helpers_on_demand() {
+    // `+ - neg floor` need only add/sub/neg helpers: no 128-bit product or division machinery.
+    let (wgsl, _, rs, _) = run_wgpu("fixed_w64_plain", r#"
+kernel F:
+    let fixed32_32 k
+    let [fixed32_32]'unified a
+    mut [fixed32_32]'unified out
+    init(fixed32_32 kk, [fixed32_32]'unified a0, [fixed32_32]'unified o0):
+        k = kk
+        a = a0
+        out = o0
+    def ():
+        let i = .thread.x
+        out[i] = -(a[i] + k - 2.5).floor()
+
+mut o = [0.0 as fixed32_32 for ..<4]
+mut f = F(1.5 as fixed32_32, o, o)
+kernel:
+    f(block = 4)
+"#);
+    assert_valid_wgsl("fixed_w64_plain", &wgsl);
+    assert!(wgsl.contains("array<vec2<u32>>"), "{wgsl}");
+    assert!(wgsl.contains("k_lo: u32,") && wgsl.contains("k_hi: u32,"), "{wgsl}");
+    assert!(wgsl.contains("let k: vec2<u32> = vec2<u32>("), "{wgsl}");
+    assert!(wgsl.contains("fn bp_fx_add64(") && wgsl.contains("fn bp_fx_neg64("), "{wgsl}");
+    assert!(!wgsl.contains("bp_fx_umulshr64") && !wgsl.contains("bp_fx_udivshl64"), "{wgsl}");
+    // 2.5 in fixed32_32 -> raw 0x2_8000_0000 = (hi 2, lo 0x80000000).
+    assert!(wgsl.contains("vec2<u32>(2147483648u, 2u)"), "{wgsl}");
+    assert!(rs.contains("k_lo:") && rs.contains("k_hi:"), "{rs}");
+
+    // `*` and `/` pull in exactly their helpers (and dependencies), signed vs unsigned.
+    let (wgsl, _, _, _) = run_wgpu("fixed_w64_mul_div", r#"
+kernel F:
+    let [fixed32_32]'unified a
+    let [ufixed32_32]'unified u
+    mut [fixed32_32]'unified out
+    mut [ufixed32_32]'unified uo
+    init([fixed32_32]'unified a0, [ufixed32_32]'unified u0, [fixed32_32]'unified o0, [ufixed32_32]'unified uo0):
+        a = a0
+        u = u0
+        out = o0
+        uo = uo0
+    def ():
+        let i = .thread.x
+        out[i] = a[i] * a[i]
+        uo[i] = u[i] / u[i]
+"#);
+    assert_valid_wgsl("fixed_w64_mul_div", &wgsl);
+    for helper in ["bp_fx_umul64", "bp_fx_umulshr64", "bp_fx_mul_i64", "bp_fx_udivshl64", "bp_fx_div_u64"] {
+        assert_eq!(wgsl.matches(&format!("fn {helper}(")).count(), 1, "{helper} emitted once:\n{wgsl}");
+    }
+    assert!(!wgsl.contains("fn bp_fx_div_i64(") && !wgsl.contains("fn bp_fx_mul_u64("), "unused helper emitted:\n{wgsl}");
+    assert!(wgsl.contains("bp_fx_mul_i64(f_a[u32(i)], f_a[u32(i)], 32u)"), "{wgsl}");
+    assert!(wgsl.find("fn bp_fx_mul_i64(").unwrap() < wgsl.find("fn F_main(").unwrap(), "{wgsl}");
+}
+
+/// The 64-bit example (fixed32_32, fixed48_16, ufixed32_32: carries across the 32-bit halves, negative
+/// operands, truncation toward zero, mixed-width casts, members) built for wgpu and run on the device
+/// prints what `boring run` prints. `int` is 32-bit on this target, so the example's 64-bit
+/// `.raw` sums (which exceed 2^31) are replaced by an `int` expression that fits; the full 64-bit
+/// raws are compared by `fixed_point_w64_mul_div_edge_sweep_matches_exact_math_on_wgpu`.
+#[test]
+fn fixed_point_w64_kernel_runs_on_wgpu_and_matches_interpreter() {
+    let src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/fixed_point_kernel64.br")).unwrap();
+    let old1 = "raws[i] = p[i].raw + q[i].floor().raw + (w[i].ceil() as int) + (a[i].trunc().raw) + (b[i].fract().raw)";
+    let old2 = "raws[i] = raws[i] + (p[i].max(q[i])).raw";
+    assert!(src.contains(old1) && src.contains(old2), "example changed, update this test");
+    let src = src
+        .replace(old1, "raws[i] = (p[i] as int) + (q[i].floor() as int) + ((w[i].fract() * 1000) as int) + (a[i].trunc() as int) + ((b[i].fract() * 1000) as int)")
+        .replace(old2, "raws[i] = raws[i] + (p[i].max(q[i]) as int)");
+    assert_wgpu_matches_interpreter("fixed_point64_run", &src);
+}
+
+/// `*`, `/` and `%` of 64-bit formats over an edge sweep (raws around 2^32, 2^62, 2^63-1, both signs, and
+/// raws with the top bit set for the unsigned formats) match exact 128-bit arithmetic: truncation toward
+/// zero, the final raw wrapping. Run on the real GPU, operands and results round-trip as full 64-bit raws.
+#[test]
+fn fixed_point_w64_mul_div_edge_sweep_matches_exact_math_on_wgpu() {
+    fn program(u: &str) -> String {
+        let operands = if u.is_empty() { "u = -u" } else { "u = u + u + u\n            v = v + v + v" };
+        let mut src = String::from("let vals = [1 as int64, 2, 3, 4294967295, 4294967296, 4294967297, 1234567890123456, 4611686018427387904, 9223372036854775807, 6148914691236517205, 3037000500, 281474976710655]\nlet V = 12\nlet N = 288\n");
+        let mut prints = String::new();
+        for (k, f) in ["fixed32_32", "fixed48_16", "fixed1_63"].iter().enumerate() {
+            let t = format!("{u}{f}");
+            src.push_str(&format!(r#"
+mut [@T@]'kernel'unified a@k@ = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified b@k@ = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified x@k@ = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified y@k@ = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified m@k@ = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified d@k@ = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified r@k@ = [@T@.fromRaw(0) for ..<N]
+for i in 0..<V:
+    for j in 0..<V:
+        for h in 0..<2:
+            a@k@[h * 144 + i * V + j] = @T@.fromRaw(vals[i])
+            b@k@[h * 144 + i * V + j] = @T@.fromRaw(vals[j])
+
+kernel K@k@:
+    let [@T@]'unified a
+    let [@T@]'unified b
+    mut [@T@]'unified x
+    mut [@T@]'unified y
+    mut [@T@]'unified m
+    mut [@T@]'unified d
+    mut [@T@]'unified r
+
+    init([@T@]'unified a0, [@T@]'unified b0, [@T@]'unified x0, [@T@]'unified y0, [@T@]'unified m0, [@T@]'unified d0, [@T@]'unified r0):
+        a = a0
+        b = b0
+        x = x0
+        y = y0
+        m = m0
+        d = d0
+        r = r0
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        var u = a[i]
+        var v = b[i]
+        if i >= 144:
+            @OPS@
+        x[i] = u
+        y[i] = v
+        m[i] = u * v
+        d[i] = u / v
+        r[i] = u % v
+
+mut kk@k@ = K@k@(a@k@, b@k@, x@k@, y@k@, m@k@, d@k@, r@k@)
+kernel:
+    kk@k@(block = 144, grid = 2)
+"#).replace("@T@", &t).replace("@k@", &k.to_string()).replace("@OPS@", operands));
+            prints.push_str(&format!(
+                "    print \"{k} {{kk{k}.x[i].raw}} {{kk{k}.y[i].raw}} {{kk{k}.m[i].raw}} {{kk{k}.d[i].raw}} {{kk{k}.r[i].raw}}\"\n"));
+        }
+        src.push_str("\nfor i in 0..<N:\n");
+        src.push_str(&prints);
+        src
+    }
+    for unsigned in [false, true] {
+        let name = if unsigned { "fixed_w64_edge_u" } else { "fixed_w64_edge_s" };
+        let (_wgsl, _e, _rs, _toml) = run_wgpu(name, &program(if unsigned { "u" } else { "" }));
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wgpu_codegen").join(name);
+        let run = common::SharedCargo::new("wgpu_codegen")
+            .args(["run", "--quiet", "--release", "--manifest-path"])
+            .arg(dir.join("test_wgpu").join("Cargo.toml"))
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+        let out = String::from_utf8_lossy(&run.stdout).into_owned();
+        assert!(run.status.success(), "generated wgpu program failed:\n{out}\n{}", String::from_utf8_lossy(&run.stderr));
+        let mut rows = 0;
+        for line in out.lines() {
+            let v: Vec<i64> = line.split_whitespace().map(|t| t.parse::<i128>().unwrap() as i64).collect();
+            if v.len() != 6 { continue; }
+            let m = [32u32, 16, 63][v[0] as usize];
+            let (a, b) = (v[1], v[2]);
+            let want: [i64; 3] = if unsigned {
+                let (ua, ub) = (a as u64 as u128, b as u64 as u128);
+                [((ua * ub) >> m) as u64 as i64, ((ua << m) / ub) as u64 as i64, (ua % ub) as u64 as i64]
+            } else {
+                [((a as i128 * b as i128) / (1i128 << m)) as i64, (((a as i128) << m) / b as i128) as i64, (a as i128 % b as i128) as i64]
+            };
+            assert_eq!(&v[3..], &want[..], "unsigned={unsigned} m={m} a={a} b={b}");
+            rows += 1;
+        }
+        assert_eq!(rows, 288 * 3, "unsigned={unsigned}\n{out}");
+    }
+}
+
+/// 64-bit scalar parameters (two `u32` params slots), int / float / other-format casts in both
+/// directions, comparisons, `fromRaw` and the min/max/epsilon members, on the device against `boring run`.
+#[test]
+fn fixed_point_w64_params_casts_and_compares_run_on_wgpu_and_match_interpreter() {
+    assert_wgpu_matches_interpreter("fixed_w64_casts", r#"
+let N = 8
+mut [fixed32_32]'kernel'unified a = [0.0 as fixed32_32 for ..<N]
+mut [fixed32_32]'kernel'unified o = [0.0 as fixed32_32 for ..<N]
+mut [fixed16_16]'kernel'unified n = [0.0 as fixed16_16 for ..<N]
+mut [ufixed32_32]'kernel'unified u = [0.0 as ufixed32_32 for ..<N]
+mut [ufixed8_8]'kernel'unified t = [0.0 as ufixed8_8 for ..<N]
+mut [int32]'kernel'unified ints = [0 for ..<N]
+mut [float32]'kernel'unified flts = [0.0 as float32 for ..<N]
+mut [int32]'kernel'unified cmp = [0 for ..<N]
+for i in 0..<N:
+    a[i] = ((i as fixed32_32) - 3) * 1.75 + 0.0009765625
+
+kernel C:
+    let fixed32_32 k
+    let ufixed32_32 ucst
+    let [fixed32_32]'unified a
+    mut [fixed32_32]'unified o
+    mut [fixed16_16]'unified n
+    mut [ufixed32_32]'unified u
+    mut [ufixed8_8]'unified t
+    mut [int32]'unified ints
+    mut [float32]'unified flts
+    mut [int32]'unified cmp
+
+    init(fixed32_32 kval, ufixed32_32 uval, [fixed32_32]'unified a0, [fixed32_32]'unified o0, [fixed16_16]'unified n0, [ufixed32_32]'unified u0, [ufixed8_8]'unified t0, [int32]'unified i0, [float32]'unified f0, [int32]'unified c0):
+        k = kval
+        ucst = uval
+        a = a0
+        o = o0
+        n = n0
+        u = u0
+        t = t0
+        ints = i0
+        flts = f0
+        cmp = c0
+
+    def ():
+        let i = .thread.x
+        o[i] = a[i] * k + (i as fixed32_32) - fixed32_32.fromRaw(5) + fixed32_32.epsilon
+        n[i] = a[i] as fixed16_16
+        u[i] = ((n[i].abs() as ufixed32_32) + ucst) * 0.5
+        t[i] = u[i] as ufixed8_8
+        ints[i] = (a[i] as int32) + (o[i] as int32) * 2
+        flts[i] = (a[i] as float32) * 0.25 + ((i as float32) as fixed32_32) as float32
+        var c = 0
+        if a[i] < k:
+            c = c + 1
+        if a[i] >= k:
+            c = c + 2
+        if a[i] == k:
+            c = c + 4
+        if a[i] != k:
+            c = c + 8
+        if a[i].max(k) > fixed32_32.fromRaw(0):
+            c = c + 16
+        if ucst <= u[i]:
+            c = c + 32
+        cmp[i] = c
+
+mut kk = C(2.5 as fixed32_32, 3.25 as ufixed32_32, a, o, n, u, t, ints, flts, cmp)
+kernel:
+    kk(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{kk.a[i]} {kk.o[i]} {kk.n[i]} {kk.u[i]} {kk.t[i]} {kk.ints[i]} {kk.flts[i]} {kk.cmp[i]}"
+"#);
+}
+
+/// A `[T, N]'const` array of a 64-bit format lives in the params block as `2N` u32 words and is read
+/// back as a limb pair; on the device it matches `boring run` (negative and above-2^32 raws included).
+#[test]
+fn fixed_point_w64_const_array_runs_on_wgpu_and_matches_interpreter() {
+    assert_wgpu_matches_interpreter("fixed_w64_const_array", r#"
+let N = 4
+mut [fixed32_32]'kernel'unified out = [0.0 as fixed32_32 for ..<N]
+mut [ufixed32_32]'kernel'unified uout = [0.0 as ufixed32_32 for ..<N]
+
+kernel W:
+    let [fixed32_32, 4]'const w
+    let [ufixed32_32, 4]'const uw
+    mut [fixed32_32]'unified out
+    mut [ufixed32_32]'unified uout
+    init([fixed32_32, 4] ww, [ufixed32_32, 4] uww, [fixed32_32]'unified o, [ufixed32_32]'unified uo):
+        w = ww
+        uw = uww
+        out = o
+        uout = uo
+    def ():
+        let i = .thread.x
+        out[i] = w[i] * w[(i + 1) % 4] - w[(i + 2) % 4]
+        uout[i] = uw[i] / uw[(i + 1) % 4] + uw[3 - i]
+
+mut k = W([1.5 as fixed32_32, -2.25 as fixed32_32, 40000.125 as fixed32_32, -0.0009765625 as fixed32_32], [3.5 as ufixed32_32, 0.25 as ufixed32_32, 4000000000.5 as ufixed32_32, 1.0 as ufixed32_32], out, uout)
+kernel:
+    k(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{k.out[i]} {k.uout[i]}"
+"#);
 }

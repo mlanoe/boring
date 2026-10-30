@@ -294,8 +294,15 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("    {}_w: i32,", f.name));
                         self.line(&format!("    {}_h: i32,", f.name));
                     }
+                    Type::ArrayN(inner, n) if crate::transpiler::emit_kernel::fixed_kernel_fmt(inner).is_some_and(|x| x.width() > 32) => {
+                        self.line(&format!("    {}: [u32; {}],", f.name, 2 * n));
+                    }
                     Type::ArrayN(inner, n) => {
                         self.line(&format!("    {}: [{}; {}],", f.name, params_slot_type(inner), n));
+                    }
+                    ty if crate::transpiler::emit_kernel::fixed_kernel_fmt(ty).is_some_and(|x| x.width() > 32) => {
+                        self.line(&format!("    {}_lo: u32,", f.name));
+                        self.line(&format!("    {}_hi: u32,", f.name));
                     }
                     ty => {
                         self.line(&format!("    {}: {},", f.name, params_slot_type(ty)));
@@ -692,6 +699,11 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("            {}_w: self.{}.0,", f.name, f.name));
                         self.line(&format!("            {}_h: self.{}.1,", f.name, f.name));
                     }
+                    Type::ArrayN(inner, n) if crate::transpiler::emit_kernel::fixed_kernel_fmt(inner).is_some_and(|x| x.width() > 32) => {
+                        self.line(&format!(
+                            "            {}: {{ let mut __a = [0u32; {}]; for (__i, __x) in self.{}.iter().enumerate() {{ __a[2 * __i] = (__x.0 as u64) as u32; __a[2 * __i + 1] = ((__x.0 as u64) >> 32) as u32; }} __a }},",
+                            f.name, 2 * n, f.name));
+                    }
                     Type::ArrayN(inner, _) => {
                         let conv = params_slot_conv(inner, "__x");
                         if conv == "__x" {
@@ -699,6 +711,10 @@ impl<'a> HostEmitter<'a> {
                         } else {
                             self.line(&format!("            {}: self.{}.map(|__x| {}),", f.name, f.name, conv));
                         }
+                    }
+                    ty if crate::transpiler::emit_kernel::fixed_kernel_fmt(ty).is_some_and(|x| x.width() > 32) => {
+                        self.line(&format!("            {}_lo: (self.{}.0 as u64) as u32,", f.name, f.name));
+                        self.line(&format!("            {}_hi: ((self.{}.0 as u64) >> 32) as u32,", f.name, f.name));
                     }
                     ty => {
                         self.line(&format!("            {}: {},", f.name, params_slot_conv(ty, &format!("self.{}", f.name))));

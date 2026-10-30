@@ -14,7 +14,16 @@
 //! * `W = 32`: the 64-bit product / shifted dividend is emulated with `u32` limb helpers
 //!   (`bp_fx_*`, emitted once into the WGSL module only when used) on the magnitudes, with the
 //!   sign applied afterwards (truncation toward zero, never an arithmetic shift).
-//! * `W = 64` / `128`: compile error on this target.
+//! * `W = 64`: the raw is a `vec2<u32>` (`.x` = low word, `.y` = high word, two's complement for
+//!   both signednesses; a `[fixed32_32]` buffer is an `array<vec2<u32>>`, bit-identical to the
+//!   host's `Vec<Fixed32_32>`). Add/sub/neg/compare/shift/`*`/`/`/`%` are `bp_fx_*64` helpers
+//!   (emitted only when used): `*` builds the 128-bit product of the magnitudes from 32x32
+//!   partial products and keeps bits `M..M+64`, `/` is a 64..127-step shift-subtract division of
+//!   `|a| << M` by `|b|`, signs are applied last (truncation toward zero, wrapping final raw).
+//!   A scalar 64-bit kernel parameter crosses the params struct as two `u32` slots
+//!   (`name_lo` / `name_hi`). `.raw` is the low 32 bits (`int` is 32-bit on this target).
+//!   A `[T, N]'const` array of a 64-bit format is `array<u32, 2N>` in the params block.
+//! * `W = 128`, `ufixed0_64` (`M = 64`), labeled `'const` 64-bit arrays: compile error on this target.
 //!
 //! Overflow wraps and division by zero is undefined, as for any GPU integer op.
 
@@ -50,7 +59,27 @@ fn is_float_ty(t: &Type) -> bool {
 }
 
 /// WGSL storage type of the raw integer.
-pub(super) fn raw_t(f: &FixedFmt) -> &'static str { if f.signed { "i32" } else { "u32" } }
+pub(super) fn raw_t(f: &FixedFmt) -> &'static str {
+    if f.width() > 32 { "vec2<u32>" } else if f.signed { "i32" } else { "u32" }
+}
+
+/// Is the raw a `vec2<u32>` limb pair?
+fn is64(f: &FixedFmt) -> bool { f.width() > 32 }
+
+/// A 64-bit raw pattern as a WGSL constant (`i128` truncated to its low 64 bits).
+fn lit64(raw: i128) -> String {
+    let v = raw as u64;
+    format!("vec2<u32>({}u, {}u)", v as u32, (v >> 32) as u32)
+}
+
+fn is_unsigned_int_ty(t: &Type) -> bool {
+    match t.without_mut() {
+        Type::Uint | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64 => true,
+        Type::Named(n) => matches!(n.as_str(), "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "u8" | "u16" | "u32" | "u64"),
+        Type::Qualified(inner, _) => is_unsigned_int_ty(inner),
+        _ => false,
+    }
+}
 
 fn suffix(f: &FixedFmt) -> &'static str { if f.signed { "" } else { "u" } }
 
@@ -63,6 +92,11 @@ fn pow2_lit(f: &FixedFmt, k: u32) -> Option<String> {
 /// A typed constant of `f`'s raw type holding the 32-bit pattern `bits`.
 fn bits_const(f: &FixedFmt, bits: u32) -> String {
     if f.signed { format!("i32({})", bits as i32) } else { format!("{bits}u") }
+}
+
+/// The raw zero of `f`.
+fn zero_const(f: &FixedFmt) -> String {
+    if is64(f) { "vec2<u32>(0u, 0u)".to_string() } else { bits_const(f, 0) }
 }
 
 /// Re-narrows a raw expression to `f`'s width (sign-/zero-extending); a no-op for 32-bit formats.
@@ -142,6 +176,152 @@ const HELPER_TDIV_I32: &str = "fn bp_fx_tdiv_i32(v: i32, k: u32) -> i32 {
 }
 ";
 
+const H_ADD64: &str = "fn bp_fx_add64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let lo = a.x + b.x;
+    return vec2<u32>(lo, a.y + b.y + select(0u, 1u, lo < a.x));
+}
+";
+const H_NEG64: &str = "fn bp_fx_neg64(a: vec2<u32>) -> vec2<u32> {
+    return vec2<u32>(0u - a.x, ~a.y + select(0u, 1u, a.x == 0u));
+}
+";
+const H_SUB64: &str = "fn bp_fx_sub64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> { return bp_fx_add64(a, bp_fx_neg64(b)); }
+";
+const H_ABS64: &str = "fn bp_fx_abs64(a: vec2<u32>) -> vec2<u32> { return select(a, bp_fx_neg64(a), (a.y >> 31u) == 1u); }
+";
+const H_ULT64: &str = "fn bp_fx_ult64(a: vec2<u32>, b: vec2<u32>) -> bool { return a.y < b.y || (a.y == b.y && a.x < b.x); }
+";
+const H_SLT64: &str = "fn bp_fx_slt64(a: vec2<u32>, b: vec2<u32>) -> bool {
+    let ah = bitcast<i32>(a.y);
+    let bh = bitcast<i32>(b.y);
+    return ah < bh || (ah == bh && a.x < b.x);
+}
+";
+const H_UMIN64: &str = "fn bp_fx_umin64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> { return select(a, b, bp_fx_ult64(b, a)); }
+";
+const H_UMAX64: &str = "fn bp_fx_umax64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> { return select(a, b, bp_fx_ult64(a, b)); }
+";
+const H_SMIN64: &str = "fn bp_fx_smin64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> { return select(a, b, bp_fx_slt64(b, a)); }
+";
+const H_SMAX64: &str = "fn bp_fx_smax64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> { return select(a, b, bp_fx_slt64(a, b)); }
+";
+const H_SHL64: &str = "fn bp_fx_shl64(a: vec2<u32>, k: u32) -> vec2<u32> {
+    if (k == 0u) { return a; }
+    if (k >= 64u) { return vec2<u32>(0u, 0u); }
+    if (k >= 32u) { return vec2<u32>(0u, a.x << (k - 32u)); }
+    return vec2<u32>(a.x << k, (a.y << k) | (a.x >> (32u - k)));
+}
+";
+const H_LSHR64: &str = "fn bp_fx_lshr64(a: vec2<u32>, k: u32) -> vec2<u32> {
+    if (k == 0u) { return a; }
+    if (k >= 64u) { return vec2<u32>(0u, 0u); }
+    if (k >= 32u) { return vec2<u32>(a.y >> (k - 32u), 0u); }
+    return vec2<u32>((a.x >> k) | (a.y << (32u - k)), a.y >> k);
+}
+";
+const H_TDIV64: &str = "fn bp_fx_tdiv64(v: vec2<u32>, k: u32) -> vec2<u32> {
+    let neg = (v.y >> 31u) == 1u;
+    let q = bp_fx_lshr64(select(v, bp_fx_neg64(v), neg), k);
+    return select(q, bp_fx_neg64(q), neg);
+}
+";
+const H_UMULSHR64: &str = "fn bp_fx_umulshr64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> {
+    let p00 = bp_fx_umul64(a.x, b.x);
+    let p01 = bp_fx_umul64(a.x, b.y);
+    let p10 = bp_fx_umul64(a.y, b.x);
+    let p11 = bp_fx_umul64(a.y, b.y);
+    let r0 = p00.x;
+    var r1 = p00.y;
+    var c1 = 0u;
+    var s = r1 + p01.x; c1 += select(0u, 1u, s < r1); r1 = s;
+    s = r1 + p10.x; c1 += select(0u, 1u, s < r1); r1 = s;
+    var r2 = p11.x;
+    var c2 = 0u;
+    s = r2 + p01.y; c2 += select(0u, 1u, s < r2); r2 = s;
+    s = r2 + p10.y; c2 += select(0u, 1u, s < r2); r2 = s;
+    s = r2 + c1; c2 += select(0u, 1u, s < r2); r2 = s;
+    let r3 = p11.y + c2;
+    if (m == 0u) { return vec2<u32>(r0, r1); }
+    if (m < 32u) { return vec2<u32>((r0 >> m) | (r1 << (32u - m)), (r1 >> m) | (r2 << (32u - m))); }
+    if (m == 32u) { return vec2<u32>(r1, r2); }
+    let t = m - 32u;
+    return vec2<u32>((r1 >> t) | (r2 << (32u - t)), (r2 >> t) | (r3 << (32u - t)));
+}
+";
+const H_MUL_U64: &str = "fn bp_fx_mul_u64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> { return bp_fx_umulshr64(a, b, m); }
+";
+const H_MUL_I64: &str = "fn bp_fx_mul_i64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> {
+    let na = (a.y >> 31u) == 1u;
+    let nb = (b.y >> 31u) == 1u;
+    let r = bp_fx_umulshr64(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb), m);
+    return select(r, bp_fx_neg64(r), na != nb);
+}
+";
+const H_UDIVSHL64: &str = "fn bp_fx_udivshl64(a: vec2<u32>, d: vec2<u32>, m: u32) -> vec2<u32> {
+    var r = vec2<u32>(0u, 0u);
+    var q = vec2<u32>(0u, 0u);
+    let mi = i32(m);
+    for (var i: i32 = 63 + mi; i >= 0; i = i - 1) {
+        var bit = 0u;
+        if (i >= mi) {
+            let k = u32(i - mi);
+            bit = (select(a.x, a.y, k >= 32u) >> (k & 31u)) & 1u;
+        }
+        let carry = r.y >> 31u;
+        r = vec2<u32>((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        q = vec2<u32>(q.x << 1u, (q.y << 1u) | (q.x >> 31u));
+        if (carry != 0u || !bp_fx_ult64(r, d)) { r = bp_fx_sub64(r, d); q.x = q.x | 1u; }
+    }
+    return q;
+}
+";
+const H_DIV_U64: &str = "fn bp_fx_div_u64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> { return bp_fx_udivshl64(a, b, m); }
+";
+const H_DIV_I64: &str = "fn bp_fx_div_i64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> {
+    let na = (a.y >> 31u) == 1u;
+    let nb = (b.y >> 31u) == 1u;
+    let q = bp_fx_udivshl64(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb), m);
+    return select(q, bp_fx_neg64(q), na != nb);
+}
+";
+const H_UREM64: &str = "fn bp_fx_urem64(a: vec2<u32>, d: vec2<u32>) -> vec2<u32> {
+    var r = vec2<u32>(0u, 0u);
+    for (var i: i32 = 63; i >= 0; i = i - 1) {
+        let k = u32(i);
+        let bit = (select(a.x, a.y, k >= 32u) >> (k & 31u)) & 1u;
+        let carry = r.y >> 31u;
+        r = vec2<u32>((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        if (carry != 0u || !bp_fx_ult64(r, d)) { r = bp_fx_sub64(r, d); }
+    }
+    return r;
+}
+";
+const H_REM_I64: &str = "fn bp_fx_rem_i64(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let na = (a.y >> 31u) == 1u;
+    let nb = (b.y >> 31u) == 1u;
+    let r = bp_fx_urem64(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb));
+    return select(r, bp_fx_neg64(r), na);
+}
+";
+const H_I32TO64: &str = "fn bp_fx_i32to64(x: i32) -> vec2<u32> { return vec2<u32>(bitcast<u32>(x), select(0u, 0xffffffffu, x < 0)); }
+";
+const H_F2RAW64: &str = "fn bp_fx_f2raw64(x: f32) -> vec2<u32> {
+    let m = abs(x);
+    let hi = u32(floor(m / 4294967296.0));
+    let lo = u32(m - f32(hi) * 4294967296.0);
+    let r = vec2<u32>(lo, hi);
+    return select(r, bp_fx_neg64(r), x < 0.0);
+}
+";
+const H_U64TOF32: &str = "fn bp_fx_u64tof32(a: vec2<u32>) -> f32 { return f32(a.y) * 4294967296.0 + f32(a.x); }
+";
+const H_I64TOF32: &str = "fn bp_fx_i64tof32(a: vec2<u32>) -> f32 {
+    let n = (a.y >> 31u) == 1u;
+    let f = bp_fx_u64tof32(select(a, bp_fx_neg64(a), n));
+    return select(f, -f, n);
+}
+";
+
 /// Helper sources in dependency order: (name, text, depends on).
 const HELPERS: &[(&str, &str, &[&str])] = &[
     ("umul64", HELPER_UMUL64, &[]),
@@ -151,6 +331,31 @@ const HELPERS: &[(&str, &str, &[&str])] = &[
     ("div_u32", HELPER_DIV_U32, &["udiv64"]),
     ("div_i32", HELPER_DIV_I32, &["div_u32"]),
     ("tdiv_i32", HELPER_TDIV_I32, &[]),
+    ("add64", H_ADD64, &[]),
+    ("neg64", H_NEG64, &[]),
+    ("sub64", H_SUB64, &["add64", "neg64"]),
+    ("abs64", H_ABS64, &["neg64"]),
+    ("ult64", H_ULT64, &[]),
+    ("slt64", H_SLT64, &[]),
+    ("umin64", H_UMIN64, &["ult64"]),
+    ("umax64", H_UMAX64, &["ult64"]),
+    ("smin64", H_SMIN64, &["slt64"]),
+    ("smax64", H_SMAX64, &["slt64"]),
+    ("shl64", H_SHL64, &[]),
+    ("lshr64", H_LSHR64, &[]),
+    ("tdiv64", H_TDIV64, &["lshr64", "neg64"]),
+    ("umulshr64", H_UMULSHR64, &["umul64"]),
+    ("mul_u64", H_MUL_U64, &["umulshr64"]),
+    ("mul_i64", H_MUL_I64, &["umulshr64", "neg64"]),
+    ("udivshl64", H_UDIVSHL64, &["sub64", "ult64"]),
+    ("div_u64", H_DIV_U64, &["udivshl64"]),
+    ("div_i64", H_DIV_I64, &["udivshl64", "neg64"]),
+    ("urem64", H_UREM64, &["sub64", "ult64"]),
+    ("rem_i64", H_REM_I64, &["urem64", "neg64"]),
+    ("i32to64", H_I32TO64, &[]),
+    ("f2raw64", H_F2RAW64, &["neg64"]),
+    ("u64tof32", H_U64TOF32, &[]),
+    ("i64tof32", H_I64TOF32, &["u64tof32", "neg64"]),
 ];
 
 impl DeviceEmitter {
@@ -221,10 +426,10 @@ impl DeviceEmitter {
     }
 
     pub(super) fn check_fixed_format(&mut self, f: &FixedFmt, line: usize, col: usize) {
-        if f.width() > 32 {
+        if f.width() > 64 || (f.width() == 64 && f.m >= 64) {
             let msg = format!(
-                "`{}` is not supported on --target wgpu: WGSL has no 64-bit integers and the 64-bit \
-                 emulation is only implemented for formats of at most 32 bits (use e.g. `fixed16_16`)",
+                "`{}` is not supported on --target wgpu: WGSL has no 64-bit integers; fixed-point formats \
+                 are emulated up to 64 bits with fewer than 64 fraction bits (e.g. `fixed16_16`, `fixed32_32`)",
                 f.name());
             if !self.errors.iter().any(|e| e.message == msg && e.line == line && e.col == col) {
                 self.errors.push(TranspileError::at(msg, line, col));
@@ -247,14 +452,14 @@ impl DeviceEmitter {
             _ => return None,
         };
         Some(match raw {
-            Some(r) if f.width() > 32 => { let _ = r; "0".to_string() }
+            Some(r) if is64(f) => lit64(r),
             Some(r) => if f.signed { format!("i32({r})") } else { format!("{r}u") },
             None => {
                 self.errors.push(TranspileError::at(
                     format!("literal out of range for {} (range [{}, {}])",
                         f.name(), f.format_exact(f.min_raw()), f.format_exact(f.max_raw())),
                     e.line, e.col));
-                bits_const(f, 0)
+                zero_const(f)
             }
         })
     }
@@ -282,6 +487,7 @@ impl DeviceEmitter {
         let a = self.fixed_operand(l, f);
         let b = self.fixed_operand(r, f);
         let m = f.m;
+        if is64(f) { return self.fixed_binop64(op, &a, &b, f); }
         match op {
             BinOp::Add => wrap(f, format!("({a} + {b})")),
             BinOp::Sub => wrap(f, format!("({a} - {b})")),
@@ -306,9 +512,37 @@ impl DeviceEmitter {
         }
     }
 
+    fn fixed_binop64(&mut self, op: &BinOp, a: &str, b: &str, f: &FixedFmt) -> String {
+        let m = f.m;
+        let sg = f.signed;
+        let (lt, ltname) = if sg { ("bp_fx_slt64", "slt64") } else { ("bp_fx_ult64", "ult64") };
+        let call = |this: &mut Self, name: &'static str, text: String| { this.use_fixed_helper(name); text };
+        match op {
+            BinOp::Add => call(self, "add64", format!("bp_fx_add64({a}, {b})")),
+            BinOp::Sub => call(self, "sub64", format!("bp_fx_sub64({a}, {b})")),
+            BinOp::Rem if sg => call(self, "rem_i64", format!("bp_fx_rem_i64({a}, {b})")),
+            BinOp::Rem => call(self, "urem64", format!("bp_fx_urem64({a}, {b})")),
+            BinOp::Mul if sg => call(self, "mul_i64", format!("bp_fx_mul_i64({a}, {b}, {m}u)")),
+            BinOp::Mul => call(self, "mul_u64", format!("bp_fx_mul_u64({a}, {b}, {m}u)")),
+            BinOp::Div if sg => call(self, "div_i64", format!("bp_fx_div_i64({a}, {b}, {m}u)")),
+            BinOp::Div => call(self, "div_u64", format!("bp_fx_div_u64({a}, {b}, {m}u)")),
+            BinOp::Eq => format!("all({a} == {b})"),
+            BinOp::NotEq => format!("any({a} != {b})"),
+            BinOp::Lt => call(self, ltname, format!("{lt}({a}, {b})")),
+            BinOp::Gt => call(self, ltname, format!("{lt}({b}, {a})")),
+            BinOp::LtEq => call(self, ltname, format!("!{lt}({b}, {a})")),
+            BinOp::GtEq => call(self, ltname, format!("!{lt}({a}, {b})")),
+            _ => unreachable!("fixed_binop_fmt filters the operators"),
+        }
+    }
+
     pub(super) fn fixed_neg(&mut self, operand: &Expr, f: &FixedFmt, e: &Expr) -> String {
         self.fixed_supported(f, e);
         let v = self.expr(operand);
+        if is64(f) {
+            self.use_fixed_helper("neg64");
+            return format!("bp_fx_neg64({v})");
+        }
         if f.signed { wrap(f, format!("(-{v})")) } else { wrap(f, format!("(0u - {v})")) }
     }
 
@@ -324,7 +558,7 @@ impl DeviceEmitter {
                     "max" => f.max_raw(),
                     _ => return None,
                 };
-                if f.width() > 32 { return Some("0".into()); }
+                if is64(&f) { return Some(lit64(raw)); }
                 return Some(if f.signed { format!("i32({raw})") } else { format!("{raw}u") });
             }
         }
@@ -333,6 +567,7 @@ impl DeviceEmitter {
                 self.fixed_supported(&f, e);
                 // `.raw` is an `int` (32-bit on this target); an unsigned 32-bit raw above 2^31 wraps.
                 let o = self.expr(obj);
+                if is64(&f) { return Some(format!("bitcast<i32>(({o}).x)")); }
                 return Some(if f.signed { o } else { format!("i32({o})") });
             }
         }
@@ -349,6 +584,15 @@ impl DeviceEmitter {
     /// `x` truncated toward zero to an integer multiple of `2^M`'s quotient: `trunc(x / 2^M)` as raw-typed.
     fn fixed_trunc_div(&mut self, f: &FixedFmt, v: &str, k: u32) -> String {
         if k == 0 { return v.to_string(); }
+        if is64(f) {
+            return if f.signed {
+                self.use_fixed_helper("tdiv64");
+                format!("bp_fx_tdiv64({v}, {k}u)")
+            } else {
+                self.use_fixed_helper("lshr64");
+                format!("bp_fx_lshr64({v}, {k}u)")
+            };
+        }
         if f.signed {
             if f.width() >= 32 {
                 self.use_fixed_helper("tdiv_i32");
@@ -371,6 +615,10 @@ impl DeviceEmitter {
                     self.fixed_supported(&f, e);
                     if let ("fromRaw", [a]) = (method, args) {
                         let n = self.expr(&a.value);
+                        if is64(&f) {
+                            let unsigned = self.ty_of(&a.value).as_ref().is_some_and(is_unsigned_int_ty);
+                            return self.int_to_raw64(&n, unsigned);
+                        }
                         return wrap(&f, format!("{}({n})", raw_t(&f)));
                     }
                     return self.fixed_gpu_error(&f, method, e);
@@ -381,6 +629,7 @@ impl DeviceEmitter {
         self.fixed_supported(&f, e);
         let o = self.expr(obj);
         let m = f.m;
+        if is64(&f) { return self.fixed_method64(&f, &o, method, args, e); }
         let mask: u32 = if m >= 32 { u32::MAX } else { (1u32 << m) - 1 };
         let inv = bits_const(&f, !mask);
         let maskc = bits_const(&f, mask);
@@ -405,6 +654,73 @@ impl DeviceEmitter {
         }
     }
 
+    /// An `int` expression sign-/zero-extended to a 64-bit raw pattern.
+    fn int_to_raw64(&mut self, n: &str, unsigned: bool) -> String {
+        if unsigned { format!("vec2<u32>(u32({n}), 0u)") }
+        else { self.use_fixed_helper("i32to64"); format!("bp_fx_i32to64(i32({n}))") }
+    }
+
+    /// A raw of format `from` (any width) as a 64-bit limb pair, sign-/zero-extended.
+    fn raw_to64(&mut self, from: &FixedFmt, v: &str) -> String {
+        if is64(from) { v.to_string() }
+        else if from.signed { self.use_fixed_helper("i32to64"); format!("bp_fx_i32to64({v})") }
+        else { format!("vec2<u32>({v}, 0u)") }
+    }
+
+    /// The low bits of a 64-bit limb pair as `to`'s raw (re-narrowed below 32 bits).
+    fn narrow64(&mut self, to: &FixedFmt, w: String) -> String {
+        if is64(to) { return w; }
+        let lo = if to.signed { format!("bitcast<i32>(({w}).x)") } else { format!("({w}).x") };
+        wrap(to, lo)
+    }
+
+    fn fixed_method64(&mut self, f: &FixedFmt, o: &str, method: &str, args: &[Arg], e: &Expr) -> String {
+        let m = f.m;
+        let mask: u64 = (1u64 << m) - 1;
+        let inv = lit64((!mask) as i128);
+        let maskc = lit64(mask as i128);
+        match (method, args) {
+            ("floor", []) => format!("({o} & {inv})"),
+            ("ceil", []) => { self.use_fixed_helper("add64"); format!("(bp_fx_add64({o}, {maskc}) & {inv})") }
+            ("trunc", []) => {
+                let q = self.fixed_trunc_div(f, o, m);
+                self.use_fixed_helper("shl64");
+                format!("bp_fx_shl64({q}, {m}u)")
+            }
+            ("fract", []) => {
+                let q = self.fixed_trunc_div(f, o, m);
+                self.use_fixed_helper("shl64");
+                self.use_fixed_helper("sub64");
+                format!("bp_fx_sub64({o}, bp_fx_shl64({q}, {m}u))")
+            }
+            ("abs", []) if f.signed => { self.use_fixed_helper("abs64"); format!("bp_fx_abs64({o})") }
+            ("abs", []) => o.to_string(),
+            ("min" | "max", [a]) => {
+                let b = self.fixed_operand(&a.value, f);
+                let name: &'static str = match (method, f.signed) {
+                    ("min", true) => "smin64", ("max", true) => "smax64",
+                    ("min", false) => "umin64", _ => "umax64",
+                };
+                self.use_fixed_helper(name);
+                format!("bp_fx_{name}({o}, {b})")
+            }
+            _ => self.fixed_gpu_error(f, method, e),
+        }
+    }
+
+    /// `x as T` between a 64-bit format and another fixed-point format.
+    fn fixed_cast64(&mut self, from: &FixedFmt, to: &FixedFmt, v: &str) -> String {
+        let w = self.raw_to64(from, v);
+        let shifted = if to.m >= from.m {
+            if to.m == from.m { w } else { self.use_fixed_helper("shl64"); format!("bp_fx_shl64({w}, {}u)", to.m - from.m) }
+        } else {
+            // A narrower signed source was sign-extended, so the 64-bit signed truncation is right.
+            let ext = FixedFmt { signed: from.signed, n: 64 - from.m, m: from.m };
+            self.fixed_trunc_div(&ext, &w, from.m - to.m)
+        };
+        self.narrow64(to, shifted)
+    }
+
     fn fixed_gpu_error(&mut self, f: &FixedFmt, method: &str, e: &Expr) -> String {
         self.errors.push(TranspileError::at(
             format!("`{}.{}(..)` is not supported on --target wgpu: fixed-point kernels support \
@@ -426,6 +742,7 @@ impl DeviceEmitter {
             let v = self.expr(inner);
             if let Some(from) = src {
                 self.fixed_supported(&from, e);
+                if is64(&from) || is64(&to) { return self.fixed_cast64(&from, &to, &v); }
                 let wide = if to.m >= from.m {
                     // Left shift (exact modulo 2^32, which the re-narrowing below makes exact modulo 2^W).
                     shl(&from, &v, to.m - from.m)
@@ -437,6 +754,18 @@ impl DeviceEmitter {
             let is_float = self.ty_of(inner).as_ref().map(is_float_ty).unwrap_or(false)
                 || self.wgsl_is_float_expr(inner);
             let scale = 2f64.powi(to.m as i32);
+            if is64(&to) {
+                if is_float {
+                    self.use_fixed_helper("f2raw64");
+                    return format!("bp_fx_f2raw64(f32({v}) * {scale:.1})");
+                }
+                let unsigned = self.ty_of(inner).as_ref().is_some_and(is_unsigned_int_ty);
+                let w = self.int_to_raw64(&v, unsigned);
+                return if to.m == 0 { w } else {
+                    self.use_fixed_helper("shl64");
+                    format!("bp_fx_shl64({w}, {}u)", to.m)
+                };
+            }
             return if is_float {
                 // float -> fixed truncates toward zero (WGSL's float -> int conversion does too).
                 wrap(&to, format!("{}(f32({v}) * {scale:.1})", raw_t(&to)))
@@ -451,7 +780,15 @@ impl DeviceEmitter {
         let dst = wgsl_type(ty);
         if is_float_ty(ty) {
             let scale = 2f64.powi(from.m as i32);
+            if is64(&from) {
+                let h = if from.signed { "i64tof32" } else { "u64tof32" };
+                self.use_fixed_helper(h);
+                return format!("{dst}(bp_fx_{h}({v}) / {scale:.1})");
+            }
             format!("{dst}(f32({v}) / {scale:.1})")
+        } else if is64(&from) {
+            let q = self.fixed_trunc_div(&from, &v, from.m);
+            format!("{dst}(({q}).x)")
         } else {
             let q = self.fixed_trunc_div(&from, &v, from.m);
             format!("{dst}({q})")
@@ -480,6 +817,12 @@ impl DeviceEmitter {
             let elem = array_elem_type(&f.ty).unwrap_or(&f.ty);
             let Some(fmt) = fixed_fmt_of_type(elem) else { continue };
             self.check_fixed_format(&fmt, f.line, f.col);
+            if is64(&fmt) && matches!(f.qual, GpuQual::Const) && array_elem_type(&f.ty).is_some() && !matches!(f.ty, Type::ArrayN(..)) {
+                self.errors.push(TranspileError::at(format!(
+                    "kernel {}: labeled `'const` array field '{}' of the 64-bit format {} is not supported on --target wgpu \
+                     (use a plain `[T, N]'const` array, a buffer field or a 32-bit format)",
+                    decl.name, f.name, fmt.name()), f.line, f.col));
+            }
             if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
                 self.errors.push(TranspileError::at(format!(
                     "kernel {}: `'actor` buffer field '{}' of fixed-point type {} is not supported on --target wgpu \
