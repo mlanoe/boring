@@ -43,6 +43,32 @@ use super::Transpiler;
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
 
+fn type_has_fn(t: &Type) -> bool {
+    match t {
+        Type::Fn(..) => true,
+        Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::Set(i)
+        | Type::Qualified(i, _) => type_has_fn(i),
+        Type::Dict(k, v) => type_has_fn(k) || type_has_fn(v),
+        Type::Tuple(es) => es.iter().any(type_has_fn),
+        _ => false,
+    }
+}
+
+impl TraitBorrowFacts {
+    /// Does a field read of `name` somewhere make a *method* `name` ambiguous? A name that is only
+    /// ever read, or declared solely as plain data fields (`Animation.start: float`), cannot be a
+    /// call of that method: `x.start(..)` is a method call and `x.start` a field read.
+    fn value_blocks_method(&self, name: &str) -> bool {
+        self.piped_names.contains(name)
+            || (self.value_names.contains(name) && !self.bound_names.contains(name))
+    }
+
+    fn field_blocks(&self, name: &str) -> bool {
+        self.callable_fields.contains(name)
+            || (self.field_names.contains(name) && !self.plain_fields.contains(name))
+    }
+}
+
 /// Syntactic shape of one call argument, resolved against the type tables only once every
 /// file of the graph has been scanned.
 #[derive(Clone)]
@@ -73,6 +99,15 @@ pub(crate) struct TraitBorrowFacts {
     called_method_names: HashSet<String>,
     /// Names read as a field anywhere (`x.name`).
     field_names: HashSet<String>,
+    /// Field names declared by structs whose type holds a function/closure (`x.f(..)` may call
+    /// the field), and those declared with any other type.
+    callable_fields: HashSet<String>,
+    /// Names bound by a `let`/`var`/`mut` or `for` anywhere: a bare use of such a name is most
+    /// likely that local, not a method value.
+    bound_names: HashSet<String>,
+    /// Names that are a pipe target or optional-call (`x?.m()`): never a local.
+    piped_names: HashSet<String>,
+    plain_fields: HashSet<String>,
     /// `(callee, argument shapes, any labeled/spread argument)` for every `f(..)` call.
     call_sites: Vec<(String, Vec<ArgShape>, bool)>,
     /// Same for every `x.m(..)` call, keyed by method name.
@@ -116,8 +151,8 @@ impl Transpiler {
             let unique = facts.method_name_count.get(name) == Some(&1)
                 && !all_trait_methods.contains(name)
                 && !free_count.contains_key(name)
-                && !facts.value_names.contains(name)
-                && !facts.field_names.contains(name);
+                && !facts.value_blocks_method(name)
+                && !facts.field_blocks(name);
             if unique {
                 let key = format!("{}::{}", ty, name);
                 decls.insert(key.clone(), m);
@@ -292,8 +327,8 @@ impl Transpiler {
         for (name, group) in &by_name {
             if facts.method_name_count.get(*name) != Some(&group.len())
                 || all_trait_methods.contains(*name)
-                || facts.value_names.contains(*name)
-                || facts.field_names.contains(*name)
+                || facts.value_blocks_method(name)
+                || facts.field_blocks(name)
                 || *name == "main"
                 || facts.method_call_sites.iter().any(|(n, _, l)| *l && n == *name)
             { continue; }
@@ -667,6 +702,10 @@ fn collect_items(items: &[Item], facts: &mut TraitBorrowFacts) {
             }
             Item::Struct(s) => {
                 facts.implementers.push((s.name.clone(), s.protocols.clone(), s.methods.clone()));
+                for f in &s.fields {
+                    if type_has_fn(&f.ty) { facts.callable_fields.insert(f.name.clone()); }
+                    else { facts.plain_fields.insert(f.name.clone()); }
+                }
                 count_methods(&s.methods, facts);
                 if s.type_params.is_empty() {
                     for m in &s.methods { facts.methods.push((s.name.clone(), m.clone())); }
@@ -724,7 +763,12 @@ fn scan(stmts: &[Stmt], facts: &mut TraitBorrowFacts) {
     // aside and not mistaken for a bare value use of the function's name.
     let mut callees: HashSet<*const Expr> = HashSet::new();
     walk_stmts(stmts, &mut |node| {
-        let WalkNode::Expr(e) = node else { return };
+        let e = match node {
+            WalkNode::Expr(e) => e,
+            WalkNode::Stmt(Stmt::Let(l)) => { facts.bound_names.insert(l.name.clone()); return }
+            WalkNode::Stmt(Stmt::For(f)) => { facts.bound_names.extend(f.vars.iter().cloned()); return }
+            WalkNode::Stmt(_) => return,
+        };
         match &e.kind {
             ExprKind::Call(callee, args) => {
                 if let ExprKind::Var(f) = &callee.kind {
@@ -743,11 +787,15 @@ fn scan(stmts: &[Stmt], facts: &mut TraitBorrowFacts) {
             ExprKind::OptionalMethodCall(_, name, _) => {
                 facts.called_method_names.insert(name.clone());
                 facts.value_names.insert(name.clone());
+                facts.piped_names.insert(name.clone());
             }
             ExprKind::Var(n) if !callees.contains(&(e as *const Expr)) => {
                 facts.value_names.insert(n.clone());
             }
-            ExprKind::Pipe(_, name, _) => { facts.value_names.insert(name.clone()); }
+            ExprKind::Pipe(_, name, _) => {
+                facts.value_names.insert(name.clone());
+                facts.piped_names.insert(name.clone());
+            }
             ExprKind::Field(_, name) | ExprKind::OptionalField(_, name) => {
                 facts.field_names.insert(name.clone());
             }

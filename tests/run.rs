@@ -598,6 +598,7 @@ interp_test!(mut_collection_param);
 interp_test!(dyn_struct_fields_optional);
 interp_test!(dyn_struct_transitive_iflet);
 interp_test!(dyn_return_borrowed_field_req_trait);
+interp_test!(trait_param_forward_method_field_name_clash);
 interp_test!(dyn_return_borrowed_field_shared);
 interp_test!(shared_dyn_local_call);
 interp_test!(shared_dyn_tree_copy);

@@ -1039,6 +1039,7 @@ transpile_test!(lend_and_read_same_local_lock_wrapper);
 transpile_test!(dyn_struct_fields_optional);
 transpile_test!(dyn_struct_transitive_iflet);
 transpile_test!(dyn_return_borrowed_field_req_trait);
+transpile_test!(trait_param_forward_method_field_name_clash);
 transpile_test!(dyn_return_borrowed_field_shared);
 transpile_test!(shared_dyn_local_call);
 transpile_test!(shared_dyn_tree_copy);

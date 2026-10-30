@@ -1,0 +1,36 @@
+# A bare-trait param forwarded to a method and used again afterwards must stay borrowed even
+# when the method name is also read as a plain data field elsewhere (`Anim.start`): borrow
+# inference used to bail on any field read (or local of that name), leaving `Box<dyn>` moved by the first call.
+
+trait Source:
+    req int value(): 0
+
+struct Num as Source:
+    int n
+    req int value(): n
+
+struct Holder:
+    var int total
+
+    def start(Source b):
+        self.total += b.value()
+        self.flush(b)
+
+    def flush(Source b):
+        self.total += b.value()
+
+struct Anim:
+    float start
+
+def int run(Source s):
+    mut h = Holder(total = 0)
+    h.start(s)
+    h.total + s.value()
+
+def main():
+    let s = Num(n = 4)
+    let a = Anim(start = 1.5)
+    let start = a.start + 1.0
+    print a.start
+    print start
+    print run(s)
