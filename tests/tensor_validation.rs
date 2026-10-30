@@ -1070,7 +1070,7 @@ fn dynamic_tensor_linear_reports_supported_quantized_formats() {
         let result = command.arg(&path).output().unwrap();
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(!result.status.success(), "{target:?}");
-        assert!(stderr.contains("expected one of: q8_0, q5_0, q4_0, iq4_nl, q6_k, q4_k, q3_k, q2_k"), "{target:?}: {stderr}");
+        assert!(stderr.contains("expected one of: q8_0, q5_0, q5_1, q4_0, q4_1, iq4_nl, q6_k, q5_k, q4_k, q3_k, q2_k, f16, bf16"), "{target:?}: {stderr}");
     }
 }
 
