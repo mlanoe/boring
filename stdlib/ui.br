@@ -410,11 +410,13 @@ pub view Fill:
 
 # Scroll: a finite viewport. Programmatic scrolling is request-driven: when `request` is above zero and differs from the last one the
 # host applied, the viewport scrolls so the `ScrollAnchor` named `anchor` sits at its leading edge (as far as the content allows).
-# Bump `request` to scroll to the same anchor again.
+# Bump `request` to scroll to the same anchor again. With `animated` the viewport glides there (ease-out, the host steps it each frame)
+# instead of jumping; user scrolling or a press stops the glide.
 pub view Scroll:
     ScrollAxis axis = .Vertical
     string anchor = ""
     int request = 0
+    bool animated = false
     [View] children
     body(): native
 
