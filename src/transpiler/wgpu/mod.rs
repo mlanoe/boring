@@ -149,7 +149,15 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
 
     let requires_f16 = device_wgsl.contains("enable f16;");
     let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some(), requires_f16, &general_out.screen_setup_fields);
-    let mut host_rs = host_rs;
+    let mut host_rs = crate::transpiler::emit_kernel::strip_fixed_casts(&host_rs);
+    // Fixed-point newtypes the host code uses (docs/fixed-point-types.md): the general pass's
+    // spliced code carries its own prelude when it uses any format, only add what is missing.
+    // The newtypes are `repr(transparent)` over their raw integer, so a `Vec` of them is
+    // bit-identical to the device buffer: mark them `Pod` for `bytemuck`.
+    let (fixed_prelude, fixed_errors) =
+        crate::transpiler::fixed_emit::fixed_point_prelude_ext(&host_rs, host_rs.contains("mod __fxm {"));
+    if let Some(prelude) = fixed_prelude { host_rs.push_str(&prelude); }
+    host_rs.push_str(&fixed_pod_impls(&host_rs));
     let mut routes = Vec::new();
     if unified {
         let (adapters, covered) = unified_adapters(&effective_kernels, &kernel_names, &device::collect_block_sizes(program), device_wgsl_emulated.is_some(), requires_f16);
@@ -164,6 +172,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
 
     let warnings = general_out.warnings;
     let mut errors = general_out.errors;
+    errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
     errors.extend(host_errors);
     errors.extend(tensor_host.errors);
@@ -173,6 +182,26 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let failed = !errors.is_empty();
     errors.extend(crate::transpiler::helpers::placeholder_errors(&device_wgsl, "wgpu device", failed));
     WgpuOutput { host_rs, device_wgsl, device_wgsl_emulated, kernel_names, cargo_toml, uses_unicode, routes, errors, warnings }
+}
+
+/// `unsafe impl bytemuck::{Zeroable, Pod}` for every generated fixed-point newtype in `code`
+/// (`#[repr(transparent)]` over a primitive integer, so the impls are sound).
+fn fixed_pod_impls(code: &str) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for line in code.lines() {
+        if let Some(rest) = line.strip_prefix("pub struct ") {
+            if let Some(name) = rest.split('(').next() {
+                let lower = if let Some(w) = name.strip_prefix("UFixed") { format!("ufixed{w}") }
+                    else if let Some(w) = name.strip_prefix("Fixed") { format!("fixed{w}") } else { continue };
+                if crate::fixed::FixedFmt::from_name(&lower).is_some_and(|f| f.rust_name() == name)
+                    && !names.iter().any(|n| n == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names.iter().map(|n| format!(
+        "unsafe impl bytemuck::Zeroable for {n} {{}}\nunsafe impl bytemuck::Pod for {n} {{}}\n")).collect()
 }
 
 /// Does this kernel's body use `.warp.*` anywhere? WGSL subgroup builtins

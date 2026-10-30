@@ -38,3 +38,7 @@ half = { version = "2", features = ["bytemuck", "serde"] }
 # Smaller target/debug (the dominant disk cost): keep line tables for backtraces, drop full DWARF.
 [profile.dev]
 debug = "line-tables-only"
+
+[dev-dependencies]
+# `tests/wgpu_codegen.rs` validates emitted WGSL (fixed-point lowering) with the real front end + validator.
+naga = { version = "25", default-features = false, features = ["wgsl-in"] }

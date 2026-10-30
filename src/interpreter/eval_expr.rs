@@ -444,6 +444,14 @@ impl Interpreter {
         }
         Some((|| {
             let old = self.eval_expr(obj_expr, Rc::clone(env))?;
+            // A fixed-point element has no atomic form (WGSL/MSL/CUDA have none for it either):
+            // `buf[i].min(x)` / `.max(x)` is the plain member, returning the extremum and
+            // leaving the buffer untouched (docs/fixed-point-types.md, "GPU backends").
+            if matches!(old, Value::Fixed(..)) && matches!(method, "min" | "max") {
+                let v = self.eval_expr(&args[0].value, Rc::clone(env))?;
+                let mut modified_self: Option<Value> = None;
+                return self.call_method(old, method, vec![v], line, &mut modified_self);
+            }
             let new_val = match method {
                 "min" => {
                     let v = self.eval_expr(&args[0].value, Rc::clone(env))?;

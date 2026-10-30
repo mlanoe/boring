@@ -3,6 +3,8 @@
 //
 // WGSL device code emitter for the wgpu backend.
 
+mod fixed;
+
 use crate::ast::*;
 use crate::transpiler::TranspileError;
 use crate::transpiler::helpers::{
@@ -522,6 +524,16 @@ struct DeviceEmitter {
     /// `emit_free_device_fn`/`emit_device_fn`/`emit_entry_point` — exactly one of those
     /// three is ever "current" during body emission.
     current_gpu_array_subst: std::collections::HashMap<String, String>,
+    /// Fixed-point format of the device function being emitted's return type, so an untyped
+    /// literal in a `return`/tail position folds to the raw integer (see `fixed.rs`).
+    current_ret_fmt: Option<crate::fixed::FixedFmt>,
+    /// Fixed-point formats of each device function's parameters (free functions by name, kernel
+    /// methods as `self::name`), so an untyped literal argument folds to the raw integer.
+    fn_param_fmts: std::collections::HashMap<String, Vec<Option<crate::fixed::FixedFmt>>>,
+    /// Same keys: the fixed-point format of each device function's return type.
+    fn_ret_fmts: std::collections::HashMap<String, Option<crate::fixed::FixedFmt>>,
+    /// `bp_fx_*` helper functions the emitted code calls (spliced into the module at the end).
+    fixed_helpers: std::collections::BTreeSet<&'static str>,
 }
 
 impl DeviceEmitter {
@@ -544,6 +556,10 @@ impl DeviceEmitter {
             locals: std::collections::HashMap::new(),
             gpu_array_params: std::collections::HashMap::new(),
             current_gpu_array_subst: std::collections::HashMap::new(),
+            current_ret_fmt: None,
+            fn_param_fmts: std::collections::HashMap::new(),
+            fn_ret_fmts: std::collections::HashMap::new(),
+            fixed_helpers: std::collections::BTreeSet::new(),
         }
     }
 
@@ -562,6 +578,21 @@ impl DeviceEmitter {
         effective_kernels: &[crate::ast::KernelDecl],
         kernel_consts: &super::KernelConstsMap,
     ) {
+        for item in &program.items {
+            match item {
+                Item::Fn(decl) => {
+                    self.fn_param_fmts.insert(decl.name.clone(),
+                        decl.params.iter().map(|p| p.ty.as_ref().and_then(fixed::fixed_fmt_of_type)).collect());
+                    self.fn_ret_fmts.insert(decl.name.clone(), decl.return_ty.as_ref().and_then(fixed::fixed_fmt_of_type));
+                }
+                Item::Kernel(k) => for m in &k.methods {
+                    self.fn_param_fmts.insert(format!("self::{}", m.name),
+                        m.params.iter().map(|p| p.ty.as_ref().and_then(fixed::fixed_fmt_of_type)).collect());
+                    self.fn_ret_fmts.insert(format!("self::{}", m.name), m.return_ty.as_ref().and_then(fixed::fixed_fmt_of_type));
+                },
+                _ => {}
+            }
+        }
         // Pre-pass: collect top-level scalar lets for inlining.
         for item in &program.items {
             if let Item::Let(s) = item {
@@ -595,6 +626,8 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
+        // `bp_fx_*` fixed-point helpers (only when used) are spliced in here at the end.
+        let fixed_prelude_pos = self.out.len();
 
         // Pre-pass: extract block sizes from kernel call sites.
         self.block_sizes = collect_block_sizes(program);
@@ -679,6 +712,10 @@ impl DeviceEmitter {
             self.current_kernel_consts = kernel_consts.get(&decl.name).cloned().unwrap_or_default();
             self.emit_kernel_decl(decl);
         }
+        let helpers = self.fixed_helpers_wgsl();
+        if !helpers.is_empty() {
+            self.out.insert_str(fixed_prelude_pos, &format!("{helpers}\n"));
+        }
     }
 
     /// Builds `current_gpu_array_subst` for the device function/method named `key`
@@ -744,6 +781,8 @@ impl DeviceEmitter {
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
         let ret = decl.return_ty.as_ref().map(wgsl_type).unwrap_or_else(|| "void".into());
         self.current_gpu_array_subst = self.build_gpu_array_subst(&decl.name, &decl.params);
+        self.current_ret_fmt = decl.return_ty.as_ref().and_then(fixed::fixed_fmt_of_type);
+        self.check_fixed_signature(&decl.params, decl.return_ty.as_ref(), decl.line, decl.col);
         self.locals.clear();
         for p in &decl.params {
             if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
@@ -794,6 +833,8 @@ impl DeviceEmitter {
             .filter(|f| is_buffer_field(f))
             .map(|f| (f.name.clone(), format!("{}_{}", decl.name.to_lowercase(), f.name)))
             .collect();
+
+        self.check_fixed_fields(decl);
 
         // Validate: reject dynamic 'sync fields ([T]'sync without size).
         for f in &decl.fields {
@@ -975,6 +1016,8 @@ impl DeviceEmitter {
             .unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
         self.current_gpu_array_subst = self.build_gpu_array_subst(&fn_name, &method.params);
+        self.current_ret_fmt = method.return_ty.as_ref().and_then(fixed::fixed_fmt_of_type);
+        self.check_fixed_signature(&method.params, method.return_ty.as_ref(), method.line, method.col);
         self.locals.clear();
         for p in &method.params {
             if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
@@ -996,6 +1039,7 @@ impl DeviceEmitter {
     fn emit_entry_point(&mut self, decl: &KernelDecl, entry: &FnDecl) {
         // The entry point is always `void` (a GPU kernel entry has no return value).
         self.current_fn_is_void = true;
+        self.current_ret_fmt = None;
         // The entry point never has its own GPU-array-qualified extra parameters (only
         // kernel fields, already plain module-scope `var<storage, ...>` names) — clear
         // whatever the last-emitted device helper method left behind.
@@ -1252,6 +1296,7 @@ impl DeviceEmitter {
                     Some(ExprKind::Float(_)) => Some(Type::Float64),
                     Some(ExprKind::Cast(_, ty)) => Some(ty.clone()),
                     Some(_) if s.value.as_ref().is_some_and(|v| self.wgsl_is_int_expr(v)) => Some(Type::Int32),
+                    Some(_) => s.value.as_ref().and_then(|v| self.ty_of(v)).filter(|t| fixed::fixed_fmt_of_type(t).is_some()),
                     _ => None,
                 });
                 if let Some(ty) = inferred_ty { self.locals.insert(s.name.clone(), ty); }
@@ -1282,7 +1327,10 @@ impl DeviceEmitter {
                     if self.try_emit_plain_index_method_stmt(Some((kw, &ty_suffix)), &name, val) {
                         return;
                     }
-                    let rhs = self.expr(val);
+                    let rhs = match s.ty.as_ref().and_then(fixed::fixed_fmt_of_type) {
+                        Some(f) => self.fixed_operand(val, &f),
+                        None => self.expr(val),
+                    };
                     if let Some(ty) = &s.ty {
                         self.line(&format!("{} {}: {} = {};", kw, name, wgsl_type(ty), rhs));
                     } else {
@@ -1353,12 +1401,18 @@ impl DeviceEmitter {
                             } else {
                                 rhs
                             };
-                            let r = self.expr(rhs);
+                            let r = match self.fixed_fmt_of(lhs) {
+                                Some(f) => self.fixed_operand(rhs, &f),
+                                None => self.expr(rhs),
+                            };
                             self.line(&format!("{} = {};", l, r));
                         }
                     }
                     _ => {
-                        let s = self.expr(e);
+                        let s = match self.current_ret_fmt {
+                            Some(f) if is_last && !self.current_fn_is_void => self.fixed_operand(e, &f),
+                            _ => self.expr(e),
+                        };
                         if is_last && !self.current_fn_is_void {
                             self.line(&format!("return {};", s));
                         } else {
@@ -1369,7 +1423,10 @@ impl DeviceEmitter {
             }
             Stmt::Return(r) => {
                 if let Some(val) = &r.value {
-                    let s = self.expr(val);
+                    let s = match self.current_ret_fmt {
+                        Some(f) => self.fixed_operand(val, &f),
+                        None => self.expr(val),
+                    };
                     self.line(&format!("return {};", s));
                 } else {
                     self.line("return;");
@@ -1642,7 +1699,10 @@ impl DeviceEmitter {
         let ExprKind::Var(name) = &arr.kind else { return None; };
         let kind = self.packed_field_kind(name)?;
         let idx_s = self.expr(idx);
-        let val_s = self.expr(rhs);
+        let val_s = match self.fixed_fmt_of(lhs) {
+            Some(f) => self.fixed_operand(rhs, &f),
+            None => self.expr(rhs),
+        };
         let arr_name = self.current_buffer_renames.get(name).cloned().unwrap_or_else(|| name.clone());
         let atomic = self.packed_field_is_atomic(name);
         Some(Self::packed_byte_store_stmt(&arr_name, &idx_s, &val_s, kind, atomic))
@@ -1771,9 +1831,9 @@ impl DeviceEmitter {
 
     fn fixed_array_initializer(&mut self, inner: &Type, n: usize, value: &Expr) -> Option<String> {
         let values = match &value.kind {
-            ExprKind::Array(values) if values.len() == n => values.iter().map(|v| self.expr(v)).collect::<Vec<_>>(),
+            ExprKind::Array(values) if values.len() == n => values.iter().map(|v| self.fixed_array_elem(inner, v)).collect::<Vec<_>>(),
             ExprKind::ArrayFill { value, count } if const_array_count(count) == Some(n) => {
-                let value = self.expr(value);
+                let value = self.fixed_array_elem(inner, value);
                 vec![value; n]
             }
             _ => {
@@ -1878,6 +1938,23 @@ impl DeviceEmitter {
                 }
             }
 
+            ExprKind::BinOp(op, lhs, rhs) if self.fixed_binop_fmt(op, lhs, rhs).is_some() => {
+                let f = self.fixed_binop_fmt(op, lhs, rhs).unwrap();
+                self.fixed_binop(op, lhs, rhs, &f, e)
+            }
+            ExprKind::UnaryOp(UnaryOp::Neg, operand) if self.fixed_fmt_of(operand).is_some() => {
+                let f = self.fixed_fmt_of(operand).unwrap();
+                self.fixed_neg(operand, &f, e)
+            }
+            ExprKind::Field(obj, field) if self.fixed_field(obj, field, e).is_some() => {
+                self.fixed_field(obj, field, e).unwrap()
+            }
+            ExprKind::Cast(inner, ty) if fixed::fixed_fmt_of_type(ty).is_some() || self.fixed_fmt_of(inner).is_some() => {
+                self.fixed_cast(inner, ty, e)
+            }
+            ExprKind::MethodCall(obj, method, args) if self.fixed_method_applies(obj) => {
+                self.fixed_method(obj, method, args, e)
+            }
             ExprKind::BinOp(op, lhs, rhs) => {
                 // A literal/literal division whose result is NaN or +/-Inf (the ordinary
                 // way to construct an IEEE-754 sentinel value, e.g. in an f16-to-f32
@@ -2035,11 +2112,18 @@ impl DeviceEmitter {
                 } else {
                     Vec::new()
                 };
+                let fmts = match &callee.kind {
+                    ExprKind::Var(n) => self.fn_param_fmts.get(n).cloned(),
+                    _ => None,
+                };
                 let args_s: Vec<String> = args.iter().enumerate().filter_map(|(i, a)| {
                     if matches!(gpu_slots.get(i), Some(ParamSlot::Gpu(_))) {
                         None
                     } else {
-                        Some(self.expr(&a.value))
+                        Some(match fmts.as_ref().and_then(|v| v.get(i).copied().flatten()) {
+                            Some(f) => self.fixed_operand(&a.value, &f),
+                            None => self.expr(&a.value),
+                        })
                     }
                 }).collect();
                 let fn_s = match &callee.kind {
@@ -2136,11 +2220,15 @@ impl DeviceEmitter {
                     // kernel struct's own helper method can have GPU-array-qualified
                     // *extra* (non-field) parameters too, dropped the same way.
                     let gpu_slots: Vec<ParamSlot> = self.gpu_array_params.get(&fn_name).cloned().unwrap_or_default();
+                    let self_fmts = self.fn_param_fmts.get(&format!("self::{}", method)).cloned();
                     let call_args: Vec<String> = args.iter().enumerate().filter_map(|(i, a)| {
                         if matches!(gpu_slots.get(i), Some(ParamSlot::Gpu(_))) {
                             None
                         } else {
-                            Some(self.expr(&a.value))
+                            Some(match self_fmts.as_ref().and_then(|v| v.get(i).copied().flatten()) {
+                                Some(f) => self.fixed_operand(&a.value, &f),
+                                None => self.expr(&a.value),
+                            })
                         }
                     }).collect();
                     format!("{}({})", fn_name, call_args.join(", "))
@@ -2321,6 +2409,16 @@ impl PackedByteKind {
 /// Does `ty` need the `array<u32>`-packed representation on `--target wgpu`? See
 /// `PackedByteKind`'s doc comment.
 pub(super) fn packed_byte_kind_of_ty(ty: &Type) -> Option<PackedByteKind> {
+    // A fixed-point buffer of 8/16-bit raws is packed like the matching integer buffer.
+    if let Some(f) = fixed::fixed_fmt_of_type(ty) {
+        return match (f.signed, f.width()) {
+            (true, 8) => Some(PackedByteKind::I8),
+            (false, 8) => Some(PackedByteKind::U8),
+            (true, 16) => Some(PackedByteKind::I16),
+            (false, 16) => Some(PackedByteKind::U16),
+            _ => None,
+        };
+    }
     match ty {
         Type::Uint8 => Some(PackedByteKind::U8),
         Type::Int8 => Some(PackedByteKind::I8),
@@ -2480,6 +2578,11 @@ fn wgsl_param_scalar(ty: &Type) -> String {
 }
 
 fn wgsl_scalar(ty: &Type) -> String {
+    // Fixed-point: the raw integer (`i32` signed / `u32` unsigned; 8/16-bit raws live in a
+    // 32-bit register and are re-narrowed by every operation, see `fixed.rs`).
+    if let Some(f) = fixed::fixed_fmt_of_type(ty) {
+        return fixed::raw_t(&f).to_string();
+    }
     match ty {
         Type::Int              => wgsl_narrowed_width("int", "i32"),
         Type::Uint             => wgsl_narrowed_width("uint", "u32"),
@@ -2556,6 +2659,9 @@ fn wgsl_type(ty: &Type) -> String {
 
 /// Zero-value literal for a WGSL scalar type.
 fn wgsl_zero(ty: &Type) -> &'static str {
+    if let Some(f) = fixed::fixed_fmt_of_type(ty) {
+        return if f.signed { "0" } else { "0u" };
+    }
     match ty {
         Type::Float16 | Type::Float32 | Type::Float64 | Type::Named(_) => "0.0",
         Type::Bool  => "0u",

@@ -1470,6 +1470,9 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
     if let Some(device) = crate::transpiler::simd::simd_scalar_ty(ty) {
         return device;
     }
+    if let Some(f) = fixed_kernel_fmt(ty) {
+        return interned_fixed_name(&f);
+    }
     match ty {
         Type::Int   => "i32",
         Type::Uint  => "u32",
@@ -1532,6 +1535,9 @@ pub(crate) fn kernel_host_scalar_type(ty: &Type) -> &'static str {
 /// width (there's no "narrow for GPU-buffer efficiency" concept once the
 /// width is already explicit).
 pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
+    if let Some(f) = fixed_kernel_fmt(ty) {
+        return interned_fixed_name(&f);
+    }
     match ty {
         Type::Int => "isize",
         Type::Uint => "usize",
@@ -1571,6 +1577,56 @@ pub(crate) fn kernel_host_element_type(ty: &Type) -> &'static str {
         Type::Qualified(inner, _) => kernel_host_element_type(inner),
         _ => "i64",
     }
+}
+
+/// The fixed-point format of a kernel field's (element) type, looking through `mut` and
+/// qualifiers. A fixed-point buffer crosses the host/device boundary as the generated
+/// `repr(transparent)` newtype (`Fixed16_16`), so it needs no `as` conversion: the
+/// `x as Fixed16_16` the shared emitters write is turned into `x` by [`strip_fixed_casts`].
+pub(crate) fn fixed_kernel_fmt(ty: &Type) -> Option<crate::fixed::FixedFmt> {
+    match ty {
+        Type::Fixed(f) => Some(*f),
+        Type::Named(n) => crate::fixed::FixedFmt::from_name(n),
+        Type::Mut(t) | Type::Qualified(t, _) => fixed_kernel_fmt(t),
+        _ => None,
+    }
+}
+
+/// `&'static str` for a format's newtype name (the host-type helpers return `&'static str`;
+/// the set of formats a program uses is tiny, so interning by leaking is bounded).
+pub(crate) fn interned_fixed_name(f: &crate::fixed::FixedFmt) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<std::collections::HashMap<String, &'static str>>> = OnceLock::new();
+    let mut names = NAMES.get_or_init(Default::default).lock().unwrap();
+    let key = f.rust_name();
+    *names.entry(key.clone()).or_insert_with(|| Box::leak(key.into_boxed_str()))
+}
+
+/// Removes the numeric `as` conversions the shared kernel-host emitters wrap around a
+/// fixed-point element: `x as Fixed16_16` -> `x`, `(v) as Fixed16_16;` -> `(v);`.
+/// (Rust cannot `as`-cast a newtype; host and device element types are the same newtype.)
+pub(crate) fn strip_fixed_casts(code: &str) -> String {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(at) = rest.find(" as ") {
+        let after = &rest[at + 4..];
+        let end = after.find(|c: char| !is_ident(c)).unwrap_or(after.len());
+        let word = &after[..end];
+        let lower = if let Some(w) = word.strip_prefix("UFixed") { Some(format!("ufixed{w}")) }
+            else { word.strip_prefix("Fixed").map(|w| format!("fixed{w}")) };
+        let is_fixed = lower.and_then(|n| crate::fixed::FixedFmt::from_name(&n))
+            .is_some_and(|f| f.rust_name() == word);
+        if is_fixed {
+            out.push_str(&rest[..at]);
+            rest = &after[end..];
+        } else {
+            out.push_str(&rest[..at + 4]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The user-struct name behind a kernel field type (`mut`/qualifier wrappers stripped).

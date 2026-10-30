@@ -2949,6 +2949,11 @@ fn host_cast_type(ty: &Type) -> Option<&'static str> {
 /// fields fall back to `i32`/`u32`/`f32` there): `bytemuck::Pod` forbids both
 /// implicit padding (a lone `u8` next to 4-byte fields) and `bool`.
 fn params_slot_type(ty: &Type) -> &'static str {
+    // A fixed-point scalar is uploaded as its raw 32-bit integer (`i32` signed, `u32` unsigned;
+    // 8/16-bit raws are widened, the device re-narrows them).
+    if let Some(f) = crate::transpiler::emit_kernel::fixed_kernel_fmt(ty) {
+        return if f.signed { "i32" } else { "u32" };
+    }
     let t = host_scalar_type(ty);
     match t {
         "i8" | "i16" | "i64" | "i128" => "i32",
@@ -2960,6 +2965,9 @@ fn params_slot_type(ty: &Type) -> &'static str {
 
 /// Expression converting host value `expr` (of `host_scalar_type(ty)`) to its params slot type.
 fn params_slot_conv(ty: &Type, expr: &str) -> String {
+    if crate::transpiler::emit_kernel::fixed_kernel_fmt(ty).is_some() {
+        return format!("{}.0 as {}", expr, params_slot_type(ty));
+    }
     let t = host_scalar_type(ty);
     let slot = params_slot_type(ty);
     if t == slot {
@@ -2972,6 +2980,11 @@ fn params_slot_conv(ty: &Type, expr: &str) -> String {
 }
 
 fn host_scalar_type(ty: &Type) -> &'static str {
+    // Fixed-point: the generated `repr(transparent)` newtype (`Fixed16_16`), bit-identical to
+    // the device's raw-integer buffer elements.
+    if let Some(f) = crate::transpiler::emit_kernel::fixed_kernel_fmt(ty) {
+        return crate::transpiler::emit_kernel::interned_fixed_name(&f);
+    }
     match ty {
         // GPU buffers always use 32-bit elements (WGSL narrows int→i32, uint→u32, float→f32).
         // This host-side mirror type must match the device layout, so it stays i32/u32 even
