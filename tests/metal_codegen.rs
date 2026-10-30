@@ -4260,17 +4260,72 @@ fn metal_codegen_fails(test_name: &str, src: &str) -> String {
 }
 
 #[test]
-fn fixed_point_64_bit_format_is_a_compile_error_on_metal() {
-    let err = metal_codegen_fails("fixed_point_w64", r#"
+fn fixed_point_128_bit_format_is_a_compile_error_on_metal() {
+    let err = metal_codegen_fails("fixed_point_w128", r#"
 kernel Wide:
-    mut [fixed32_32]'unified out
-    init([fixed32_32]'unified o):
+    mut [fixed64_64]'unified out
+    init([fixed64_64]'unified o):
         out = o
     def ():
         let i = .thread.x
         out[i] = out[i] * out[i]
 "#);
-    assert!(err.contains("fixed32_32") && err.contains("not supported on --target metal"), "{err}");
+    assert!(err.contains("fixed64_64") && err.contains("not supported on --target metal"), "{err}");
+}
+
+#[test]
+fn fixed_point_64_bit_fraction_format_is_a_compile_error_on_metal() {
+    let err = metal_codegen_fails("fixed_point_m64", r#"
+kernel Frac:
+    mut [ufixed0_64]'unified out
+    init([ufixed0_64]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        out[i] = out[i] + out[i]
+"#);
+    assert!(err.contains("ufixed0_64") && err.contains("not supported on --target metal"), "{err}");
+}
+
+const FIXED64_KERNEL: &str = r#"
+kernel Wide:
+    let [fixed32_32]'unified a
+    mut [fixed32_32]'unified out
+    mut [ufixed32_32]'unified uout
+    mut [fixed48_16]'unified w
+    init([fixed32_32]'unified aa, [fixed32_32]'unified oo, [ufixed32_32]'unified uu, [fixed48_16]'unified ww):
+        a = aa
+        out = oo
+        uout = uu
+        w = ww
+    def ():
+        let i = .thread.x
+        out[i] = a[i] * a[i] / 3 + 0.5 + fixed32_32.epsilon
+        uout[i] = (a[i].abs() as ufixed32_32) * 1.5
+        w[i] = (out[i] as fixed48_16).trunc() + (fixed48_16.min).abs()
+"#;
+
+#[test]
+fn fixed_point_64_bit_lowers_to_helpers() {
+    let (msl, _) = metal_codegen("fixed_point_w64_lowering", FIXED64_KERNEL);
+    // 64-bit raw storage and helper calls (with the fraction width), emitted once, on demand.
+    assert!(msl.contains("device const long* a") && msl.contains("device ulong* uout"), "{msl}");
+    assert!(msl.contains("inline long bp_fx_mul_i64(") && msl.contains("inline ulong bp_fx_div_u64("), "{msl}");
+    assert_eq!(msl.matches("inline long bp_fx_mul_i64(").count(), 1, "{msl}");
+    assert!(msl.contains("mulhi(a, b)"), "{msl}");
+    assert!(msl.contains("bp_fx_mul_i64(a[i], a[i], 32u)"), "{msl}");
+    assert!(msl.contains("bp_fx_mul_u64("), "{msl}");
+    // Untyped literals above the i32 range carry long/ulong suffixes (1.5 -> 6442450944, 0.5 -> 2147483648).
+    assert!(msl.contains("6442450944ul") && msl.contains("2147483648l"), "{msl}");
+    // min of a signed 64-bit format is not a valid MSL literal; it is spelled as -(2^63-1) - 1.
+    assert!(msl.contains("(-9223372036854775807l - 1l)"), "{msl}");
+    assert!(!msl.contains(">> 32") && !msl.contains("ERROR"), "{msl}");
+}
+
+#[test]
+fn fixed_point_helpers_are_absent_without_a_64_bit_format() {
+    let (msl, _) = metal_codegen("fixed_point_no_w64_helpers", FIXED_KERNEL);
+    assert!(!msl.contains("bp_fx_") && !msl.contains("@bp_fx_helpers@"), "{msl}");
 }
 
 #[test]
@@ -4306,6 +4361,127 @@ fn fixed_point_kernel_runs_on_metal_and_matches_interpreter() {
     let reference = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(dir.join("test.br")).output().unwrap();
     assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
     assert_eq!(stdout.trim_end(), String::from_utf8_lossy(&reference.stdout).trim_end());
+}
+
+/// Build `src` for Metal, run it on the device and return its stdout.
+fn run_metal_stdout(test_name: &str, src: &str) -> String {
+    run_metal(test_name, src);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join(test_name);
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(dir.join("test_metal").join("Cargo.toml"))
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(run.status.success(), "generated Metal program failed:\n{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    stdout
+}
+
+/// 64-bit formats (fixed32_32, fixed48_16, ufixed32_32, carries across the 32-bit halves,
+/// negative operands, truncation toward zero) run on the device and print exactly what
+/// `boring run` prints.
+#[test]
+fn fixed_point_64_kernel_runs_on_metal_and_matches_interpreter() {
+    let src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/fixed_point_kernel64.br")).unwrap();
+    let stdout = run_metal_stdout("fixed_point64_run", &src);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join("fixed_point64_run");
+    let reference = Command::new(env!("CARGO_BIN_EXE_boring")).arg("run").arg(dir.join("test.br")).output().unwrap();
+    assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+    assert_eq!(stdout.trim_end(), String::from_utf8_lossy(&reference.stdout).trim_end());
+}
+
+const FIXED64_EDGE: &str = r#"let vals = [1, 2, 3, 4294967295, 4294967296, 4294967297, 1234567890123456, 4611686018427387904, 9223372036854775807, 6148914691236517205, 3037000500, 281474976710655]
+let V = 12
+let N = 144 * 2
+
+mut [int]'kernel'unified xa = [0 for ..<N]
+mut [int]'kernel'unified xb = [0 for ..<N]
+mut [int]'kernel'unified o1 = [0 for ..<N]
+mut [int]'kernel'unified o2 = [0 for ..<N]
+mut [int]'kernel'unified o3 = [0 for ..<N]
+mut [int]'kernel'unified o4 = [0 for ..<N]
+mut [int]'kernel'unified o5 = [0 for ..<N]
+mut [int]'kernel'unified o6 = [0 for ..<N]
+for i in 0..<V:
+    for j in 0..<V:
+        xa[i * V + j] = vals[i]
+        xb[i * V + j] = vals[j]
+        xa[144 + i * V + j] = 0 - vals[i]
+        xb[144 + i * V + j] = vals[j]
+
+kernel Edge:
+    let [int]'unified xa
+    let [int]'unified xb
+    mut [int]'unified o1
+    mut [int]'unified o2
+    mut [int]'unified o3
+    mut [int]'unified o4
+    mut [int]'unified o5
+    mut [int]'unified o6
+
+    init([int]'unified a, [int]'unified b, [int]'unified p1, [int]'unified p2, [int]'unified p3, [int]'unified p4, [int]'unified p5, [int]'unified p6):
+        xa = a
+        xb = b
+        o1 = p1
+        o2 = p2
+        o3 = p3
+        o4 = p4
+        o5 = p5
+        o6 = p6
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        let {U}fixed32_32 a = {U}fixed32_32.fromRaw(xa[i])
+        let {U}fixed32_32 b = {U}fixed32_32.fromRaw(xb[i])
+        o1[i] = (a * b).raw
+        o2[i] = (a / b).raw
+        let {U}fixed48_16 c = {U}fixed48_16.fromRaw(xa[i])
+        let {U}fixed48_16 d = {U}fixed48_16.fromRaw(xb[i])
+        o3[i] = (c * d).raw
+        o4[i] = (c / d).raw
+        let {U}fixed1_63 e = {U}fixed1_63.fromRaw(xa[i])
+        let {U}fixed1_63 f = {U}fixed1_63.fromRaw(xb[i])
+        o5[i] = (e * f).raw
+        o6[i] = (e / f).raw
+
+mut kk = Edge(xa, xb, o1, o2, o3, o4, o5, o6)
+kernel:
+    kk(block = 144, grid = 2)
+
+for i in 0..<N:
+    print "{kk.xa[i]} {kk.xb[i]} {kk.o1[i]} {kk.o2[i]} {kk.o3[i]} {kk.o4[i]} {kk.o5[i]} {kk.o6[i]}"
+"#;
+
+/// `*` and `/` of 64-bit formats over an edge sweep (raw values around 2^32, 2^62, 2^63-1, with
+/// both signs, plus raws with the top bit set for the unsigned formats) match exact 128-bit
+/// arithmetic: truncation toward zero, the final raw wrapping.
+#[test]
+fn fixed_point_64_mul_div_edge_sweep_matches_exact_math_on_metal() {
+    for unsigned in [false, true] {
+        let src = FIXED64_EDGE.replace("{U}", if unsigned { "u" } else { "" });
+        let out = run_metal_stdout(if unsigned { "fixed_point64_edge_u" } else { "fixed_point64_edge_s" }, &src);
+        let mut rows = 0;
+        for line in out.lines() {
+            let v: Vec<i64> = line.split_whitespace().map(|t| t.parse().unwrap()).collect();
+            if v.len() != 8 { continue; }
+            let (a, b) = (v[0], v[1]);
+            let mut want = vec![];
+            for m in [32u32, 16, 63] {
+                if unsigned {
+                    let (ua, ub) = (a as u64 as u128, b as u64 as u128);
+                    want.push(((ua * ub) >> m) as u64 as i64);
+                    want.push(((ua << m) / ub) as u64 as i64);
+                } else {
+                    want.push(((a as i128 * b as i128) / (1i128 << m)) as i64);
+                    want.push((((a as i128) << m) / b as i128) as i64);
+                }
+            }
+            assert_eq!(&v[2..], &want[..], "unsigned={unsigned} a={a} b={b}");
+            rows += 1;
+        }
+        assert_eq!(rows, 288);
+    }
 }
 
 #[test]

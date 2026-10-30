@@ -1118,7 +1118,13 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
     interp.current_env = prev_env
     match sig:
         nil: Nil
-        ReturnSignal(v): v
+        ReturnSignal(v):
+            # `fixed16_16 f(float64 x): x` needs an explicit `as`; a literal result adopts the format.
+            if let ret_ty = decl.return_ty:
+                if not fixed_result_has_literal(decl.body, true):
+                    check_fixed_returned(ret_ty, v, decl.name)
+                return coerce_declared_value(interp, v, ret_ty)
+            v
         ThrowSignal(v):
             interp.set_pending_throw(v)
             Nil
@@ -1434,3 +1440,62 @@ def bool value_equals(Value a, Value b):
                         all_found
                 _: false
         _: false
+
+
+# True when some expression the body can yield (a `return <expr>` at any depth, or the tail
+# expression — descending into a trailing `if`/`match`) is an untyped numeric literal.
+# Mirrors `collect_result_exprs` in the Rust interpreter's call.rs.
+bool fixed_result_has_literal([Stmt] body, bool tail):
+    var i = 0
+    while i < body.length:
+        let is_tail = tail and i + 1 == body.length
+        match body[i]:
+            Stmt.Return(rs):
+                if let rv = rs.value:
+                    if is_untyped_numeric_literal(rv):
+                        return true
+            Stmt.Expr(e):
+                if is_tail and is_untyped_numeric_literal(e):
+                    return true
+            Stmt.If(ifs):
+                for br in ifs.branches:
+                    if fixed_result_has_literal(br.body, is_tail):
+                        return true
+                if let eb = ifs.else_body:
+                    if fixed_result_has_literal(eb, is_tail):
+                        return true
+            Stmt.Match(ms):
+                for arm in ms.arms:
+                    match arm.body:
+                        MatchBody.Expr(me):
+                            if is_tail and is_untyped_numeric_literal(me):
+                                return true
+                        MatchBody.Block(bs):
+                            if fixed_result_has_literal(bs, is_tail):
+                                return true
+            Stmt.While(ws):
+                if fixed_result_has_literal(ws.body, false):
+                    return true
+            Stmt.For(fs):
+                if fixed_result_has_literal(fs.body, false):
+                    return true
+            Stmt.Loop(ls):
+                if fixed_result_has_literal(ls.body, false):
+                    return true
+            Stmt.Try(ts):
+                if fixed_result_has_literal(ts.body, false):
+                    return true
+            _: nil
+        i += 1
+    false
+
+def check_fixed_returned(Type ty, Value v, string fname):
+    match ty:
+        Type.Qualified(inner, _): check_fixed_returned(inner, v, fname)
+        Type.Named(tname):
+            if let f = fixed_fmt_of_name(tname):
+                match v:
+                    Value.Int(_) | Value.Float64(_):
+                        throw "function '{fname}' declared to return {f.name()}, but got {value_type_name(v)}; convert explicitly with `as {f.name()}`"
+                    _: nil
+        _: nil

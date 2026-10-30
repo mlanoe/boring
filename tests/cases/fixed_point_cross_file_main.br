@@ -1,0 +1,9 @@
+use fixed_point_cross_file_lib
+
+def main():
+    let fixed16_16 a = 2.0
+    print "{scale(a)}"
+    mut acc = Acc()
+    acc.total = 0.25
+    acc.last = scale(a)
+    print "{acc.total} {acc.last}"

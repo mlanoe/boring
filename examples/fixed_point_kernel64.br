@@ -1,0 +1,60 @@
+# fixed_point_kernel64.br — 64-bit binary fixed-point arithmetic inside a GPU kernel
+#
+#   boring run fixed_point_kernel64.br                    # interpreted simulation
+#   boring build --target metal fixed_point_kernel64.br   # Metal (macOS)
+#
+# `*` and `/` on a 64-bit format need a 128-bit intermediate; Metal has no 128-bit integer,
+# so the backend emits `bp_fx_*` helpers (`mulhi` + a shift-subtract division) on demand.
+# Results are bit-identical to `boring run` (truncation toward zero, wrapping final raw).
+
+let N = 8
+
+mut [fixed32_32]'kernel'unified a = [0.0 as fixed32_32 for ..<N]
+mut [fixed32_32]'kernel'unified b = [0.0 as fixed32_32 for ..<N]
+mut [fixed32_32]'kernel'unified p = [0.0 as fixed32_32 for ..<N]
+mut [fixed32_32]'kernel'unified q = [0.0 as fixed32_32 for ..<N]
+mut [fixed48_16]'kernel'unified w = [0.0 as fixed48_16 for ..<N]
+mut [ufixed32_32]'kernel'unified u = [0.0 as ufixed32_32 for ..<N]
+mut [int]'kernel'unified raws = [0 for ..<N]
+for i in 0..<N:
+    a[i] = (i as fixed32_32) * 12345.678901 - 1.000000000123 * (i as fixed32_32) * (i as fixed32_32) - 7.25
+    if i % 2 == 1:
+        a[i] = 0.0 as fixed32_32 - a[i] * 3.3333333333
+    b[i] = (i as fixed32_32) * 0.7654321098 + 0.3333333333
+
+kernel Fx64:
+    let [fixed32_32]'unified a
+    let [fixed32_32]'unified b
+    mut [fixed32_32]'unified p
+    mut [fixed32_32]'unified q
+    mut [fixed48_16]'unified w
+    mut [ufixed32_32]'unified u
+    mut [int]'unified raws
+
+    init([fixed32_32]'unified aa, [fixed32_32]'unified bb, [fixed32_32]'unified pp, [fixed32_32]'unified qq,
+         [fixed48_16]'unified ww, [ufixed32_32]'unified uu, [int]'unified rr):
+        a = aa
+        b = bb
+        p = pp
+        q = qq
+        w = ww
+        u = uu
+        raws = rr
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        p[i] = a[i] * b[i] + 0.5
+        q[i] = a[i] / (b[i] + 1.25) - 3
+        # truncation toward zero, negative operands
+        w[i] = (p[i] as fixed48_16) * (q[i] as fixed48_16) / 3.5
+        u[i] = ((b[i] as ufixed32_32) * 1.5) / (a[i].abs() as ufixed32_32 + 1)
+        raws[i] = p[i].raw + q[i].floor().raw + (w[i].ceil() as int) + (a[i].trunc().raw) + (b[i].fract().raw)
+        if a[i] < b[i]:
+            raws[i] = raws[i] + (p[i].max(q[i])).raw
+
+mut kk = Fx64(a, b, p, q, w, u, raws)
+kernel:
+    kk(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{i}: {kk.a[i]} {kk.b[i]} {kk.p[i]} {kk.q[i]} {kk.w[i]} {kk.u[i]} {kk.raws[i]}"

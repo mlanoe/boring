@@ -22,7 +22,8 @@ pub(super) fn emit_device_msl(program: &Program) -> String {
 pub(super) fn emit_device_msl_with_errors(program: &Program) -> (String, Vec<crate::transpiler::TranspileError>) {
     let mut e = DeviceEmitter::new();
     e.emit_program(program);
-    (e.out, e.errors)
+    let helpers = if e.fixed64_used { FIXED64_HELPERS } else { "" };
+    (e.out.replacen(FIXED64_MARKER, helpers, 1), e.errors)
 }
 
 // ── Reserved-word-safe identifiers ────────────────────────────────────────────
@@ -138,6 +139,9 @@ struct DeviceEmitter {
     /// Fixed-point formats of each device function's parameters (free functions by name,
     /// kernel methods as `self::name`), so an untyped literal argument folds to the raw integer.
     fn_param_fmts: std::collections::HashMap<String, Vec<Option<FixedFmt>>>,
+    /// A 64-bit fixed-point `*` or `/` was emitted: the `bp_fx_*` helper block is spliced into
+    /// the header (at `FIXED64_MARKER`) once, only then.
+    fixed64_used: bool,
     errors: Vec<crate::transpiler::TranspileError>,
 }
 
@@ -154,6 +158,7 @@ impl DeviceEmitter {
             current_fn_is_void: true,
             current_ret_fmt: None,
             fn_param_fmts: std::collections::HashMap::new(),
+            fixed64_used: false,
             errors: Vec::new(),
         }
     }
@@ -203,6 +208,8 @@ impl DeviceEmitter {
         // 64-bit integer aliases for MSL
         self.line("typedef long     int64_t;");
         self.line("typedef ulong    uint64_t;");
+        self.blank();
+        self.out.push_str(FIXED64_MARKER);
         self.blank();
         // Boring built-in Dimension type (mirrors host-side struct)
         self.line("struct Dimension { uint width; uint height; };");
@@ -2514,20 +2521,44 @@ impl DeviceEmitter {
         self.ty_of(e).as_ref().and_then(fixed_fmt_of_type)
     }
 
-    /// A formats this backend can do; anything else is a compile error (never a silent narrowing).
+    /// A formats this backend can do (8..=64 bits; 64-bit `*` / `/` use the `bp_fx_*` helpers);
+    /// anything else is a compile error (never a silent narrowing).
     fn fixed_supported(&mut self, f: &FixedFmt, e: &Expr) {
-        if f.width() > 32 {
+        if f.width() > 64 || f.m >= 64 {
             self.errors.push(crate::transpiler::TranspileError::at(
-                format!("`{}` is not supported on --target metal: fixed-point `*` and `/` on a 64-bit \
-                         format need `mulhi`-based emulation, which this backend does not have \
-                         (use a format of at most 32 bits, e.g. `fixed16_16`)", f.name()),
+                format!("`{}` is not supported on --target metal: fixed-point formats are limited to \
+                         at most 64 bits with fewer than 64 fraction bits (e.g. `fixed16_16`, `fixed32_32`)",
+                        f.name()),
                 e.line, e.col));
         }
     }
 
+    /// Mark that the 64-bit helper block is needed and return the helper-call text.
+    fn fixed64_call(&mut self, name: &str, f: &FixedFmt, a: &str, b: &str) -> String {
+        self.fixed64_used = true;
+        format!("bp_fx_{}_{}({}, {}, {}u)", name, if f.signed { "i64" } else { "u64" }, a, b, f.m)
+    }
+
+    /// Raw-integer literal text of a (range-checked) raw value of format `f`.
+    fn fixed_raw_lit(f: &FixedFmt, r: i128) -> String {
+        if f.width() <= 32 {
+            return format!("{}{}", r, if r > i32::MAX as i128 { "u" } else { "" });
+        }
+        if r == i64::MIN as i128 { return "(-9223372036854775807l - 1l)".into(); }
+        if r < 0 { return format!("({}l)", r); }
+        if !f.signed || r > i64::MAX as i128 { format!("{}ul", r) } else { format!("{}l", r) }
+    }
+
+    /// An unsigned mask / scale constant as text.
+    fn fixed_ulit(f: &FixedFmt, v: u64) -> String {
+        if f.width() > 32 { format!("{}ul", v) } else { format!("{}u", v) }
+    }
+
     fn fixed_scale(f: &FixedFmt, m: u32) -> String {
         let _ = f;
-        format!("{}", 1u64 << m)
+        // (an unsupported m >= 64 was already reported by `fixed_supported`; 0 just keeps emitting)
+        let v = 1u64.checked_shl(m).unwrap_or(0);
+        if m >= 31 { format!("{}ul", v) } else { format!("{}", v) }
     }
 
     /// `long` for a signed format, `ulong` for an unsigned one.
@@ -2546,10 +2577,7 @@ impl DeviceEmitter {
             _ => return None,
         };
         Some(match raw {
-            Some(r) => {
-                let suffix = if r > i32::MAX as i128 { "u" } else { "" };
-                format!("(({}){}{})", msl_fixed_raw_type(f), r, suffix)
-            }
+            Some(r) => format!("(({}){})", msl_fixed_raw_type(f), Self::fixed_raw_lit(f, r)),
             None => {
                 self.errors.push(crate::transpiler::TranspileError::at(
                     format!("literal out of range for {} (range [{}, {}])",
@@ -2588,6 +2616,8 @@ impl DeviceEmitter {
             BinOp::Sub => format!("(({})(({}) - ({})))", raw, a, b),
             BinOp::Rem => format!("(({})(({}) % ({})))", raw, a, b),
             // `/`, never `>>`: the quotient truncates toward zero, an arithmetic shift would floor.
+            BinOp::Mul if f.width() > 32 => self.fixed64_call("mul", f, &a, &b),
+            BinOp::Div if f.width() > 32 => self.fixed64_call("div", f, &a, &b),
             BinOp::Mul => format!("(({})((({}){} * ({}){}) / ({}){}))", raw, wide, wrap(&a), wide, wrap(&b), wide, scale),
             BinOp::Div => format!("(({})((({}){} * ({}){}) / ({}){}))", raw, wide, wrap(&a), wide, scale, wide, wrap(&b)),
             cmp => format!("({} {} {})", a, binop_msl(cmp), b),
@@ -2606,8 +2636,7 @@ impl DeviceEmitter {
                     "max" => f.max_raw(),
                     _ => return None,
                 };
-                let suffix = if raw > i32::MAX as i128 { "u" } else { "" };
-                return Some(format!("(({}){}{})", msl_fixed_raw_type(&f), raw, suffix));
+                return Some(format!("(({}){})", msl_fixed_raw_type(&f), Self::fixed_raw_lit(&f, raw)));
             }
         }
         if field == "raw" {
@@ -2644,13 +2673,13 @@ impl DeviceEmitter {
         let raw = msl_fixed_raw_type(&f);
         let wide = Self::fixed_wide(&f);
         let scale = Self::fixed_scale(&f, f.m);
-        let mask = (1u64 << f.m) - 1;
+        let mask = Self::fixed_ulit(&f, 1u64.checked_shl(f.m).unwrap_or(0).wrapping_sub(1));
         let o = self.expr(obj);
         match (method, args) {
-            ("floor", []) => format!("(({})(({}) & ~(({}){}u)))", raw, o, wide, mask),
+            ("floor", []) => format!("(({})(({}) & ~(({}){})))", raw, o, wide, mask),
             ("trunc", []) => format!("(({})((({}){} / ({}){}) * ({}){}))", raw, wide, wrap(&o), wide, scale, wide, scale),
             ("fract", []) => format!("(({})(({}) - ({})(({}){} / ({}){}) * ({}){}))", raw, o, wide, wide, wrap(&o), wide, scale, wide, scale),
-            ("ceil", []) => format!("(({})((({}){} + ({}){}u) & ~(({}){}u)))", raw, wide, wrap(&o), wide, mask, wide, mask),
+            ("ceil", []) => format!("(({})((({}){} + ({}){}) & ~(({}){})))", raw, wide, wrap(&o), wide, mask, wide, mask),
             ("abs", []) if f.signed => format!("(({})(({}) < 0 ? -({}) : ({})))", raw, o, o, o),
             ("abs", []) => o,
             ("min" | "max", [a]) => {
@@ -2685,6 +2714,8 @@ impl DeviceEmitter {
             if let Some(from) = src {
                 self.fixed_supported(&from, e);
                 let wide = if from.signed || to.signed { "int64_t" } else { "uint64_t" };
+                // A 64-bit unsigned source must be divided as unsigned (an int64 view would go negative).
+                let wide = if to.m < from.m && !from.signed && from.width() == 64 { "uint64_t" } else { wide };
                 return if to.m >= from.m {
                     format!("(({})(({}){} * ({}){}))", raw, wide, wrap(&v), wide, Self::fixed_scale(&to, to.m - from.m))
                 } else {
@@ -2811,10 +2842,49 @@ fn msl_fixed_raw_type(f: &FixedFmt) -> String {
         (false, 16) => "ushort".into(),
         (true, 32) => "int".into(),
         (false, 32) => "uint".into(),
-        _ => format!("{} /* ERROR: `{}` is not supported on --target metal (fixed-point formats are limited to 8, 16 or 32 bits here) */",
+        (true, 64) => "long".into(),
+        (false, 64) => "ulong".into(),
+        _ => format!("{} /* ERROR: `{}` is not supported on --target metal (fixed-point formats are limited to 8, 16, 32 or 64 bits here) */",
             if f.signed { "int64_t" } else { "uint64_t" }, f.name()),
     }
 }
+
+/// Where the `bp_fx_*` 64-bit fixed-point helpers go when a kernel uses them.
+const FIXED64_MARKER: &str = "// @bp_fx_helpers@\n";
+
+/// 64x64 -> 128-bit multiply-shift and 128/64 divide for `W = 64` fixed-point formats, on the
+/// magnitudes (so the quotient truncates toward zero), keeping the low 64 bits of the result.
+/// `m` is the fraction width (1..=63). Division by zero is undefined like any GPU integer op.
+const FIXED64_HELPERS: &str = r#"// 64-bit fixed-point helpers (docs/fixed-point-types.md, "Metal").
+inline ulong bp_fx_umul_shr(ulong a, ulong b, uint m) {
+    ulong lo = a * b;
+    ulong hi = mulhi(a, b);
+    return m == 0u ? lo : ((lo >> m) | (hi << (64u - m)));
+}
+inline ulong bp_fx_udiv_shl(ulong a, ulong d, uint m) {
+    ulong r = 0ul;
+    ulong q = 0ul;
+    for (int i = 63 + (int)m; i >= 0; --i) {
+        ulong bit = (i >= (int)m) ? ((a >> (uint)(i - (int)m)) & 1ul) : 0ul;
+        ulong carry = r >> 63;
+        r = (r << 1) | bit;
+        q <<= 1;
+        if (carry != 0ul || r >= d) { r -= d; q |= 1ul; }
+    }
+    return q;
+}
+inline ulong bp_fx_abs64(long v) { return v < 0 ? 0ul - (ulong)v : (ulong)v; }
+inline ulong bp_fx_mul_u64(ulong a, ulong b, uint m) { return bp_fx_umul_shr(a, b, m); }
+inline long bp_fx_mul_i64(long a, long b, uint m) {
+    ulong r = bp_fx_umul_shr(bp_fx_abs64(a), bp_fx_abs64(b), m);
+    return (long)(((a < 0) != (b < 0)) ? 0ul - r : r);
+}
+inline ulong bp_fx_div_u64(ulong a, ulong b, uint m) { return bp_fx_udiv_shl(a, b, m); }
+inline long bp_fx_div_i64(long a, long b, uint m) {
+    ulong r = bp_fx_udiv_shl(bp_fx_abs64(a), bp_fx_abs64(b), m);
+    return (long)(((a < 0) != (b < 0)) ? 0ul - r : r);
+}
+"#;
 
 fn fixed_fmt_of_type(ty: &Type) -> Option<FixedFmt> {
     match ty {

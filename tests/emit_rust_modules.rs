@@ -171,3 +171,15 @@ fn emit_rust_cross_file_recursive_struct_param_is_borrowed() {
     let actual = emit_and_run(br_file, out_dir);
     assert_eq!(actual.trim_end(), "2\n1");
 }
+
+/// Fixed-point formats used in both a `use`d module and the main file: the newtype
+/// definitions are appended once to the flattened `--emit-rust` stream, and every format
+/// the module introduces (`fixed8_24` here) gets one too.
+#[test]
+fn emit_rust_includes_fixed_point_formats_across_files() {
+    let br_file = Path::new("tests/cases/fixed_point_cross_file_main.br");
+    let out_dir = Path::new("tests/cases/fixed_point_cross_file_emit_rust_rust");
+
+    let actual = emit_and_run(br_file, out_dir);
+    assert_eq!(actual.trim_end(), "3\n0.25 3");
+}

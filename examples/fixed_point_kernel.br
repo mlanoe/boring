@@ -5,7 +5,7 @@
 #
 # Fixed-point values lower to their raw integer on the device: `+ - %` and compares are
 # plain integer ops, `*` / `/` widen to a 64-bit intermediate and truncate toward zero
-# (docs/fixed-point-types.md, "GPU backends"). Formats up to 32 bits wide work on Metal.
+# (docs/fixed-point-types.md, "GPU backends"). Formats up to 32 bits wide use a 64-bit intermediate; 64-bit formats: see fixed_point_kernel64.br.
 
 let N = 8
 

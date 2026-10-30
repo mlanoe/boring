@@ -11,9 +11,10 @@
 > `T?`) and `mulRound`/`divRound`.
 > Also implemented, as **native methods** rather than library code:
 > `sqrt`, `sin`, `cos`, `tan`, `exp`, `ln` (Phase 5 — see below).
-> GPU backends: **CUDA, ROCm/HIP, Metal and wgpu (both `W ≤ 32`) are implemented** (see [GPU backends](#gpu-backends);
+> GPU backends: **CUDA, ROCm/HIP and Metal (`W ≤ 64`) and wgpu (`W ≤ 32`) are implemented** (see [GPU backends](#gpu-backends);
 > CUDA/ROCm verified by codegen tests only, no NVIDIA/AMD hardware was available; Metal and wgpu
-> are also verified on the device, byte for byte against `boring run`). 128-bit formats (Phase 4) are signed-only. The former open
+> are also verified on the device, byte for byte against `boring run`; Metal's 64-bit formats use
+> `mulhi` plus a shift-subtract division). 128-bit formats (Phase 4) are signed-only. The former open
 > questions are resolved in [Decisions](#decisions).
 >
 > **Implementation notes** (where the code differs from, or narrows, the text):
@@ -29,14 +30,13 @@
 >   non-literal `int`/`float` passed to a `fixed` parameter, constructor field or
 >   `init` parameter, assigned to a `fixed` variable or field, or returned from a
 >   `fixed` function needs an explicit `as`. Only an untyped literal adopts the
->   format. Known leftovers: the self-hosted interpreter does not check function
->   returns, and a `float64` *variable* placed inside a tuple literal is still
->   coerced when the tuple meets a `(fixedN_M, …)` slot.
+>   format. Known leftover: a `float64` *variable* placed inside a tuple literal is
+>   still coerced when the tuple meets a `(fixedN_M, …)` slot.
 > - `fixed → fixed` / `int → fixed` / `float → fixed` casts that do not fit give
 >   `nil` in the interpreters and panic in generated Rust.
 > - The Rust newtype definitions are appended to the generated program for every
->   format that appears in it; module-split output (`--emit-rust` with modules)
->   is untested.
+>   format that appears in it; a `use`d module's formats are emitted too in the flattened
+>   `--emit-rust` output (`tests/emit_rust_modules.rs`).
 
 ## Problem Statement
 
@@ -263,7 +263,7 @@ multiply/shift.
 | Backend | Support |
 |---|---|
 | CUDA | any `W ≤ 64` (native `long long` for the intermediate) |
-| Metal (MSL) | `W ≤ 32` with a `long` intermediate; `W = 64` needs `mulhi`-based emulation |
+| Metal (MSL) | `W ≤ 32` with a `long` intermediate; `W = 64` (with `M < 64`) through emitted-on-demand `bp_fx_*` helpers (`mulhi` product, shift-subtract 128/64 division); 128-bit is a compile error |
 | wgpu (WGSL) | no 64-bit integers: `W ≤ 16` direct in `i32`/`u32`; `W = 32` through `u32` limb helpers (emulated 64-bit product and 64/32 division); `W = 64` and 128-bit are compile errors |
 | ROCm | as CUDA |
 
@@ -311,7 +311,7 @@ initializer) are fixed-point names; everything else is untouched.
   (decimal approximation; format specs like `:.3f` are not applied).
 - Not handled: fixed-point `tensor` fields.
 
-### Metal (implemented, `W ≤ 32`)
+### Metal (implemented, `W ≤ 64`)
 
 `src/transpiler/metal/device.rs` (kernel code) and `metal/host.rs` (host). Same rules as
 CUDA above, with MSL types: `fixedN_M` fields, buffers, parameters and locals are `char`/`short`/`int`
@@ -323,8 +323,18 @@ truncating toward zero. Untyped literals fold to the raw constant (also in funct
 On the host the generated `FixedN_M` newtype is `repr(transparent)`, so a `Vec<FixedN_M>` is
 bit-identical to the device buffer, and literals/casts fold as in the general pass.
 
-- **Compile errors on Metal**, never a silent narrowing: any 64-bit format (`W = 64` would need
-  `mulhi`-based emulation of the 128-bit product, not implemented), 128-bit formats,
+- **64-bit formats** (`fixed32_32`, `fixed48_16`, `ufixed32_32`, …; raw is `long`/`ulong`):
+  `+ - %`, comparisons, `floor/ceil/trunc/fract/abs/min/max`, `as` casts, `.raw`, `fromRaw`,
+  `epsilon/min/max` are the same integer ops (literals above the i32 range get `l`/`ul` suffixes; the
+  signed `min` is spelled `-9223372036854775807l - 1l`). `*` and `/` call helpers emitted once into the
+  MSL header, only when a 64-bit format is used: they work on the magnitudes (so the quotient truncates
+  toward zero, never a shift), `*` takes the 128-bit product from `a * b` and `mulhi(a, b)` and shifts it
+  right by `M`, `/` is a `64 + M`-step shift-subtract division of `a << M` by `b`; the final raw keeps the
+  low 64 bits (wraps). The division is slow (a loop per `/`), the multiply is cheap. `fixed -> float`
+  and `float -> fixed` go through the device `float32` (24-bit mantissa), so large 64-bit raws round;
+  use integer casts for exactness.
+- **Compile errors on Metal**, never a silent narrowing: 128-bit formats and the degenerate
+  `ufixed0_64` (`M = 64`, whose scale 2^64 has no 64-bit constant),
   `sqrt/sin/cos/tan/exp/ln`, `round`, `signum`, `clamp`, `wrapping*`/`saturating*`/`checked*`,
   `mulRound`/`divRound`.
 - Overflow wraps and division by zero is undefined, as for any GPU integer op. `fixed -> float`
@@ -332,6 +342,13 @@ bit-identical to the device buffer, and literals/casts fold as in the general pa
 - Verified on an Apple GPU: `tests/metal_codegen.rs::fixed_point_kernel_runs_on_metal_and_matches_interpreter`
   runs `examples/fixed_point_kernel.br` (`fixed16_16`, `fixed8_8`, `fixed8_24`, `ufixed16_16`,
   members, helper functions) on the device and compares with `boring run` byte for byte.
+  The 64-bit formats are verified the same way (`fixed_point_64_kernel_runs_on_metal_and_matches_interpreter`,
+  `examples/fixed_point_kernel64.br`: `fixed32_32`, `fixed48_16`, `ufixed32_32`, negative operands, carries
+  across the 32-bit halves) plus `fixed_point_64_mul_div_edge_sweep_matches_exact_math_on_metal`: `*` and `/`
+  of `fixed32_32`, `fixed48_16`, `fixed1_63` and their unsigned twins over 288 edge raw pairs (around 2^32, 2^62,
+  2^63-1, both signs, top-bit-set raws) equal exact 128-bit arithmetic on the Apple GPU, including wrapped
+  results (the interpreter reports overflow instead of wrapping, so overflowing cases are checked against
+  exact math, not `boring run`).
 
 ### wgpu (implemented, `W ≤ 32`)
 
@@ -396,7 +413,7 @@ conversion (the shared kernel-host emitters' `x as <fixed>` casts are dropped).
    newtype for `W ∈ {8, 16, 32, 64}`, tests in the shared corpus.
 2. **Members**: `floor/ceil/round/fract/abs/min/max/clamp`, `wrapping*`/
    `saturating*`/`checked*`, and `mulRound`/`divRound` (round to nearest).
-3. **GPU**: CUDA first, then Metal, then wgpu (with the limb emulation) — all done for `W ≤ 32` (CUDA/ROCm also `W = 64`).
+3. **GPU**: CUDA first, then Metal, then wgpu (with the limb emulation) — all done for `W ≤ 32` (CUDA/ROCm and Metal also `W = 64`).
 4. **128-bit formats** (`fixed64_64`, `fixed32_96`, `fixed128_0`, …).
    **Implemented for signed formats with at most 126 fractional bits.**
    - `src/fixed_wide_core.rs` (dual-use like `fixed_math_core.rs`: compiled into the

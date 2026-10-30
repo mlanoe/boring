@@ -1,0 +1,6 @@
+pub fixed16_16 scale(fixed16_16 x):
+    x * 1.5
+
+pub struct Acc:
+    var fixed8_24 total = 0.0
+    var fixed16_16 last = 0.0
