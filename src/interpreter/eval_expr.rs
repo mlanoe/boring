@@ -3136,12 +3136,16 @@ impl Interpreter {
             };
             let Some((name, Some(ty))) = slot else { continue };
             let resolved = self.resolve_type(ty);
-            let Type::Fixed(fmt) = super::strip_qualifiers(resolved.without_mut()) else { continue };
             let val = match vals.get(i) {
                 Some(Value::Labeled { value, .. }) => &**value,
                 Some(v) => v,
                 None => continue,
             };
+            if let Type::Tuple(_) = super::strip_qualifiers(resolved.without_mut()) {
+                Self::check_fixed_tuple_slots(val, &arg.value, &resolved, &format!("pass {{}} to '{name}'"), line)?;
+                continue;
+            }
+            let Type::Fixed(fmt) = super::strip_qualifiers(resolved.without_mut()) else { continue };
             if matches!(val, Value::Int(_) | Value::Float64(_)) && !is_untyped_numeric_literal(&arg.value) {
                 return Err(err(format!(
                     "cannot pass {} to '{name}': expected {}; convert explicitly with `as {}`",

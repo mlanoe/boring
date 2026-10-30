@@ -1769,7 +1769,41 @@ def check_fixed_declared(Type ty, Expr e, Value v, string verb, string name):
                         if not is_untyped_numeric_literal(e):
                             throw "cannot {verb} {value_type_name(v)} to '{name}': expected {f.name()}; convert explicitly with `as {f.name()}`"
                     _: nil
+        Type.Tuple(_):
+            let msg = fixed_tuple_slots_error(ty, e, v, verb, "'{name}'")
+            if let m = msg:
+                throw m
         _: nil
+
+# A tuple literal meeting a `(fixedN_M, ...)` type: only untyped literals adopt the format
+# per slot. Returns the error message for the first offending slot, nil when fine.
+string? fixed_tuple_slots_error(Type ty, Expr e, Value v, string verb, string target):
+    match ty:
+        Type.Qualified(inner, _): return fixed_tuple_slots_error(inner, e, v, verb, target)
+        Type.Tuple(tys):
+            match e.kind:
+                ExprKind.Tuple(exprs):
+                    match v:
+                        Value.Tuple(vals):
+                            if tys.length != vals.length or tys.length != exprs.length:
+                                return nil
+                            var i = 0
+                            while i < tys.length:
+                                let sub = fixed_tuple_slots_error(tys[i], exprs[i], vals[i], verb, target)
+                                if let m = sub:
+                                    return m
+                                i += 1
+                        _: nil
+                _: nil
+        Type.Named(tname):
+            if let f = fixed_fmt_of_name(tname):
+                match v:
+                    Value.Int(_) | Value.Float64(_):
+                        if not is_untyped_numeric_literal(e):
+                            return "cannot {verb} {value_type_name(v)} to {target}: expected {f.name()} in a tuple slot; convert explicitly with `as {f.name()}`"
+                    _: nil
+        _: nil
+    nil
 
 # Constructor arguments against the struct's declared field types (by label, else position).
 def check_fixed_ctor_args(mut Interpreter interp, Value callee, [Arg] args, [Value] arg_vals):

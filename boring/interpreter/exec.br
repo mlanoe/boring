@@ -1123,6 +1123,7 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
             if let ret_ty = decl.return_ty:
                 if not fixed_result_has_literal(decl.body, true):
                     check_fixed_returned(ret_ty, v, decl.name)
+                check_fixed_returned_tuple(ret_ty, v, decl.body, decl.name)
                 return coerce_declared_value(interp, v, ret_ty)
             v
         ThrowSignal(v):
@@ -1445,49 +1446,65 @@ def bool value_equals(Value a, Value b):
 # True when some expression the body can yield (a `return <expr>` at any depth, or the tail
 # expression — descending into a trailing `if`/`match`) is an untyped numeric literal.
 # Mirrors `collect_result_exprs` in the Rust interpreter's call.rs.
-bool fixed_result_has_literal([Stmt] body, bool tail):
+# Every expression a function body can yield as its result: `return` values anywhere,
+# the tail expression, and trailing if/match arms (loop/try bodies only contribute returns).
+[Expr] fixed_result_exprs([Stmt] body, bool tail):
+    mut [Expr] out = []
     var i = 0
     while i < body.length:
         let is_tail = tail and i + 1 == body.length
         match body[i]:
             Stmt.Return(rs):
                 if let rv = rs.value:
-                    if is_untyped_numeric_literal(rv):
-                        return true
+                    out.push(rv)
             Stmt.Expr(e):
-                if is_tail and is_untyped_numeric_literal(e):
-                    return true
+                if is_tail:
+                    out.push(e)
             Stmt.If(ifs):
                 for br in ifs.branches:
-                    if fixed_result_has_literal(br.body, is_tail):
-                        return true
+                    out.extend(fixed_result_exprs(br.body, is_tail))
                 if let eb = ifs.else_body:
-                    if fixed_result_has_literal(eb, is_tail):
-                        return true
+                    out.extend(fixed_result_exprs(eb, is_tail))
             Stmt.Match(ms):
                 for arm in ms.arms:
                     match arm.body:
                         MatchBody.Expr(me):
-                            if is_tail and is_untyped_numeric_literal(me):
-                                return true
+                            if is_tail:
+                                out.push(me)
                         MatchBody.Block(bs):
-                            if fixed_result_has_literal(bs, is_tail):
-                                return true
-            Stmt.While(ws):
-                if fixed_result_has_literal(ws.body, false):
-                    return true
-            Stmt.For(fs):
-                if fixed_result_has_literal(fs.body, false):
-                    return true
-            Stmt.Loop(ls):
-                if fixed_result_has_literal(ls.body, false):
-                    return true
-            Stmt.Try(ts):
-                if fixed_result_has_literal(ts.body, false):
-                    return true
+                            out.extend(fixed_result_exprs(bs, is_tail))
+            Stmt.While(ws): out.extend(fixed_result_exprs(ws.body, false))
+            Stmt.For(fs): out.extend(fixed_result_exprs(fs.body, false))
+            Stmt.Loop(ls): out.extend(fixed_result_exprs(ls.body, false))
+            Stmt.Try(ts): out.extend(fixed_result_exprs(ts.body, false))
             _: nil
         i += 1
+    out
+
+bool fixed_result_has_literal([Stmt] body, bool tail):
+    for e in fixed_result_exprs(body, tail):
+        if is_untyped_numeric_literal(e):
+            return true
     false
+
+# `(fixed16_16, int) f(float64 x): (x, 1)`: a tuple-literal result passes when one of the
+# tuple-literal results gives every fixed slot a literal (same leniency as the scalar rule).
+def check_fixed_returned_tuple(Type ty, Value v, [Stmt] body, string fname):
+    mut string? first_err = nil
+    var any_ok = false
+    for e in fixed_result_exprs(body, true):
+        match e.kind:
+            ExprKind.Tuple(_):
+                let msg = fixed_tuple_slots_error(ty, e, v, "return", "'{fname}'")
+                if let m = msg:
+                    if first_err == nil:
+                        first_err = m
+                else:
+                    any_ok = true
+            _: nil
+    if not any_ok:
+        if let m = first_err:
+            throw m
 
 def check_fixed_returned(Type ty, Value v, string fname):
     match ty:

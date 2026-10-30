@@ -1,0 +1,16 @@
+# A tuple literal meeting a (fixedN_M, ...) slot: literals adopt the format, variables need `as`.
+def show((fixed16_16, int) p):
+    print "{p.0} {p.1}"
+
+(fixed16_16, int) mk(float64 f):
+    (f as fixed16_16, 1)
+
+(fixed16_16, int) lit():
+    (0.5, 2)
+
+let float64 f = 1.5
+show((f as fixed16_16, 2))
+show((0.25, 3))
+let (fixed16_16, int) q = (2.5, 1)
+print "{q.0} {q.1}"
+print "{mk(3.0).0} {lit().0}"

@@ -1365,6 +1365,9 @@ impl Interpreter {
     /// range) or a value already of that format; an `int`/`float` *variable*
     /// needs an explicit `as`. Other values are left to the generic type check.
     pub(crate) fn check_fixed_binding(val: &Value, init: &Expr, ty: &Type, name: &str, line: usize) -> Result<(), Signal> {
+        if let Type::Tuple(_) = strip_qualifiers(ty.without_mut()) {
+            return Self::check_fixed_tuple_slots(val, init, ty, &format!("assign {{}} to '{name}'"), line);
+        }
         let Type::Fixed(fmt) = strip_qualifiers(ty.without_mut()) else { return Ok(()) };
         if !matches!(val, Value::Int(_) | Value::Float64(_)) {
             return Ok(());
@@ -1378,6 +1381,32 @@ impl Interpreter {
             return Err(err(format!(
                 "literal out of range for {} (range [{}, {}])",
                 fmt.name(), fmt.format_exact(fmt.min_raw()), fmt.format_exact(fmt.max_raw())), line));
+        }
+        Ok(())
+    }
+
+    /// Tuple analogue of the strict-mixing rule: a tuple literal meeting a
+    /// `(fixedN_M, …)` slot type only lets untyped numeric literals adopt the
+    /// format; an `int`/`float` variable in a `fixedN_M` slot needs `as`.
+    /// `verb` is a message template with one `{}` for the offending type name.
+    pub(crate) fn check_fixed_tuple_slots(val: &Value, expr: &Expr, ty: &Type, verb: &str, line: usize) -> Result<(), Signal> {
+        let (Type::Tuple(tys), Value::Tuple(vals), ExprKind::Tuple(exprs)) =
+            (strip_qualifiers(ty.without_mut()), val, &expr.kind) else { return Ok(()) };
+        if tys.len() != vals.len() || tys.len() != exprs.len() {
+            return Ok(());
+        }
+        for (i, ((t, v), e)) in tys.iter().zip(vals).zip(exprs).enumerate() {
+            match strip_qualifiers(t.without_mut()) {
+                Type::Fixed(fmt) if matches!(v, Value::Int(_) | Value::Float64(_))
+                    && !super::eval_expr::is_untyped_numeric_literal(e) =>
+                {
+                    return Err(err(format!(
+                        "cannot {} (tuple slot {i}): expected {}; convert explicitly with `as {}`",
+                        verb.replace("{}", &v.type_name()), fmt.name(), fmt.name()), line));
+                }
+                Type::Tuple(_) => Self::check_fixed_tuple_slots(v, e, t, verb, line)?,
+                _ => {}
+            }
         }
         Ok(())
     }

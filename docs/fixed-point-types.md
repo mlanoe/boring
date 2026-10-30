@@ -30,8 +30,8 @@
 >   non-literal `int`/`float` passed to a `fixed` parameter, constructor field or
 >   `init` parameter, assigned to a `fixed` variable or field, or returned from a
 >   `fixed` function needs an explicit `as`. Only an untyped literal adopts the
->   format. Known leftover: a `float64` *variable* placed inside a tuple literal is
->   still coerced when the tuple meets a `(fixedN_M, …)` slot.
+>   format. The same holds per slot of a tuple literal meeting a `(fixedN_M, …)` type
+>   (argument, `let`, return).
 > - `fixed → fixed` / `int → fixed` / `float → fixed` casts that do not fit give
 >   `nil` in the interpreters and panic in generated Rust.
 > - The Rust newtype definitions are appended to the generated program for every

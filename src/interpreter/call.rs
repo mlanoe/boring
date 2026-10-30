@@ -336,6 +336,22 @@ impl Interpreter {
                             }
                         }
                     }
+                    if let (Type::Tuple(_), Value::Tuple(_)) = (super::strip_qualifiers(resolved.without_mut()), &v) {
+                        let mut results: Vec<&Expr> = Vec::new();
+                        collect_result_exprs(&decl.body, true, &mut results);
+                        let verb = format!("return {{}} from '{}'", decl.name);
+                        // Like the scalar case: one tuple literal result that adopts the
+                        // slots by literal is enough; otherwise each literal result must pass.
+                        let mut first_err = None;
+                        let mut any_ok = false;
+                        for e in results.iter().filter(|e| matches!(e.kind, ExprKind::Tuple(_))) {
+                            match Self::check_fixed_tuple_slots(&v, e, resolved, &verb, line) {
+                                Ok(()) => any_ok = true,
+                                Err(x) => { first_err.get_or_insert(x); }
+                            }
+                        }
+                        if !any_ok { if let Some(x) = first_err { return Err(x); } }
+                    }
                     let coerced = Self::coerce_to_type(v, resolved);
                     // ── Return type check ────────────────────────────────────────
                     if !self.value_matches_type(&coerced, resolved) {

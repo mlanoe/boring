@@ -86,6 +86,10 @@ fn float_and_int_variables_need_as_at_every_binding_site() {
     fails_run("field", &format!("{head}mut p = P()\nlet float64 f = 1.5\np.v = f\n"), hint);
     fails_run("reassign", "var fixed16_16 g = 0.0\nlet float64 f = 1.5\ng = f\n", hint);
     fails_run("return", "fixed16_16 r(float64 f):\n    f\nprint \"{r(1.5)}\"\n", hint);
+    // A variable inside a tuple literal meeting a `(fixed16_16, …)` slot.
+    fails_run("tuple_arg", "def show((fixed16_16, int) p):\n    print \"{p.0}\"\nlet float64 f = 1.5\nshow((f, 2))\n", hint);
+    fails_run("tuple_let", "let float64 f = 1.5\nlet (fixed16_16, int) q = (f, 1)\nprint \"{q.0}\"\n", hint);
+    fails_run("tuple_return", "(fixed16_16, int) mk(float64 f):\n    (f, 1)\nprint \"{mk(1.5).0}\"\n", hint);
 }
 
 #[test]
