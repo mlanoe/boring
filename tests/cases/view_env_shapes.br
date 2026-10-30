@@ -1,0 +1,62 @@
+# A view's `body()` gets its env shared whatever the use: none, plain only, closure only, both (directly or via a
+# local), and alongside `state` — `expandIn` hands it one `Arc` (was E0308 in either direction).
+use boring.ui.*
+
+use PopFn as def void()
+
+struct Navigator as EnvValue:
+    PopFn pop
+    int depth
+
+view NoUse:
+    env Navigator nav
+    body():
+        Text(content = "none")
+
+view PlainOnly:
+    env Navigator nav
+    body():
+        Text(content = "depth {nav.depth}")
+
+view ClosureOnly:
+    env Navigator nav
+    body():
+        Button(label = "c", onActivate = ():
+            nav.pop())
+
+view Both:
+    env Navigator nav
+    string label = "Back"
+    body():
+        Disabled(value = nav.depth == 0):
+            Button(label = label, onActivate = ():
+                nav.pop())
+
+view ViaLocal:
+    env Navigator nav
+    body():
+        let back = nav.pop
+        Disabled(value = nav.depth == 0):
+            Button(label = "l", onActivate = ():
+                back())
+
+view WithState:
+    env Navigator nav
+    state int n = 0
+    body():
+        Disabled(value = nav.depth == n):
+            Button(label = "s", onActivate = ():
+                n += 1
+                nav.pop())
+
+def main():
+    let StateBox'shared st = NoState()
+    let PopFn pf = ():
+        print "popped"
+    let [EnvValue] scope = [Navigator(pop = pf, depth = 1)]
+    print NoUse().expandIn(st, scope).viewKind()
+    print PlainOnly().expandIn(st, scope).viewKind()
+    print ClosureOnly().expandIn(st, scope).viewKind()
+    print Both().expandIn(st, scope).viewKind()
+    print ViaLocal().expandIn(st, scope).viewKind()
+    print WithState().expandIn(st, scope).viewKind()

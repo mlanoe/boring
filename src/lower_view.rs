@@ -502,7 +502,12 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
                 }
             }
             if has_state { m.params.push(context_param("mut ", &state_name, ST, m.line, m.col)); }
-            if has_env { m.params.push(context_param("", &env_name, ENV, m.line, m.col)); }
+            if has_env {
+                // `body` always takes the env shared: `expandIn` builds one `Arc`, and the inferred mode flips
+                // (borrow / owned / `Arc`) with how the body uses it — plain reads, closure captures, or both.
+                let ty = if m.name == "body" { format!("{env_name}'shared") } else { env_name.clone() };
+                m.params.push(context_param("", &ty, ENV, m.line, m.col));
+            }
             // The description is never mutated (inputs are immutable, state lives in `__st`), so
             // even a method that writes state only needs `&self`.
             m.mutating = false;
