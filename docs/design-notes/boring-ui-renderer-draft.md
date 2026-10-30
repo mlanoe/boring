@@ -50,6 +50,12 @@ Rationale, in short:
   (`PlacedGlyph.font`); `GlyphCache(fallbacks = ...)` and `EngineMeasurer(fallbacks = ...)` use it, and `todo_window`
   falls back to Hiragino Sans GB for CJK (an IME composing Chinese or Japanese now draws real glyphs, not boxes).
 - **TextField** (2026-10-23): its text is clipped to the field and scrolls horizontally to keep the caret in view (`fieldScroll`).
+- **Rounded corners** (2026-10-30): `Command.radius` on `FillRect`/`StrokeRect` (scaled by `scaled`), drawn by the CPU reference
+  (`fillRounded`), the per-pixel kernel and the tiled kernel (`roundedCover`, op 0/1, float slot 11) from one signed-distance
+  coverage (`roundMask`/`roundMaskDevice`; a rounded stroke is the ring between the outline and its inset). `scene.br` gives it to
+  buttons, text fields (plus a 1 px `ControlBorder` ring), toggles (circles), sliders, scrollbar thumbs, focus rings, popovers and
+  sheets from `MetricRole.ControlRadius` (now 8) / `SheetCornerRadius`; Secondary buttons use `Separator` as their fill.
+  Tests in `raster_test`, `raster_gpu_test`, `raster_tile_test` (CPU vs simd/wgpu within one LSB).
 - **Not done**: `scene.br` still emits `DrawText` (the window converts it after the fact: `glyphify`), bold/italic weights, per-call shaping with no cache in the measurer, line breaking via
   the engine, bidi, colour emoji, and a bundled font (paths are macOS system fonts).
 
