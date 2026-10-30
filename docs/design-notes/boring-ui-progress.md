@@ -512,9 +512,10 @@ All in `../boring-ui` (README sections "Composite controls", "Popover", "Program
 file or `[deps]` project was not linked to the caller's `state` (`lower_view` now reads the imported files' view signatures, 3674e283); a
 closure-typed field forwarded as a constructor argument was wrapped twice (450caa35); a closure calling `self.method()` in a view with
 `[View] children` was not `Send` (0642ac42); a closure body of just `pass` commented out the closing delimiters (e78325c5); a generic struct
-(`Slot`) lost its type argument in a `Screen` program's setup (ef386904). Quirks worked around, not filed: a trait-object `Builder` parameter
-is moved by `rt.start(host)` in `boring build` (open the runtime at top level in tests), and `(x as int) as float` emits a string-parse cast
-(bind to a `let` first).
+(`Slot`) lost its type argument in a `Screen` program's setup (ef386904). Two more quirks, found and filed as tasks on 2026-10-30 after a fresh build of boring HEAD, are fixed too: a trait-object parameter forwarded
+to a method was moved, so a helper taking `Builder host` could not use it again (755189f1: two name collisions disabled trait-param borrow
+inference), and `(x as int) as float` emitted a string-parse cast (ec887c3d). The same build exposed a regression (a lent `[Trait]` parameter
+returned by value, `Runtime.scopeBelow`, 5bfea2de), fixed. The workarounds in boring-ui (`phaseAt`, `popover_test`'s top-level runtime) were removed.
 
 **Process notes**: `boring` at its HEAD did not build on 2026-10-28 (another session's unfinished fixed-point work was committed
 half-way); boring-ui was built against `ddcc6a04` plus the `OnHover` facade. A `Background` (and other wrapper) with no child yields a nil
