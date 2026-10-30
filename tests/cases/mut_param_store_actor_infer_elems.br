@@ -1,0 +1,25 @@
+# A `mut` parameter pushed into / assigned to an element of a `[T'actor]` or `{K = T'actor}` member
+# is inferred `'actor`: the element is the caller's own handle, not a copy.
+struct ElPoint:
+    var float x
+
+struct ElHolder:
+    var [ElPoint'actor] all = []
+    var {string = ElPoint'actor} named = {=}
+
+    def add(mut ElPoint p):
+        self.all.push(p)
+
+    def name(string k, mut ElPoint p):
+        named[k] = p
+
+def main():
+    mut a = ElPoint(1.0)
+    mut h = ElHolder()
+    h.add(a)
+    h.name("a", a)
+    a.x = 5.0
+    print h.all.len()
+    print h.named.len()
+    print h.all[0].x
+    print h.named["a"].x

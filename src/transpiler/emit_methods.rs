@@ -3785,7 +3785,16 @@ impl Transpiler {
                 || self.var_mutex_types.contains(v.as_str()) || self.var_rwlock_types.contains(v.as_str()),
             _ => self.resolve_expr_type(value).is_some_and(|t| qualified_ty(&t)),
         };
-        if already { return Some(self.emit_let_value(Some(slot_ty), value)); }
+        if already {
+            // A qualified parameter is a borrowed handle (`&Arc<..>`): store a clone of the handle,
+            // aliasing the caller's object (a `mut` struct parameter inferred `'actor`).
+            if let ExprKind::Var(v) = &value.kind {
+                if self.fn_current_params.get(v.as_str()).is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::Shared))) {
+                    return Some(format!("{v}.clone()"));
+                }
+            }
+            return Some(self.emit_let_value(Some(slot_ty), value));
+        }
         let raw = self.emit_expr_owned(value);
         let single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
         Some(match q {

@@ -1,9 +1,10 @@
-# An element of a `[T'actor]` member is not covered by the `'actor` inference: still rejected.
+# An element of a plain `[T]` member cannot alias the caller's value (only `[T'actor]` elements can, see
+# mut_param_store_actor_infer_elems): still rejected.
 struct ElemPoint:
     var float x
 
 struct ElemHolder:
-    var [ElemPoint'actor] all = []
+    var [ElemPoint] all = []
 
     def add(mut ElemPoint p):
         all.push(p)

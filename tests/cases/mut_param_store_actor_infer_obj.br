@@ -1,0 +1,36 @@
+# `obj.field = p` also infers `'actor` for the stored `mut` parameter when `obj`'s struct type is
+# positively known: a `self` field, a typed parameter or a typed local. Same object in both backends.
+struct ObjPoint:
+    var float x
+
+struct ObjInner:
+    var ObjPoint'actor kept = ObjPoint(0.0)
+
+struct ObjOuter:
+    var ObjInner inner = ObjInner()
+    var ObjPoint'actor own = ObjPoint(0.0)
+
+    def keepNested(mut ObjPoint p):
+        self.inner.kept = p
+
+    def keepInto(mut ObjInner other, mut ObjPoint p):
+        other.kept = p
+
+    def keepLocal(mut ObjPoint p):
+        mut ObjInner tmp = ObjInner()
+        tmp.kept = p
+        print tmp.kept.x
+
+def main():
+    mut a = ObjPoint(1.0)
+    mut o = ObjOuter()
+    o.keepNested(a)
+    a.x = 5.0
+    print o.inner.kept.x
+    mut b = ObjPoint(2.0)
+    mut i = ObjInner()
+    o.keepInto(i, b)
+    b.x = 6.0
+    print i.kept.x
+    mut c = ObjPoint(3.0)
+    o.keepLocal(c)

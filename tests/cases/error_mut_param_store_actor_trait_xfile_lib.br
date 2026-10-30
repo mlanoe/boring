@@ -1,0 +1,4 @@
+# Library of error_mut_param_store_actor_trait_xfile: the trait lives in another file (its
+# parameter type is declared by the importing file).
+pub trait XfKeeper:
+    def keep(mut XfPoint p)

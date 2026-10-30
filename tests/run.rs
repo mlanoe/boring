@@ -652,6 +652,7 @@ error_test_exact!(error_immutable_let);
 // `all.push(p)`): the interpreter aliased, the transpiled Rust silently cloned. `.clone()` is explicit.
 error_test!(error_mut_param_store);
 error_test!(error_mut_param_store_actor_trait);
+error_test!(error_mut_param_store_actor_trait_xfile);
 error_test!(error_mut_param_store_shared);
 error_test!(error_mut_param_store_actor_elems);
 error_test!(error_actor_param_field_arg);
@@ -667,6 +668,8 @@ interp_test!(ok_set_literal_hashable_ctor);
 interp_test!(mut_param_store_clone);
 interp_test!(mut_param_store_actor);
 interp_test!(mut_param_store_actor_infer);
+interp_test!(mut_param_store_actor_infer_obj);
+interp_test!(mut_param_store_actor_infer_elems);
 interp_test!(qualified_member_store);
 interp_test!(managed_owned_member_read);
 interp_test!(struct_set_dict_key);

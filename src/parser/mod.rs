@@ -79,6 +79,11 @@ impl ParseError {
     }
 }
 
+/// `parse` minus the parse-time inference passes: for reading another file's declarations.
+pub(crate) fn parse_without_inference(tokens: Vec<Token>) -> Result<Program, ParseError> {
+    Parser::new(tokens).parse_program()
+}
+
 pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     let mut p = Parser::new(tokens);
     let mut program = p.parse_program()?;

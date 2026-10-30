@@ -827,7 +827,7 @@ impl Checker {
                 "cannot store the `mut` parameter `{n}` in `{place}`: a `mut` parameter is lent (`&mut`) from the caller, \
                  so it cannot be kept past the call, and a stored copy would silently stop aliasing the caller's value. \
                  Fix: store an explicit copy (`{n}.clone()`); or, to keep sharing the caller's object, declare the member \
-                 `Type'actor` (a plain member, a `'shared` member or an element of a collection cannot alias a `mut` value) \
+                 `Type'actor` (a plain member, a `'shared` member or an element of a plain collection cannot alias a `mut` value) \
                  and store `{n}` into it by bare name in a non-trait method, which infers `{n}` as `'actor`"
             ), line, col);
         }

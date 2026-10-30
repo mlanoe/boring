@@ -1,0 +1,17 @@
+# A method implementing a trait declared in an imported file keeps its lent `mut` parameter
+# (`&mut T`, the trait's signature): not inferred `'actor`, so storing it is still rejected.
+use error_mut_param_store_actor_trait_xfile_lib
+
+struct XfPoint:
+    var float x
+
+struct XfHolder as XfKeeper:
+    var XfPoint'actor kept = XfPoint(0.0)
+
+    def keep(mut XfPoint p):
+        kept = p
+
+def main():
+    mut p = XfPoint(1.0)
+    mut h = XfHolder()
+    h.keep(p)

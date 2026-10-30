@@ -2399,7 +2399,10 @@ impl Transpiler {
         // A `mut T&` parameter is already an `&mut` reference: a `mut` binding would only be an
         // unused-mut warning, and is a hard error in a trait method signature without a body.
         let is_mut_borrow = matches!(&p.ty, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
-        let name = if (p.mutable && !lent && !is_mut_borrow) || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
+        // A `mut T'actor`/`T'guard` parameter (declared or inferred) is a handle reached through its
+        // lock, never reassigned: `mut` on the binding would only warn.
+        let is_lock_handle = !p.rebindable && matches!(p.ty.as_ref().map(Type::without_mut), Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard)));
+        let name = if (p.mutable && !lent && !is_mut_borrow && !is_lock_handle) || is_fnmut { format!("mut {}", escaped_name) } else { escaped_name };
         match &p.ty {
             Some(ty) if p.variadic => format!("{}: Vec<{}>", name, self.emit_type(ty)),
             Some(ty) => {

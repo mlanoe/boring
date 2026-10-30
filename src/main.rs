@@ -2417,6 +2417,7 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
         }
     };
 
+    infer_actor_params::set_import_context(&path);
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
@@ -2568,6 +2569,7 @@ fn print_rust(path: &str, config: transpiler::TranspileConfig) {
         Ok(t) => t,
         Err(errors) => { report_lex_errors(&path, &source, &errors); process::exit(1); }
     };
+    infer_actor_params::set_import_context(&path);
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => { report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg()); process::exit(1); }
@@ -2662,6 +2664,7 @@ fn emit_rust_to_dir(path: &str, version: &str, config: transpiler::TranspileConf
         }
     };
 
+    infer_actor_params::set_import_context(&path);
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
@@ -2979,6 +2982,7 @@ fn merge_into(
         }
     };
 
+    infer_actor_params::set_import_context(&canonical);
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
@@ -3612,6 +3616,7 @@ fn emit_kernel_with_version(path: &str, version: &str) {
         }
     };
 
+    infer_actor_params::set_import_context(&path);
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {

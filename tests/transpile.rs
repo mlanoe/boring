@@ -990,6 +990,10 @@ transpile_test!(mut_param_store_actor);
 // A `mut` param stored by bare name into a `T'actor` member is inferred `'actor`: the caller's variable
 // (promoted to `'actor`) and the member are one object, and a non-stored `mut` param still lends `&mut`.
 transpile_test!(mut_param_store_actor_infer);
+// Same inference for `obj.field = p` when `obj`'s struct type is known (self field, typed param/local).
+transpile_test!(mut_param_store_actor_infer_obj);
+// ... and for a push/index store into a `[T'actor]` / `{K = T'actor}` member (the caller's handle).
+transpile_test!(mut_param_store_actor_infer_elems);
 transpile_test!(qualified_member_store);
 // Managed mode: a `T'owned` member is an `Arc<Mutex<T>>`/`RefCell<T>`, read and written through its guard.
 transpile_test!(managed_owned_member_read);

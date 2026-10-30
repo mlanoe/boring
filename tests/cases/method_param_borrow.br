@@ -1,6 +1,7 @@
 # Bare read-only struct/enum/collection parameters of ordinary methods are lent as `&T`, like
 # the same parameters of free functions. Methods sharing their name with a trait method or with
-# another type's method keep every parameter by value, at every call site.
+# another type's method are lent like any other when every method of that name agrees
+# (see tests/method_param_borrow_name_rule.rs for the disagreeing case).
 struct Point:
     float x
     float y
@@ -91,7 +92,7 @@ def main():
         print k.sum(p)
     print b.len()
     print p.x
-    # unresolved receiver, name shared by two types: by value at every call site (b is moved)
+    # unresolved receiver, name shared by two agreeing types: looked up by name, lent
     let fixed2 = Calc(3.0)
     let getCalc2 = (): fixed2
     print getCalc2().same(b)
