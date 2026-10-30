@@ -789,6 +789,7 @@ interp_test!(implicit_self_actor_field_alias);
 interp_test!(view_lifecycle_actions);
 interp_test!(view_state_seed_values);
 interp_test!(view_env_provide);
+interp_test!(view_env_closure_capture);
 interp_test!(view_scenarios);
 interp_test!(view_array_block_closure_arg);
 interp_test!(view_bind_env);

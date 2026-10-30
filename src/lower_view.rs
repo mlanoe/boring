@@ -732,7 +732,7 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, ow
                 args.push(format!("{n} = {n}"));
             }
             let env_name = format!("{}__Env", s.name);
-            body.push_str(&format!("        let e = {env_name}({})\n", args.join(", ")));
+            body.push_str(&format!("        let {env_name}'shared e = {env_name}({})\n", args.join(", ")));
             body.push_str(if has_state { "        self.body(s, e)\n" } else { "        self.body(e)\n" });
             src.push_str(&body);
             src.push_str("    req View expand(StateBox'shared st): self.expandIn(st, [])\n");

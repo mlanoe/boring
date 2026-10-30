@@ -1,0 +1,27 @@
+# An `env` field used inside a closure in `body()` makes the body take the env as an `Arc`;
+# the generated `expandIn` must hand it one (was E0308: `Link__Env` vs `Arc<Link__Env>`).
+use boring.ui.*
+
+use PushFn as def void(string)
+
+struct Navigator as EnvValue:
+    PushFn push
+    int depth
+
+view Link:
+    env Navigator nav
+    string to
+
+    body():
+        Button(label = "go", onActivate = ():
+            nav.push(to))
+
+def main():
+    let l = Link(to = "x")
+    let StateBox'shared st = NoState()
+    let PushFn pf = (string s):
+        print "pushed {s}"
+    let [EnvValue] scope = [Navigator(push = pf, depth = 0)]
+    let v = l.expandIn(st, scope)
+    print v.viewKind()
+    v.viewAct("activate", "")

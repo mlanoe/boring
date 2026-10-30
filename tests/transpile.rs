@@ -483,6 +483,7 @@ transpile_test!(view_env_provide);
 transpile_test!(actor_scenarios);
 transpile_test!(actor_slot_double_read);
 transpile_test!(view_env_only);
+transpile_test!(view_env_closure_capture);
 // Named cross-project dependency (docs/cross-project-code-sharing-gap.md's [deps]
 // work): `use numlib.big_uint.*` resolves against tests/cases/fixtures/dep_numlib via
 // tests/cases/cross_project_dep/boring.toml's own `[deps]` section. Project mode (its
