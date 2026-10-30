@@ -2041,6 +2041,20 @@ impl Parser {
             )
     }
 
+    /// The name in a `struct`/`enum`/`trait`/`use .. as`/`type` declaration. The
+    /// fixed-point type names (`fixed16_16`, `u8_8`, ...) are reserved, exactly as `i32` is.
+    pub(crate) fn expect_type_decl_name(&mut self) -> Result<String, ParseError> {
+        let (line, col, len) = (self.line(), self.col(), self.tok_len());
+        let name = self.expect_ident()?;
+        if crate::fixed::FixedFmt::is_reserved_type_name(&name) {
+            return Err(ParseError::Generic {
+                line, col, len,
+                msg: format!("`{name}` is a reserved fixed-point type name and cannot be declared"),
+            });
+        }
+        Ok(name)
+    }
+
     fn parse_struct_or_view(
         &mut self,
         is_pub: bool,
@@ -2054,7 +2068,7 @@ impl Parser {
         } else {
             self.expect(&TokenKind::Struct)?;
         }
-        let name = self.expect_ident()?;
+        let name = self.expect_type_decl_name()?;
         let (type_params, where_clause) = self.parse_type_params();
         let mut protocols = Vec::new();
         if self.eat(&TokenKind::As) {
@@ -2490,7 +2504,7 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         self.expect(&TokenKind::Enum)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_type_decl_name()?;
         let (type_params, _) = self.parse_type_params();
         let mut protocols = Vec::new();
         if self.eat(&TokenKind::As) {
@@ -2723,7 +2737,7 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         self.expect(&TokenKind::Trait)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_type_decl_name()?;
         let (type_params, _) = self.parse_type_params();
         let mut parents = Vec::new();
         // `trait B as A:` or `trait B as A, C:` — supertrait(s) via `as`

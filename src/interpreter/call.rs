@@ -318,6 +318,24 @@ impl Interpreter {
                 if resolved_ret.as_ref().map(|t| matches!(t, Type::Void)).unwrap_or(false) {
                     Ok(Value::Void)
                 } else if let Some(ref resolved) = resolved_ret {
+                    // Strict mixing: a bare `int`/`float` value only becomes a `fixedN_M`
+                    // return when the function yields an untyped literal; any other
+                    // numeric expression needs an explicit `as`.
+                    if let Type::Fixed(fmt) = super::strip_qualifiers(resolved.without_mut()) {
+                        if matches!(v, Value::Int(_) | Value::Float64(_)) {
+                            let mut results: Vec<&Expr> = Vec::new();
+                            collect_result_exprs(&decl.body, true, &mut results);
+                            if !results.iter().any(|e| super::eval_expr::is_untyped_numeric_literal(e)) {
+                                return Err(err(
+                                    format!(
+                                        "function '{}' declared to return {}, but got {}; convert explicitly with `as {}`",
+                                        decl.name, fmt.name(), v.type_name(), fmt.name()
+                                    ),
+                                    line,
+                                ));
+                            }
+                        }
+                    }
                     let coerced = Self::coerce_to_type(v, resolved);
                     // ── Return type check ────────────────────────────────────────
                     if !self.value_matches_type(&coerced, resolved) {
@@ -1011,5 +1029,34 @@ fn default_value_for_type(ty: &Type) -> Value {
         Type::Tuple(elems) => Value::Tuple(elems.iter().map(default_value_for_type).collect()),
         Type::Qualified(inner, _) => default_value_for_type(inner),
         _ => Value::Nil,
+    }
+}
+
+/// Collects the expressions a function body can yield as its result: every `return <expr>`
+/// at any depth, plus the tail expression (descending into a trailing `if`/`match`).
+fn collect_result_exprs<'a>(body: &'a [Stmt], tail: bool, out: &mut Vec<&'a Expr>) {
+    for (i, stmt) in body.iter().enumerate() {
+        let is_tail = tail && i + 1 == body.len();
+        match stmt {
+            Stmt::Return(r) => { if let Some(e) = &r.value { out.push(e); } }
+            Stmt::Expr(e) if is_tail && !matches!(e.kind, ExprKind::Assign(..)) => out.push(e),
+            Stmt::If(s) => {
+                for (_, b) in &s.branches { collect_result_exprs(b, is_tail, out); }
+                if let Some(b) = &s.else_body { collect_result_exprs(b, is_tail, out); }
+            }
+            Stmt::Match(s) => {
+                for arm in &s.arms {
+                    match &arm.body {
+                        MatchBody::Expr(e) => { if is_tail { out.push(e); } }
+                        MatchBody::Block(b) => collect_result_exprs(b, is_tail, out),
+                    }
+                }
+            }
+            Stmt::While(s) => collect_result_exprs(&s.body, false, out),
+            Stmt::For(s) => collect_result_exprs(&s.body, false, out),
+            Stmt::Loop(s) => collect_result_exprs(&s.body, false, out),
+            Stmt::Try(s) => collect_result_exprs(&s.body, false, out),
+            _ => {}
+        }
     }
 }

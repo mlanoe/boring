@@ -737,7 +737,7 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         self.expect(&TokenKind::Use)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_type_decl_name()?;
         // Optional generic type params: `use Callable<T> as …`
         let type_params = if self.check(&TokenKind::Lt) {
             let (tp, _) = self.parse_type_params();
@@ -757,7 +757,7 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         self.expect(&TokenKind::Type)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_type_decl_name()?;
         self.expect(&TokenKind::As)?;
         let ty = self.parse_type()?;
         self.expect_newline()?;

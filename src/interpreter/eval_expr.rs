@@ -769,6 +769,25 @@ impl Interpreter {
             }
             _ => self.eval_args(args, Rc::clone(&env))?,
         };
+        match &callee {
+            Value::Fn { decl, .. } => {
+                let slots: Vec<(String, Option<Type>)> =
+                    decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+                self.check_fixed_args(args, &arg_vals, &slots, line)?;
+            }
+            Value::Struct { decl, .. } => {
+                let slots: Vec<(String, Option<Type>)> = if let Some(init) = decl.inits.iter()
+                    .find(|i| args.len() >= i.params.iter().filter(|p| p.default.is_none()).count()
+                        && args.len() <= i.params.len())
+                {
+                    init.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+                } else {
+                    decl.fields.iter().map(|f| (f.name.clone(), Some(f.ty.clone()))).collect()
+                };
+                self.check_fixed_args(args, &arg_vals, &slots, line)?;
+            }
+            _ => {}
+        }
         let result = self.call_value(callee.clone(), arg_vals, line, false)?;
         // Write back mutated `var` params to their caller variables.
         if let Value::Fn { ref decl, .. } = callee {
@@ -1198,8 +1217,14 @@ impl Interpreter {
         }
         let arg_vals = match method_candidates.as_slice() {
             [] => self.eval_args(args, Rc::clone(&env))?,
-            [only] => self.eval_args_with_hints(args, Rc::clone(&env),
-                &only.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>())?,
+            [only] => {
+                let vals = self.eval_args_with_hints(args, Rc::clone(&env),
+                    &only.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>())?;
+                let slots: Vec<(String, Option<Type>)> =
+                    only.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
+                self.check_fixed_args(args, &vals, &slots, line)?;
+                vals
+            }
             many => {
                 let hints = self.merged_overload_param_hints(many, args.len());
                 self.eval_args_with_hints(args, Rc::clone(&env), &hints)?
@@ -1715,7 +1740,12 @@ impl Interpreter {
                         let dt = env.borrow().get_declared_type(name);
                         if let Some(ty) = dt {
                             let ty = self.resolve_type(&ty);
-                            if matches!(super::strip_qualifiers(ty.without_mut()), Type::Fixed(_)) {
+                            if let Type::Fixed(fmt) = super::strip_qualifiers(ty.without_mut()) {
+                                if !is_untyped_numeric_literal(value) {
+                                    return Err(err(format!(
+                                        "cannot assign {} to '{name}': expected {}; convert explicitly with `as {}`",
+                                        val.type_name(), fmt.name(), fmt.name()), line));
+                                }
                                 val = Self::coerce_to_type(val, &ty);
                             }
                         }
@@ -1733,7 +1763,10 @@ impl Interpreter {
                 {
                     self.in_content_writeback = true;
                 }
-                self.assign(target, val.clone(), Rc::clone(&env), line)?;
+                let prev_nonliteral = std::mem::replace(&mut self.assign_rhs_nonliteral, !is_untyped_numeric_literal(value));
+                let assigned = self.assign(target, val.clone(), Rc::clone(&env), line);
+                self.assign_rhs_nonliteral = prev_nonliteral;
+                assigned?;
                 Ok(val)
             }
 
@@ -3080,6 +3113,34 @@ impl Interpreter {
             return Err(err_at(format!("cannot compare {} and {}", l.type_name(), r.type_name()), line, col));
         };
         Ok(Value::Bool(pred(ord)))
+    }
+
+    /// Strict-mixing rule for fixed-point parameters and struct fields: an `int`/`float`
+    /// *variable* (or any non-literal numeric expression) passed where a `fixedN_M` is
+    /// declared needs an explicit `as`; only an untyped numeric literal adopts the format.
+    /// `slots` are the callee's `(name, declared type)` pairs, matched by label or position.
+    pub(crate) fn check_fixed_args(&self, args: &[Arg], vals: &[Value], slots: &[(String, Option<Type>)], line: usize) -> Result<(), Signal> {
+        for (i, arg) in args.iter().enumerate() {
+            if arg.spread || arg.default_rest { continue; }
+            let slot = match &arg.label {
+                Some(l) => slots.iter().find(|(n, _)| n == l),
+                None => slots.get(i),
+            };
+            let Some((name, Some(ty))) = slot else { continue };
+            let resolved = self.resolve_type(ty);
+            let Type::Fixed(fmt) = super::strip_qualifiers(resolved.without_mut()) else { continue };
+            let val = match vals.get(i) {
+                Some(Value::Labeled { value, .. }) => &**value,
+                Some(v) => v,
+                None => continue,
+            };
+            if matches!(val, Value::Int(_) | Value::Float64(_)) && !is_untyped_numeric_literal(&arg.value) {
+                return Err(err(format!(
+                    "cannot pass {} to '{name}': expected {}; convert explicitly with `as {}`",
+                    val.type_name(), fmt.name(), fmt.name()), line));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn eval_args(&mut self, args: &[Arg], env: EnvRef) -> Result<Vec<Value>, Signal> {

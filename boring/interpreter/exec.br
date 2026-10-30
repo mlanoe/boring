@@ -193,6 +193,7 @@ def Signal? exec_stmt(mut Interpreter interp, Stmt stmt):
                 # Coerce int literals/values to the declared uint/uint8 type — the parser
                 # already recognizes these annotations, but nothing applied them at runtime.
                 if let declared_ty = s.ty:
+                    check_fixed_declared(declared_ty, expr, val, "assign", s.name)
                     match declared_ty:
                         Type.Uint:
                             match val:

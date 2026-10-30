@@ -208,6 +208,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             # An argument that threw (`print early(1)`): propagate it, don't call with Nil.
             if interp.has_pending_throw:
                 return Value.Nil
+            check_fixed_ctor_args(interp, callee, args, arg_vals)
             interp.last_var_params = []
             let result = call_value(interp, callee, arg_vals)
             write_back_fn_var_args(interp, callee, args)
@@ -679,6 +680,32 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
 
         ExprKind.Assign(target, val_expr):
             let val = eval_expr(interp, val_expr)
+            # `g = f` / `p.v = f` where the slot holds a fixed-point value: only an
+            # untyped literal may adopt its format.
+            match val:
+                Value.Int(_) | Value.Float64(_):
+                    if not is_untyped_numeric_literal(val_expr):
+                        var slot_name = ""
+                        var guard_ok = false
+                        match target.kind:
+                            ExprKind.Var(vname):
+                                slot_name = vname
+                                guard_ok = vname != "_"
+                            ExprKind.Field(fobj, fname):
+                                match fobj.kind:
+                                    ExprKind.Var(_):
+                                        slot_name = fname
+                                        guard_ok = true
+                                    _: nil
+                            _: nil
+                        if guard_ok:
+                            let cur_slot = eval_expr(interp, target.clone())
+                            match cur_slot:
+                                Value.Fixed(_, csg, cn, cm):
+                                    let cf = FixedFmt(signed = csg, n = cn, m = cm)
+                                    throw "cannot assign {value_type_name(val)} to '{slot_name}': expected {cf.name()}; convert explicitly with `as {cf.name()}`"
+                                _: nil
+                _: nil
             assign_target(interp, target, val)
             Value.Nil
 
@@ -946,6 +973,9 @@ def [Value] eval_args_with_hints(mut Interpreter interp, [Arg] args, [Type?] hin
                     _: nil
         if not hinted:
             v = eval_expr(interp, arg.value)
+        if i < hints.length and not arg.spread and arg.label == nil:
+            if let strict_ty = hints[i]:
+                check_fixed_declared(strict_ty, arg.value, v, "pass", "argument {i + 1}")
         if arg.spread:
             # Spread: expand struct fields as labeled args
             match v:
@@ -1723,6 +1753,52 @@ Value? fixed_literal_value(FixedFmt f, Value v):
                 Value.Fixed(raw, f.signed, f.n, f.m)
             else:
                 throw "literal out of range for {f.name()}"
+        _: nil
+
+# Strict mixing for fixed-point bindings, arguments and fields: an `int`/`float`
+# *variable* (any non-literal numeric expression) needs an explicit `as` where a
+# `fixedN_M` is declared; only an untyped numeric literal adopts the format.
+# Mirrors the Rust interpreter's `check_fixed_binding` / `check_fixed_args`.
+def check_fixed_declared(Type ty, Expr e, Value v, string verb, string name):
+    match ty:
+        Type.Qualified(inner, _): check_fixed_declared(inner, e, v, verb, name)
+        Type.Named(tname):
+            if let f = fixed_fmt_of_name(tname):
+                match v:
+                    Value.Int(_) | Value.Float64(_):
+                        if not is_untyped_numeric_literal(e):
+                            throw "cannot {verb} {value_type_name(v)} to '{name}': expected {f.name()}; convert explicitly with `as {f.name()}`"
+                    _: nil
+        _: nil
+
+# Constructor arguments against the struct's declared field types (by label, else position).
+def check_fixed_ctor_args(mut Interpreter interp, Value callee, [Arg] args, [Value] arg_vals):
+    match callee:
+        Value.StructDef(sname):
+            let decl_opt = interp.get_struct_decl(sname)
+            if let decl = decl_opt:
+                if decl.inits.length > 0:
+                    return
+                var i = 0
+                while i < args.length and i < arg_vals.length:
+                    let arg = args[i]
+                    if not arg.spread and not arg.default_rest:
+                        var fi = -1
+                        if let label = arg.label:
+                            var k = 0
+                            while k < decl.fields.length:
+                                if decl.fields[k].name == label:
+                                    fi = k
+                                k += 1
+                        else:
+                            fi = i
+                        if fi >= 0 and fi < decl.fields.length:
+                            var raw = arg_vals[i]
+                            match raw:
+                                Value.Labeled(_, inner_v): raw = inner_v
+                                _: nil
+                            check_fixed_declared(decl.fields[fi].ty, arg.value, raw, "pass", decl.fields[fi].name)
+                    i += 1
         _: nil
 
 (Value, Value) coerce_fixed_literal_pair(Value l, Value r, Expr lhs, Expr rhs):

@@ -20,12 +20,18 @@
 >
 > - Names are reserved by shape: `fixedN_M`/`ufixedN_M` always (an invalid one
 >   is a parse error), `iN_M`/`uN_M` only when valid, so `i3_4` as a variable
->   name still works. A *user type* named like a valid format is not rejected yet.
+>   name still works. Declaring a `struct`/`enum`/`trait`/`type`/`use … as` with a
+>   reserved format name (`struct u8_8`) is a parse error.
 > - `0.1 as fixed16_16` — a cast of an untyped literal — rounds to nearest like
 >   a contextual literal; only casts of *computed* values truncate.
 > - Strictness against int/float *variables* is enforced at `let` bindings and
->   in operators; passing a `float64` variable to a `fixed` parameter/field is
->   still accepted by the interpreters (same leniency `float32` has today).
+>   in operators, and in the interpreters at every other binding site too: a
+>   non-literal `int`/`float` passed to a `fixed` parameter, constructor field or
+>   `init` parameter, assigned to a `fixed` variable or field, or returned from a
+>   `fixed` function needs an explicit `as`. Only an untyped literal adopts the
+>   format. Known leftovers: the self-hosted interpreter does not check function
+>   returns, and a `float64` *variable* placed inside a tuple literal is still
+>   coerced when the tuple meets a `(fixedN_M, …)` slot.
 > - `fixed → fixed` / `int → fixed` / `float → fixed` casts that do not fit give
 >   `nil` in the interpreters and panic in generated Rust.
 > - The Rust newtype definitions are appended to the generated program for every

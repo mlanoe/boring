@@ -2545,6 +2545,9 @@ pub struct Interpreter {
     /// place: a field write that is really *content* mutation (`s.log.push(x)`,
     /// `s.log[i] = x`), permitted by a `mut`-typed field without `var`.
     pub(crate) in_content_writeback: bool,
+    /// Set for the duration of one `target = <expr>` whose right-hand side is a non-literal
+    /// numeric expression: a fixed-point field must then refuse a bare `int`/`float` value.
+    pub(crate) assign_rhs_nonliteral: bool,
     /// Runtime store for `type var` values: "StructName::var_name" → Value.
     /// `type let` values are stored here too (immutability enforced by the interpreter).
     pub(crate) type_var_store: HashMap<String, Value>,
@@ -2734,6 +2737,7 @@ impl Interpreter {
             current_method_mutating: true,  // default to mutating for top-level code
             in_init_body: false,
             in_content_writeback: false,
+            assign_rhs_nonliteral: false,
             type_var_store: HashMap::new(),
             in_type_setter: false,
             in_instance_setter: None,
@@ -2784,6 +2788,7 @@ impl Interpreter {
             current_method_mutating: true,
             in_init_body: false,
             in_content_writeback: false,
+            assign_rhs_nonliteral: false,
             type_var_store: HashMap::new(),
             in_type_setter: false,
             in_instance_setter: None,

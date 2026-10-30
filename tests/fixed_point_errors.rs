@@ -75,3 +75,34 @@ fn math_domain_and_overflow_errors() {
     fails_run("expovf", "let fixed16_16 a = 20.0\nprint \"{a.exp()}\"\n", "fixed-point overflow in fixed16_16.exp()");
     fails_run("lnneg_unsigned", "let ufixed8_8 a = 0.5\nprint \"{a.ln()}\"\n", "fixed-point overflow in ufixed8_8.ln()");
 }
+
+#[test]
+fn float_and_int_variables_need_as_at_every_binding_site() {
+    let hint = "convert explicitly with `as fixed16_16`";
+    let head = "struct P:\n    var fixed16_16 v = 0.0\n    def set(fixed16_16 x):\n        v = x\n";
+    fails_run("arg", &format!("fixed16_16 id(fixed16_16 a):\n    a\nlet float64 f = 1.5\nprint \"{{id(f)}}\"\n"), hint);
+    fails_run("ctor", &format!("{head}let float64 f = 1.5\nprint \"{{P(v = f).v}}\"\n"), hint);
+    fails_run("method", &format!("{head}mut p = P()\nlet int n = 2\np.set(n)\n"), hint);
+    fails_run("field", &format!("{head}mut p = P()\nlet float64 f = 1.5\np.v = f\n"), hint);
+    fails_run("reassign", "var fixed16_16 g = 0.0\nlet float64 f = 1.5\ng = f\n", hint);
+    fails_run("return", "fixed16_16 r(float64 f):\n    f\nprint \"{r(1.5)}\"\n", hint);
+}
+
+#[test]
+fn literals_still_adopt_the_fixed_format_everywhere() {
+    let src = "struct P:\n    var fixed16_16 v = 0.0\n    def set(fixed16_16 x):\n        v = x\n\
+fixed16_16 a(fixed16_16 x):\n    1.5\nfixed16_16 b(bool c):\n    if c:\n        return 2\n    0.25\n\
+mut p = P(v = 0.5)\np.set(2)\np.v = 3.25\nvar fixed16_16 g = 0.0\ng = -1.5\n\
+print \"{p.v} {a(1)} {b(true)} {b(false)} {g}\"\n";
+    let (ok, text) = run("literals_ok", src, &["run"]);
+    assert!(ok && text.trim() == "3.25 1.5 2 0.25 -1.5", "got: {text}");
+}
+
+#[test]
+fn fixed_type_names_cannot_be_declared() {
+    let needle = "reserved fixed-point type name";
+    fails_run("struct_name", "struct u8_8:\n    int x\n", needle);
+    fails_run("enum_name", "enum fixed16_16:\n    A\n", needle);
+    fails_run("trait_name", "trait ufixed8_8:\n    req int f()\n", needle);
+    fails_run("type_name", "type i16_16 as int\n", needle);
+}

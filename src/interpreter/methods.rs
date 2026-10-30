@@ -2847,6 +2847,13 @@ impl Interpreter {
                         let val = match field_ty {
                             Some(ty) => {
                                 let resolved_ty = self.resolve_type(&ty);
+                                if self.assign_rhs_nonliteral && matches!(val, Value::Int(_) | Value::Float64(_)) {
+                                    if let Type::Fixed(fmt) = super::strip_qualifiers(resolved_ty.without_mut()) {
+                                        return Err(err(format!(
+                                            "cannot assign {} to field '{field}': expected {}; convert explicitly with `as {}`",
+                                            val.type_name(), fmt.name(), fmt.name()), line));
+                                    }
+                                }
                                 Self::coerce_to_type(val, &resolved_ty)
                             }
                             None => val,

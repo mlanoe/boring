@@ -1144,6 +1144,12 @@ impl Interpreter {
             (Type::Set(elem_ty), Value::Set(elems)) => {
                 return Value::Set(elems.iter().cloned().map(|e| Self::coerce_to_type(e, elem_ty)).collect());
             }
+            // `(fixed16_16, int)`-typed tuple: a literal slot adopts its declared type.
+            (Type::Tuple(tys), Value::Tuple(elems)) if tys.len() == elems.len() => {
+                return Value::Tuple(
+                    elems.iter().cloned().zip(tys.iter()).map(|(e, t)| Self::coerce_to_type(e, t)).collect(),
+                );
+            }
             _ => {}
         }
 
