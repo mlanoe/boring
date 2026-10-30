@@ -221,7 +221,7 @@ fn trait_array_field_debug_supertrait_is_kept_and_compiles() {
     );
     let generated = String::from_utf8_lossy(&emit.stdout).into_owned();
     assert!(
-        generated.contains("trait Drawable: std::fmt::Debug {"),
+        generated.contains("trait Drawable: std::fmt::Debug + Send + Sync {"),
         "a bare `Debug` supertrait must be fully qualified to `std::fmt::Debug` \
          (unqualified `Debug` fails to resolve as a trait bound -- it's not in the 2021 \
          prelude for plain name resolution, only for derive-macro invocation), got:\n{}",
