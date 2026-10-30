@@ -2029,6 +2029,26 @@ impl Transpiler {
         // struct field (`bind.value.rename(s)`): lock the handle, then call on the projected field.
         // The path below the handle may be deeper than one field (`item.value.hist.push(..)`, a
         // lowered `bind` slot's projected collection): peel field layers until a lock handle shows.
+        // `coll[i].method(args)` / `holder.owned_field.method(args)`: the receiver is itself a lock
+        // handle (an element of a collection of `'actor`/`'guard` values, or a managed-mode
+        // `T'owned` member), so call through its guard. Plain `self.field` `'actor` members keep
+        // their dedicated dispatch below/above.
+        if matches!(&obj.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..) | ExprKind::Field(..)) {
+            if let Some(r) = self.resolve_lock_field_ref(obj) {
+                let held = {
+                    let mut cur = r.field_ty.without_mut();
+                    while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
+                    receiver_type_name(cur)
+                };
+                let via_handle = !matches!(&obj.kind, ExprKind::Field(..)) || self.is_managed_owned_user(r.field_ty.without_mut());
+                if via_handle && held.as_deref().is_some_and(|n| self.is_known_user_type(n)) {
+                    let mut args_s: Vec<String> = self.emit_user_method_args(held.as_deref(), method, args);
+                    let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
+                    let call = format!("{}.{}({})", self.lock_field_write(&r), method, args_s.join(", "));
+                    return Some(Self::with_hoisted_args(&hoisted, call));
+                }
+            }
+        }
         let mut peeled: Vec<&str> = Vec::new();
         let mut cur = obj;
         let lock_path = loop {
@@ -3772,7 +3792,7 @@ impl Transpiler {
     /// known to be qualified is aliased through `emit_let_value` instead (never double-wrapped).
     /// `None` when the slot type is not such a qualified user struct.
     pub(crate) fn emit_qualified_struct_store(&self, slot_ty: &Type, value: &Expr) -> Option<String> {
-        let Type::Qualified(inner, q @ (OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Owned)) = slot_ty.without_mut() else { return None };
+        let Type::Qualified(inner, q @ (OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Owned)) = slot_ty.without_mut() else { return None };
         if !matches!(inner.as_ref(), Type::Named(n) if self.struct_fields.contains_key(n.as_str())) { return None; }
         let qualified_ty = |t: &Type| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Owned | OwnerQual::ActorTask | OwnerQual::GuardTask));
         let already = match &value.kind {
@@ -3800,6 +3820,7 @@ impl Transpiler {
         Some(match q {
             OwnerQual::Shared => format!("{}::new({raw})", if single { "Rc" } else { "Arc" }),
             OwnerQual::Actor => self.emit_actor_new(&raw),
+            OwnerQual::Guard => self.emit_guard_new(&raw),
             _ if self.is_managed_owned_user(slot_ty.without_mut()) => {
                 if single { format!("RefCell::new({raw})") } else { self.emit_actor_new(&raw) }
             }
@@ -6951,6 +6972,24 @@ impl Transpiler {
                     }
                 }
                 (self.resolve_expr_struct_type(inner)?, f.clone(), self.emit_expr(inner))
+            }
+            // `coll[i]` whose element is an `'actor`/`'guard` (or managed-mode `'owned`) value: the
+            // element is itself the lock handle, so the lock is taken on the indexed place (never
+            // on the `.clone()` an index read of a non-Copy element normally yields).
+            ExprKind::Index(..) | ExprKind::LabeledIndex(..) => {
+                let elem_ty = self.resolve_expr_type(obj)?;
+                let cur = elem_ty.without_mut();
+                let rwlock = matches!(cur, Type::Qualified(_, OwnerQual::Guard | OwnerQual::GuardTask));
+                if !matches!(cur, Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
+                    && !self.is_managed_owned_user(cur)
+                {
+                    return None;
+                }
+                let old = self.in_lhs_assign.replace(true);
+                let rendered = self.emit_expr(obj);
+                self.in_lhs_assign.set(old);
+                let handle = rendered.strip_suffix(".clone()").unwrap_or(&rendered).to_string();
+                return Some(LockFieldRef { key: String::new(), handle, rwlock, field_ty: elem_ty });
             }
             _ => return None,
         };

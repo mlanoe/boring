@@ -1462,6 +1462,33 @@ impl Transpiler {
                     self.var_types.insert(s.name.clone(), ty);
                 }
             }
+            // `let q = coll[i]` over a collection of `'actor`/`'guard` elements: `q` is a handle to
+            // the element (the clone the index read yields is an `Arc`/`Rc` clone), used like any
+            // other actor local.
+            if matches!(&s_value.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..)) {
+                if let Some(elem_ty) = self.resolve_expr_type(s_value) {
+                    if Self::is_mutex_binding(false, &elem_ty) || Self::is_rwlock_binding(false, &elem_ty) {
+                        if Self::is_mutex_task_binding(false, &elem_ty) {
+                            self.var_mutex_task_types.insert(s.name.clone());
+                        } else if Self::is_rwlock_task_binding(false, &elem_ty) {
+                            self.var_rwlock_task_types.insert(s.name.clone());
+                        } else if Self::is_mutex_binding(false, &elem_ty) {
+                            self.var_mutex_types.insert(s.name.clone());
+                        } else {
+                            self.var_rwlock_types.insert(s.name.clone());
+                        }
+                        self.arc_vars.insert(s.name.clone());
+                        if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
+                            self.rc_vars.insert(s.name.clone());
+                        }
+                        let inner = Self::mutex_inner(&elem_ty).or_else(|| Self::rwlock_inner(&elem_ty));
+                        if inner.map(Self::is_copy_type).unwrap_or(false) {
+                            self.var_lock_scalar.insert(s.name.clone());
+                        }
+                        self.var_types.insert(s.name.clone(), elem_ty);
+                    }
+                }
+            }
             if let ExprKind::Field(obj_expr, field_name) = &s_value.kind {
                 if let ExprKind::Var(v) = &obj_expr.kind {
                     if self.var_mutex_types.contains(v.as_str()) {

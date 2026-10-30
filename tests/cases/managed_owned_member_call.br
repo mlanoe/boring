@@ -1,0 +1,37 @@
+struct Point:
+    var float x
+    var float y
+    def bump():
+        x += 1.0
+    req float sum():
+        x + y
+
+struct Holder:
+    var mut Point'owned one = Point(1.0, 2.0)
+    var [Point'owned] many = []
+    var {string = Point'owned} byName = {=}
+    def addMany(Point p):
+        many.push(p)
+    def putByName(string k, Point p):
+        byName[k] = p
+    def bumpOne():
+        one.bump()
+    req float sumOne():
+        one.sum()
+
+def main():
+    mut h = Holder()
+    h.one.bump()
+    print h.one.sum()
+    h.bumpOne()
+    print h.sumOne()
+    h.addMany(Point(3.0, 4.0))
+    print h.many[0].y
+    h.many[0].x = 9.0
+    print h.many[0].x
+    h.many[0].bump()
+    print h.many[0].sum()
+    h.putByName("k", Point(0.5, 0.25))
+    print h.byName["k"].x
+    h.byName["k"].bump()
+    print h.byName["k"].sum()

@@ -997,6 +997,8 @@ transpile_test!(mut_param_store_actor_infer_elems);
 transpile_test!(qualified_member_store);
 // Managed mode: a `T'owned` member is an `Arc<Mutex<T>>`/`RefCell<T>`, read and written through its guard.
 transpile_test!(managed_owned_member_read);
+transpile_test!(managed_owned_member_call);
+transpile_test!(actor_collection_element_access);
 // A struct is a set element / dict key: auto-derived `Eq + Hash` when every field is hashable.
 transpile_test!(struct_set_dict_key);
 transpile_test!(struct_transient_hash);

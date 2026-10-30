@@ -1,0 +1,40 @@
+struct Point:
+    var float x
+    var float y
+    def bump():
+        x += 1.0
+    req float sum():
+        x + y
+
+struct Holder:
+    var [Point'actor] acArr = []
+    var {string = Point'actor} acMap = {=}
+    var [Point'guard] gdArr = []
+    def pushAc(Point p):
+        acArr.push(p)
+    def putAc(string k, Point p):
+        acMap[k] = p
+    def pushGd(Point p):
+        gdArr.push(p)
+
+def main():
+    let p = Point(1.0, 2.0)
+    mut h = Holder()
+    h.pushAc(p)
+    h.putAc("a", Point(5.0, 6.0))
+    h.pushGd(Point(7.0, 8.0))
+    print h.acArr[0].y
+    print h.acMap["a"].x
+    print h.gdArr[0].y
+    h.acArr[0].x = 10.0
+    h.acMap["a"].y = 20.0
+    print h.acArr[0].x
+    print h.acMap["a"].y
+    mut q = h.acArr[0]
+    print q.x
+    q.x = 11.0
+    print h.acArr[0].x
+    mut g = h.gdArr[0]
+    print g.x
+    h.acArr[0].bump()
+    print h.acArr[0].sum()

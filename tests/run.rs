@@ -672,6 +672,8 @@ interp_test!(mut_param_store_actor_infer_obj);
 interp_test!(mut_param_store_actor_infer_elems);
 interp_test!(qualified_member_store);
 interp_test!(managed_owned_member_read);
+interp_test!(managed_owned_member_call);
+interp_test!(actor_collection_element_access);
 interp_test!(struct_set_dict_key);
 interp_test!(struct_transient_hash);
 interp_test!(struct_value_eq);
