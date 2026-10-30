@@ -2696,6 +2696,14 @@ impl Transpiler {
                     ExprKind::Var(v) if self.bare_self_field_collection_needs_clone(v) => {
                         format!("{}.clone()", self.emit_expr(value))
                     }
+                    // A lent array parameter (`&Vec<Arc<dyn T>>`) in owned position: the shared
+                    // pointers are `Clone`, so copy it out instead of returning the reference.
+                    ExprKind::Var(v) if self.fn_current_params.contains_key(v.as_str())
+                        && (matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Borrow | OwnerQual::BorrowMut))
+                            || matches!(self.fn_current_params.get(v.as_str()),
+                                Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)))) => {
+                        format!("{}.clone()", self.emit_expr(value))
+                    }
                     _ => self.emit_expr(value),
                 }
             }

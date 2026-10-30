@@ -491,6 +491,7 @@ itest!(pub_top_level_const);
 
 itest!(collection_named_methods);
 itest!(array_param_length_only);
+itest!(shared_dyn_array_param_returned);
 itest!(destructured_slice_by_value_reuse);
 itest!(try_prefix_in_cond_clause_noparen);
 

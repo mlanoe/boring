@@ -896,6 +896,7 @@ interp_test!(collection_named_methods);
 // Same cases as the transpile_tests of the same name -- both backends print identical output.
 interp_test!(misc_scenarios_4);
 interp_test!(array_param_length_only);
+interp_test!(shared_dyn_array_param_returned);
 interp_test!(var_mut_collection_ok);
 
 // A single-uppercase-letter struct name (`struct M`) parses its uses as `Type::TypeParam`;

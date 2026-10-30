@@ -1511,6 +1511,7 @@ transpile_test!(misc_scenarios_4);
 // as a use without ever disqualifying it), a type that doesn't exist on non-GPU targets. See
 // `scan_expr_var_arg` in `src/ast/mod.rs`.
 transpile_test!(array_param_length_only);
+transpile_test!(shared_dyn_array_param_returned);
 
 // A struct method calling a sibling through `self.` (the bare form is a diagnostic, covered by
 // `tests/bare_sibling_method_call_build_fails.rs`), and a same-named top-level function still

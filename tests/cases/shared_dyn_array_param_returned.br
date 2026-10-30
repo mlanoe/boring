@@ -1,0 +1,32 @@
+# A method's lent `[Trait]` array parameter (shared trait objects) that is returned by value on one
+# path and rebuilt on another: the returned reference must be cloned out (`scope.clone()`).
+trait Env:
+    req int id()
+
+struct A as Env:
+    int n
+    req int id(): n
+
+struct R:
+    int hits
+    [Env] held
+
+    def [Env] below(int k, [Env] scope):
+        if k > 0:
+            if scope.length > 5:
+                return scope
+            mut [Env] out = []
+            for v in scope:
+                out.push(v)
+            return out
+        scope
+
+    def int run():
+        let [Env] s = [A(n = 1), A(n = 2)]
+        let t = self.below(3, s)
+        let u = self.below(0, s)
+        t.length + u.length + s.length
+
+def main():
+    mut r = R(hits = 0, held = [])
+    print(r.run())
