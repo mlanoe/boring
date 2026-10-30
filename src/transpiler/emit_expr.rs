@@ -1209,8 +1209,25 @@ impl Transpiler {
             ExprKind::Var(v) => self.var_types.get(v.as_str())
                 .map(is_known_numeric_scalar_type).unwrap_or(false),
             ExprKind::If(if_stmt) => self.if_stmt_is_definitely_numeric(if_stmt),
+            // A cast to a numeric scalar of a non-string/bool source is itself numeric
+            // (`(t as int) as float`).
+            ExprKind::Cast(inner, ty) => self.cast_is_definitely_numeric(inner, ty),
             _ => false,
         }
+    }
+
+    /// `inner as ty` is a plain numeric value (not an `Option` from a string parse)
+    /// when `ty` is a numeric scalar and the operand is neither stringy nor bool.
+    fn cast_is_definitely_numeric(&self, inner: &Expr, ty: &Type) -> bool {
+        is_known_numeric_scalar_type(ty.without_mut())
+            && !self.cast_source_is_stringy_or_bool(inner)
+            && (self.is_definitely_numeric_expr(inner)
+                || matches!(self.resolve_expr_type(inner).as_ref().map(Type::without_mut),
+                    Some(t) if is_known_numeric_scalar_type(t))
+                || matches!(&inner.kind, ExprKind::Cast(..))
+                // Same bare-variable heuristic as `src_is_numeric_var` (a top-level
+                // `let t = 2.75` isn't tracked in `var_types`): a non-string var is numeric.
+                || matches!(&inner.kind, ExprKind::Var(v) if !self.string_vars.contains(v.as_str())))
     }
 
     /// Is every branch of `if_stmt` (used as an expression) definitely numeric —
@@ -1519,6 +1536,14 @@ impl Transpiler {
         let src_is_numeric_if = matches!(&e.kind,
             ExprKind::If(if_stmt) if self.if_stmt_is_definitely_numeric(if_stmt));
         if src_is_numeric_if && (is_float_ty || is_fixed_int_ty) {
+            return format!("({} as {})", src, dst);
+        }
+
+        // `(t as int) as float` — operand is itself a numeric cast (already emitted as
+        // a plain numeric Rust expression), never a string to parse.
+        let src_is_numeric_cast = matches!(&e.kind,
+            ExprKind::Cast(inner, ity) if self.cast_is_definitely_numeric(inner, ity));
+        if src_is_numeric_cast && (is_float_ty || is_fixed_int_ty) {
             return format!("({} as {})", src, dst);
         }
 

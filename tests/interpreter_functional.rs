@@ -479,6 +479,7 @@ itest!(fixed_point_math);
 itest!(float64_array_literal_width_and_cast);
 itest!(optional_interp_numeric);
 itest!(if_else_cast_numeric);
+itest!(nested_numeric_cast);
 itest!(unresolved_field_cast_numeric);
 
 itest!(narrowing_cast_if_let);

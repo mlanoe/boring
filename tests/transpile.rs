@@ -838,6 +838,7 @@ transpile_test!(cast_scenarios);
 // named 'trim' found for type 'isize'` and friends. See
 // tests/cases/if_else_cast_numeric.br's own doc comment for the full repro.
 transpile_test!(if_else_cast_numeric);
+transpile_test!(nested_numeric_cast);
 transpile_test!(unresolved_field_cast_numeric);
 // `(s.length as float)` numeric cast, `parseFloat`/`parseInt` on field/param strings, string-literal
 // promotion in `assert_eq`/`join` — see tests/cases/string_len_cast_parse_field.br.

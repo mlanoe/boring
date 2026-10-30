@@ -570,6 +570,7 @@ interp_test!(self_field_loop_match_borrow);
 interp_test!(qualifier_group_param);
 interp_test!(cast_scenarios);
 interp_test!(if_else_cast_numeric);
+interp_test!(nested_numeric_cast);
 interp_test!(unresolved_field_cast_numeric);
 
 // Regression: `boring run` (the interpreter) had the analogous bug to the

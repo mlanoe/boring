@@ -1,0 +1,28 @@
+# Regression test: a numeric cast whose operand is itself a (parenthesised)
+# numeric cast, `(t as int) as float`, used to take emit_expr_cast's
+# string-parse fallback (`.trim().parse::<f64>().ok()`) -> E0599 on `isize`.
+
+int one_more(int a):
+    a + 1
+
+float frac(float t):
+    t - (t as int) as float
+
+float add_cast(int a, int b):
+    (a + b) as float
+
+float call_cast(int a):
+    one_more(a) as float
+
+float index_cast([int] xs, int i):
+    xs[i] as float
+
+let t = 2.75
+let frac_v = t - (t as int) as float
+print "{frac_v}"
+print "{frac(5.25)}"
+print "{add_cast(3, 4)}"
+print "{call_cast(9)}"
+print "{index_cast([1, 2, 3], 2)}"
+let n = ((t as int) as int) as float
+print "{n}"
