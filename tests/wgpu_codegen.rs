@@ -5066,22 +5066,22 @@ kernel F:
     def ():
         out[.thread.x] = 1.0
 "#, "fixed64_64"),
-        ("sqrt", r#"
+        ("ln", r#"
 kernel F:
     mut [fixed16_16]'unified out
     init([fixed16_16]'unified o):
         out = o
     def ():
-        out[.thread.x] = out[.thread.x].sqrt()
-"#, "sqrt"),
-        ("round_member", r#"
+        out[.thread.x] = out[.thread.x].ln()
+"#, "ln"),
+        ("checked_member", r#"
 kernel F:
     mut [fixed16_16]'unified out
     init([fixed16_16]'unified o):
         out = o
     def ():
-        out[.thread.x] = out[.thread.x].round()
-"#, "round"),
+        out[.thread.x] = out[.thread.x].checkedAdd(out[.thread.x]) ?? 0
+"#, "checkedAdd"),
         ("literal_out_of_range", r#"
 kernel F:
     mut [fixed8_8]'unified out
@@ -5102,7 +5102,7 @@ kernel F:
     for (name, src, needle) in cases {
         let err = run_wgpu_expect_failure(&format!("fixed_err_{name}"), src);
         assert!(err.contains(needle), "[{name}] expected `{needle}` in:\n{err}");
-        if name != "literal_out_of_range" && name != "actor_fixed_buffer" && name != "sqrt" && name != "round_member" {
+        if name != "literal_out_of_range" && name != "actor_fixed_buffer" && name != "ln" && name != "checked_member" {
             assert!(err.contains("--target wgpu"), "[{name}] {err}");
         }
     }
@@ -5552,4 +5552,161 @@ kernel:
 for i in 0..<N:
     print "{k.out[i]} {k.frac[i]} {k.frac2[i]} {k.wide[i]} {k.cmp[i]}"
 "#);
+}
+
+/// `clamp`, `round`, `signum` and `wrapping{Add,Sub,Mul,Div}` over formats of 8..64 bits (signed and
+/// unsigned) on the device against `boring run`: raws near the format's extremes, overflowing wraps.
+#[test]
+fn fixed_point_members_clamp_round_signum_wrapping_run_on_wgpu_and_match_interpreter() {
+    fn raws(t: &str, f: impl Fn(i64) -> i128) -> String {
+        let _ = t;
+        (0..16).map(|i| f(i).to_string()).collect::<Vec<_>>().join(", ")
+    }
+    for t in ["fixed16_16", "ufixed16_16", "fixed8_8", "ufixed8_8", "fixed4_4", "fixed4_28",
+              "fixed32_32", "ufixed32_32", "fixed48_16", "fixed16_48", "ufixed48_16"] {
+        let signed = !t.starts_with('u');
+        let digits: Vec<u32> = t.trim_start_matches('u').trim_start_matches("fixed").split('_').map(|x| x.parse().unwrap()).collect();
+        let w = digits[0] + digits[1];
+        // Largest raw, capped to what the (signed 64-bit) host literals can hold.
+        let max: i128 = if signed { (1i128 << (w - 1)) - 1 } else { ((1i128 << w) - 1).min(i64::MAX as i128) };
+        let k = max / if signed { 9 } else { 17 };
+        let (ra, rl, rh, rd) = if signed {
+            (raws(t, |i| (i as i128 - 8) * k), raws(t, |i| (((i * 7 + 3) % 16) as i128 - 8) * k),
+             raws(t, |i| (((i * 7 + 3) % 16) as i128 - 8) * k + k), raws(t, |i| (i as i128 % 5 + 1) * (k / 2 + 1)))
+        } else {
+            (raws(t, |i| (i as i128 + 1) * k), raws(t, |i| ((i * 7 + 3) % 16) as i128 * k),
+             raws(t, |i| ((i * 7 + 3) % 16) as i128 * k + k), raws(t, |i| (i as i128 % 5 + 1) * (k / 2 + 1)))
+        };
+        let m = digits[1];
+        // Small operands for the rounding variants (|a2| <= 2, 0.5 <= |s2| <= 3.5): no overflow on the CPU.
+        let one = 1i128 << m;
+        let (rb, rs) = if signed {
+            (raws(t, |i| (i as i128 - 8) * one / 4), raws(t, |i| ((i as i128 % 7) + 1) * (one / 2) * if i % 2 == 0 { 1 } else { -1 }))
+        } else {
+            (raws(t, |i| (i as i128 + 1) * one / 8), raws(t, |i| ((i as i128 % 7) + 1) * (one / 2)))
+        };
+        let names = ["r", "s", "c", "wa", "ws", "wm", "wd", "sa", "ss", "sm", "sd", "mr", "dr"];
+        let ins = ["a", "lo", "hi", "dv", "a2", "s2"];
+        let decls: String = ins.iter().chain(names.iter())
+            .map(|n| format!("mut [@T@]'kernel'unified {n} = [@T@.fromRaw(0) for ..<N]\n")).collect();
+        let fields: String = ins.iter().map(|n| format!("    let [@T@]'unified {n}\n"))
+            .chain(names.iter().map(|n| format!("    mut [@T@]'unified {n}\n"))).collect();
+        let params = ins.iter().map(|n| format!("[@T@]'unified {n}0"))
+            .chain(names.iter().map(|n| format!("[@T@]'unified {n}0"))).collect::<Vec<_>>().join(", ");
+        let assigns: String = ins.iter().chain(names.iter()).map(|n| format!("        {n} = {n}0\n")).collect();
+        let args = ins.iter().chain(names.iter()).cloned().collect::<Vec<_>>().join(", ");
+        let prints = format!("{{k.a[i].raw}} {}", names.iter().map(|n| format!("{{k.{n}[i].raw}}")).collect::<Vec<_>>().join(" "));
+        let src = format!(r#"
+let N = 16
+let RA = [0 as int64, {ra}]
+let RL = [0 as int64, {rl}]
+let RH = [0 as int64, {rh}]
+let RD = [0 as int64, {rd}]
+let RB = [0 as int64, {rb}]
+let RS = [0 as int64, {rs}]
+{decls}
+for i in 0..<N:
+    a[i] = @T@.fromRaw(RA[i + 1])
+    lo[i] = @T@.fromRaw(RL[i + 1])
+    hi[i] = @T@.fromRaw(RH[i + 1])
+    dv[i] = @T@.fromRaw(RD[i + 1])
+    a2[i] = @T@.fromRaw(RB[i + 1])
+    s2[i] = @T@.fromRaw(RS[i + 1])
+
+kernel K:
+{fields}
+    init({params}):
+{assigns}
+    def ():
+        let i = .thread.x
+        r[i] = a[i].round()
+        s[i] = a[i].signum()
+        c[i] = a[i].clamp(lo[i], hi[i])
+        wa[i] = a[i].wrappingAdd(lo[i])
+        ws[i] = a[i].wrappingSub(lo[i])
+        wm[i] = a[i].wrappingMul(lo[i])
+        wd[i] = a[i].wrappingDiv(dv[i])
+        sa[i] = a[i].saturatingAdd(lo[i])
+        ss[i] = a[i].saturatingSub(lo[i])
+        sm[i] = a[i].saturatingMul(lo[i])
+        sd[i] = a[i].saturatingDiv(dv[i])
+        mr[i] = a2[i].mulRound(s2[i])
+        dr[i] = a2[i].divRound(s2[i])
+
+mut k = K({args})
+kernel:
+    k(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{prints}"
+"#).replace("@T@", t);
+        assert_wgpu_matches_interpreter(&format!("fixed_members_{t}"), &src);
+    }
+}
+
+/// Runs `out[i] = a[i].<method>()` over 16 raws spread across the format's range (and a few tiny ones)
+/// on the device and compares with `boring run`.
+fn assert_math_member_matches_interpreter(t: &str, method: &str, positive_only: bool) {
+    let signed = !t.starts_with('u');
+    let digits: Vec<u32> = t.trim_start_matches('u').trim_start_matches("fixed").split('_').map(|x| x.parse().unwrap()).collect();
+    let w = digits[0] + digits[1];
+    let max: i128 = if signed { (1i128 << (w - 1)) - 1 } else { ((1i128 << w) - 1).min(i64::MAX as i128) };
+    let k = max / 17;
+    let raws: Vec<String> = (0..16i128).map(|i| {
+        let v = match i {
+            0 => 0, 1 => 1, 2 => 3,
+            _ if signed && !positive_only => (i - 9) * k,
+            _ => i * k,
+        };
+        v.to_string()
+    }).collect();
+    let src = format!(r#"
+let N = 16
+let RA = [0 as int64, {raws}]
+mut [@T@]'kernel'unified a = [@T@.fromRaw(0) for ..<N]
+mut [@T@]'kernel'unified r = [@T@.fromRaw(0) for ..<N]
+for i in 0..<N:
+    a[i] = @T@.fromRaw(RA[i + 1])
+
+kernel K:
+    let [@T@]'unified a
+    mut [@T@]'unified r
+    init([@T@]'unified a0, [@T@]'unified r0):
+        a = a0
+        r = r0
+    def ():
+        let i = .thread.x
+        r[i] = a[i].@M@()
+
+mut k = K(a, r)
+kernel:
+    k(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{{k.a[i].raw}} {{k.r[i].raw}}"
+"#, raws = raws.join(", ")).replace("@T@", t).replace("@M@", method);
+    assert_wgpu_matches_interpreter(&format!("fixed_{method}_{t}"), &src);
+}
+
+#[test]
+fn fixed_point_sqrt_runs_on_wgpu_and_matches_interpreter() {
+    for t in ["fixed16_16", "ufixed16_16", "fixed8_8", "ufixed8_8", "fixed4_4", "fixed4_28", "ufixed0_32",
+              "fixed32_32", "ufixed32_32", "fixed48_16", "fixed16_48", "ufixed48_16", "ufixed0_64"] {
+        assert_math_member_matches_interpreter(t, "sqrt", true);
+    }
+}
+
+/// `sin` / `cos` (the interpreter's 60-bit CORDIC, bit for bit) over raws spread across each format's
+/// range, so the 128-bit quadrant reduction is exercised, on the device against `boring run`.
+#[test]
+fn fixed_point_sin_cos_run_on_wgpu_and_match_interpreter() {
+    for t in ["fixed16_16", "fixed8_8", "fixed4_28", "fixed2_30", "fixed32_32", "fixed48_16", "fixed16_48"] {
+        for m in ["sin", "cos"] {
+            assert_math_member_matches_interpreter(t, m, false);
+        }
+    }
+    // `M > 60` (the argument is shifted right into the 60-bit CORDIC domain): inputs below 1, sin only.
+    for t in ["ufixed0_32", "ufixed0_64"] {
+        assert_math_member_matches_interpreter(t, "sin", true);
+    }
 }

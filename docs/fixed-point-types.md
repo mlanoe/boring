@@ -372,6 +372,11 @@ operation that can leave its range (`extractBits(x, 0u, W)`), so `+ - %` wrap li
 | `x as float32` / `f as fixed` | `f32(x) / 2^M` / `i32(f32(f) * 2^M)` (the float → int conversion truncates toward zero) |
 | `n as fixed`, other-format casts | `i32(n) << M`; left shift / truncating right shift by the fraction-bit difference, re-narrowed |
 | `floor` / `ceil` | `x & ~mask` / `(x + mask) & ~mask` |
+| `x.round()`, `x.signum()`, `x.clamp(lo, hi)` | `bp_fx_round_i32/u32/i64/u64` (add half, mask the fraction on the magnitude, ties away from zero), `sign(x) * one` / `bp_fx_signum64`, `clamp` / `bp_fx_smin64(bp_fx_smax64(..))` |
+| `wrappingAdd/Sub/Mul/Div` | the plain operator (overflow already wraps on this target) |
+| `saturatingAdd/Sub/Mul/Div`, `mulRound`, `divRound` | the operands are extended to 64-bit limb pairs for every width; `bp_fx_addsat/subsat` (sign-overflow rules), `bp_fx_mulsat/divsat` (the exact magnitude from the 128-bit product / the shift-subtract quotient with an overflow flag, then `bp_fx_satfin` clamps to the format's range); `mulRound` / `divRound` add half before the shift / compare the remainder to the divisor and **wrap** where the CPU reports an overflow error |
+| `x.sqrt()` | `bp_fx_sqrt`: the exact floor of `sqrt(raw * 2^M)` by a 64-step binary search over the result bits using the 128-bit product (a negative value gives 0; the CPU raises an error) |
+| `x.sin()`, `x.cos()` | `bp_fx_sin/cos`: the interpreter's 60-fractional-bit CORDIC (`src/fixed_math_core.rs`, same constants and iteration count) with a 128-bit quadrant reduction (`bp_fx_divrem128by64`), rounded to the format's `M` bits (ties away from zero), so results are bit-identical to `boring run`; raws that make the result unrepresentable wrap |
 | literals, `epsilon`/`min`/`max`, `fromRaw`, `.raw`, `abs`, `min`, `max`, `-x` | typed raw constants (`i32(32768)`, `640u`), `extractBits(i32(n), …)`, `i32(x)`, `abs`/`min`/`max` builtins |
 
 The `bp_fx_*` helpers are module-level WGSL functions emitted once, only when a kernel uses them (a program
@@ -381,8 +386,8 @@ uploaded as its raw `i32`/`u32` in the params struct (a 64-bit one as two `u32` 
 conversion (the shared kernel-host emitters' `x as <fixed>` casts are dropped).
 
 - **Compile errors on wgpu**, never a silent narrowing: 128-bit formats — as a kernel field, parameter, return type or in an operation; a fixed-point `'actor` buffer
-  (WGSL atomics are 32-bit `i32`/`u32` only); `sqrt/sin/cos/tan/exp/ln`, `round`, `signum`, `clamp`,
-  `wrapping*`/`saturating*`/`checked*`, `mulRound`/`divRound`; a literal out of range.
+  (WGSL atomics are 32-bit `i32`/`u32` only); `tan`, `exp`, `ln` and `checked*` (they return an optional);
+  a literal out of range.
 - Overflow wraps and division by zero is undefined, as for any GPU integer op. `.raw` is a 32-bit `int` on this
   target, so the raw of a `ufixed` with `W = 32` above 2^31 wraps and the raw of a 64-bit format is its **low 32
   bits** (read the full raw back by copying the buffer to the host, where `.raw` is 64-bit); `fixed -> float` goes
@@ -399,7 +404,8 @@ conversion (the shared kernel-host emitters' `x as <fixed>` casts are dropped).
   The 64-bit formats are verified the same way: `fixed_point_w64_kernel_runs_on_wgpu_and_matches_interpreter`
   (`examples/fixed_point_kernel64.br`, with its `int` `.raw` sums replaced by a 32-bit-safe expression),
   `fixed_point_w64_params_casts_and_compares_run_on_wgpu_and_match_interpreter` (64-bit scalar parameters, casts,
-  comparisons, members), `fixed_point_w64_const_array_runs_on_wgpu_and_matches_interpreter` (`'const` arrays filled by an init literal), `fixed_point_w64_labeled_const_array_and_ufixed0_64_run_on_wgpu_and_match_interpreter` (labeled `'const` arrays, `ufixed0_64`) and `fixed_point_w64_mul_div_edge_sweep_matches_exact_math_on_wgpu`, a 288-pair sweep of
+  comparisons, members), `fixed_point_w64_const_array_runs_on_wgpu_and_matches_interpreter` (`'const` arrays filled by an init literal), `fixed_point_w64_labeled_const_array_and_ufixed0_64_run_on_wgpu_and_match_interpreter` (labeled `'const` arrays, `ufixed0_64`);
+  `fixed_point_members_clamp_round_signum_wrapping_run_on_wgpu_and_match_interpreter` (`clamp`, `round`, `signum`, `wrapping*`, `saturating*`, `mulRound`/`divRound` over eleven formats of 8 to 64 bits), `fixed_point_sqrt_runs_on_wgpu_and_matches_interpreter` and `fixed_point_sin_cos_run_on_wgpu_and_match_interpreter` (raw for raw against `boring run`) and `fixed_point_w64_mul_div_edge_sweep_matches_exact_math_on_wgpu`, a 288-pair sweep of
   `* / %` over `fixed32_32`, `fixed48_16`, `fixed1_63`, their unsigned forms and `ufixed0_64` (raws around 2^32, 2^62, 2^63-1,
   both signs, top bit set) whose full 64-bit raws equal exact 128-bit math. The WGSL of every supported width and every lowered operation is also validated
   with naga (`fixed_point_ops_validate_in_naga_for_every_supported_width`).

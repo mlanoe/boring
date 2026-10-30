@@ -58,6 +58,17 @@ fn is_float_ty(t: &Type) -> bool {
     }
 }
 
+/// `wrappingAdd/Sub/Mul/Div` as the plain operator (overflow wraps on this target anyway).
+fn wrapping_op(method: &str) -> Option<BinOp> {
+    match method {
+        "wrappingAdd" => Some(BinOp::Add),
+        "wrappingSub" => Some(BinOp::Sub),
+        "wrappingMul" => Some(BinOp::Mul),
+        "wrappingDiv" => Some(BinOp::Div),
+        _ => None,
+    }
+}
+
 /// WGSL storage type of the raw integer.
 pub(super) fn raw_t(f: &FixedFmt) -> &'static str {
     if f.width() > 32 { "vec2<u32>" } else if f.signed { "i32" } else { "u32" }
@@ -225,7 +236,7 @@ const H_TDIV64: &str = "fn bp_fx_tdiv64(v: vec2<u32>, k: u32) -> vec2<u32> {
     return select(q, bp_fx_neg64(q), neg);
 }
 ";
-const H_UMULSHR64: &str = "fn bp_fx_umulshr64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> {
+const H_UMUL128: &str = "fn bp_fx_umul128(a: vec2<u32>, b: vec2<u32>) -> vec4<u32> {
     let p00 = bp_fx_umul64(a.x, b.x);
     let p01 = bp_fx_umul64(a.x, b.y);
     let p10 = bp_fx_umul64(a.y, b.x);
@@ -240,13 +251,37 @@ const H_UMULSHR64: &str = "fn bp_fx_umulshr64(a: vec2<u32>, b: vec2<u32>, m: u32
     s = r2 + p01.y; c2 += select(0u, 1u, s < r2); r2 = s;
     s = r2 + p10.y; c2 += select(0u, 1u, s < r2); r2 = s;
     s = r2 + c1; c2 += select(0u, 1u, s < r2); r2 = s;
-    let r3 = p11.y + c2;
-    if (m == 0u) { return vec2<u32>(r0, r1); }
-    if (m < 32u) { return vec2<u32>((r0 >> m) | (r1 << (32u - m)), (r1 >> m) | (r2 << (32u - m))); }
-    if (m == 32u) { return vec2<u32>(r1, r2); }
-    if (m >= 64u) { return vec2<u32>(r2, r3); }
-    let t = m - 32u;
-    return vec2<u32>((r1 >> t) | (r2 << (32u - t)), (r2 >> t) | (r3 << (32u - t)));
+    return vec4<u32>(r0, r1, r2, p11.y + c2);
+}
+";
+const H_SHR128: &str = "fn bp_fx_shr128(v: vec4<u32>, m: u32) -> vec4<u32> {
+    if (m == 0u) { return v; }
+    if (m < 32u) { return vec4<u32>((v.x >> m) | (v.y << (32u - m)), (v.y >> m) | (v.z << (32u - m)), (v.z >> m) | (v.w << (32u - m)), v.w >> m); }
+    if (m == 32u) { return vec4<u32>(v.y, v.z, v.w, 0u); }
+    if (m < 64u) { let t = m - 32u; return vec4<u32>((v.y >> t) | (v.z << (32u - t)), (v.z >> t) | (v.w << (32u - t)), v.w >> t, 0u); }
+    return vec4<u32>(v.z, v.w, 0u, 0u);
+}
+";
+const H_UMULSHR64: &str = "fn bp_fx_umulshr64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> {
+    return bp_fx_shr128(bp_fx_umul128(a, b), m).xy;
+}
+";
+const H_UMULSHRX: &str = "struct BpFxRes { v: vec2<u32>, ovf: bool }
+fn bp_fx_umulshrx(a: vec2<u32>, b: vec2<u32>, m: u32, rnd: bool) -> BpFxRes {
+    var p = bp_fx_umul128(a, b);
+    if (rnd && m > 0u) {
+        let h = bp_fx_shl64(vec2<u32>(1u, 0u), m - 1u);
+        let x = p.x + h.x;
+        let c0 = select(0u, 1u, x < p.x);
+        let t = p.y + h.y;
+        let y = t + c0;
+        let c1 = select(0u, 1u, t < p.y) + select(0u, 1u, y < t);
+        let z = p.z + c1;
+        let c2 = select(0u, 1u, z < p.z);
+        p = vec4<u32>(x, y, z, p.w + c2);
+    }
+    let s = bp_fx_shr128(p, m);
+    return BpFxRes(s.xy, (s.z | s.w) != 0u);
 }
 ";
 const H_MUL_U64: &str = "fn bp_fx_mul_u64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> { return bp_fx_umulshr64(a, b, m); }
@@ -258,9 +293,11 @@ const H_MUL_I64: &str = "fn bp_fx_mul_i64(a: vec2<u32>, b: vec2<u32>, m: u32) ->
     return select(r, bp_fx_neg64(r), na != nb);
 }
 ";
-const H_UDIVSHL64: &str = "fn bp_fx_udivshl64(a: vec2<u32>, d: vec2<u32>, m: u32) -> vec2<u32> {
+const H_UDIVREM64: &str = "struct BpFxDiv { q: vec2<u32>, r: vec2<u32>, ovf: bool }
+fn bp_fx_udivrem64(a: vec2<u32>, d: vec2<u32>, m: u32) -> BpFxDiv {
     var r = vec2<u32>(0u, 0u);
     var q = vec2<u32>(0u, 0u);
+    var ovf = false;
     let mi = i32(m);
     for (var i: i32 = 63 + mi; i >= 0; i = i - 1) {
         var bit = 0u;
@@ -270,10 +307,78 @@ const H_UDIVSHL64: &str = "fn bp_fx_udivshl64(a: vec2<u32>, d: vec2<u32>, m: u32
         }
         let carry = r.y >> 31u;
         r = vec2<u32>((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        if ((q.y >> 31u) != 0u) { ovf = true; }
         q = vec2<u32>(q.x << 1u, (q.y << 1u) | (q.x >> 31u));
         if (carry != 0u || !bp_fx_ult64(r, d)) { r = bp_fx_sub64(r, d); q.x = q.x | 1u; }
     }
-    return q;
+    return BpFxDiv(q, r, ovf);
+}
+";
+const H_UDIVSHL64: &str = "fn bp_fx_udivshl64(a: vec2<u32>, d: vec2<u32>, m: u32) -> vec2<u32> { return bp_fx_udivrem64(a, d, m).q; }
+";
+const H_UDIVX: &str = "fn bp_fx_udivx(a: vec2<u32>, d: vec2<u32>, m: u32, rnd: bool) -> BpFxRes {
+    let x = bp_fx_udivrem64(a, d, m);
+    var q = x.q;
+    var ovf = x.ovf;
+    if (rnd && !bp_fx_ult64(x.r, bp_fx_sub64(d, x.r))) {
+        q = bp_fx_add64(q, vec2<u32>(1u, 0u));
+        if (all(q == vec2<u32>(0u, 0u))) { ovf = true; }
+    }
+    return BpFxRes(q, ovf);
+}
+";
+const H_SATFIN: &str = "fn bp_fx_satfin(mag: vec2<u32>, neg: bool, ovf: bool, lo: vec2<u32>, hi: vec2<u32>) -> vec2<u32> {
+    let limit = select(hi, bp_fx_neg64(lo), neg);
+    let over = ovf || bp_fx_ult64(limit, mag);
+    return select(select(mag, bp_fx_neg64(mag), neg), select(hi, lo, neg), over);
+}
+";
+const H_MULSAT: &str = "fn bp_fx_mulsat(a: vec2<u32>, b: vec2<u32>, m: u32, rnd: bool, lo: vec2<u32>, hi: vec2<u32>, sg: bool) -> vec2<u32> {
+    let na = sg && (a.y >> 31u) == 1u;
+    let nb = sg && (b.y >> 31u) == 1u;
+    let r = bp_fx_umulshrx(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb), m, rnd);
+    return bp_fx_satfin(r.v, na != nb, r.ovf, lo, hi);
+}
+";
+const H_DIVSAT: &str = "fn bp_fx_divsat(a: vec2<u32>, b: vec2<u32>, m: u32, rnd: bool, lo: vec2<u32>, hi: vec2<u32>, sg: bool) -> vec2<u32> {
+    let na = sg && (a.y >> 31u) == 1u;
+    let nb = sg && (b.y >> 31u) == 1u;
+    let r = bp_fx_udivx(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb), m, rnd);
+    return bp_fx_satfin(r.v, na != nb, r.ovf, lo, hi);
+}
+";
+const H_MULRND: &str = "fn bp_fx_mulrnd(a: vec2<u32>, b: vec2<u32>, m: u32, sg: bool) -> vec2<u32> {
+    let na = sg && (a.y >> 31u) == 1u;
+    let nb = sg && (b.y >> 31u) == 1u;
+    let r = bp_fx_umulshrx(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb), m, true).v;
+    return select(r, bp_fx_neg64(r), na != nb);
+}
+";
+const H_DIVRND: &str = "fn bp_fx_divrnd(a: vec2<u32>, b: vec2<u32>, m: u32, sg: bool) -> vec2<u32> {
+    let na = sg && (a.y >> 31u) == 1u;
+    let nb = sg && (b.y >> 31u) == 1u;
+    let r = bp_fx_udivx(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb), m, true).v;
+    return select(r, bp_fx_neg64(r), na != nb);
+}
+";
+const H_ADDSAT: &str = "fn bp_fx_addsat(a: vec2<u32>, b: vec2<u32>, lo: vec2<u32>, hi: vec2<u32>, sg: bool) -> vec2<u32> {
+    let r = bp_fx_add64(a, b);
+    if (sg) {
+        let ovf = (((a.y ^ r.y) & (b.y ^ r.y)) >> 31u) == 1u;
+        let c = bp_fx_smax64(bp_fx_smin64(r, hi), lo);
+        return select(c, select(hi, lo, (a.y >> 31u) == 1u), ovf);
+    }
+    return select(bp_fx_umin64(r, hi), hi, bp_fx_ult64(r, a));
+}
+";
+const H_SUBSAT: &str = "fn bp_fx_subsat(a: vec2<u32>, b: vec2<u32>, lo: vec2<u32>, hi: vec2<u32>, sg: bool) -> vec2<u32> {
+    let r = bp_fx_sub64(a, b);
+    if (sg) {
+        let ovf = (((a.y ^ b.y) & (a.y ^ r.y)) >> 31u) == 1u;
+        let c = bp_fx_smax64(bp_fx_smin64(r, hi), lo);
+        return select(c, select(hi, lo, (a.y >> 31u) == 1u), ovf);
+    }
+    return select(r, lo, bp_fx_ult64(a, b));
 }
 ";
 const H_DIV_U64: &str = "fn bp_fx_div_u64(a: vec2<u32>, b: vec2<u32>, m: u32) -> vec2<u32> { return bp_fx_udivshl64(a, b, m); }
@@ -323,6 +428,159 @@ const H_I64TOF32: &str = "fn bp_fx_i64tof32(a: vec2<u32>) -> f32 {
 }
 ";
 
+const H_ROUND_I32: &str = "fn bp_fx_round_i32(v: i32, m: u32) -> i32 {
+    if (m == 0u) { return v; }
+    let neg = v < 0;
+    let mag = bitcast<u32>(select(v, -v, neg));
+    let mask = select((1u << m) - 1u, 0xffffffffu, m >= 32u);
+    let r = (mag + (1u << ((m - 1u) & 31u))) & ~mask;
+    return bitcast<i32>(select(r, 0u - r, neg));
+}
+";
+const H_ROUND_U32: &str = "fn bp_fx_round_u32(v: u32, m: u32) -> u32 {
+    if (m == 0u) { return v; }
+    let mask = select((1u << m) - 1u, 0xffffffffu, m >= 32u);
+    return (v + (1u << ((m - 1u) & 31u))) & ~mask;
+}
+";
+const H_ROUND_I64: &str = "fn bp_fx_round_i64(v: vec2<u32>, m: u32) -> vec2<u32> {
+    if (m == 0u) { return v; }
+    let neg = (v.y >> 31u) == 1u;
+    let mag = select(v, bp_fx_neg64(v), neg);
+    let mask = bp_fx_sub64(bp_fx_shl64(vec2<u32>(1u, 0u), m), vec2<u32>(1u, 0u));
+    let r = bp_fx_add64(mag, bp_fx_shl64(vec2<u32>(1u, 0u), m - 1u)) & ~mask;
+    return select(r, bp_fx_neg64(r), neg);
+}
+";
+const H_ROUND_U64: &str = "fn bp_fx_round_u64(v: vec2<u32>, m: u32) -> vec2<u32> {
+    if (m == 0u) { return v; }
+    let mask = bp_fx_sub64(bp_fx_shl64(vec2<u32>(1u, 0u), m), vec2<u32>(1u, 0u));
+    return bp_fx_add64(v, bp_fx_shl64(vec2<u32>(1u, 0u), m - 1u)) & ~mask;
+}
+";
+const H_SIGNUM64: &str = "fn bp_fx_signum64(v: vec2<u32>, one: vec2<u32>) -> vec2<u32> {
+    if (all(v == vec2<u32>(0u, 0u))) { return v; }
+    return select(one, bp_fx_neg64(one), (v.y >> 31u) == 1u);
+}
+";
+
+const H_SHL128: &str = "fn bp_fx_shl128(v: vec4<u32>, k: u32) -> vec4<u32> {
+    if (k >= 128u) { return vec4<u32>(0u, 0u, 0u, 0u); }
+    let w = k >> 5u;
+    let b = k & 31u;
+    var s = v;
+    if (w == 1u) { s = vec4<u32>(0u, v.x, v.y, v.z); }
+    else if (w == 2u) { s = vec4<u32>(0u, 0u, v.x, v.y); }
+    else if (w == 3u) { s = vec4<u32>(0u, 0u, 0u, v.x); }
+    if (b == 0u) { return s; }
+    return vec4<u32>(s.x << b, (s.y << b) | (s.x >> (32u - b)), (s.z << b) | (s.y >> (32u - b)), (s.w << b) | (s.z >> (32u - b)));
+}
+";
+const H_ULE128: &str = "fn bp_fx_ule128(a: vec4<u32>, b: vec4<u32>) -> bool {
+    if (a.w != b.w) { return a.w < b.w; }
+    if (a.z != b.z) { return a.z < b.z; }
+    if (a.y != b.y) { return a.y < b.y; }
+    return a.x <= b.x;
+}
+";
+const H_SQRT: &str = "fn bp_fx_sqrt(a: vec2<u32>, m: u32, sg: bool) -> vec2<u32> {
+    if (sg && (a.y >> 31u) == 1u) { return vec2<u32>(0u, 0u); }
+    let n = bp_fx_shl128(vec4<u32>(a.x, a.y, 0u, 0u), m);
+    var x = vec2<u32>(0u, 0u);
+    for (var i: i32 = 63; i >= 0; i = i - 1) {
+        let bit = 1u << (u32(i) & 31u);
+        let cand = select(vec2<u32>(x.x | bit, x.y), vec2<u32>(x.x, x.y | bit), i >= 32);
+        if (bp_fx_ule128(bp_fx_umul128(cand, cand), n)) { x = cand; }
+    }
+    return x;
+}
+";
+
+const H_ADD128: &str = "fn bp_fx_add128(a: vec4<u32>, b: vec4<u32>) -> vec4<u32> {
+    let x = a.x + b.x;
+    let c0 = select(0u, 1u, x < a.x);
+    let t1 = a.y + b.y;
+    let y = t1 + c0;
+    let c1 = select(0u, 1u, t1 < a.y) + select(0u, 1u, y < t1);
+    let t2 = a.z + b.z;
+    let z = t2 + c1;
+    let c2 = select(0u, 1u, t2 < a.z) + select(0u, 1u, z < t2);
+    return vec4<u32>(x, y, z, a.w + b.w + c2);
+}
+fn bp_fx_neg128(a: vec4<u32>) -> vec4<u32> { return bp_fx_add128(~a, vec4<u32>(1u, 0u, 0u, 0u)); }
+";
+const H_ASR64: &str = "fn bp_fx_asr64(v: vec2<u32>, k: u32) -> vec2<u32> {
+    if (k == 0u) { return v; }
+    let n = (v.y >> 31u) == 1u;
+    let r = bp_fx_lshr64(select(v, ~v, n), k);
+    return select(r, ~r, n);
+}
+";
+const H_DIVREM128: &str = "fn bp_fx_divrem128by64(n: vec4<u32>, d: vec2<u32>) -> vec4<u32> {
+    var r = vec2<u32>(0u, 0u);
+    var q = vec2<u32>(0u, 0u);
+    for (var i: i32 = 127; i >= 0; i = i - 1) {
+        let k = u32(i);
+        let limb = select(select(n.x, n.y, k >= 32u), select(n.z, n.w, k >= 96u), k >= 64u);
+        let bit = (limb >> (k & 31u)) & 1u;
+        r = vec2<u32>((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        q = vec2<u32>(q.x << 1u, (q.y << 1u) | (q.x >> 31u));
+        if (!bp_fx_ult64(r, d)) { r = bp_fx_sub64(r, d); q.x = q.x | 1u; }
+    }
+    return vec4<u32>(q.x, q.y, r.x, r.y);
+}
+";
+const H_ATAN_TAB: &str = "var<private> bp_fx_atan: array<vec2<u32>, 60> = array<vec2<u32>, 60>(@ATAN@);
+";
+const H_SINCOS: &str = "struct BpFxSC { s: vec2<u32>, c: vec2<u32> }
+fn bp_fx_sincos(raw: vec2<u32>, m: u32, sg: bool) -> BpFxSC {
+    let neg = sg && (raw.y >> 31u) == 1u;
+    let ext = select(0u, 0xffffffffu, neg);
+    var a = vec4<u32>(raw.x, raw.y, ext, ext);
+    if (m <= 60u) {
+        a = bp_fx_shl128(a, 60u - m);
+    } else {
+        let sh = select(bp_fx_lshr64(raw, m - 60u), bp_fx_asr64(raw, m - 60u), neg);
+        a = vec4<u32>(sh.x, sh.y, ext, ext);
+    }
+    let hp = @HP@;
+    let t = bp_fx_add128(a, vec4<u32>(@HALFHP@, 0u, 0u));
+    let tneg = (t.w >> 31u) == 1u;
+    let qr = bp_fx_divrem128by64(select(t, bp_fx_neg128(t), tneg), hp);
+    var q = qr.xy;
+    if (tneg) { q = bp_fx_neg64(select(q, bp_fx_add64(q, vec2<u32>(1u, 0u)), any(qr.zw != vec2<u32>(0u, 0u)))); }
+    var z = bp_fx_sub64(a.xy, bp_fx_umul128(q, hp).xy);
+    var x = @K@;
+    var y = vec2<u32>(0u, 0u);
+    for (var i: u32 = 0u; i < 60u; i = i + 1u) {
+        let dx = bp_fx_asr64(y, i);
+        let dy = bp_fx_asr64(x, i);
+        let at = bp_fx_atan[i];
+        if ((z.y >> 31u) == 0u) {
+            x = bp_fx_sub64(x, dx); y = bp_fx_add64(y, dy); z = bp_fx_sub64(z, at);
+        } else {
+            x = bp_fx_add64(x, dx); y = bp_fx_sub64(y, dy); z = bp_fx_add64(z, at);
+        }
+    }
+    let nx = bp_fx_neg64(x);
+    let ny = bp_fx_neg64(y);
+    let quad = q.x & 3u;
+    if (quad == 0u) { return BpFxSC(y, x); }
+    if (quad == 1u) { return BpFxSC(x, ny); }
+    if (quad == 2u) { return BpFxSC(ny, nx); }
+    return BpFxSC(nx, y);
+}
+fn bp_fx_down(v: vec2<u32>, m: u32) -> vec2<u32> {
+    if (m >= 60u) { return bp_fx_shl64(v, m - 60u); }
+    let s = 60u - m;
+    let neg = (v.y >> 31u) == 1u;
+    let q = bp_fx_lshr64(bp_fx_add64(select(v, bp_fx_neg64(v), neg), bp_fx_shl64(vec2<u32>(1u, 0u), s - 1u)), s);
+    return select(q, bp_fx_neg64(q), neg);
+}
+fn bp_fx_sin(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> { return bp_fx_down(bp_fx_sincos(raw, m, sg).s, m); }
+fn bp_fx_cos(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> { return bp_fx_down(bp_fx_sincos(raw, m, sg).c, m); }
+";
+
 /// Helper sources in dependency order: (name, text, depends on).
 const HELPERS: &[(&str, &str, &[&str])] = &[
     ("umul64", HELPER_UMUL64, &[]),
@@ -345,10 +603,22 @@ const HELPERS: &[(&str, &str, &[&str])] = &[
     ("shl64", H_SHL64, &[]),
     ("lshr64", H_LSHR64, &[]),
     ("tdiv64", H_TDIV64, &["lshr64", "neg64"]),
-    ("umulshr64", H_UMULSHR64, &["umul64"]),
+    ("umul128", H_UMUL128, &["umul64"]),
+    ("shr128", H_SHR128, &[]),
+    ("umulshr64", H_UMULSHR64, &["umul128", "shr128"]),
+    ("umulshrx", H_UMULSHRX, &["umul128", "shr128", "shl64"]),
     ("mul_u64", H_MUL_U64, &["umulshr64"]),
     ("mul_i64", H_MUL_I64, &["umulshr64", "neg64"]),
-    ("udivshl64", H_UDIVSHL64, &["sub64", "ult64"]),
+    ("udivrem64", H_UDIVREM64, &["sub64", "ult64"]),
+    ("udivshl64", H_UDIVSHL64, &["udivrem64"]),
+    ("udivx", H_UDIVX, &["udivrem64", "umulshrx", "add64"]),
+    ("satfin", H_SATFIN, &["neg64", "ult64"]),
+    ("mulsat", H_MULSAT, &["umulshrx", "satfin", "neg64"]),
+    ("divsat", H_DIVSAT, &["udivx", "satfin", "neg64"]),
+    ("mulrnd", H_MULRND, &["umulshrx", "neg64"]),
+    ("divrnd", H_DIVRND, &["udivx", "neg64"]),
+    ("addsat", H_ADDSAT, &["add64", "ult64", "smin64", "smax64", "umin64"]),
+    ("subsat", H_SUBSAT, &["sub64", "ult64", "smin64", "smax64"]),
     ("div_u64", H_DIV_U64, &["udivshl64"]),
     ("div_i64", H_DIV_I64, &["udivshl64", "neg64"]),
     ("urem64", H_UREM64, &["sub64", "ult64"]),
@@ -357,6 +627,19 @@ const HELPERS: &[(&str, &str, &[&str])] = &[
     ("f2raw64", H_F2RAW64, &["neg64"]),
     ("u64tof32", H_U64TOF32, &[]),
     ("i64tof32", H_I64TOF32, &["u64tof32", "neg64"]),
+    ("round_i32", H_ROUND_I32, &[]),
+    ("round_u32", H_ROUND_U32, &[]),
+    ("round_i64", H_ROUND_I64, &["neg64", "add64", "sub64", "shl64"]),
+    ("round_u64", H_ROUND_U64, &["add64", "sub64", "shl64"]),
+    ("signum64", H_SIGNUM64, &["neg64"]),
+    ("shl128", H_SHL128, &[]),
+    ("ule128", H_ULE128, &[]),
+    ("sqrt", H_SQRT, &["shl128", "ule128", "umul128"]),
+    ("add128", H_ADD128, &[]),
+    ("asr64", H_ASR64, &["lshr64"]),
+    ("divrem128", H_DIVREM128, &["ult64", "sub64"]),
+    ("atan_tab", H_ATAN_TAB, &[]),
+    ("sincos", H_SINCOS, &["shl128", "add128", "asr64", "lshr64", "divrem128", "umul128", "atan_tab", "add64", "sub64", "neg64", "shl64"]),
 ];
 
 impl DeviceEmitter {
@@ -370,7 +653,16 @@ impl DeviceEmitter {
             }
             if used.len() == before { break; }
         }
-        HELPERS.iter().filter(|(n, _, _)| used.contains(n)).map(|(_, t, _)| *t).collect()
+        let text: String = HELPERS.iter().filter(|(n, _, _)| used.contains(n)).map(|(_, t, _)| *t).collect();
+        if !used.contains("sincos") { return text; }
+        // The CORDIC constants come from the interpreter's own tables (src/fixed_math_core.rs).
+        use crate::fixed_math_core as c;
+        let atan = c::ATAN.iter().map(|&v| lit64(v)).collect::<Vec<_>>().join(", ");
+        let half = lit64(c::HALF_PI / 2);
+        text.replace("@ATAN@", &atan)
+            .replace("@HP@", &lit64(c::HALF_PI))
+            .replace("@HALFHP@", &half[half.find('(').unwrap() + 1..half.len() - 1])
+            .replace("@K@", &lit64(c::CORDIC_K))
     }
 
     fn use_fixed_helper(&mut self, name: &'static str) { self.fixed_helpers.insert(name); }
@@ -401,7 +693,9 @@ impl DeviceEmitter {
                     .or_else(|| self.ty_of(r).filter(|t| fixed_fmt_of_type(t).is_some() || is_float_ty(t)))
                     .or_else(|| self.ty_of(l)),
             ExprKind::UnaryOp(UnaryOp::Neg, inner) => self.ty_of(inner),
-            ExprKind::MethodCall(obj, m, _) if matches!(m.as_str(), "floor" | "ceil" | "trunc" | "fract" | "abs" | "min" | "max")
+            ExprKind::MethodCall(obj, m, _) if matches!(m.as_str(), "floor" | "ceil" | "trunc" | "fract" | "abs" | "min" | "max" | "round" | "signum" | "clamp" | "sqrt" | "sin" | "cos"
+                | "saturatingAdd" | "saturatingSub" | "saturatingMul" | "saturatingDiv" | "mulRound" | "divRound")
+                || wrapping_op(m).is_some()
                 && self.fixed_fmt_of(obj).is_some() => self.ty_of(obj),
             ExprKind::MethodCall(obj, m, _) if m == "fromRaw" => match &obj.kind {
                 ExprKind::Var(v) if self.local_or_field_type(v).is_none() => FixedFmt::from_name(v).map(Type::Fixed),
@@ -537,6 +831,11 @@ impl DeviceEmitter {
         }
     }
 
+    /// `l op r` with already-lowered operand text for `l` (a method receiver) and an expression `r`.
+    fn fixed_binop_exprs(&mut self, op: &BinOp, l: &Expr, r: &Expr, f: &FixedFmt, e: &Expr) -> String {
+        self.fixed_binop(op, l, r, f, e)
+    }
+
     pub(super) fn fixed_neg(&mut self, operand: &Expr, f: &FixedFmt, e: &Expr) -> String {
         self.fixed_supported(f, e);
         let v = self.expr(operand);
@@ -630,6 +929,22 @@ impl DeviceEmitter {
         self.fixed_supported(&f, e);
         let o = self.expr(obj);
         let m = f.m;
+        if let ("sqrt", []) = (method, args) {
+            let a64 = self.raw_to64(&f, &o);
+            self.use_fixed_helper("sqrt");
+            let call = format!("bp_fx_sqrt({a64}, {m}u, {})", f.signed);
+            return self.narrow64(&f, call);
+        }
+        if let ("sin" | "cos", []) = (method, args) {
+            let a64 = self.raw_to64(&f, &o);
+            self.use_fixed_helper("sincos");
+            let call = format!("bp_fx_{method}({a64}, {m}u, {})", f.signed);
+            return self.narrow64(&f, call);
+        }
+        if let ("saturatingAdd" | "saturatingSub" | "saturatingMul" | "saturatingDiv" | "mulRound" | "divRound", [a]) = (method, args) {
+            let b = self.fixed_operand(&a.value, &f);
+            return self.fixed_policy_op(&f, method, &o, &b);
+        }
         if is64(&f) { return self.fixed_method64(&f, &o, method, args, e); }
         let mask: u32 = if m >= 32 { u32::MAX } else { (1u32 << m) - 1 };
         let inv = bits_const(&f, !mask);
@@ -647,12 +962,50 @@ impl DeviceEmitter {
             }
             ("abs", []) if f.signed => wrap(&f, format!("abs({o})")),
             ("abs", []) => o,
+            ("round", []) => {
+                let h = if f.signed { "round_i32" } else { "round_u32" };
+                self.use_fixed_helper(h);
+                wrap(&f, format!("bp_fx_{h}({o}, {m}u)"))
+            }
+            ("signum", []) if f.signed => wrap(&f, format!("(sign({o}) * {})", bits_const(&f, 1u32.checked_shl(m).unwrap_or(0)))),
+            ("signum", []) => format!("select(0u, {}, {o} != 0u)", bits_const(&f, 1u32.checked_shl(m).unwrap_or(0))),
+            ("clamp", [lo, hi]) => {
+                let l = self.fixed_operand(&lo.value, &f);
+                let h = self.fixed_operand(&hi.value, &f);
+                format!("clamp({o}, {l}, {h})")
+            }
+            (op, [a]) if wrapping_op(op).is_some() => {
+                // Overflow already wraps on this target: `wrappingAdd` is `+`, and so on.
+                let bin = wrapping_op(op).unwrap();
+                self.fixed_binop_exprs(&bin, obj, &a.value, &f, e)
+            }
             ("min" | "max", [a]) => {
                 let b = self.fixed_operand(&a.value, &f);
                 format!("{method}({o}, {b})")
             }
             _ => self.fixed_gpu_error(&f, method, e),
         }
+    }
+
+    /// `saturating{Add,Sub,Mul,Div}`, `mulRound`, `divRound` for every width: the operands are
+    /// extended to 64-bit limb pairs, the exact result is formed on the magnitudes with an overflow
+    /// flag (`bp_fx_*sat`), clamped to the format's range (saturating) or wrapped (the round
+    /// variants, where the CPU reports an overflow error), then narrowed back.
+    fn fixed_policy_op(&mut self, f: &FixedFmt, method: &str, a: &str, b: &str) -> String {
+        let a64 = self.raw_to64(f, a);
+        let b64 = self.raw_to64(f, b);
+        let (lo, hi) = (lit64(f.min_raw()), lit64(f.max_raw()));
+        let (sg, m) = (f.signed, f.m);
+        let (helper, call): (&'static str, String) = match method {
+            "saturatingAdd" => ("addsat", format!("bp_fx_addsat({a64}, {b64}, {lo}, {hi}, {sg})")),
+            "saturatingSub" => ("subsat", format!("bp_fx_subsat({a64}, {b64}, {lo}, {hi}, {sg})")),
+            "saturatingMul" => ("mulsat", format!("bp_fx_mulsat({a64}, {b64}, {m}u, false, {lo}, {hi}, {sg})")),
+            "saturatingDiv" => ("divsat", format!("bp_fx_divsat({a64}, {b64}, {m}u, false, {lo}, {hi}, {sg})")),
+            "mulRound" => ("mulrnd", format!("bp_fx_mulrnd({a64}, {b64}, {m}u, {sg})")),
+            _ => ("divrnd", format!("bp_fx_divrnd({a64}, {b64}, {m}u, {sg})")),
+        };
+        self.use_fixed_helper(helper);
+        self.narrow64(f, call)
     }
 
     /// An `int` expression sign-/zero-extended to a 64-bit raw pattern.
@@ -696,6 +1049,33 @@ impl DeviceEmitter {
             }
             ("abs", []) if f.signed => { self.use_fixed_helper("abs64"); format!("bp_fx_abs64({o})") }
             ("abs", []) => o.to_string(),
+            ("round", []) => {
+                let h: &'static str = if f.signed { "round_i64" } else { "round_u64" };
+                self.use_fixed_helper(h);
+                format!("bp_fx_{h}({o}, {m}u)")
+            }
+            ("signum", []) => {
+                let one = lit64(1i128.checked_shl(m).unwrap_or(0));
+                if f.signed {
+                    self.use_fixed_helper("signum64");
+                    format!("bp_fx_signum64({o}, {one})")
+                } else {
+                    format!("select(vec2<u32>(0u, 0u), {one}, any({o} != vec2<u32>(0u, 0u)))")
+                }
+            }
+            ("clamp", [lo, hi]) => {
+                let l = self.fixed_operand(&lo.value, f);
+                let h = self.fixed_operand(&hi.value, f);
+                let (mn, mx): (&'static str, &'static str) = if f.signed { ("smin64", "smax64") } else { ("umin64", "umax64") };
+                self.use_fixed_helper(mn);
+                self.use_fixed_helper(mx);
+                format!("bp_fx_{mn}(bp_fx_{mx}({o}, {l}), {h})")
+            }
+            (op, [a]) if wrapping_op(op).is_some() => {
+                let bin = wrapping_op(op).unwrap();
+                let b = self.fixed_operand(&a.value, f);
+                self.fixed_binop64(&bin, o, &b, f)
+            }
             ("min" | "max", [a]) => {
                 let b = self.fixed_operand(&a.value, f);
                 let name: &'static str = match (method, f.signed) {
@@ -725,9 +1105,10 @@ impl DeviceEmitter {
     fn fixed_gpu_error(&mut self, f: &FixedFmt, method: &str, e: &Expr) -> String {
         self.errors.push(TranspileError::at(
             format!("`{}.{}(..)` is not supported on --target wgpu: fixed-point kernels support \
-                     `+ - * / %`, comparisons, `as` casts, `.raw`, `fromRaw`, `floor`, `ceil`, `trunc`, `fract`, \
-                     `abs`, `min` and `max`; math functions (`sqrt`, `sin`, ...), `round`, `signum`, `clamp` and \
-                     the `wrapping*`/`saturating*`/`checked*`/`mulRound`/`divRound` variants are CPU-only", f.name(), method),
+                     `+ - * / %`, comparisons, `as` casts, `.raw`, `fromRaw`, `floor`, `ceil`, `round`, `trunc`, `fract`, \
+                     `abs`, `signum`, `min`, `max`, `clamp`, `wrapping{{Add,Sub,Mul,Div}}`, `saturating{{Add,Sub,Mul,Div}}`, \
+                     `mulRound`, `divRound`, `sqrt`, `sin` and `cos`; the other math functions (`tan`, `exp`, `ln`) and the `checked*` \
+                     variants (which return an optional) are CPU-only", f.name(), method),
             e.line, e.col));
         "0".to_string()
     }
