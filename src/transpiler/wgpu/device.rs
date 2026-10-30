@@ -991,7 +991,11 @@ impl DeviceEmitter {
                     ty if ty.as_labeled_array().is_some() && ty.labeled_array_len().is_some() => {
                         let (elem, _) = ty.as_labeled_array().unwrap();
                         let len = ty.labeled_array_len().unwrap();
-                        self.line(&format!("{}: array<{}, {}>,", name, wgsl_param_scalar(elem), len));
+                        if fixed::fixed_fmt_of_type(elem).is_some_and(|x| x.width() > 32) {
+                            self.line(&format!("{}: array<u32, {}>,", name, 2 * len));
+                        } else {
+                            self.line(&format!("{}: array<{}, {}>,", name, wgsl_param_scalar(elem), len));
+                        }
                     }
                     ty if fixed::fixed_fmt_of_type(ty).is_some_and(|x| x.width() > 32) => {
                         // A 64-bit raw crosses as two u32 slots (a `vec2<u32>` member would be 8-aligned).
@@ -1102,6 +1106,9 @@ impl DeviceEmitter {
                         }
                         Type::ArrayN(_, _) => {
                             // Fixed arrays are accessed as {pvar}.field[i] directly.
+                        }
+                        ty if ty.as_labeled_array().is_some_and(|(e, _)| fixed::fixed_fmt_of_type(e).is_some_and(|x| x.width() > 32)) => {
+                            // 64-bit raws stay as u32 word pairs in the params block (read per element).
                         }
                         ty if fixed::fixed_fmt_of_type(ty).is_some_and(|x| x.width() > 32) => {
                             self.line(&format!("let {name}: vec2<u32> = vec2<u32>({pvar}.{name}_lo, {pvar}.{name}_hi);"));
@@ -2053,7 +2060,10 @@ impl DeviceEmitter {
                                 ty => ty.as_labeled_array().is_some_and(|(inner, _)| is_float16_type(inner)),
                             };
                             let pvar = format!("{}_params", self.current_kernel.to_lowercase());
-                            let wide64 = matches!(&field.ty, Type::ArrayN(inner, _) if fixed::fixed_fmt_of_type(inner).is_some_and(|x| x.width() > 32));
+                            let wide64 = match &field.ty {
+                                Type::ArrayN(inner, _) => fixed::fixed_fmt_of_type(inner).is_some_and(|x| x.width() > 32),
+                                ty => ty.as_labeled_array().is_some_and(|(e, _)| fixed::fixed_fmt_of_type(e).is_some_and(|x| x.width() > 32)),
+                            };
                             let idx_s = self.expr(idx);
                             if wide64 {
                                 let w = wgsl_safe_ident(name);

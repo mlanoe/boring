@@ -754,6 +754,9 @@ impl Transpiler {
             if param_to_field.values().any(|fields| fields.contains(&field_name)) { continue; }
             let Some(field) = decl.fields.iter().find(|f| f.name == field_name) else { continue };
             let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
+            // A bare numeric literal element of a fixed-point array is built as the newtype
+            // (`as` cannot convert to it, and the later `strip_fixed_casts` would leave a float).
+            let elem_fmt = fixed_kernel_fmt(&array_inner_type(&field.ty));
             match init {
                 KernelOutputInit::Alloc(count) => {
                     let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
@@ -762,15 +765,21 @@ impl Transpiler {
                     ));
                 }
                 KernelOutputInit::Fill(value, count) => {
-                    let value_rust = self.substitute_and_emit(&value, &param_to_arg, &param_to_len);
+                    let value_rust = match elem_fmt.and_then(|f| self.emit_fixed_literal(&value, &f)) {
+                        Some(lit) => lit,
+                        None => format!("({}) as {inner}", self.substitute_and_emit(&value, &param_to_arg, &param_to_len)),
+                    };
                     let count_rust = self.substitute_and_emit(&count, &param_to_arg, &param_to_len);
                     self.line(&format!(
-                        "{var_name}.copy_{field_name}_to_device(&vec![({value_rust}) as {inner}; ({count_rust}) as usize]);"
+                        "{var_name}.copy_{field_name}_to_device(&vec![{value_rust}; ({count_rust}) as usize]);"
                     ));
                 }
                 KernelOutputInit::Literal(elems) => {
                     let elems_rust: Vec<String> = elems.iter()
-                        .map(|e| format!("({}) as {inner}", self.substitute_and_emit(e, &param_to_arg, &param_to_len)))
+                        .map(|e| match elem_fmt.and_then(|f| self.emit_fixed_literal(e, &f)) {
+                            Some(lit) => lit,
+                            None => format!("({}) as {inner}", self.substitute_and_emit(e, &param_to_arg, &param_to_len)),
+                        })
                         .collect();
                     self.line(&format!(
                         "{var_name}.copy_{field_name}_to_device(&vec![{}]);",

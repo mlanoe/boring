@@ -22,8 +22,8 @@
 //!   `|a| << M` by `|b|`, signs are applied last (truncation toward zero, wrapping final raw).
 //!   A scalar 64-bit kernel parameter crosses the params struct as two `u32` slots
 //!   (`name_lo` / `name_hi`). `.raw` is the low 32 bits (`int` is 32-bit on this target).
-//!   A `[T, N]'const` array of a 64-bit format is `array<u32, 2N>` in the params block.
-//! * `W = 128`, `ufixed0_64` (`M = 64`), labeled `'const` 64-bit arrays: compile error on this target.
+//!   A `'const` array of a 64-bit format (`[T, N]` or labeled) is `array<u32, 2N>` in the params block.
+//! * `W = 128`: compile error on this target.
 //!
 //! Overflow wraps and division by zero is undefined, as for any GPU integer op.
 
@@ -244,6 +244,7 @@ const H_UMULSHR64: &str = "fn bp_fx_umulshr64(a: vec2<u32>, b: vec2<u32>, m: u32
     if (m == 0u) { return vec2<u32>(r0, r1); }
     if (m < 32u) { return vec2<u32>((r0 >> m) | (r1 << (32u - m)), (r1 >> m) | (r2 << (32u - m))); }
     if (m == 32u) { return vec2<u32>(r1, r2); }
+    if (m >= 64u) { return vec2<u32>(r2, r3); }
     let t = m - 32u;
     return vec2<u32>((r1 >> t) | (r2 << (32u - t)), (r2 >> t) | (r3 << (32u - t)));
 }
@@ -426,10 +427,10 @@ impl DeviceEmitter {
     }
 
     pub(super) fn check_fixed_format(&mut self, f: &FixedFmt, line: usize, col: usize) {
-        if f.width() > 64 || (f.width() == 64 && f.m >= 64) {
+        if f.width() > 64 {
             let msg = format!(
                 "`{}` is not supported on --target wgpu: WGSL has no 64-bit integers; fixed-point formats \
-                 are emulated up to 64 bits with fewer than 64 fraction bits (e.g. `fixed16_16`, `fixed32_32`)",
+                 are emulated up to 64 bits (e.g. `fixed16_16`, `fixed32_32`, `ufixed0_64`)",
                 f.name());
             if !self.errors.iter().any(|e| e.message == msg && e.line == line && e.col == col) {
                 self.errors.push(TranspileError::at(msg, line, col));
@@ -676,7 +677,7 @@ impl DeviceEmitter {
 
     fn fixed_method64(&mut self, f: &FixedFmt, o: &str, method: &str, args: &[Arg], e: &Expr) -> String {
         let m = f.m;
-        let mask: u64 = (1u64 << m) - 1;
+        let mask: u64 = if m >= 64 { u64::MAX } else { (1u64 << m) - 1 };
         let inv = lit64((!mask) as i128);
         let maskc = lit64(mask as i128);
         match (method, args) {
@@ -817,12 +818,6 @@ impl DeviceEmitter {
             let elem = array_elem_type(&f.ty).unwrap_or(&f.ty);
             let Some(fmt) = fixed_fmt_of_type(elem) else { continue };
             self.check_fixed_format(&fmt, f.line, f.col);
-            if is64(&fmt) && matches!(f.qual, GpuQual::Const) && array_elem_type(&f.ty).is_some() && !matches!(f.ty, Type::ArrayN(..)) {
-                self.errors.push(TranspileError::at(format!(
-                    "kernel {}: labeled `'const` array field '{}' of the 64-bit format {} is not supported on --target wgpu \
-                     (use a plain `[T, N]'const` array, a buffer field or a 32-bit format)",
-                    decl.name, f.name, fmt.name()), f.line, f.col));
-            }
             if matches!(f.qual, GpuQual::ActorGlobal | GpuQual::ActorUnified) {
                 self.errors.push(TranspileError::at(format!(
                     "kernel {}: `'actor` buffer field '{}' of fixed-point type {} is not supported on --target wgpu \

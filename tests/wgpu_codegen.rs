@@ -5057,15 +5057,7 @@ kernel F:
 
 #[test]
 fn fixed_point_unsupported_cases_are_compile_errors_on_wgpu() {
-    let cases: [(&str, &str, &str); 6] = [
-        ("m64_fraction_only", r#"
-kernel F:
-    mut [ufixed0_64]'unified out
-    init([ufixed0_64]'unified o):
-        out = o
-    def ():
-        out[.thread.x] = out[.thread.x] + out[.thread.x]
-"#, "ufixed0_64"),
+    let cases: [(&str, &str, &str); 5] = [
         ("w128", r#"
 kernel F:
     mut [fixed64_64]'unified out
@@ -5305,10 +5297,12 @@ fn fixed_point_w64_kernel_runs_on_wgpu_and_matches_interpreter() {
 #[test]
 fn fixed_point_w64_mul_div_edge_sweep_matches_exact_math_on_wgpu() {
     fn program(u: &str) -> String {
+        let formats: &[&str] = if u.is_empty() { &["fixed32_32", "fixed48_16", "fixed1_63"] }
+            else { &["fixed32_32", "fixed48_16", "fixed1_63", "fixed0_64"] };
         let operands = if u.is_empty() { "u = -u" } else { "u = u + u + u\n            v = v + v + v" };
         let mut src = String::from("let vals = [1 as int64, 2, 3, 4294967295, 4294967296, 4294967297, 1234567890123456, 4611686018427387904, 9223372036854775807, 6148914691236517205, 3037000500, 281474976710655]\nlet V = 12\nlet N = 288\n");
         let mut prints = String::new();
-        for (k, f) in ["fixed32_32", "fixed48_16", "fixed1_63"].iter().enumerate() {
+        for (k, f) in formats.iter().enumerate() {
             let t = format!("{u}{f}");
             src.push_str(&format!(r#"
 mut [@T@]'kernel'unified a@k@ = [@T@.fromRaw(0) for ..<N]
@@ -5381,7 +5375,7 @@ kernel:
         for line in out.lines() {
             let v: Vec<i64> = line.split_whitespace().map(|t| t.parse::<i128>().unwrap() as i64).collect();
             if v.len() != 6 { continue; }
-            let m = [32u32, 16, 63][v[0] as usize];
+            let m = [32u32, 16, 63, 64][v[0] as usize];
             let (a, b) = (v[1], v[2]);
             let want: [i64; 3] = if unsigned {
                 let (ua, ub) = (a as u64 as u128, b as u64 as u128);
@@ -5392,7 +5386,7 @@ kernel:
             assert_eq!(&v[3..], &want[..], "unsigned={unsigned} m={m} a={a} b={b}");
             rows += 1;
         }
-        assert_eq!(rows, 288 * 3, "unsigned={unsigned}\n{out}");
+        assert_eq!(rows, 288 * if unsigned { 4 } else { 3 }, "unsigned={unsigned}\n{out}");
     }
 }
 
@@ -5483,21 +5477,79 @@ kernel W:
     let [ufixed32_32, 4]'const uw
     mut [fixed32_32]'unified out
     mut [ufixed32_32]'unified uout
-    init([fixed32_32, 4] ww, [ufixed32_32, 4] uww, [fixed32_32]'unified o, [ufixed32_32]'unified uo):
-        w = ww
-        uw = uww
+    init([fixed32_32]'unified o, [ufixed32_32]'unified uo):
         out = o
         uout = uo
+        w = [1.5, -2.25, 40000.125, -0.0009765625]
+        uw = [3.5, 0.25, 4000000000.5, 1.0]
     def ():
         let i = .thread.x
         out[i] = w[i] * w[(i + 1) % 4] - w[(i + 2) % 4]
         uout[i] = uw[i] / uw[(i + 1) % 4] + uw[3 - i]
 
-mut k = W([1.5 as fixed32_32, -2.25 as fixed32_32, 40000.125 as fixed32_32, -0.0009765625 as fixed32_32], [3.5 as ufixed32_32, 0.25 as ufixed32_32, 4000000000.5 as ufixed32_32, 1.0 as ufixed32_32], out, uout)
+mut k = W(out, uout)
 kernel:
     k(block = N, grid = 1)
 
 for i in 0..<N:
     print "{k.out[i]} {k.uout[i]}"
+"#);
+}
+
+/// Labeled `'const` arrays (`[T, width = W, height = H]`, stored flat) of a 64-bit format, and the
+/// fraction-only `ufixed0_64` (`M = 64`) with its members and casts, on the device against `boring run`.
+#[test]
+fn fixed_point_w64_labeled_const_array_and_ufixed0_64_run_on_wgpu_and_match_interpreter() {
+    assert_wgpu_matches_interpreter("fixed_w64_labeled_m64", r#"
+let N = 4
+mut [fixed32_32]'kernel'unified out = [0.0 as fixed32_32 for ..<N]
+mut [ufixed0_64]'kernel'unified frac = [0.0 as ufixed0_64 for ..<N]
+mut [ufixed0_64]'kernel'unified frac2 = [0.0 as ufixed0_64 for ..<N]
+mut [ufixed32_32]'kernel'unified wide = [0.0 as ufixed32_32 for ..<N]
+mut [int32]'kernel'unified cmp = [0 for ..<N]
+
+kernel W:
+    let [fixed32_32, width = 2, height = 2]'const w
+    mut [fixed32_32]'unified out
+    mut [ufixed0_64]'unified frac
+    mut [ufixed0_64]'unified frac2
+    mut [ufixed32_32]'unified wide
+    mut [int32]'unified cmp
+    init([fixed32_32]'unified o, [ufixed0_64]'unified f, [ufixed0_64]'unified f2, [ufixed32_32]'unified wd, [int32]'unified c):
+        out = o
+        frac = f
+        frac2 = f2
+        wide = wd
+        cmp = c
+        w = [1.5, -2.25, 40000.125, -0.0009765625]
+    def ():
+        let i = .thread.x
+        out[i] = w[i] * w[(i + 1) % 4] - w[(i + 2) % 4]
+        let ufixed0_64 a = 0.3
+        var ufixed0_64 b = 0.7
+        if i == 1:
+            b = 0.6
+        elif i == 2:
+            b = 0.5
+        elif i == 3:
+            b = 0.4
+        frac[i] = a * b + a / b + b % a
+        let ufixed0_64 mx = ufixed0_64.max
+        let ufixed0_64 q = b.min(mx) * 0.25
+        frac2[i] = a.fract() + a.floor() + a.trunc() + ufixed0_64.epsilon + q
+        wide[i] = (b as ufixed32_32) + (a as ufixed32_32) * 3
+        var c = 0
+        if a < b:
+            c = c + 1
+        if a >= b:
+            c = c + 2
+        cmp[i] = c
+
+mut k = W(out, frac, frac2, wide, cmp)
+kernel:
+    k(block = N, grid = 1)
+
+for i in 0..<N:
+    print "{k.out[i]} {k.frac[i]} {k.frac2[i]} {k.wide[i]} {k.cmp[i]}"
 "#);
 }

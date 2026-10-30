@@ -294,11 +294,14 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("    {}_w: i32,", f.name));
                         self.line(&format!("    {}_h: i32,", f.name));
                     }
-                    Type::ArrayN(inner, n) if crate::transpiler::emit_kernel::fixed_kernel_fmt(inner).is_some_and(|x| x.width() > 32) => {
-                        self.line(&format!("    {}: [u32; {}],", f.name, 2 * n));
-                    }
-                    Type::ArrayN(inner, n) => {
-                        self.line(&format!("    {}: [{}; {}],", f.name, params_slot_type(inner), n));
+                    ty if const_array_view(ty).is_some() => {
+                        let (inner, n) = const_array_view(ty).unwrap();
+                        let inner = &inner;
+                        if crate::transpiler::emit_kernel::fixed_kernel_fmt(inner).is_some_and(|x| x.width() > 32) {
+                            self.line(&format!("    {}: [u32; {}],", f.name, 2 * n));
+                        } else {
+                            self.line(&format!("    {}: [{}; {}],", f.name, params_slot_type(inner), n));
+                        }
                     }
                     ty if crate::transpiler::emit_kernel::fixed_kernel_fmt(ty).is_some_and(|x| x.width() > 32) => {
                         self.line(&format!("    {}_lo: u32,", f.name));
@@ -349,8 +352,9 @@ impl<'a> HostEmitter<'a> {
                         Type::Named(n) if n == "Dimension" => {
                             self.line(&format!("    {}: (i32, i32),", f.name));
                         }
-                        Type::ArrayN(inner, n) => {
-                            self.line(&format!("    {}: [{}; {}],", f.name, host_scalar_type(inner), n));
+                        ty if const_array_view(ty).is_some() => {
+                            let (inner, n) = const_array_view(ty).unwrap();
+                            self.line(&format!("    {}: [{}; {}],", f.name, host_scalar_type(&inner), n));
                         }
                         ty => {
                             self.line(&format!("    {}: {},", f.name, host_scalar_type(ty)));
@@ -644,9 +648,10 @@ impl<'a> HostEmitter<'a> {
                             // Use width/height params when available (has_dim_field kernel).
                             self.line(&format!("            {}: (width, height),", f.name));
                         }
-                        Type::ArrayN(inner, n) => {
+                        ty if const_array_view(ty).is_some() => {
+                            let (inner, n) = const_array_view(ty).unwrap();
                             self.line(&format!("            {}: [{}::default(); {}],",
-                                f.name, host_scalar_type(inner), n));
+                                f.name, host_scalar_type(&inner), n));
                         }
                         ty => {
                             let val = f.default.as_ref()
@@ -699,12 +704,15 @@ impl<'a> HostEmitter<'a> {
                         self.line(&format!("            {}_w: self.{}.0,", f.name, f.name));
                         self.line(&format!("            {}_h: self.{}.1,", f.name, f.name));
                     }
-                    Type::ArrayN(inner, n) if crate::transpiler::emit_kernel::fixed_kernel_fmt(inner).is_some_and(|x| x.width() > 32) => {
-                        self.line(&format!(
-                            "            {}: {{ let mut __a = [0u32; {}]; for (__i, __x) in self.{}.iter().enumerate() {{ __a[2 * __i] = (__x.0 as u64) as u32; __a[2 * __i + 1] = ((__x.0 as u64) >> 32) as u32; }} __a }},",
-                            f.name, 2 * n, f.name));
-                    }
-                    Type::ArrayN(inner, _) => {
+                    ty if const_array_view(ty).is_some() => {
+                        let (inner, n) = const_array_view(ty).unwrap();
+                        let inner = &inner;
+                        if crate::transpiler::emit_kernel::fixed_kernel_fmt(inner).is_some_and(|x| x.width() > 32) {
+                            self.line(&format!(
+                                "            {}: {{ let mut __a = [0u32; {}]; for (__i, __x) in self.{}.iter().enumerate() {{ __a[2 * __i] = (__x.0 as u64) as u32; __a[2 * __i + 1] = ((__x.0 as u64) >> 32) as u32; }} __a }},",
+                                f.name, 2 * n, f.name));
+                            continue;
+                        }
                         let conv = params_slot_conv(inner, "__x");
                         if conv == "__x" {
                             self.line(&format!("            {}: self.{},", f.name, f.name));
@@ -789,8 +797,8 @@ impl<'a> HostEmitter<'a> {
             // fields (`w = [1.0, 2.0]`) reach it through the same `copy_{field}_to_device`
             // call `emit_kernel::kernel_output_fill_map` emits for every backend.
             if matches!(f.qual, GpuQual::Const) {
-                if let Type::ArrayN(inner, n) = &f.ty {
-                    let host_ty = host_scalar_type(inner);
+                if let Some((inner, n)) = const_array_view(&f.ty) {
+                    let host_ty = host_scalar_type(&inner);
                     self.line(&format!("    fn copy_{}_to_device(&mut self, data: &[{}]) {{", f.name, host_ty));
                     self.line(&format!("        self.{}[..data.len().min({})].copy_from_slice(&data[..data.len().min({})]);", f.name, n, n));
                     self.line("    }");
@@ -2891,6 +2899,19 @@ fn is_params_field(f: &KernelFieldDecl) -> bool {
 /// only matched `Array`/`ArrayN`, so a `[T, width = .., height = ..]'global`
 /// field's buffer, struct field, and bind-group entry were all silently
 /// dropped (matrix_mul_gpu.br's wgpu regression).
+/// Element type and length of a fixed-length `'const` array: `[T, N]` or a labeled array whose axes
+/// are all literal-sized (`[T, width = 4, height = 4]`, stored flat, row-major).
+fn const_array_view(ty: &Type) -> Option<(Type, usize)> {
+    match ty {
+        Type::ArrayN(inner, n) => Some(((**inner).clone(), *n)),
+        ty if ty.as_labeled_array().is_some() => {
+            let (inner, _) = ty.as_labeled_array()?;
+            Some((inner.clone(), ty.labeled_array_len()? as usize))
+        }
+        _ => None,
+    }
+}
+
 fn is_buffer_array_ty(ty: &Type) -> bool {
     matches!(ty, Type::Array(_) | Type::ArrayN(_, _)) || ty.as_labeled_array().is_some()
 }
