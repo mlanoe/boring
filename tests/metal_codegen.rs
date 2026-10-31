@@ -306,6 +306,91 @@ fn host_array_passed_to_float32_gpu_param_runs_on_metal() {
     assert_eq!(stdout.trim_end(), "4");
 }
 
+// A host array that also feeds a GPU function is tagged `'kernel'global` by residency inference,
+// and so are the host-only helper parameters it flows through (`lin`, `rd`): they must still be
+// read-only borrows (`&Vec<T>`), like any unqualified array parameter, so a helper called twice
+// with the same array, or reading a parameter inside a loop, doesn't move it (E0382).
+const HOST_ONLY_ARRAY_PARAMS_FED_BY_GPU_ARRAY: &str = r#"
+kernel AddOneKernel:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 as float32 for ..<nn]
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        if i < n:
+            out[i] = src[i] + 1.0
+
+pub req [float32]'kernel'unified fill([float32]'global src, int n) throws:
+    mut k = AddOneKernel(src, n)
+    kernel:
+        k(block = 256, grid = ((n + 255) / 256, 1))
+    k.out
+
+pub [float32] lin([float32] x, [float32] w, int n):
+    mut [float32] r = [0.0 as float32 for i in 0..<n]
+    var int i = 0
+    while i < n:
+        r[i] = x[i] * w[i]
+        i += 1
+    r
+
+pub [float32] ffn([float32] x, [float32] g, [float32] u, int n):
+    let a = lin(x, g, n)
+    let b = lin(x, u, n)
+    [a[i] + b[i] for i in 0..<n]
+
+pub float32 rd([float32] bytes, int o):
+    bytes[o]
+
+pub float32 total([float32] bytes, int n):
+    var int cur = 0
+    var float32 t = 0.0
+    while cur < n:
+        t += rd(bytes, cur)
+        cur += 1
+    t
+
+def main() throws:
+    let n = 4
+    mut [float32] x = [1.0 as float32 for ..<n]
+    let g = [2.0 as float32 for ..<n]
+    let u = [3.0 as float32 for ..<n]
+    let y = fill(x, n)
+    let r = ffn(x, g, u, n)
+    with y:
+        print "{r[0]} {total(x, n)} {y[0]}"
+"#;
+
+#[test]
+fn host_only_array_params_fed_by_gpu_array_are_borrowed() {
+    let (_, rs) = metal_codegen("host_only_array_params_codegen", HOST_ONLY_ARRAY_PARAMS_FED_BY_GPU_ARRAY);
+    for sig in ["pub fn lin(x: &Vec<f32>, w: &Vec<f32>", "pub fn ffn(x: &Vec<f32>", "pub fn rd(bytes: &Vec<f32>", "pub fn total(bytes: &Vec<f32>"] {
+        assert!(rs.contains(sig), "host-only array parameter must be a `&Vec`, missing `{sig}`:\n{rs}");
+    }
+}
+
+#[test]
+fn host_only_array_params_fed_by_gpu_array_compile_and_run_on_metal() {
+    let test_name = "host_only_array_params_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, HOST_ONLY_ARRAY_PARAMS_FED_BY_GPU_ARRAY);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generated Metal program failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "5 4 2");
+}
+
 const TOP_LEVEL_TENSOR_ARRAYS_IN_FN: &str = r#"
 let [float32, k = 8, m = 8]'kernel'global a = [1.0 as float32 for ..<64]
 let [float32, n = 8, k = 8]'kernel'global b = [1.0 as float32 for ..<64]

@@ -2180,6 +2180,81 @@ impl Transpiler {
         Some(cloned)
     }
 
+    /// Residency inference (`desugar_tensor_quals.rs`) tags every array that shares a group with a
+    /// GPU operand `'kernel'global`/`'kernel'unified` — including a parameter of an ordinary host
+    /// function (`linear(x, w)` called with the same array that also feeds a GPU function). Such a
+    /// parameter that is never a kernel-side operand in its function (not a `fn_gpu_arg_params`
+    /// position, never passed at a position that is, no `with` block) is a plain host `Vec<T>`:
+    /// emitted as declared, it would be taken by value and moved out of the caller (E0382),
+    /// bypassing the read-only borrow inference every unqualified array parameter gets. Dropping
+    /// the qualifier here, for the general pass only, restores that inference.
+    fn unqualify_host_only_gpu_array_params(&mut self, program: &Program) -> Option<Program> {
+        let host_only = |this: &Self, f: &crate::ast::FnDecl, p: &Param, i: usize| -> bool {
+            if p.mutable || p.rebindable || p.variadic { return false; }
+            let Some(Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)) = p.ty.as_ref() else { return false };
+            if !matches!(inner.as_ref(), Type::Array(_)) { return false; }
+            if this.fn_gpu_arg_params.get(&f.name).and_then(|fl| fl.get(i)).copied().unwrap_or(false) { return false; }
+            if f.return_ty.as_ref().is_some_and(|t| t.gpu_resident_qual().is_some() || matches!(t, Type::Tuple(_))) { return false; }
+            let mut with_block = false;
+            crate::ast::walk_stmts(&f.body, &mut |n| { if let crate::ast::WalkNode::Stmt(Stmt::With(_)) = n { with_block = true; } });
+            if with_block { return false; }
+            let mut at_gpu_position = false;
+            let mut classify = |callee: &str, idx: usize| -> bool {
+                let q = this.gpu_arg_position_qualifies(callee, idx);
+                at_gpu_position |= q;
+                q
+            };
+            crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, true);
+            !at_gpu_position
+        };
+        fn any_item(items: &[Item], t: &Transpiler, host_only: &dyn Fn(&Transpiler, &crate::ast::FnDecl, &Param, usize) -> bool) -> bool {
+            items.iter().any(|i| match i {
+                Item::Fn(f) => f.params.iter().enumerate().any(|(k, p)| host_only(t, f, p, k)),
+                Item::Mod(m) => any_item(&m.items, t, host_only),
+                _ => false,
+            })
+        }
+        if !any_item(&program.items, self, &host_only) { return None; }
+        fn rewrite_items(items: &mut [Item], t: &Transpiler, host_only: &dyn Fn(&Transpiler, &crate::ast::FnDecl, &Param, usize) -> bool) {
+            for it in items.iter_mut() {
+                match it {
+                    Item::Fn(f) => {
+                        let flags: Vec<bool> = f.params.iter().enumerate().map(|(k, p)| host_only(t, f, p, k)).collect();
+                        for (p, hit) in f.params.iter_mut().zip(flags) {
+                            if !hit { continue; }
+                            if let Some(Type::Qualified(inner, _)) = p.ty.take() { p.ty = Some(*inner); }
+                        }
+                    }
+                    Item::Mod(m) => rewrite_items(&mut m.items, t, host_only),
+                    _ => {}
+                }
+            }
+        }
+        let mut cloned = program.clone();
+        rewrite_items(&mut cloned.items, self, &host_only);
+        fn collect(orig: &[Item], new: &[Item], out: &mut Vec<(String, Vec<Param>, Vec<Param>)>) {
+            for (o, n) in orig.iter().zip(new.iter()) {
+                match (o, n) {
+                    (Item::Fn(a), Item::Fn(b)) => out.push((a.name.clone(), a.params.clone(), b.params.clone())),
+                    (Item::Mod(a), Item::Mod(b)) => collect(&a.items, &b.items, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut pairs = Vec::new();
+        collect(&program.items, &cloned.items, &mut pairs);
+        for (name, old_ps, new_ps) in pairs {
+            if old_ps.iter().zip(&new_ps).all(|(a, b)| a.ty == b.ty) { continue; }
+            let types: Vec<Type> = new_ps.iter().filter_map(helpers::sig_param_type).collect();
+            self.fn_sigs.insert(mangle_overload_name(&name, &old_ps), types.clone());
+            if self.fn_sigs.contains_key(&name) { self.fn_sigs.insert(name, types); }
+        }
+        // The global pre-pass could not borrow these parameters (a declared qualifier is never
+        // refined): redo it so a caller emitted before its callee already sees `&Vec<T>`.
+        self.pre_infer_fn_qualifiers(&cloned);
+        Some(cloned)
+    }
+
     // ── Output helpers ────────────────────────────────────────────────────────
 
     fn push_error(&self, line: usize, col: usize, msg: impl Into<String>) {
@@ -2320,6 +2395,11 @@ impl Transpiler {
         // fixed point, so it runs once here rather than folding into `pre_scan`,
         // which recurses per-module-scope on a series of smaller pseudo-programs.
         self.compute_gpu_arg_params(program);
+        let owned_program3;
+        let program: &Program = match self.unqualify_host_only_gpu_array_params(program) {
+            Some(p) => { owned_program3 = p; &owned_program3 }
+            None => program,
+        };
         // Pre-scan: collect enum variants and fn defaults before emitting anything.
         self.pre_scan(program);
 
