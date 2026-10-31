@@ -1,6 +1,6 @@
 # Labelled generic arguments — draft
 
-Status: **draft, nothing implemented.** Prerequisite (phase 0) of
+Status: **type and const arguments implemented** (parser-time resolution, `src/parser/generic_args.rs`; the resolution site is a lenient first parse + resolving second parse, see `docs/book.md` "Labelled generic arguments"); the qualifier form `label'value` and the `'Q` declaration remain a draft. Prerequisite (phase 0) of
 [qualifier-generic-params.md](qualifier-generic-params.md), useful on its own: today a generic
 argument list is positional only (`Pair<int, string>`), which says nothing about what each
 argument is for, and cannot name a qualifier at all.

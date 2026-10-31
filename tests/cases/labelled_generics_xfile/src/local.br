@@ -1,0 +1,6 @@
+# Same-project sibling of main.br: a generic struct whose parameters main.br's labels name.
+pub struct Cell<T, uint N>:
+    pub T value
+
+    req T get():
+        value

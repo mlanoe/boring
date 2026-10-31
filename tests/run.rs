@@ -943,3 +943,28 @@ interp_test!(bytes_array_field_and_param_reuse);
 // swallow the closing delimiters on the flattened closure line.
 interp_test!(closure_pass_body_struct_arg);
 interp_test!(unresolved_receiver_user_method_name);
+
+// Labelled generic arguments (`Pair<K = int, V = string>`): see tests/cases/labelled_generics.br.
+interp_test!(labelled_generics);
+
+// Labelled generic arguments naming parameters declared in other files (a `[deps]` project and
+// a sibling `use`): the same program `transpile_project_test!(labelled_generics_xfile)` builds.
+#[test]
+fn labelled_generics_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/labelled_generics_xfile/src/main.br");
+
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        output.status.success(),
+        "labelled_generics_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "1\none\n7\n5");
+}

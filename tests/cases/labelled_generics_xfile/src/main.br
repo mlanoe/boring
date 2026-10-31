@@ -1,0 +1,14 @@
+# Labelled generic arguments whose callee is declared in ANOTHER file: `Pair` and `pick` in the
+# `[deps]` project (fixtures/labelled_generics_lib), `Cell` in the sibling src/local.br. The
+# labels cannot be resolved from this file alone; `boring run` and `boring build` must agree.
+# Registered by tests/run.rs (`labelled_generics_xfile`) and tests/transpile.rs
+# (`transpile_project_test!(labelled_generics_xfile)`).
+use pairlib.pair.*
+use local
+
+let a = Pair<V = string, K = int>(1, "one")
+print a.getFirst()
+print a.getSecond()
+let c = Cell<N = 3, T = int>(7)
+print c.get()
+print pick<U2 = string, T2 = int>(5, "x")

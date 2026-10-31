@@ -309,17 +309,11 @@ impl Parser {
                     | "int8" | "int16" | "int32" | "int64" | "int128"
                     | "float" | "float16" | "float32" | "float64" | "f16" | "bool" | "string" | "str");
                 let built = if takes_generics && self.eat(&TokenKind::Lt) {
-                    let mut args = Vec::new();
-                    args.push(self.parse_generic_type_arg()?);
-                    while self.eat(&TokenKind::Comma) {
-                        if self.check(&TokenKind::Gt) { break; }
-                        args.push(self.parse_generic_type_arg()?);
-                    }
-                    self.expect(&TokenKind::Gt)?;
                     let name = match &base {
                         Type::Named(n) => n.clone(),
                         _ => s.clone(),
                     };
+                    let args = self.parse_generic_arg_list(ArgTarget::Type(&name), |p| p.parse_generic_type_arg())?;
                     Type::Generic(name, args)
                 } else {
                     base

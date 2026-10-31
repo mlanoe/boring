@@ -4543,6 +4543,42 @@ copy_items::<isize>(src, dst);           // bound already on fn, not repeated at
 let buf: Container<'a, Arc<str>>;   // lifetime preserved
 ```
 
+### Labelled generic arguments
+
+A generic argument can name the parameter it is for: `Pair<K = int, V = string>`, `Grid<N = 4>`. The label is the parameter's declared name, and the list is written the same way everywhere an argument list appears — constructor/function call, method turbofish, type position, `ext` header.
+
+```boring
+struct Pair<K, V>:
+    K first
+    V second
+
+struct Grid<uint N>:
+    int x
+
+let a = Pair<K = int, V = string>(1, "one")
+let b = Pair<V = string, K = int>(2, "two")     # any order among the labelled
+let c = Pair<int, V = string>(3, "three")       # positional first, then labelled
+let g = Grid<N = 4>(1)
+let r = pick<U2 = string, T2 = int>(5, "x")     # function and method turbofish too
+```
+
+**Rules**
+- Positional arguments come first, then labelled ones; a positional argument after a labelled one is an error.
+- A parameter is given at most once (positionally or by label), and once any argument of a list is labelled **every** parameter must be given — there are no default arguments.
+- Labels are scoped to their own list: in `Pair<K = int, V = Pair<K = string, V = int>>` the nested list has its own `K` and `V`. A trailing comma is allowed.
+- Only uppercase-initial names are labels (declared type and const parameters are), so `a < b, c = d > (e)` and call-argument labels (`f(x = 1)`) are unaffected.
+- A lifetime parameter has no label; give it positionally, first.
+
+Labels are resolved right after parsing, against the callee's declaration — in this file or in a file it `use`s (sibling files, `[deps]` projects, `boring.*`) — and replaced by the positional arguments. Everything after that (checker, interpreter, transpiler, monomorphizer) sees positional arguments, so `boring run` and `boring build` behave and fail identically, and `Pair<K = int, V = string>` and `Pair<int, string>` are the same instance (one specialisation, `Pair_int_string`).
+
+**Errors** (all with the position of the argument): `unknown generic parameter `X` of `Pair` (parameters: K, V)`, `generic parameter `K` of `Pair` is given more than once`, `positional generic argument after a labelled one`, `missing generic argument `V` of `Pair``, `takes 2 generic argument(s), got more`, and `labelled generic arguments need the declaration of `Name` in scope` when the callee is not declared in this file or an imported one (a built-in generic such as `Vec` has no labels).
+
+In an `ext` header, labels name an instance: `ext Pair<K = int, V = string>:` is `ext Pair<int, string>:`; it cannot be mixed with parameters declared with `as`. A method turbofish whose receiver is not a bare type name (`obj.m<T = int>()`) is resolved by the method's name, which must be declared with one parameter list in scope.
+
+**Rust equivalent**: none of its own — `Pair::<isize, Arc<str>>`, as for the positional spelling.
+
+---
+
 ### Const generics — `<uint N>`
 
 A **const generic** is a compile-time integer or bool value that is part of a type's signature. Write it as `<uint N>` (or `<int N>`, `<bool N>`) inside the generic parameter list — the type comes first, then the name, just like a regular variable declaration.

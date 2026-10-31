@@ -86,8 +86,7 @@ pub fn set_import_context(entry: &Path) {
     IMPORT_CTX.with(|c| *c.borrow_mut() = Some((dir, deps)));
 }
 
-/// Trait method names of the files `items` `use`, transitively. Imported files are parsed
-/// without this pass (`parse_without_inference`): only their declarations matter here.
+/// Trait method names of the files `items` `use`, transitively.
 fn collect_imported_trait_methods(
     items: &[Item],
     source_dir: &Path,
@@ -95,9 +94,28 @@ fn collect_imported_trait_methods(
     visited: &mut HashSet<PathBuf>,
     out: &mut HashSet<String>,
 ) {
+    visit_imported_files(items, source_dir, deps, visited, &mut |file| collect_trait_methods(&file.items, out));
+}
+
+/// The import context of the current parse (`set_import_context`): directory bare `use`
+/// resolves against and the project's `[deps]`.
+pub(crate) fn import_context() -> Option<(PathBuf, HashMap<String, PathBuf>)> {
+    IMPORT_CTX.with(|c| c.borrow().clone())
+}
+
+/// Calls `f` on every file the `use` items of `items` reach, transitively (sibling files,
+/// `[deps]`, `boring.*` stdlib). Imported files are parsed without the inference passes
+/// (`parse_without_inference`): only their declarations matter to the callers.
+pub(crate) fn visit_imported_files(
+    items: &[Item],
+    source_dir: &Path,
+    deps: &HashMap<String, PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+    f: &mut dyn FnMut(&Program),
+) {
     for it in items {
         match it {
-            Item::Mod(m) => collect_imported_trait_methods(&m.items, source_dir, deps, visited, out),
+            Item::Mod(m) => visit_imported_files(&m.items, source_dir, deps, visited, f),
             Item::Use(u) if !u.path.is_empty() => {
                 let (root, source) = if u.path[0] == "boring" && u.path.len() >= 2 {
                     // `use boring.<module>`: embedded stdlib.
@@ -117,8 +135,8 @@ fn collect_imported_trait_methods(
                 };
                 let Ok(tokens) = crate::lexer::lex_all(&source) else { continue };
                 let Ok(file) = crate::parser::parse_without_inference(tokens) else { continue };
-                collect_trait_methods(&file.items, out);
-                collect_imported_trait_methods(&file.items, &root, deps, visited, out);
+                f(&file);
+                visit_imported_files(&file.items, &root, deps, visited, f);
             }
             _ => {}
         }

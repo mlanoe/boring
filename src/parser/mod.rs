@@ -9,6 +9,7 @@
 //
 // See the LICENSE file at the project root for the full text.
 
+mod generic_args;
 mod parse_array_block;
 mod parse_expr;
 mod parse_fn;
@@ -19,6 +20,7 @@ use crate::ast::*;
 use crate::lexer::{LexError, Token, TokenKind};
 use thiserror::Error;
 
+use generic_args::ArgTarget;
 use parse_type::{check_no_return, expr_to_param, resolve_assoc_in_fn, resolve_assoc_in_sig};
 
 /// Internal helper: result of parsing one `type …` member inside a struct body.
@@ -87,6 +89,13 @@ pub(crate) fn parse_without_inference(tokens: Vec<Token>) -> Result<Program, Par
 pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     let mut p = Parser::new(tokens);
     let mut program = p.parse_program()?;
+    if p.saw_labelled_generics {
+        // Labels name parameters of declarations that may live in other files: collect them from
+        // this first (lenient) parse, then parse again resolving every labelled list.
+        let mut resolving = Parser::new(std::mem::take(&mut p.tokens));
+        resolving.generic_decls = Some(generic_args::decls_rc(&program));
+        program = resolving.parse_program()?;
+    }
     crate::infer_actor_params::infer_actor_params(&mut program);
     crate::infer_actor_elems::infer_actor_elems(&mut program);
     Ok(program)
@@ -124,6 +133,11 @@ struct Parser {
     /// When true, `expect_newline_soft` will not consume a `;` token, leaving it
     /// for `parse_inline_stmts` to use as a statement separator.
     pub(crate) in_inline_context: bool,
+    /// Declared generic parameters that labelled generic arguments resolve against; `None` on the
+    /// lenient first parse (see `generic_args`).
+    pub(crate) generic_decls: Option<std::rc::Rc<generic_args::GenericDecls>>,
+    /// A labelled generic argument list was seen: the file needs the two-phase parse.
+    pub(crate) saw_labelled_generics: bool,
 }
 
 impl Parser {
@@ -135,6 +149,8 @@ impl Parser {
             allow_noparen_closure: true,
             allow_trailing_closure: true,
             in_inline_context: false,
+            generic_decls: None,
+            saw_labelled_generics: false,
         }
     }
 
@@ -903,12 +919,22 @@ impl Parser {
                     }
                     i += 1;
                 }
+                // A labelled argument `Label = value` (`Pair<K = int, V = string>(..)`): the label is
+                // uppercase-initial (declared parameter names are) and directly follows `<` or `,`.
+                // Anything else with `=` is not a type argument list. An assignment cannot be an
+                // operand of `<`, so only inputs that did not parse before are affected.
+                TokenKind::Eq
+                    if i >= 2
+                        && matches!(&self.tokens[i - 1].kind, TokenKind::Ident(s) if s.starts_with(|c: char| c.is_uppercase()))
+                        && matches!(&self.tokens[i - 2].kind, TokenKind::Lt | TokenKind::Comma) =>
+                {
+                    i += 1;
+                }
                 // Tokens that cannot appear inside a type argument list: bail out
                 TokenKind::Newline
                 | TokenKind::Semicolon
                 | TokenKind::Indent
                 | TokenKind::Dedent
-                | TokenKind::Eq
                 | TokenKind::EqEq
                 | TokenKind::BangEq
                 | TokenKind::LtEq
@@ -2338,6 +2364,8 @@ impl Parser {
         let mut type_args: Vec<Type> = Vec::new();
         let mut type_params: Vec<String> = Vec::new();
         let mut where_clause: Vec<(String, String)> = Vec::new();
+        let mut ext_args: Vec<generic_args::GArg> = Vec::new();
+        let mut labelled = false;
         if self.eat(&TokenKind::Lt) {
             loop {
                 let is_type_param = matches!(self.peek(), TokenKind::Ident(n) if {
@@ -2360,8 +2388,10 @@ impl Parser {
                     type_params.push(param_name.clone());
                     type_args.push(Type::TypeParam(param_name));
                 } else {
-                    let ty = self.parse_type()?;
-                    type_args.push(ty);
+                    let arg = self.parse_generic_arg(|p| p.parse_type())?;
+                    labelled |= arg.label.is_some();
+                    type_args.push(arg.ty.clone());
+                    ext_args.push(arg);
                 }
 
                 if !self.eat(&TokenKind::Comma) {
@@ -2369,6 +2399,17 @@ impl Parser {
                 }
             }
             self.expect(&TokenKind::Gt)?;
+            if labelled {
+                // `ext Pair<K = int, V = string>:` — the header names an instance of `type_name`.
+                let (lt_line, lt_col) = (line, col);
+                if !type_params.is_empty() {
+                    return Err(ParseError::Generic {
+                        msg: "an `ext` header cannot mix generic parameters declared with `as` and labelled arguments".into(),
+                        line, col, len: self.span_len(line, col),
+                    });
+                }
+                type_args = self.resolve_generic_args(ArgTarget::Type(&type_name), ext_args, lt_line, lt_col)?;
+            }
         }
 
         // Optional `as Trait1, Trait2` conformance list
@@ -3044,3 +3085,5 @@ mod tests;
 mod tests_labeled_array;
 #[cfg(test)]
 mod tests_recursion_depth;
+#[cfg(test)]
+mod tests_labelled_generics;

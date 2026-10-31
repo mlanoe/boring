@@ -207,6 +207,18 @@ lifetime_param  ::= "&" LOWERCASE_IDENT                    # e.g. &a, &b  (store
 const_param     ::= ("int" | "uint" | "bool") IDENT
 type_param      ::= IDENT ("as" (IDENT | "(" IDENT ("," IDENT)* ")"))?
 
+# Generic ARGUMENTS at a use site (call, method turbofish, type position, `ext` header):
+# positional arguments first, then labelled ones in any order, trailing comma allowed.
+# A label is the declared parameter's name (`K`, `V`, `N`; uppercase-initial) and is resolved
+# against the callee's declaration, in this file or a file it `use`s, right after parsing: the
+# rest of the compiler only ever sees positional arguments. A parameter is given exactly once;
+# once any argument is labelled every parameter must be given. A list with no label is not
+# checked against the declaration. The label form is `IDENT "="`, the same shape as a labelled
+# call argument, but at use sites of `<…>` it only appears with an uppercase-initial IDENT.
+generic_args    ::= "<" generic_arg ("," generic_arg)* ","? ">"
+generic_arg     ::= (IDENT "=")? generic_value
+generic_value   ::= type | INT_LITERAL | const_param | lifetime_param   # a const argument is a literal (Grid<N = 4>)
+
 # Functions do NOT need explicit lifetime params: they are auto-inferred from the signature.
 #   def str&a longest(str&a x, str&a y):   — transpiles to fn longest<'a>(…) automatically
 
@@ -340,7 +352,7 @@ type_member_decl ::= "type" ("let" | "var") type? IDENT "=" expr NEWLINE
 
 fn_signature    ::= ("def" | "req") type? IDENT "(" param_list? ")" modifier* NEWLINE
 
-ext_decl        ::= "ext" IDENT type_params? ("as" type_list)? ":" NEWLINE INDENT
+ext_decl        ::= "ext" IDENT (type_params | generic_args)? ("as" type_list)? ":" NEWLINE INDENT
                       ext_member+
                     DEDENT
 
@@ -756,7 +768,7 @@ trailing_closure ::= "(" param_list? ")" modifier* ":" fn_body   # (p, q): body
                    | "do" expr                                         # do expr (same-line)
 
 postfix         ::= "(" arg_list? ")" trailing_closure?          # call with optional trailing closure
-                  | "<" type_list ">" "(" arg_list? ")" trailing_closure?  # generic call: f<T>(args)
+                  | generic_args "(" arg_list? ")" trailing_closure?           # generic call: f<T>(args), f<T = int>(args)
                   | trailing_closure                                         # trailing closure, no regular args
                   | "." IDENT                                                # field access — also covers
                                                                              #   `.pointee` on an opaque/external
@@ -766,10 +778,10 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                                                                              #   properties (`a.width`, `a.height`)
                   | "?." IDENT                                               # optional chaining — field
                   | "." IDENT "(" arg_list? ")"                             # method call
-                  | "." IDENT "<" type_list ">" "(" arg_list? ")"          # generic method call: obj.method<T>(args)
+                  | "." IDENT generic_args "(" arg_list? ")"                    # generic method call: obj.method<T>(args)
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
                   | "?" "(" arg_list? ")"                                # optional call of a function-typed value: f?(args) — sugar for `if f != nil: f(args) else: nil`; callee must be a variable/field path
-                  | "?." IDENT "<" type_list ">" "(" arg_list? ")"        # optional chaining — generic method call: obj?.method<T>(args)
+                  | "?." IDENT generic_args "(" arg_list? ")"                  # optional chaining — generic method call: obj?.method<T>(args)
                   | "[" expr "]"                                             # index
                   | "[" IDENT "=" expr ("," IDENT "=" expr)* ","? "]"        # labeled index (2+ axes; see array-multidim-types.md):
                                                                              #   a[width = w, height = h] — every arg mandatorily
@@ -1009,7 +1021,7 @@ type            ::= primitive_type
                   | numeric_type
                   | "<" IDENT ">"                      # impl Trait shorthand: <Drawable>
                   | IDENT                              # named type; if a trait → Box<dyn Trait>
-                  | IDENT "<" type_list ">"            # generic: Stack<Int>
+                  | IDENT generic_args                 # generic: Stack<Int>, Pair<K = Int, V = String>
                   | type "?"                           # optional: T?  →  Option<T>
                   | "[" type "]"                       # dynamic array: [T]  →  Vec<T>
                   | "[" type "," const_expr "]"        # fixed-size array: [T, N]  →  [T; N] in Rust

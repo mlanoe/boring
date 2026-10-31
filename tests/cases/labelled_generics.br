@@ -1,0 +1,52 @@
+# Labelled generic arguments (docs/book.md, "Labelled generic arguments"): `Name<K = int>`
+# names the parameter an argument is for. Positional arguments first, then labelled ones, any
+# order among the labelled; every parameter given exactly once. Normalised to positional right
+# after parsing, so a labelled and a positional spelling of one instance are the same type
+# (one specialisation: `Pair_int_string`).
+struct Pair<K, V>:
+    K first
+    V second
+
+    req K getFirst():
+        first
+
+    req V getSecond():
+        second
+
+struct Grid<uint N>:
+    int x
+
+struct Mapper:
+    var int base = 10
+
+    def T2 convert<T2, U2>(T2 x, U2 y):
+        x
+
+T2 pick<T2, U2>(T2 a, U2 b):
+    a
+
+def main():
+    let a = Pair<K = int, V = string>(1, "one")
+    let b = Pair<V = string, K = int>(2, "two")
+    let c = Pair<int, V = string>(3, "three")
+    let d = Pair<string, int>("four", 4)
+    print a.getFirst()
+    print b.getSecond()
+    print c.getFirst() + b.getFirst()
+    print d.getSecond()
+
+    # Trailing comma, and a compound value.
+    let e = Pair<K = int, V = [int],>(4, [5, 6])
+    print e.getSecond()[1]
+
+    let g = Grid<N = 4>(1)
+    print g.x
+
+    mut m = Mapper(1)
+    print m.convert<U2 = string, T2 = int>(42, "u")
+    print pick<T2 = int, U2 = string>(8, "z")
+
+    # Comparisons are untouched.
+    let lo = 1
+    let hi = 2
+    print lo < hi

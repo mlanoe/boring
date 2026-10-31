@@ -2813,6 +2813,27 @@ copy_items&lt;<span class="kt">int</span>&gt;(src, dst)
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code>copy_items::&lt;isize&gt;(src, dst);           <span class="co">// bound already on fn, not repeated at call site</span>
 <span class="kw">let</span> buf: <span class="kt">Container</span>&lt;<span class="lf">&#x27;a</span>, <span class="kw">Arc</span>&lt;str&gt;&gt;;   <span class="co">// lifetime preserved</span></code></pre></div>
+<h3 id="labelled-generic-arguments">Labelled generic arguments</h3>
+<p>A generic argument can name the parameter it is for: <code>Pair&lt;K = int, V = string&gt;</code>, <code>Grid&lt;N = 4&gt;</code>. The label is the parameter&#x27;s declared name, and the list is written the same way everywhere an argument list appears — constructor/function call, method turbofish, type position, <code>ext</code> header.</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Pair&lt;K, V&gt;:
+    K first
+    V second
+
+<span class="kw">struct</span> Grid&lt;<span class="kt">uint</span> N&gt;:
+    <span class="kt">int</span> x
+
+<span class="kw">let</span> a = Pair&lt;K = <span class="kt">int</span>, V = <span class="kt">string</span>&gt;(<span class="nb">1</span>, <span class="s">"one"</span>)
+<span class="kw">let</span> b = Pair&lt;V = <span class="kt">string</span>, K = <span class="kt">int</span>&gt;(<span class="nb">2</span>, <span class="s">"two"</span>)     <span class="co"># any order among the labelled</span>
+<span class="kw">let</span> c = Pair&lt;<span class="kt">int</span>, V = <span class="kt">string</span>&gt;(<span class="nb">3</span>, <span class="s">"three"</span>)       <span class="co"># positional first, then labelled</span>
+<span class="kw">let</span> g = Grid&lt;N = <span class="nb">4</span>&gt;(<span class="nb">1</span>)
+<span class="kw">let</span> r = pick&lt;U2 = <span class="kt">string</span>, T2 = <span class="kt">int</span>&gt;(<span class="nb">5</span>, <span class="s">"x"</span>)     <span class="co"># function and method turbofish too</span></code></pre></div>
+<p><strong>Rules</strong></p>
+<ul><li>Positional arguments come first, then labelled ones; a positional argument after a labelled one is an error.</li><li>A parameter is given at most once (positionally or by label), and once any argument of a list is labelled <strong>every</strong> parameter must be given — there are no default arguments.</li><li>Labels are scoped to their own list: in <code>Pair&lt;K = int, V = Pair&lt;K = string, V = int&gt;&gt;</code> the nested list has its own <code>K</code> and <code>V</code>. A trailing comma is allowed.</li><li>Only uppercase-initial names are labels (declared type and const parameters are), so <code>a &lt; b, c = d &gt; (e)</code> and call-argument labels (<code>f(x = 1)</code>) are unaffected.</li><li>A lifetime parameter has no label; give it positionally, first.</li></ul>
+<p>Labels are resolved right after parsing, against the callee&#x27;s declaration — in this file or in a file it <code>use</code>s (sibling files, <code>[deps]</code> projects, <code>boring.*</code>) — and replaced by the positional arguments. Everything after that (checker, interpreter, transpiler, monomorphizer) sees positional arguments, so <code>boring run</code> and <code>boring build</code> behave and fail identically, and <code>Pair&lt;K = int, V = string&gt;</code> and <code>Pair&lt;int, string&gt;</code> are the same instance (one specialisation, <code>Pair_int_string</code>).</p>
+<p><strong>Errors</strong> (all with the position of the argument): <code>unknown generic parameter </code>X<code> of </code>Pair<code> (parameters: K, V)</code>, <code>generic parameter </code>K<code> of </code>Pair<code> is given more than once</code>, <code>positional generic argument after a labelled one</code>, <code>missing generic argument </code>V<code> of </code>Pair<code></code>, <code>takes 2 generic argument(s), got more</code>, and <code>labelled generic arguments need the declaration of </code>Name<code> in scope</code> when the callee is not declared in this file or an imported one (a built-in generic such as <code>Vec</code> has no labels).</p>
+<p>In an <code>ext</code> header, labels name an instance: <code>ext Pair&lt;K = int, V = string&gt;:</code> is <code>ext Pair&lt;int, string&gt;:</code>; it cannot be mixed with parameters declared with <code>as</code>. A method turbofish whose receiver is not a bare type name (<code>obj.m&lt;T = int&gt;()</code>) is resolved by the method&#x27;s name, which must be declared with one parameter list in scope.</p>
+<p><strong>Rust equivalent</strong>: none of its own — <code>Pair::&lt;isize, Arc&lt;str&gt;&gt;</code>, as for the positional spelling.</p>
+<hr>
 <h3 id="const-generics--uint-n">Const generics — <code>&lt;uint N&gt;</code></h3>
 <p>A <strong>const generic</strong> is a compile-time integer or bool value that is part of a type&#x27;s signature. Write it as <code>&lt;uint N&gt;</code> (or <code>&lt;int N&gt;</code>, <code>&lt;bool N&gt;</code>) inside the generic parameter list — the type comes first, then the name, just like a regular variable declaration.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Stack&lt;T, <span class="kt">uint</span> N&gt;:

@@ -811,13 +811,12 @@ impl Parser {
                     // less-than comparison) keeps parsing as a comparison, unaffected.
                     if self.check(&TokenKind::Lt) && self.is_generic_call_ahead(self.pos) {
                         self.advance(); // consume '<'
-                        let mut type_args: Vec<Type> = Vec::new();
-                        type_args.push(self.parse_type()?);
-                        while self.eat(&TokenKind::Comma) {
-                            if self.check(&TokenKind::Gt) { break; }
-                            type_args.push(self.parse_type()?);
-                        }
-                        self.expect(&TokenKind::Gt)?;
+                        let recv_ty = match &expr.kind {
+                            ExprKind::Var(n) if n.starts_with(|c: char| c.is_uppercase()) => Some(n.clone()),
+                            _ => None,
+                        };
+                        let type_args = self.parse_generic_arg_list(
+                            ArgTarget::Method(recv_ty.as_deref(), &field), |p| p.parse_type())?;
                         let callee = Expr { kind: ExprKind::Field(Box::new(expr), field), line, col, len: self.span_len(line, col) };
                         let args = if self.check(&TokenKind::LParen) { self.parse_call_args()? } else { vec![] };
                         expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col) };
@@ -908,13 +907,12 @@ impl Parser {
                     // keeps parsing as a comparison, unaffected.
                     if self.check(&TokenKind::Lt) && self.is_generic_call_ahead(self.pos) {
                         self.advance(); // consume '<'
-                        let mut type_args: Vec<Type> = Vec::new();
-                        type_args.push(self.parse_type()?);
-                        while self.eat(&TokenKind::Comma) {
-                            if self.check(&TokenKind::Gt) { break; }
-                            type_args.push(self.parse_type()?);
-                        }
-                        self.expect(&TokenKind::Gt)?;
+                        let recv_ty = match &expr.kind {
+                            ExprKind::Var(n) if n.starts_with(|c: char| c.is_uppercase()) => Some(n.clone()),
+                            _ => None,
+                        };
+                        let type_args = self.parse_generic_arg_list(
+                            ArgTarget::Method(recv_ty.as_deref(), &field), |p| p.parse_type())?;
                         let callee = Expr { kind: ExprKind::OptionalField(Box::new(expr), field), line, col, len: self.span_len(line, col) };
                         let args = if self.check(&TokenKind::LParen) { self.parse_call_args()? } else { vec![] };
                         expr = Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col) };
@@ -1766,13 +1764,8 @@ impl Parser {
                 {
                     self.advance(); // consume Ident
                     self.advance(); // consume '<'
-                    let mut type_args: Vec<Type> = Vec::new();
-                    type_args.push(self.parse_type()?);
-                    while self.eat(&TokenKind::Comma) {
-                        if self.check(&TokenKind::Gt) { break; }
-                        type_args.push(self.parse_type()?);
-                    }
-                    self.expect(&TokenKind::Gt)?;
+                    let target = if Self::is_type_name(&name) { ArgTarget::Type(&name) } else { ArgTarget::Fn(&name) };
+                    let type_args = self.parse_generic_arg_list(target, |p| p.parse_type())?;
                     let callee = Expr { kind: ExprKind::Var(name), line, col, len: self.span_len(line, col)};
                     let args = if self.check(&TokenKind::LParen) {
                         self.parse_call_args()?

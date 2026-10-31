@@ -1,0 +1,14 @@
+# Dependency project of tests/cases/labelled_generics_xfile: the generic declarations that the
+# labelled arguments of the consuming project's src/main.br name (K, V, T2, U2).
+pub struct Pair<K, V>:
+    pub K first
+    pub V second
+
+    req K getFirst():
+        first
+
+    req V getSecond():
+        second
+
+pub T2 pick<T2, U2>(T2 a, U2 b):
+    a

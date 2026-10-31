@@ -1,0 +1,7 @@
+[project]
+name = "labelled_generics_xfile"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+pairlib = "../fixtures/labelled_generics_lib"
