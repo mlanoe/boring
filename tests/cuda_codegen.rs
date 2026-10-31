@@ -1444,10 +1444,10 @@ kernel:
         "the field/init-assignment must not fall back to the unit type;\ngot:\n{rs}"
     );
     assert!(
-        rs.contains("let mut blur = Blur::new("),
+        rs.contains("let mut blur = Blur_1_1::new("),
         "expected the turbofish construction `Blur<1, 1>(...)` to emit a plain \
-         `Blur::new(...)` call (type args erased, same as a non-generic kernel), \
-         not this file's `/* expr */` catch-all;\ngot:\n{rs}"
+         `Blur_1_1::new(...)` call (monomorphised by `kernel_generic`, same as a \
+         non-generic kernel), not this file's `/* expr */` catch-all;\ngot:\n{rs}"
     );
     assert!(
         rs.contains("blur.__boring_launch("),
@@ -2226,4 +2226,67 @@ kernel Fx:
         print "v = {a[i] * a[i]}"
 "#);
     assert!(dev.contains("printf(\"v = %f\\n\", ((double)((int32_t)((long long)a[i] * (long long)a[i] / (1LL << 16))) / 65536.0));"), "{dev}");
+}
+
+// ─── Generic kernel monomorphisation ─────────────────────────────────────────
+
+const GENERIC_KERNEL_SRC: &str = r#"
+float32 pick(int fmt, float32 v):
+    if fmt == 0:
+        v * 2.0
+    else:
+        v + 100.0
+
+kernel Scale<int FMT, int N>:
+    let [float32]'global x
+    mut [float32]'unified y
+    let int n
+    mut [float32, N]'actor tile
+    init([float32]'global xi, int nn):
+        x = xi
+        n = nn
+        y = [0.0 as float32 for ..<nn]
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        if i < n:
+            tile[.thread.x] = x[i]
+            if FMT == 0:
+                y[i] = pick(FMT, tile[.thread.x])
+            else:
+                y[i] = pick(FMT, tile[.thread.x])
+
+kernel Unused<int Q>:
+    mut [float32]'unified y
+    init(int nn):
+        y = [0.0 as float32 for ..<nn]
+    def ():
+        y[.thread.x] = Q as float32
+
+pub req [float32] run_e0([float32]'global x, int n) throws:
+    mut k = Scale<0, 64>(x, n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    k.y
+
+pub req [float32] run_e1([float32]'global x, int n) throws:
+    mut k = Scale<1, 64>(x, n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    k.y
+
+def main() throws:
+    let n = 4
+    let x = [1.0 as float32, 2.0, 3.0, 4.0]
+    let a = run_e0(x, n)
+    let b = run_e1(x, n)
+    print "{a[0]} {a[3]} {b[0]} {b[3]}"
+"#;
+
+#[test]
+fn generic_kernel_emits_one_specialisation_per_argument_list() {
+    let (cu, rs) = cuda_codegen("generic_kernel_codegen", GENERIC_KERNEL_SRC);
+    assert!(cu.contains("Scale_0_64") && cu.contains("Scale_1_64"), "{cu}");
+    assert!(rs.contains("Scale_0_64") && rs.contains("Scale_1_64"), "{rs}");
+    assert!(!cu.contains("FMT") && !rs.contains("FMT"), "const parameter must be substituted:\n{cu}");
+    assert!(!cu.contains("Unused") && !rs.contains("Unused"), "an uninstantiated generic emits nothing");
 }

@@ -129,6 +129,8 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
     let program = &optional_lowered;
+    let (generic_lowered, generic_errors) = crate::transpiler::kernel_generic::monomorphise_generic_kernels(program);
+    let program = &generic_lowered;
     // `screen.setAccessibility` / `screen.accessibilityRequests` are wgpu-only: a no-op here.
     let accessibility_stripped = crate::transpiler::screen_input::strip_accessibility(program);
     let program = &accessibility_stripped;
@@ -261,6 +263,7 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let warnings = general_out.warnings;
     let mut errors = general_out.errors;
     errors.extend(device_errors);
+    errors.extend(generic_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
     errors.extend(crate::transpiler::helpers::take_reported_errors());

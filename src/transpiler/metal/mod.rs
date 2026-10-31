@@ -90,6 +90,8 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
     let program = &optional_lowered;
+    let (generic_lowered, generic_errors) = crate::transpiler::kernel_generic::monomorphise_generic_kernels(program);
+    let program = &generic_lowered;
     // `screen.setAccessibility` / `screen.accessibilityRequests` are wgpu-only: a no-op here.
     let accessibility_stripped = crate::transpiler::screen_input::strip_accessibility(program);
     let program = &accessibility_stripped;
@@ -218,6 +220,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
     let mut errors = general_out.errors;
     errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
+    errors.extend(generic_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);
     errors.extend(crate::transpiler::helpers::take_reported_errors());

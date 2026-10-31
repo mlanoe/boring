@@ -118,6 +118,16 @@ let large = Blur<7>()
 
 Multiple instantiations of the same generic kernel generate **distinct** code objects per backend — for example, `Blur<3>` and `Blur<7>` produce separate WGSL entry points `Blur_3_main` and `Blur_7_main` when building with `--target wgpu`.
 
+On `--target metal`, `--target cuda` and `--target rocm` the same holds, implemented as a source-to-source pass before code generation: every `Name<0>(...)`/`Name<1>(...)` construction found **anywhere** in the program (top level, function and method bodies) yields one ordinary kernel per unique argument list (`Name_0`, `Name_1` — a negative value is spelled `n<abs>`, `Name_n1`), with each use of the const parameter (field types and defaults, `init`/method bodies, `[T, N]` / `[T, W * H]` array sizes) replaced by the literal. The device compiler therefore sees `if 0 == 0` / `if 1 == 0` and folds the dead branch, exactly as for a hand-written constant. A generic kernel with no instantiation emits nothing. Limits on these three targets: only `int`/`uint` const parameters with integer-literal arguments (`Name<D>(...)` inside a generic function, a type parameter `kernel K<T>`, or a `float`/`bool` const parameter is a transpile error naming the kernel).
+
+```boring
+kernel FlashDecode<int D>:
+    ...                       # `D` usable in bodies and in `[float32, D]'actor`
+
+mut a = FlashDecode<64>(...)  # → kernel FlashDecode_64
+mut b = FlashDecode<128>(...) # → kernel FlashDecode_128
+```
+
 ---
 
 ## GPU memory qualifiers

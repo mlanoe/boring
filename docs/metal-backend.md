@@ -199,6 +199,10 @@ transpiler to handle.
 - **Dispatch**: deferred — launches are batched into shared command buffers and waited on at the next host read (see Error handling). `after =` is accepted syntactically but has no effect.
 - **Atomics**: `atomicSub` has no MSL equivalent — emitted as `atomic_fetch_add_explicit` with a negated value, `memory_order_relaxed`.
 
+## Generic kernels
+
+`kernel Name<int D>:` is monomorphised before MSL generation (`src/transpiler/kernel_generic.rs`, shared with CUDA and ROCm): one `Name_<args>` kernel, MSL function and compute pipeline per unique argument list, the parameter replaced by its literal so the Metal compiler folds `if D == 0` branches and sizes `threadgroup` arrays (`[float32, N]'actor` → `threadgroup float tile[64]`) statically. Instantiations are collected program-wide, including inside function bodies. See [GPU module](gpu-module.html#generic-kernel-declarations) for the naming scheme and limits (`int`/`uint` const parameters with literal arguments only; type-generic kernels are a clear error).
+
 ## Quantized prefill for formats without a native kernel
 
 `kernel.tensors.linear` has native Metal kernels for Q8_0, Q4_K and Q6_K. The other packed formats (Q4_0, Q5_0, IQ4_NL, Q3_K, Q2_K) use the portable path: `m == 1` decodes with a SIMD-group reduction, and prefill (`m > 1`) stages 16x16 activation and dequantized-weight tiles in threadgroup memory (the same generic dequantizer as CUDA/ROCm, exact fp32). Before this path was enabled for Metal they ran a per-element scalar loop. On an Apple GPU, 20 calls of a 128x2048x11008 prefill took 55-82 s that way and 4.2-5.0 s tiled (the native Q8_0/Q4_K kernels take about 0.4 s). `[tensor.linear.prefill] algorithm = "scalar"` still selects the per-element reference.

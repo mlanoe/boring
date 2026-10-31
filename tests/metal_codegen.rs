@@ -2732,9 +2732,9 @@ kernel:
         "the field/init-assignment must not fall back to the unit type;\ngot:\n{rs}"
     );
     assert!(
-        rs.contains("let mut blur = Blur::new("),
+        rs.contains("let mut blur = Blur_1_1::new("),
         "expected the turbofish construction `Blur<1, 1>(...)` to emit a plain \
-         `Blur::new(...)` call (type args erased, same as a non-generic kernel), \
+         `Blur_1_1::new(...)` call (monomorphised by `kernel_generic`), \
          not this file's `/* expr */` catch-all;\ngot:\n{rs}"
     );
     assert!(
@@ -4863,4 +4863,110 @@ fn inline_kernel_flat_actor_tiled_gemm_runs_on_metal() {
 #[test]
 fn inline_kernel_named_axes_actor_tiled_gemm_runs_on_metal() {
     run_inline_gemm("inline_actor_axes_run", false);
+}
+
+// ─── Generic kernel monomorphisation ─────────────────────────────────────────
+
+const GENERIC_KERNEL_SRC: &str = r#"
+float32 pick(int fmt, float32 v):
+    if fmt == 0:
+        v * 2.0
+    else:
+        v + 100.0
+
+kernel Scale<int FMT, int N>:
+    let [float32]'global x
+    mut [float32]'unified y
+    let int n
+    mut [float32, N]'actor tile
+    init([float32]'global xi, int nn):
+        x = xi
+        n = nn
+        y = [0.0 as float32 for ..<nn]
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        if i < n:
+            tile[.thread.x] = x[i]
+            if FMT == 0:
+                y[i] = pick(FMT, tile[.thread.x])
+            else:
+                y[i] = pick(FMT, tile[.thread.x])
+
+kernel Unused<int Q>:
+    mut [float32]'unified y
+    init(int nn):
+        y = [0.0 as float32 for ..<nn]
+    def ():
+        y[.thread.x] = Q as float32
+
+pub req [float32] run_e0([float32]'global x, int n) throws:
+    mut k = Scale<0, 64>(x, n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    k.y
+
+pub req [float32] run_e1([float32]'global x, int n) throws:
+    mut k = Scale<1, 64>(x, n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    k.y
+
+def main() throws:
+    let n = 4
+    let x = [1.0 as float32, 2.0, 3.0, 4.0]
+    let a = run_e0(x, n)
+    let b = run_e1(x, n)
+    print "{a[0]} {a[3]} {b[0]} {b[3]}"
+"#;
+
+#[test]
+fn generic_kernel_emits_one_specialisation_per_argument_list() {
+    let (msl, rs) = metal_codegen("generic_kernel_codegen", GENERIC_KERNEL_SRC);
+    assert!(msl.contains("Scale_0_64_kernel") && msl.contains("Scale_1_64_kernel"), "{msl}");
+    assert!(rs.contains("Scale_0_64") && rs.contains("Scale_1_64"), "{rs}");
+    assert!(!msl.contains("FMT") && !rs.contains("FMT"), "const parameter must be substituted:\n{msl}");
+    assert!(msl.contains("threadgroup float tile[64]"), "array size must be const-evaluated:\n{msl}");
+    assert!(!msl.contains("Unused") && !rs.contains("Unused"), "an uninstantiated generic emits nothing");
+}
+
+#[test]
+fn generic_kernel_instantiations_run_on_metal() {
+    let test_name = "generic_kernel_run";
+    let _ = run_metal(test_name, GENERIC_KERNEL_SRC);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generic kernel run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "2 8 101 104");
+}
+
+#[test]
+fn type_generic_kernel_is_a_clear_error_on_metal() {
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("metal_codegen").join("generic_kernel_type_param");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    fs::write(tmp.join("test.br"), r#"
+kernel Fill<T>:
+    mut [float32]'unified y
+    init(int nn):
+        y = [0.0 as float32 for ..<nn]
+    def ():
+        y[.thread.x] = 1.0
+
+def main() throws:
+    mut k = Fill<float32>(4)
+    kernel:
+        k(block = 4, grid = 1)
+"#).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"]).arg(tmp.join("test.br")).output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("generic kernel `Fill`"), "{}", String::from_utf8_lossy(&result.stderr));
 }

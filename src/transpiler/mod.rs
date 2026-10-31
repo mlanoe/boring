@@ -37,6 +37,7 @@ mod share_dyn_traits;
 mod last_use;
 mod promote_atomic;
 pub(crate) mod monomorphize;
+pub(crate) mod kernel_generic;
 pub(crate) mod helpers;
 pub(crate) mod fixed_gpu;
 pub(crate) use helpers::*;

@@ -197,6 +197,12 @@ print k.buf[<span class="nb">0</span>]</code></pre></div>
 <span class="kw">let</span> small = Blur&lt;<span class="nb">3</span>&gt;()
 <span class="kw">let</span> large = Blur&lt;<span class="nb">7</span>&gt;()</code></pre></div>
 <p>Multiple instantiations of the same generic kernel generate <strong>distinct</strong> code objects per backend — for example, <code>Blur&lt;3&gt;</code> and <code>Blur&lt;7&gt;</code> produce separate WGSL entry points <code>Blur_3_main</code> and <code>Blur_7_main</code> when building with <code>--target wgpu</code>.</p>
+<p>On <code>--target metal</code>, <code>--target cuda</code> and <code>--target rocm</code> the same holds, implemented as a source-to-source pass before code generation: every <code>Name&lt;0&gt;(...)</code>/<code>Name&lt;1&gt;(...)</code> construction found <strong>anywhere</strong> in the program (top level, function and method bodies) yields one ordinary kernel per unique argument list (<code>Name_0</code>, <code>Name_1</code> — a negative value is spelled <code>n&lt;abs&gt;</code>, <code>Name_n1</code>), with each use of the const parameter (field types and defaults, <code>init</code>/method bodies, <code>[T, N]</code> / <code>[T, W * H]</code> array sizes) replaced by the literal. The device compiler therefore sees <code>if 0 == 0</code> / <code>if 1 == 0</code> and folds the dead branch, exactly as for a hand-written constant. A generic kernel with no instantiation emits nothing. Limits on these three targets: only <code>int</code>/<code>uint</code> const parameters with integer-literal arguments (<code>Name&lt;D&gt;(...)</code> inside a generic function, a type parameter <code>kernel K&lt;T&gt;</code>, or a <code>float</code>/<code>bool</code> const parameter is a transpile error naming the kernel).</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> FlashDecode&lt;<span class="kt">int</span> D&gt;:
+    ...                       <span class="co"># `D` usable in bodies and in `[float32, D]&#x27;actor`</span>
+
+<span class="kw">mut</span> a = FlashDecode&lt;<span class="nb">64</span>&gt;(...)  <span class="co"># → kernel FlashDecode_64</span>
+<span class="kw">mut</span> b = FlashDecode&lt;<span class="nb">128</span>&gt;(...) <span class="co"># → kernel FlashDecode_128</span></code></pre></div>
 <hr>
 <h2 id="gpu-memory-qualifiers">GPU memory qualifiers</h2>
 <p><strong>Kernel-context</strong> (inside <code>kernel</code> struct fields):</p>

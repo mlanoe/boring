@@ -397,7 +397,7 @@ fn monomorphise(decl: &KernelDecl, args: &[i64], subst: &HashMap<String, i64>) -
     }
 }
 
-fn monomorphise_type(ty: &Type, subst: &HashMap<String, i64>) -> Type {
+pub(crate) fn monomorphise_type(ty: &Type, subst: &HashMap<String, i64>) -> Type {
     match ty {
         Type::ArrayNExpr(inner, ce) => {
             let n = eval_const_expr(&ce.0, subst).unwrap_or(0) as usize;
