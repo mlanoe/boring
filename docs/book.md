@@ -931,6 +931,27 @@ This is checked for a bare `Var` collection with an explicit type annotation (an
 
 **Aliasing an element (`let q = arr[0]`).** In `boring run` a struct element read is the element itself, so `let q = arr[0]; arr[0].x = 9.0; print q.x` prints `9`. A `Vec<Point>` cannot do that in Rust (an index read copies; a borrow would forbid the later write), so when a file contains such an element binding (`let`/`mut`/`var` initialized by `coll[i]` / `d[k]`), every declared `[mut T]` / `{K = mut V}` type in it whose element is a non-generic struct declared in the same file is inferred `[mut T'actor]` / `{K = mut V'actor}` (`Arc<Mutex<T>>`, `Rc<RefCell<T>>` in single-thread mode), and `q` is a handle to the same element: `boring build` prints `9` too, in all four configs. The cost is a lock per element access, so write `[mut T'inline]` (or `'owned`) to opt out of the inference and keep a plain value with copy semantics. Not rewritten: plain `[T]` (nothing can be written through the alias), generic or foreign-file struct elements, a struct a kernel mentions (or a field type of one), and `boring build --linux` (the `no_std` emitter has no lock-aware element access). Array/dict literals wrapped automatically are the ones initializing a declared `let`; assign `[Point(..)]` elsewhere through `push`/`d[k] = ...`. See `--show-qualifiers`.
 
+**One qualifier per declared type, and why.** The inference decides per *declaration* (a field, parameter, return type or annotated `let`), never per variable, because every use of a type must agree on its Rust type: `Board.cells` is either `Vec<Point>` or `Vec<Arc<Mutex<Point>>>` for the whole program. A struct whose field would want different qualifiers in different places has no single answer today, so you choose it yourself by writing the qualifier on the field; a written qualifier always wins over the inference:
+
+```boring
+struct Board:
+    var [mut Point'actor] cells = []    # shared handles: `let q = b.cells[0]` aliases, one lock per access
+
+struct FastBoard:
+    var [mut Point'inline] cells = []   # plain Vec<Point>: no lock, but `let q = b.cells[0]` is a copy
+```
+
+- `'actor`: elements are shared (`Arc<Mutex<T>>`), the alias works, every access locks.
+- `'inline`: plain values, no lock, an element read is a copy.
+- `'owned`: plain values, each in a `Box`, same trade-off as `'inline`.
+
+A program that needs both behaviours for the same data declares two structs, one per choice. Two shapes of "decide at the use site" were considered:
+
+- *A Rust generic over the element handle* (`struct Board<H> { cells: Vec<H> }`, `H = Point` or `Arc<Mutex<Point>>`, behind a trait). Not adopted: Rust cannot abstract over "plain or locked", so every field access, method call and literal would go through a `with(|p| ..)` closure, which makes the generated Rust unreadable and lets the copy/alias semantics diverge between the two instantiations.
+- *Monomorphization on the Boring side* (a specialised copy per choice, `Board<actor>` / `Board<plain>`, reusing the existing turbofish monomorphization). Feasible and keeps the generated Rust plain, but it needs the choice to be inferred at call sites (only explicit instantiation is handled today), the two copies are distinct types (a function taking a `Board` becomes generic or is duplicated, and a trait, a `[Board]` or a cross-file use becomes ambiguous). Not implemented; the natural next step if a real program needs two variants of one struct is explicit instantiation first, inference second.
+
+On `--target metal|cuda|rocm` the kernel-file host emitters resolve a collection field against the receiver's struct (`b.items` is looked up as `(B, items)`), so two structs may declare a same-named field with different qualifiers.
+
 
 #### Array fill and comprehension
 
