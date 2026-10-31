@@ -111,11 +111,22 @@ fn lower_expr(
 
     let output_set: HashSet<&str> = output_names.iter().map(String::as_str).collect();
     let mut output_decls = Vec::<LetStmt>::new();
+    // `'actor` (threadgroup/shared) arrays declared without an initializer
+    // in the block become `'actor` fields of the generated kernel, exactly
+    // like the same declarations in a named kernel struct.
+    let mut shared_decls = Vec::<LetStmt>::new();
     let mut device_body = Vec::new();
     let mut local_names = HashSet::<String>::new();
     for stmt in body {
         if let Stmt::Let(binding) = &stmt {
             local_names.insert(binding.name.clone());
+            if binding.value.is_none()
+                && !output_set.contains(binding.name.as_str())
+                && binding.ty.as_ref().is_some_and(|ty| matches!(strip_mut(ty), Type::Qualified(_, OwnerQual::Actor)))
+            {
+                shared_decls.push(binding.clone());
+                continue;
+            }
             if output_set.contains(binding.name.as_str()) {
                 output_decls.push(binding.clone());
                 continue;
@@ -171,6 +182,21 @@ fn lower_expr(
             ty: Some(strip_mut(ty).clone()), default: None, line: expr.line, col: expr.col,
         });
         init_body.push(assign_stmt(name, var_expr(&param_name, expr.line, expr.col), expr.line, expr.col));
+    }
+
+    for shared in &shared_decls {
+        let Some(ty) = shared.ty.as_ref() else { return false };
+        let field_binding = match shared.binding {
+            BindingKind::Let => FieldBinding::Let,
+            BindingKind::Mut => FieldBinding::Mut,
+            BindingKind::Var => FieldBinding::Var,
+            BindingKind::Lazy => return false,
+        };
+        let (qual, base) = kernel_field_type(ty, field_binding.clone());
+        fields.push(KernelFieldDecl {
+            name: shared.name.clone(), binding: field_binding, qual, ty: base,
+            default: None, line: shared.line, col: shared.col,
+        });
     }
 
     for output in &output_decls {

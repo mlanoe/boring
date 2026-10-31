@@ -408,6 +408,22 @@ pub req [float32]'kernel'unified scale([float32]'kernel'global src, int n) throw
 on a regular dispatch. The result remains GPU-resident when the enclosing
 function declares a `'kernel'unified` or `'kernel'global` return type.
 
+Shared (workgroup) memory is declared in the block like in a named kernel: an
+`'actor` array without initializer, flat (`[float32, 256]'actor`) or with named
+axes (`[float32, width = 16, height = 16]'actor`). It becomes `threadgroup`
+(Metal), `__shared__` (CUDA/ROCm) or `var<workgroup>` (wgpu); `sync` is the
+block barrier.
+
+```boring
+kernel(block = (16, 16), grid = (gx, gy)):
+    mut [float32]'unified y = [0.0 for ..<seq * d_out]
+    mut [float32, width = 16, height = 16]'actor tile_x
+    tile_x[width = .thread.x, height = .thread.y] = x[...]
+    sync
+    ...
+    y
+```
+
 Inline kernels are syntax sugar for a generated private `kernel` struct, its
 constructor, a synchronous `kernel:` dispatch, and a final field read. Use a
 named kernel struct when the kernel needs helpers, generic parameters, several

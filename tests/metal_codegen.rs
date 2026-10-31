@@ -4748,3 +4748,119 @@ fn helper_method_reading_mut_scalar_field_runs_on_metal() {
     // per thread: acc = 10 + i, result = acc + n = 14 + i
     assert_eq!(stdout.trim_end(), "14 17");
 }
+
+// ─── inline kernel `'actor` shared memory ────────────────────────────────────
+
+/// Tiled 16×16 GEMM (y = x · wᵀ, 5×20 · 18×20) written as an inline kernel.
+/// `{DECL}` is the shared-tile declaration pair, `{RD_X}`/`{RD_W}`/`{WR_X}`/`{WR_W}` the index forms.
+fn inline_tiled_gemm(flat: bool) -> String {
+    let (decl, wx, ww, rx, rw) = if flat {
+        (
+            "mut [float32, 256]'actor",
+            "tile_x[ty * 16 + tx]", "tile_w[ty * 16 + tx]",
+            "tile_x[ty * 16 + kk]", "tile_w[kk * 16 + tx]",
+        )
+    } else {
+        (
+            "mut [float32, width = 16, height = 16]'actor",
+            "tile_x[width = tx, height = ty]", "tile_w[width = tx, height = ty]",
+            "tile_x[width = kk, height = ty]", "tile_w[width = tx, height = kk]",
+        )
+    };
+    format!(r#"
+pub req [float32]'kernel'unified run_c([float32]'kernel'global x, [float32]'kernel'global w, int seq, int d_in, int d_out) throws:
+    kernel(block = (16, 16), grid = ((d_out + 15) / 16, (seq + 15) / 16)):
+        mut [float32]'unified y = [0.0 for ..<seq * d_out]
+        {decl} tile_x
+        {decl} tile_w
+        let tx = .thread.x
+        let ty = .thread.y
+        let row = .block.y * .block_dim.y + ty
+        let col = .block.x * .block_dim.x + tx
+        var float32 acc = 0.0
+        for t in 0..<((d_in + 15) / 16):
+            let x_col = t * 16 + tx
+            let w_row = t * 16 + ty
+            if row < seq and x_col < d_in:
+                {wx} = x[row * d_in + x_col]
+            else:
+                {wx} = 0.0
+            if w_row < d_in and col < d_out:
+                {ww} = w[col * d_in + w_row]
+            else:
+                {ww} = 0.0
+            sync
+            for kk in 0..<16:
+                acc += {rx} * {rw}
+            sync
+        if row < seq and col < d_out:
+            y[row * d_out + col] = acc
+        y
+
+def main() throws:
+    let seq = 5
+    let d_in = 20
+    let d_out = 18
+    let [float32] x = [(((i * 7) % 11) as float32) * 0.25 for i in 0..<(seq * d_in)]
+    let [float32] w = [(((i * 5) % 13) as float32) * 0.125 for i in 0..<(d_out * d_in)]
+    let [float32] y = run_c(x, w, seq, d_in, d_out)
+    var float64 err = 0.0
+    var float64 sum = 0.0
+    for r in 0..<seq:
+        for c in 0..<d_out:
+            var float32 acc = 0.0
+            for k in 0..<d_in:
+                acc += x[r * d_in + k] * w[c * d_in + k]
+            let float64 d = (y[r * d_out + c] - acc) as float64
+            err += d * d
+            sum += acc as float64
+    print "err={{err}} sum={{sum}}"
+"#)
+}
+
+fn assert_inline_gemm_codegen(name: &str, flat: bool) {
+    let (msl, _rs) = metal_codegen(name, &inline_tiled_gemm(flat));
+    assert!(msl.contains("threadgroup float tile_x[256];"), "{msl}");
+    assert!(msl.contains("threadgroup float tile_w[256];"), "{msl}");
+    assert!(!msl.contains("void*;"), "{msl}");
+    assert!(msl.contains("threadgroup_barrier(mem_flags::mem_threadgroup);"), "{msl}");
+}
+
+fn run_inline_gemm(name: &str, flat: bool) {
+    let (_msl, _rs, _toml) = run_metal(name, &inline_tiled_gemm(flat));
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "inline tiled GEMM failed:\n{stdout}\n{stderr}");
+    let line = stdout.trim_end();
+    let err: f64 = line.strip_prefix("err=").and_then(|s| s.split(' ').next())
+        .and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("unexpected output: {line}"));
+    assert!(err < 1e-6, "tiled GEMM differs from reference: {line}");
+}
+
+#[test]
+fn inline_kernel_flat_actor_arrays_emit_threadgroup_memory() {
+    assert_inline_gemm_codegen("inline_actor_flat_codegen", true);
+}
+
+#[test]
+fn inline_kernel_named_axes_actor_arrays_emit_threadgroup_memory() {
+    assert_inline_gemm_codegen("inline_actor_axes_codegen", false);
+}
+
+#[test]
+fn inline_kernel_flat_actor_tiled_gemm_runs_on_metal() {
+    run_inline_gemm("inline_actor_flat_run", true);
+}
+
+#[test]
+fn inline_kernel_named_axes_actor_tiled_gemm_runs_on_metal() {
+    run_inline_gemm("inline_actor_axes_run", false);
+}
