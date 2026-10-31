@@ -4,6 +4,7 @@
 // Rust host-side code emitter for the Metal backend.
 // Uses the `metal` crate (objc2-metal migration planned).
 
+use crate::transpiler::host_types::actor_elem_coll;
 use crate::fixed::FixedFmt;
 use crate::ast::*;
 use crate::transpiler::helpers::{
@@ -61,7 +62,6 @@ struct HostEmitter {
     /// `'actor` collections / handles (`track_actor_var`).
     actor_coll_vars: std::collections::HashSet<String>,
     actor_vars: std::collections::HashSet<String>,
-    actor_coll_fields: std::collections::HashSet<String>,
     /// Struct field names (flat, not namespaced by struct) declared with a `{K=V}`
     /// dict type, so `self.field[key]`/`self.field[key] = v` get the same HashMap
     /// treatment as `dict_vars`. Populated once from every `Item::Struct`.
@@ -268,7 +268,6 @@ impl HostEmitter {
             dict_vars: std::collections::HashSet::new(),
             actor_coll_vars: std::collections::HashSet::new(),
             actor_vars: std::collections::HashSet::new(),
-            actor_coll_fields: std::collections::HashSet::new(),
             dict_fields: std::collections::HashSet::new(),
             string_vars: std::collections::HashSet::new(),
             string_fields: std::collections::HashSet::new(),
@@ -376,6 +375,9 @@ impl HostEmitter {
     /// `'actor` handle (a declared `T'actor`, or `let q = coll[i]` over such a collection).
     fn track_actor_var(&mut self, name: &str, ty: Option<&Type>, val: Option<&Expr>) {
         fn is_actor(t: &Type) -> bool { matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Actor)) }
+        // A rebinding of the same name (another function's local) starts from scratch.
+        self.actor_coll_vars.remove(name);
+        self.actor_vars.remove(name);
         if let Some(ty) = ty {
             if actor_elem_coll(ty) {
                 self.actor_coll_vars.insert(name.to_string());
@@ -392,7 +394,7 @@ impl HostEmitter {
     fn is_actor_coll(&self, c: &Expr) -> bool {
         match &c.kind {
             ExprKind::Var(v) => self.actor_coll_vars.contains(v.as_str()),
-            ExprKind::Field(_, f) => self.actor_coll_fields.contains(f.as_str()),
+            ExprKind::Field(o, f) => self.tenv.field_is_actor_coll(o, f, self.self_type.as_deref()),
             _ => false,
         }
     }
@@ -542,9 +544,6 @@ impl HostEmitter {
                 for f in &s.fields {
                     if is_gpu_array_param(&f.ty) {
                         self.gpu_fields.insert(f.name.clone());
-                    }
-                    if actor_elem_coll(&f.ty) {
-                        self.actor_coll_fields.insert(f.name.clone());
                     }
                     if matches!(f.ty, Type::Dict(..)) {
                         self.dict_fields.insert(f.name.clone());
@@ -3223,7 +3222,6 @@ impl HostEmitter {
             dict_vars: self.dict_vars.clone(),
             actor_coll_vars: self.actor_coll_vars.clone(),
             actor_vars: self.actor_vars.clone(),
-            actor_coll_fields: self.actor_coll_fields.clone(),
             dict_fields: self.dict_fields.clone(),
             string_vars: self.string_vars.clone(),
             string_fields: self.string_fields.clone(),
@@ -4517,16 +4515,6 @@ fn general_host_elem_type(ty: &Type) -> String {
         Type::Named(n) if n == "float" || n == "float64" || n == "f64" => "f64".into(),
         other => rust_type(other),
     }
-}
-
-/// `[mut T'actor]` / `{K = mut V'actor}` (through `mut` and non-actor qualifiers).
-fn actor_elem_coll(ty: &Type) -> bool {
-    let mut t = ty.without_mut();
-    while let Type::Qualified(inner, q) = t {
-        if matches!(q, OwnerQual::Actor) { return false; }
-        t = inner.without_mut();
-    }
-    matches!(t, Type::Array(e) | Type::Dict(_, e) if matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
 }
 
 pub(super) fn rust_type(ty: &Type) -> String {

@@ -63,6 +63,20 @@ pub(crate) struct HostTypeEnv {
     array_fns: HashSet<String>,
     array_locals: HashSet<String>,
     ctors: HashMap<String, StructCtor>,
+    /// `(struct, field)` of every field declared `[mut T'actor]` / `{K = mut V'actor}`.
+    actor_coll_fields: HashSet<(String, String)>,
+    /// Per field name: (structs declaring it, of which declare an `'actor` collection).
+    field_decls: HashMap<String, (usize, usize)>,
+}
+
+/// `[mut T'actor]` / `{K = mut V'actor}` (through `mut` and non-actor qualifiers).
+pub(crate) fn actor_elem_coll(ty: &Type) -> bool {
+    let mut t = ty.without_mut();
+    while let Type::Qualified(inner, q) = t {
+        if matches!(q, OwnerQual::Actor) { return false; }
+        t = inner.without_mut();
+    }
+    matches!(t, Type::Array(e) | Type::Dict(_, e) if matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
 }
 
 /// How a call `Name(args)` to a user struct is constructed in host code: a literal
@@ -92,6 +106,13 @@ impl HostTypeEnv {
                     for f in &s.fields { m.insert(f.name.clone()); }
                     for f in &s.methods { m.insert(f.name.clone()); }
                     for f in &s.fields {
+                        let actor = actor_elem_coll(&f.ty);
+                        let d = env.field_decls.entry(f.name.clone()).or_default();
+                        d.0 += 1;
+                        if actor {
+                            d.1 += 1;
+                            env.actor_coll_fields.insert((s.name.clone(), f.name.clone()));
+                        }
                         if matches!(f.ty.without_mut(), Type::Array(_)) {
                             env.array_fields.insert((s.name.clone(), f.name.clone()));
                         }
@@ -198,6 +219,15 @@ impl HostTypeEnv {
                 self.method_returns.get(&(s, m.clone())).cloned()
             }
             _ => None,
+        }
+    }
+
+    /// True when `obj.field` is an `'actor` collection. Resolved against `obj`'s struct type when
+    /// it is known; otherwise only when every struct declaring a field of that name agrees.
+    pub(crate) fn field_is_actor_coll(&self, obj: &Expr, field: &str, self_type: Option<&str>) -> bool {
+        match self.expr_struct(obj, self_type) {
+            Some(s) => self.actor_coll_fields.contains(&(s, field.to_string())),
+            None => self.field_decls.get(field).is_some_and(|&(all, actor)| all > 0 && all == actor),
         }
     }
 

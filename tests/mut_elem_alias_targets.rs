@@ -104,3 +104,21 @@ fn gpu_host_actor_struct_field_collections() {
         }
     }
 }
+
+/// Two structs declare a field of the same name, only one as an `'actor` collection: the host
+/// emitters resolve the receiver's struct instead of going by field name.
+#[test]
+fn gpu_host_same_field_name_in_two_structs() {
+    for target in ["metal", "cuda", "rocm"] {
+        let d = dir(&format!("conflict_{target}"));
+        fs::write(d.join("main.br"), format!("struct Point:\n    var float x\n\nstruct A:\n    var [mut Point] items = []\n\nstruct B:\n    var [mut Point'inline] items = []\n\n{KERNEL}\ndef main() throws:\n    mut a = A()\n    mut b = B()\n    a.items.push(Point(1.0))\n    b.items.push(Point(2.0))\n    let q = a.items[0]\n    a.items[0].x = 5.0\n    b.items[0].x = 6.0\n    print q.x\n    mut d = [1.0, 2.0]\n    mut k = Scale(d)\n    kernel:\n        k(block = 2, grid = 1)\n")).unwrap();
+        let rs = build(&d, &["build", "--target", target], &format!("main_{target}/src/main.rs"));
+        for want in [
+            "a.items[(0) as usize].lock().unwrap().x = 5.0;",
+            "b.items[(0) as usize].x = 6.0;",
+            "b.items.push(Point { x: 2.0 })",
+        ] {
+            assert!(rs.contains(want), "{target}: missing `{want}`:\n{rs}");
+        }
+    }
+}
