@@ -3228,13 +3228,13 @@ kernel Dequant:
         out[tid] = dequant_at(w_packed, tid)
 "#);
     assert!(
-        wgsl.contains("fn dequant_at(idx: "),
+        wgsl.contains("fn dequant_at__dequant_w_packed(idx: "),
         "expected the GPU-array-qualified `w_packed` parameter to be dropped entirely \
          from the emitted signature (WGSL forbids a storage-buffer pointer function \
          parameter outright), leaving only the ordinary `idx` parameter;\ngot:\n{wgsl}"
     );
     assert!(
-        !wgsl.lines().any(|l| l.contains("fn dequant_at(") && l.contains("w_packed")),
+        !wgsl.lines().any(|l| l.contains("fn dequant_at__dequant_w_packed(") && l.contains("w_packed:")),
         "the dropped parameter must not survive under any WGSL type at all in the \
          signature — neither the original bug's wrong bare scalar (`w_packed: i32`), nor \
          a `ptr<storage, ...>` type (rejected by naga as a function parameter outright);\n\
@@ -3248,7 +3248,7 @@ kernel Dequant:
          `w_packed`), not left as an unresolved bare identifier;\ngot:\n{wgsl}"
     );
     assert!(
-        wgsl.contains("dequant_at(tid)"),
+        wgsl.contains("dequant_at__dequant_w_packed(tid)"),
         "expected the call site to drop the corresponding argument too, matching the \
          callee's now-one-parameter-shorter signature;\ngot:\n{wgsl}"
     );
@@ -3713,12 +3713,51 @@ kernel Dequant2:
         let tid = .thread.x
         out[tid] = dequant_at(other_packed, tid)
 "#;
-    let stderr = run_wgpu_expect_failure("gpu_array_param_binding_conflict", src);
-    assert!(
-        stderr.contains("dequant_at") && stderr.contains("w_packed") && stderr.contains("not supported on --target wgpu"),
-        "expected a clear diagnostic naming the unresolvable GPU-array-qualified parameter \
-         instead of a silently generated, still-broken WGSL comment, got:\n{stderr}"
-    );
+    // Two kernels binding `dequant_at`'s array parameter to different buffers used to be a
+    // hard error; the function is now cloned once per bound buffer instead.
+    let (wgsl, _rs) = wgpu_codegen("gpu_array_param_binding_conflict", src);
+    assert!(wgsl.contains("fn dequant_at__dequant_w_packed(") && wgsl.contains("fn dequant_at__dequant2_other_packed("), "{wgsl}");
+    assert!(wgsl.contains("dequant_w_packed[u32(idx)]") && wgsl.contains("dequant2_other_packed[u32(idx)]"), "{wgsl}");
+    assert!(!wgsl.contains("/* ERROR"), "{wgsl}");
+}
+
+/// A call whose array argument is not a kernel buffer field (a computed expression) still
+/// cannot be bound to a single buffer, and is reported rather than silently miscompiled.
+#[test]
+fn wgpu_gpu_array_param_unresolvable_argument_is_rejected_not_silently_dropped() {
+    let src = r#"
+float32 dequant_at([int32]'global w_packed, int idx):
+    let b = w_packed[idx]
+    (b as float32) * 2.0
+
+kernel Dequant:
+    let [int32]'global w_packed
+    mut [float32]'unified out
+
+    init([int32] w, [float32] o):
+        w_packed = w
+        out = o
+
+    def ():
+        let tid = .thread.x
+        out[tid] = dequant_at(w_packed, tid)
+
+float32 other([int32]'global q):
+    dequant_at(q, 0)
+
+kernel Dequant2:
+    let [int32]'global p
+    mut [float32]'unified out
+
+    init([int32] w, [float32] o):
+        p = w
+        out = o
+
+    def ():
+        out[.thread.x] = dequant_at([1, 2, 3], 0)
+"#;
+    let stderr = run_wgpu_expect_failure("gpu_array_param_unresolvable", src);
+    assert!(stderr.contains("dequant_at") && stderr.contains("not supported on --target wgpu"), "{stderr}");
 }
 
 // ─── Identifiers colliding with a real WGSL reserved keyword ─────────────────
@@ -5709,4 +5748,170 @@ fn fixed_point_sin_cos_run_on_wgpu_and_match_interpreter() {
     for t in ["ufixed0_32", "ufixed0_64"] {
         assert_math_member_matches_interpreter(t, "sin", true);
     }
+}
+
+
+/// Builds `src` for wgpu, runs the generated program on the real device and returns its stdout.
+fn run_wgpu_program(name: &str, src: &str) -> (String, String, String) {
+    let (wgsl, _emulated, rs, _toml) = run_wgpu(name, src);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("wgpu_codegen").join(name);
+    let run = common::SharedCargo::new("wgpu_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(dir.join("test_wgpu").join("Cargo.toml"))
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(run.status.success(), "generated wgpu program failed:
+{}
+{}",
+        String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    (String::from_utf8_lossy(&run.stdout).trim_end().to_string(), wgsl, rs)
+}
+
+/// A generic kernel instantiated inside a `pub req` returning a resident array (two
+/// instantiations, the first behind an `if` with an explicit `return k0.y`, the second a tail
+/// `k1.y`), whose body calls free functions taking a `'global` array parameter (also through a
+/// forwarding chain `dec` -> `dec_a`). Used to fail on wgpu: no struct was emitted for the
+/// instantiation, the launch was emitted as a tail `Ok(..)`, and the shared `w` parameter was
+/// bound to two different buffers.
+#[test]
+fn generic_kernel_instantiated_in_req_runs_on_wgpu() {
+    let src = r#"# D: named tiled kernel (labeled 'actor tiles) + free decode fns with array params, selected by a runtime fmt field
+float32 dec_a([uint8]'global w, int idx):
+    (int(w[idx]) as float32) * 0.5
+
+float32 dec_b([uint8]'global w, int idx):
+    let v = int(w[idx * 2]) | (int(w[idx * 2 + 1]) << 8)
+    v as float32
+
+float32 dec([uint8]'global w, int fmt, int idx):
+    if fmt == 0:
+        dec_a(w, idx)
+    else:
+        dec_b(w, idx)
+
+kernel TiledKernel<int FMT>:
+    let [float32]'global x
+    let [uint8]'global w
+    mut [float32]'unified y
+    let int seq
+    let int d_in
+    let int d_out
+    mut [float32, width = 16, height = 16]'actor tile_x
+    mut [float32, width = 16, height = 16]'actor tile_w
+
+    init([float32]'global xi, [uint8]'global wi, int s, int din, int dout):
+        x = xi
+        w = wi
+        seq = s
+        d_in = din
+        d_out = dout
+        y = [0.0 for ..<s * dout]
+
+    def ():
+        let tx = .thread.x
+        let ty = .thread.y
+        let row = .block.y * .block_dim.y + ty
+        let col = .block.x * .block_dim.x + tx
+        var float32 acc = 0.0
+        let num_tiles = (d_in + 15) / 16
+        for t in 0..<num_tiles:
+            let x_col = t * 16 + tx
+            let w_row = t * 16 + ty
+            if row < seq and x_col < d_in:
+                tile_x[width = tx, height = ty] = x[row * d_in + x_col]
+            else:
+                tile_x[width = tx, height = ty] = 0.0
+            if w_row < d_in and col < d_out:
+                tile_w[width = tx, height = ty] = dec(w, FMT, col * d_in + w_row)
+            else:
+                tile_w[width = tx, height = ty] = 0.0
+            sync
+            for kk in 0..<16:
+                acc += tile_x[width = kk, height = ty] * tile_w[width = tx, height = kk]
+            sync
+        if row < seq and col < d_out:
+            y[row * d_out + col] = acc
+
+pub req [float32]'kernel'unified run_e([float32]'kernel'global x, [uint8]'kernel'global w, int seq, int d_in, int d_out, int fmt) throws:
+    if fmt == 0:
+        mut k0 = TiledKernel<0>(x, w, seq, d_in, d_out)
+        kernel:
+            k0(block = (16, 16), grid = ((d_out + 15) / 16, (seq + 15) / 16))
+        return k0.y
+    guard fmt == 1 else throw "bad fmt {fmt}"
+    mut k1 = TiledKernel<1>(x, w, seq, d_in, d_out)
+    kernel:
+        k1(block = (16, 16), grid = ((d_out + 15) / 16, (seq + 15) / 16))
+    k1.y
+
+def main() throws:
+    let [float32] x = [1.0 as float32 for ..<4]
+    let [uint8] w = [2 as uint8 for ..<16]
+    let [float32] r0 = run_e(x, w, 1, 4, 2, 0)
+    let [float32] r1 = run_e(x, w, 1, 4, 2, 1)
+    print "fmt0 {r0[0]}  fmt1 {r1[0]}"
+"#;
+    let (out, wgsl, rs) = run_wgpu_program("generic_kernel_in_req", src);
+    // fmt 0: dec_a = 2 * 0.5 = 1.0, summed over d_in = 4; fmt 1: dec_b = 2 | 2 << 8 = 514, * 4.
+    assert_eq!(out, "fmt0 4  fmt1 2056");
+    assert!(rs.contains("struct TiledKernel_0 {") && rs.contains("struct TiledKernel_1 {"), "{rs}");
+    assert!(!rs.contains("TiledKernel::<"), "{rs}");
+    assert!(rs.contains("return Ok(BoringKernelArg::Resident("), "explicit resident return: {rs}");
+    // One clone of each free function per bound buffer, array parameter dropped.
+    assert!(wgsl.contains("fn dec__tiledkernel_0_w(") && wgsl.contains("fn dec__tiledkernel_1_w("), "{wgsl}");
+    assert!(wgsl.contains("fn dec_a__tiledkernel_0_w(") && wgsl.contains("fn dec_b__tiledkernel_1_w("), "{wgsl}");
+}
+
+/// Const-generic array sizes (`[float32, D / 16]'actor`, `width = D + 1`) and the literal
+/// `D` itself, per instantiation, from a `req`.
+#[test]
+fn generic_kernel_array_sizes_depend_on_const_param_on_wgpu() {
+    let src = r#"kernel SumKernel<int D>:
+    let [float32]'global x
+    mut [float32]'unified y
+    mut [float32, D / 16]'actor part
+    mut [float32, width = D + 1, height = 2]'actor buf
+
+    init([float32]'global xi):
+        x = xi
+        y = [0.0 for ..<2]
+
+    def ():
+        let t = .thread.x
+        buf[width = t, height = 0] = x[t]
+        sync
+        if t < D / 16:
+            var float32 s = 0.0
+            for k in 0..<16:
+                s += buf[width = t * 16 + k, height = 0]
+            part[t] = s
+        sync
+        if t == 0:
+            var float32 total = 0.0
+            for i in 0..<D / 16:
+                total += part[i]
+            y[0] = total
+            y[1] = D as float32
+
+pub req [float32]'kernel'unified run_sum([float32]'kernel'global x, int which) throws:
+    if which == 0:
+        mut k0 = SumKernel<32>(x)
+        kernel:
+            k0(block = 32, grid = 1)
+        return k0.y
+    mut k1 = SumKernel<64>(x)
+    kernel:
+        k1(block = 64, grid = 1)
+    k1.y
+
+def main() throws:
+    let [float32] x = [1.0 as float32 for ..<64]
+    let [float32] a = run_sum(x, 0)
+    let [float32] b = run_sum(x, 1)
+    print "{a[0]} {a[1]} {b[0]} {b[1]}"
+"#;
+    let (out, wgsl, _rs) = run_wgpu_program("generic_kernel_array_sizes", src);
+    assert_eq!(out, "32 32 64 64");
+    assert!(wgsl.contains("array<f32, 2>") && wgsl.contains("array<f32, 4>"), "{wgsl}");
 }

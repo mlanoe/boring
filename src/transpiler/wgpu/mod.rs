@@ -86,6 +86,11 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
     let program = &optional_lowered;
+    // Program-wide const-generic kernel monomorphisation (shared with Metal/CUDA/ROCm): every
+    // `Name<args>(...)` construction, wherever it appears (top level, `req`/`def` bodies, ...),
+    // becomes a plain call of a specialised non-generic kernel.
+    let (generic_lowered, generic_errors) = crate::transpiler::kernel_generic::monomorphise_generic_kernels(program);
+    let program = &generic_lowered;
     let kernel_names: Vec<String> = program.items.iter().filter_map(|item| {
         if let Item::Kernel(decl) = item { Some(decl.name.clone()) } else { None }
     }).collect();
@@ -174,6 +179,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let mut errors = general_out.errors;
     errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
+    errors.extend(generic_errors);
     errors.extend(host_errors);
     errors.extend(tensor_host.errors);
     // Backstop against silently dropped code (see `helpers::PLACEHOLDER_MARKERS`).

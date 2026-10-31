@@ -29,6 +29,14 @@ impl Transpiler {
                     self.line(&if self.in_throws { format!("return Ok({lit});") } else { format!("return {lit};") });
                     return;
                 }
+                // GPU-resident return (`'kernel'unified`/`'kernel'global`): an explicit
+                // `return k.y` must hand back the resident buffer exactly like a tail `k.y`.
+                if let Some(resident) = self.try_emit_gpu_resident_return(e)
+                    .or_else(|| self.try_emit_gpu_resident_tuple_return(e))
+                {
+                    self.line(&if self.in_throws { format!("return Ok({resident});") } else { format!("return {resident};") });
+                    return;
+                }
                 self.check_dyn_borrow_escape(e);
                 let is_optional_return = matches!(&self.fn_return_ty, Some(Type::Optional(_)));
                 // Check if the declared return type is a known trait → wrap value in Box::new().

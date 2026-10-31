@@ -400,7 +400,7 @@ WGSL forbids `bool` inside `storage` and `uniform` buffers (`array<bool>` is inv
 
 ## Generic kernel monomorphisation
 
-Generic kernels (`kernel Blur<int N>:`) are specialised at `boring build --target wgpu` time — the transpiler scans the program for all `Name<arg, ...>()` instantiations and emits one WGSL struct + entry point per unique argument list.
+Generic kernels (`kernel Blur<int N>:`) are specialised at `boring build --target wgpu` time by the same program-wide pass as Metal/CUDA/ROCm (`src/transpiler/kernel_generic.rs`): every `Name<arg, ...>(...)` construction **anywhere in the program** — top level, a `pub req`/`def` body, a method — becomes a call of a plain kernel `Name_<args>`, and one WGSL struct + entry point is emitted per unique argument list. The const parameter is replaced by its literal everywhere in the kernel, so `if FMT == 8` is a constant condition the shader compiler folds.
 
 ### Naming scheme
 
@@ -422,6 +422,10 @@ kernel Tile<int W, int H>:
 ```
 
 Supported operators: `+`, `-`, `*`, `/`, `%`, unary `-`.
+
+Free functions called from a generic kernel's body work too, including ones taking a `[T]'global` array parameter. WGSL cannot pass a storage buffer to a function, so such a function is cloned once per distinct tuple of kernel buffers it is called with (`dec__tiledkernel_0_w`, `dec__tiledkernel_1_w`), the array parameter is dropped and the clone reads the module-scope global of that buffer; this also resolves forwarding chains (`dec` calling `dec_a(w, ..)`). A call whose array argument is not a kernel buffer field (or a forwarded parameter) is still a diagnostic.
+
+A construction inside a function that returns a resident array (`[float32]'kernel'unified`) works with both `return k.y` and a tail `k.y`.
 
 ### Restrictions
 

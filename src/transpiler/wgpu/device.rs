@@ -27,8 +27,13 @@ pub(super) fn emit_device_wgsl(
 ) -> (String, Option<String>, Vec<TranspileError>) {
     let uses_warp = effective_kernels.iter().any(super::kernel_uses_gpu_warp);
 
+    let (specialised_program, specialised_kernels, presets) = specialise_gpu_array_fns(program, effective_kernels);
+    let program = &specialised_program;
+    let effective_kernels = &specialised_kernels[..];
+
     let mut real = DeviceEmitter::new(WarpMode::Real);
     real.program_uses_warp = uses_warp;
+    real.gpu_array_presets = presets.clone();
     real.emit_program(program, effective_kernels, kernel_consts);
 
     let mut real_out = real.out;
@@ -41,6 +46,7 @@ pub(super) fn emit_device_wgsl(
     let emulated = if uses_warp {
         let mut e = DeviceEmitter::new(WarpMode::Emulated);
         e.program_uses_warp = true;
+        e.gpu_array_presets = presets;
         e.emit_program(program, effective_kernels, kernel_consts);
         // Both passes emit from the same kernel decls/bodies, so the same underlying
         // issue (a bad field qualifier, an out-of-range literal, ...) is normally
@@ -65,6 +71,97 @@ pub(super) fn emit_device_wgsl(
     };
 
     (real_out, emulated, errors)
+}
+
+/// WGSL cannot pass a storage buffer to a function, so a free function with a GPU-array
+/// parameter is emitted with that parameter dropped and bound to one module-scope global
+/// (see `is_gpu_array_qualified_type`). A function shared by several kernels — the usual
+/// case once a generic kernel is instantiated twice (`Tiled_0_w`, `Tiled_1_w`) — or called
+/// through a forwarding chain (`dec` → `dec_a(w, ..)`) has no single binding. This pass
+/// clones such a function once per distinct tuple of buffers it is called with, named
+/// `f__{global}[__{global}...]`, rewrites the call sites to the clone, and reports each
+/// clone's fixed binding (`GpuBinding::Preset`). Calls it cannot resolve are left untouched
+/// and keep producing the existing diagnostic.
+fn specialise_gpu_array_fns(
+    program: &Program,
+    kernels: &[KernelDecl],
+) -> (Program, Vec<KernelDecl>, std::collections::HashMap<String, Vec<Option<String>>>) {
+    use std::collections::{HashMap, HashSet};
+    let fns: HashMap<String, FnDecl> = program.items.iter().filter_map(|i| match i {
+        Item::Fn(d) if d.qualifier.is_none() && !d.task
+            && d.params.iter().any(|p| p.ty.as_ref().is_some_and(is_gpu_array_qualified_type)) =>
+            Some((d.name.clone(), d.clone())),
+        _ => None,
+    }).collect();
+    if fns.is_empty() {
+        return (program.clone(), kernels.to_vec(), HashMap::new());
+    }
+
+    // Rewrites every resolvable call in `body`; returns the (fn, globals) clones it needs.
+    fn rewrite(
+        body: &mut [Stmt],
+        kernel: Option<&KernelDecl>,
+        pmap: &HashMap<String, String>,
+        fns: &HashMap<String, FnDecl>,
+    ) -> Vec<(String, Vec<Option<String>>)> {
+        let mut wanted = Vec::new();
+        let mut on_expr = |e: &mut Expr| {
+            let ExprKind::Call(callee, args) = &mut e.kind else { return };
+            let ExprKind::Var(name) = callee.kind.clone() else { return };
+            let Some(decl) = fns.get(&name) else { return };
+            let mut globals: Vec<Option<String>> = Vec::new();
+            for (i, p) in decl.params.iter().enumerate() {
+                if !p.ty.as_ref().is_some_and(is_gpu_array_qualified_type) { globals.push(None); continue; }
+                let g = args.get(i).and_then(|a| match &a.value.kind {
+                    ExprKind::Var(v) => pmap.get(v).cloned().or_else(|| {
+                        let k = kernel?;
+                        let f = k.fields.iter().find(|f| &f.name == v)?;
+                        is_buffer_field(f).then(|| format!("{}_{}", k.name.to_lowercase(), v))
+                    }),
+                    _ => None,
+                });
+                if g.is_none() { return; }
+                globals.push(g);
+            }
+            let clone = clone_name(&name, &globals);
+            callee.kind = ExprKind::Var(clone);
+            wanted.push((name, globals));
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut w = crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+        w.stmts(body);
+        wanted
+    }
+    fn clone_name(f: &str, globals: &[Option<String>]) -> String {
+        let parts: Vec<&str> = globals.iter().flatten().map(|g| g.as_str()).collect();
+        format!("{}__{}", f, parts.join("__"))
+    }
+
+    let mut out_kernels = kernels.to_vec();
+    let mut work: Vec<(String, Vec<Option<String>>)> = Vec::new();
+    for k in &mut out_kernels {
+        let snapshot = k.clone();
+        for m in &mut k.methods {
+            work.extend(rewrite(&mut m.body, Some(&snapshot), &HashMap::new(), &fns));
+        }
+    }
+    let mut presets: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    let mut new_items: Vec<Item> = Vec::new();
+    let mut done: HashSet<String> = HashSet::new();
+    while let Some((name, globals)) = work.pop() {
+        let cname = clone_name(&name, &globals);
+        if !done.insert(cname.clone()) { continue; }
+        let mut decl = fns[&name].clone();
+        decl.name = cname.clone();
+        let pmap: HashMap<String, String> = decl.params.iter().zip(&globals)
+            .filter_map(|(p, g)| g.clone().map(|g| (p.name.clone(), g))).collect();
+        work.extend(rewrite(&mut decl.body, None, &pmap, &fns));
+        presets.insert(cname, globals);
+        new_items.push(Item::Fn(decl));
+    }
+    let mut out = program.clone();
+    out.items.extend(new_items);
+    (out, out_kernels, presets)
 }
 
 fn wgsl_uses_f16(source: &str) -> bool {
@@ -305,6 +402,10 @@ enum GpuBinding {
     /// resolved WGSL global name (`{kernel}_{field}`, matching `current_buffer_renames`'s
     /// own scheme) is this string.
     Bound(String),
+    /// Fixed by `specialise_gpu_array_fns`: this is a per-buffer clone of a free function
+    /// created for exactly this global, so call sites (including forwarding ones) never
+    /// change it.
+    Preset(String),
     /// Two call sites disagreed, or some call site passed something this fix can't
     /// resolve to a single buffer (a computed expression, a forwarded parameter, ...).
     Poisoned,
@@ -312,7 +413,7 @@ enum GpuBinding {
 
 impl GpuBinding {
     fn resolved(&self) -> Option<&str> {
-        match self { GpuBinding::Bound(g) => Some(g.as_str()), _ => None }
+        match self { GpuBinding::Bound(g) | GpuBinding::Preset(g) => Some(g.as_str()), _ => None }
     }
 
     /// Folds in one more call site's evidence for this parameter — `None` means
@@ -320,6 +421,7 @@ impl GpuBinding {
     /// buffer field's resolved WGSL name.
     fn merge(&mut self, evidence: Option<String>) {
         *self = match (&*self, evidence) {
+            (GpuBinding::Preset(g), _) => GpuBinding::Preset(g.clone()),
             (GpuBinding::Poisoned, _) => GpuBinding::Poisoned,
             (_, None) => GpuBinding::Poisoned,
             (GpuBinding::Unbound, Some(g)) => GpuBinding::Bound(g),
@@ -514,6 +616,13 @@ struct DeviceEmitter {
     /// whole-program passes (`ParamSlot`'s doc comment explains why this can't be answered
     /// per-function the way an ordinary parameter type can).
     gpu_array_params: std::collections::HashMap<String, Vec<ParamSlot>>,
+    /// Per-buffer free-function clones from `specialise_gpu_array_fns`: clone name → the
+    /// global each GPU-array parameter position is fixed to (`None` for an ordinary one).
+    gpu_array_presets: std::collections::HashMap<String, Vec<Option<String>>>,
+    /// WGSL global name (`{kernel}_{field}`) → the kernel buffer field it backs, so a free
+    /// function's GPU-array parameter bound to it can be treated as that field (packed
+    /// `uint8`/`uint16` element access, atomics).
+    buffer_globals: std::collections::HashMap<String, KernelFieldDecl>,
     /// Parameter name → WGSL substitution text, for the device function/method *currently
     /// being emitted*'s own GPU-array-qualified parameters (see `ParamSlot`). Every
     /// occurrence of such a parameter name inside this body (`expr()`'s `ExprKind::Var` arm)
@@ -555,6 +664,8 @@ impl DeviceEmitter {
             current_fn_is_void: true,
             locals: std::collections::HashMap::new(),
             gpu_array_params: std::collections::HashMap::new(),
+            gpu_array_presets: std::collections::HashMap::new(),
+            buffer_globals: std::collections::HashMap::new(),
             current_gpu_array_subst: std::collections::HashMap::new(),
             current_ret_fmt: None,
             fn_param_fmts: std::collections::HashMap::new(),
@@ -666,9 +777,13 @@ impl DeviceEmitter {
         let mut gpu_array_params: std::collections::HashMap<String, Vec<ParamSlot>> = std::collections::HashMap::new();
         for name in &reachable {
             let decl = free_fns[name.as_str()];
-            let slots = decl.params.iter()
-                .map(|p| if p.ty.as_ref().is_some_and(is_gpu_array_qualified_type) {
-                    ParamSlot::Gpu(GpuBinding::Unbound)
+            let preset = self.gpu_array_presets.get(&decl.name);
+            let slots = decl.params.iter().enumerate()
+                .map(|(i, p)| if p.ty.as_ref().is_some_and(is_gpu_array_qualified_type) {
+                    match preset.and_then(|v| v.get(i)).cloned().flatten() {
+                        Some(g) => ParamSlot::Gpu(GpuBinding::Preset(g)),
+                        None => ParamSlot::Gpu(GpuBinding::Unbound),
+                    }
                 } else {
                     ParamSlot::Plain
                 })
@@ -698,6 +813,11 @@ impl DeviceEmitter {
             }
         }
         self.gpu_array_params = gpu_array_params;
+        for decl in effective_kernels {
+            for f in decl.fields.iter().filter(|f| is_buffer_field(f)) {
+                self.buffer_globals.insert(format!("{}_{}", decl.name.to_lowercase(), f.name), f.clone());
+            }
+        }
 
         for item in &program.items {
             if let Item::Fn(decl) = item {
@@ -781,6 +901,17 @@ impl DeviceEmitter {
     fn emit_free_device_fn(&mut self, decl: &crate::ast::FnDecl) {
         let ret = decl.return_ty.as_ref().map(wgsl_type).unwrap_or_else(|| "void".into());
         self.current_gpu_array_subst = self.build_gpu_array_subst(&decl.name, &decl.params);
+        // A bound GPU-array parameter behaves as the kernel buffer field it is bound to.
+        self.current_fields.clear();
+        self.current_buffer_renames.clear();
+        for (name, global) in self.current_gpu_array_subst.clone() {
+            if let Some(field) = self.buffer_globals.get(&global) {
+                let mut f = field.clone();
+                f.name = name.clone();
+                self.current_fields.push(f);
+                self.current_buffer_renames.insert(name, global);
+            }
+        }
         self.current_ret_fmt = decl.return_ty.as_ref().and_then(fixed::fixed_fmt_of_type);
         self.check_fixed_signature(&decl.params, decl.return_ty.as_ref(), decl.line, decl.col);
         self.locals.clear();
