@@ -1,0 +1,18 @@
+# '...' is a single-line raw string: no interpolation, no escapes, `"`/`{`/`}`/`\` literal.
+# A `'` glued to the end of a type or name (`T'actor`, ...) stays a qualifier.
+struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+
+let a = 'say "hi" {name} \n'
+print a
+print a.length
+print ''
+print 'it'
+let list = ['x', 'y']
+print list.length
+print list[1]
+mut Counter'actor c = Counter()
+c.inc()
+print c.n

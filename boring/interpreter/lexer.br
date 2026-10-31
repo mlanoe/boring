@@ -201,6 +201,26 @@ def string encode_dollar_content(string content, bool keep_escapes, int line):
             i += 1
     return out
 
+# Is the `'` at chars[i] an ownership-qualifier tick (`T'actor`, `T?'actor`, `T&'x`,
+# `[int]'kernel`) rather than the start of a raw `'...'` string? Decided by the
+# character directly before it; mirrors `tick_is_qualifier` in src/lexer/mod.rs.
+def bool tick_is_qualifier([string] chars, int i):
+    if i == 0:
+        return false
+    let prev = chars[i - 1]
+    var before = ""
+    if i >= 2:
+        before = chars[i - 2]
+    if is_dollar_ident_char(prev) or prev > "~":
+        return true
+    if prev == "]" or prev == "}" or prev == ")" or prev == "?":
+        return true
+    if prev == ">":
+        return before != "-" and before != "="
+    if prev == "&":
+        return before != "&"
+    return false
+
 def string preprocess_triple_strings(string source):
     let chars = source.chars()
     let n = chars.length
@@ -259,6 +279,33 @@ def string preprocess_triple_strings(string source):
             while nl < newlines_consumed:
                 result = result + "\n"
                 nl += 1
+            continue
+        if ch == "'" and not tick_is_qualifier(chars, i):
+            # Raw single-line '...': no interpolation, no escapes, ends at the next
+            # `'` on the same line. Re-emitted as a regular string token.
+            let start_line = line
+            var j = i + 1
+            while j < n and chars[j] != "'" and chars[j] != "\n":
+                j += 1
+            if j >= n or chars[j] != "'":
+                throw "line {start_line}: unterminated string"
+            result = result + "\""
+            var k = i + 1
+            while k < j:
+                let c = chars[k]
+                if c == "\"":
+                    result = result + "\\\""
+                elif c == "\\":
+                    result = result + "\\\\"
+                elif c == "{{":
+                    result = result + "{{{{"
+                elif c == "}}":
+                    result = result + "}}}}"
+                else:
+                    result = result + c
+                k += 1
+            result = result + "\""
+            i = j + 1
             continue
         if ch == "$" and i + 1 < n and chars[i + 1] == "\"":
             # `$"..."` / `$"""..."""`: `$` interpolation, rewritten to the regular form.

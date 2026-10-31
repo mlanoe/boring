@@ -138,6 +138,36 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
             continue;
         }
 
+        // ── Raw single-line string `'...'` ──────────────────────────────────
+        // A `'` that does not directly follow the end of a type or name is the
+        // start of a raw string (see `tick_is_qualifier`): no interpolation, no
+        // escapes, ends at the next `'` on the same line. Re-encoded as a regular
+        // `"..."` token, like the triple form. (The triple form was handled above,
+        // so `''` here is the empty string.)
+        if ch == '\'' && !tick_is_qualifier(&chars, i) {
+            let start_line = line;
+            let mut j = i + 1;
+            while j < n && chars[j] != '\'' && chars[j] != '\n' {
+                j += 1;
+            }
+            if j >= n || chars[j] != '\'' {
+                return Err(LexError::UnterminatedString { line: start_line, col: 1 });
+            }
+            result.push('"');
+            for &c in &chars[i + 1..j] {
+                match c {
+                    '"'  => { result.push('\\'); result.push('"'); }
+                    '\\' => { result.push('\\'); result.push('\\'); }
+                    '{'  => result.push_str("{{"),
+                    '}'  => result.push_str("}}"),
+                    other => result.push(other),
+                }
+            }
+            result.push('"');
+            i = j + 1;
+            continue;
+        }
+
         // ── `$"..."` / `$"""..."""`: `$` interpolation ───────────────────────
         // Same strings as `"..."` / `"""..."""`, except that `{`/`}` are literal
         // and holes are written `$name` or `${expr}` (`$$` is a literal `$`).
@@ -334,6 +364,27 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
         i += 1;
     }
     Ok(result)
+}
+
+/// Is the `'` at `chars[i]` an ownership-qualifier tick (`T'actor`, `w'shared`,
+/// `[int]'kernel`, `T?'actor`, `T&'x`) rather than the start of a raw `'...'`
+/// string? Qualifiers are always glued to the end of a type or name, so the
+/// character directly before the tick decides: an identifier character or a
+/// closing/postfix type token (`]`, `}`, `>`, `)`, `?`, `&`) means qualifier;
+/// anything else (including whitespace and start of input) means string.
+/// `&&`, `->` and `=>` end in `&`/`>` but are operators, not types.
+fn tick_is_qualifier(chars: &[char], i: usize) -> bool {
+    let Some(&prev) = i.checked_sub(1).and_then(|k| chars.get(k)) else {
+        return false;
+    };
+    let before = i.checked_sub(2).and_then(|k| chars.get(k)).copied();
+    match prev {
+        c if c.is_alphanumeric() || c == '_' => true,
+        ']' | '}' | ')' | '?' => true,
+        '>' => !matches!(before, Some('-') | Some('=')),
+        '&' => before != Some('&'),
+        _ => false,
+    }
 }
 
 /// Strip common leading indentation from a triple-quoted string's raw content.
@@ -1812,6 +1863,47 @@ mod raw_apostrophe_strings {
     #[test]
     fn unterminated_raw_string_is_an_error() {
         assert!(matches!(lex("let x = '''abc"), Err(LexError::UnterminatedString { .. })));
+    }
+
+    #[test]
+    fn single_line_raw_string_is_literal() {
+        assert_eq!(first_str("let x = 'a \"q\" {b} \\n'"), "a \"q\" {b} \\n");
+        assert_eq!(first_str("let x = ''"), "");
+    }
+
+    #[test]
+    fn single_line_raw_string_after_punctuation_and_operators() {
+        for src in ["f('a')", "[ 'a' ]", "{'a'=1}", "x,'a'", "x=>'a'", "x->'a'", "a&&'a'", "print 'a'"] {
+            assert!(
+                kinds(src).iter().any(|k| matches!(k, TokenKind::Str(s) if s == "a")),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn qualifier_ticks_after_types_are_not_strings() {
+        for src in [
+            "let T'actor x = 1",
+            "let w'shared = 1",
+            "let my_var'actor = 1",
+            "let [int]'kernel x = 1",
+            "let {string=float}'actor m = 1",
+            "let Slot<string>'actor s = 1",
+            "let (int, string)'shared t = 1",
+            "let T?'actor x = 1",
+            "let T&'static x = 1",
+        ] {
+            let ks = kinds(src);
+            assert!(ks.iter().any(|k| matches!(k, TokenKind::Tick)), "{src}");
+            assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+    }
+
+    #[test]
+    fn unterminated_single_line_raw_string_is_an_error() {
+        assert!(matches!(lex("let x = 'abc\nlet y = 1"), Err(LexError::UnterminatedString { .. })));
+        assert!(matches!(lex("let x = 'abc"), Err(LexError::UnterminatedString { .. })));
     }
 }
 

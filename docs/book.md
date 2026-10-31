@@ -601,7 +601,21 @@ let path = '''C:\temp\new'''     # backslashes stay backslashes
 
 Multiline raw strings follow the same dedent and first/last-newline rules as `"""` (the indentation of the closing delimiter is stripped from every line). A raw string has no escape for `'''` itself: text that contains three consecutive apostrophes can't be written this way.
 
-Use `"""` when you want interpolation, `'''` when you don't. A lone `'` or `''` is not a string literal — `'` is otherwise only used by ownership qualifiers (`T'actor'task`), and three consecutive apostrophes never occur there, so `'''` needs no surrounding context to be recognised.
+Use `"""` when you want interpolation, `'''` when you don't. Three consecutive apostrophes never occur in a qualifier (`T'actor'task`), so `'''` needs no surrounding context to be recognised.
+
+**Single-line raw strings: `'...'`.** A single `'` also opens a raw string — no interpolation, no escapes, `"`/`{`/`}`/`\` literal — that ends at the next `'` on the same line (`''` is the empty string). There is no way to write a `'` inside it: use `'''...'''` or `"..."` for that. A line that ends before the closing `'` is an "unterminated string" error.
+
+```boring
+let re = '\d+{2}'
+let greeting = 'say "hi"'
+```
+
+`'` is also the ownership-qualifier tick, so the lexer decides from the character **directly before** it (a qualifier is always glued to the end of a type or name):
+
+- preceded by a letter, digit or `_`, or by `]`, `}`, `)`, `>`, `?` or `&` → qualifier (`T'actor`, `w'shared`, `[int]'kernel`, `{string=int}'actor`, `(int, string)'shared`, `Slot<T>'actor`, `T&'static`). An optional qualified type is written `T'actor? x` (the `?` follows the qualifier, the form used everywhere in the test suite); the parser also tolerates `T?'actor x`, and the lexer treats a `'` after `?` as a qualifier for that reason;
+- anything else — whitespace, `(`, `[`, `{`, `,`, `=`, an operator, start of input — → string (`f('a')`, `['x', 'y']`, `print 'a'`).
+
+`&&`, `->` and `=>` end in `&`/`>` but are operators, so `a&&'x'`, `f->'x'` and `m=>'x'` are strings. One glued case stays a qualifier and fails to parse: a string right after a closing token with no space, such as `c>'a'` or `f(x)'a'`; put a space before the quote.
 
 **Rust equivalent** — an ordinary string literal with the content escaped (no `format!`), identical to what a `"..."` literal with no holes produces:
 
