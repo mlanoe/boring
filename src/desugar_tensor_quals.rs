@@ -278,6 +278,14 @@ struct Facts {
     /// Some use of this array is (or may be) a write: destination, passed to a mutable
     /// parameter, aliased, returned, or any use the pass does not model.
     maybe_written: bool,
+    /// The array is a host-built `Vec` in some use a resident value cannot serve: a mutating
+    /// collection method (`x.push(..)`), or, outside any tensor operand role, an element
+    /// access (`x[i]`, `x[i] = v`) in host code. Such a local stays a host array; it is
+    /// converted at the call that hands it to a resident parameter.
+    host_push: bool,
+    host_index: bool,
+    /// Used as an operand of a host `kernel.tensors.*` call.
+    tensor_operand: bool,
 }
 
 #[derive(Clone)]
@@ -543,6 +551,9 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
             let f = usage_of(scope, name, *id, &sigs, &msigs);
             let slot = &mut facts[*id];
             slot.operand |= f.operand;
+            slot.host_push |= f.host_push;
+            slot.host_index |= f.host_index;
+            slot.tensor_operand |= f.tensor_operand;
             slot.maybe_written |= f.maybe_written;
             slot.forced.extend(f.forced);
             slot.unions.extend(f.unions);
@@ -574,6 +585,9 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
             let f = usage_of(&seen_from, name, *id, &sigs, &msigs);
             let slot = &mut facts[*id];
             slot.operand |= f.operand;
+            slot.host_push |= f.host_push;
+            slot.host_index |= f.host_index;
+            slot.tensor_operand |= f.tensor_operand;
             slot.maybe_written |= f.maybe_written;
             slot.forced.extend(f.forced);
             slot.unions.extend(f.unions);
@@ -631,6 +645,9 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
 
     let mut decided: HashMap<usize, OwnerQual> = HashMap::new();
     for (id, info) in infos.iter().enumerate().take(node_count) {
+        // A host-built array stays a host `Vec` (see `Facts::host_push`); an explicit bare
+        // `'kernel` is the programmer's own choice and is always resolved.
+        if !info.marker && (facts[id].host_push || (facts[id].host_index && !facts[id].tensor_operand)) { continue; }
         let root = find(&mut parent, id);
         let Some(g) = groups.get(&root) else { continue };
         let Some((q, why)) = resolve(g) else { continue };
@@ -861,6 +878,7 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
                     if matches!(&arg.value.kind, ExprKind::Var(n) if n == name) {
                         let mut f = facts.borrow_mut();
                         f.operand = true;
+                        f.tensor_operand = true;
                         // The last positional operand is the destination.
                         if idx + 1 == operand_count { f.maybe_written = true; }
                         *accounted.borrow_mut() += 1;
@@ -943,6 +961,37 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
         walker.stmts(&mut stmts);
     }
     let mut facts = facts.into_inner();
+    {
+        // Host-only uses: walk the host statements only (a kernel block or `with` body reads
+        // and writes the array through its resident view).
+        fn strip(stmts: &mut [Stmt]) {
+            for s in stmts.iter_mut() {
+                match s {
+                    Stmt::KernelBlock(k) => k.body.clear(),
+                    Stmt::With(w) => w.body.clear(),
+                    _ => {}
+                }
+            }
+        }
+        let mut host = scope.stmts.clone();
+        strip(&mut host);
+        let flags = RefCell::new((false, false));
+        let mut on_expr = |e: &mut Expr| match &e.kind {
+            ExprKind::MethodCall(recv, m, _) if matches!(&recv.kind, ExprKind::Var(n) if n == name)
+                && matches!(m.as_str(), "push" | "append" | "extend" | "insert" | "pop" | "remove"
+                    | "clear" | "truncate" | "drain" | "retain" | "dedup" | "resize") =>
+                flags.borrow_mut().0 = true,
+            ExprKind::Index(obj, _) if matches!(&obj.kind, ExprKind::Var(n) if n == name) =>
+                flags.borrow_mut().1 = true,
+            _ => {}
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut walker = Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+        walker.stmts(&mut host);
+        let (p, i) = flags.into_inner();
+        facts.host_push = p;
+        facts.host_index = i;
+    }
     // A use the pass does not model (an assignment, a method call, a read, a `with` body...)
     // may be a write: only a fully understood array is reported as never written.
     if total.into_inner() > accounted.into_inner() { facts.maybe_written = true; }

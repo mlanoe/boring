@@ -194,6 +194,8 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 
 > **Labeled arrays vs `[T, N]` fixed — the one place they differ**: `[T, N]'unified`/`[T, N]'global` are errors ("size is implicit from the init parameter"), but `[T, width=W, height=H]'unified`/`'global` are valid. The reason: `[T, N]`'s host-side representation is a true fixed-size Rust array, which conflicts with `'unified`/`'global`'s always-dynamic host buffer (`Vec`/`CudaSlice`/`DeviceBuffer`/`Buffer`, sized at runtime from the constructor's argument). A fixed-shape labeled array doesn't have that conflict — its host representation *is* the same dynamic buffer type as `[T]`; the axis sizes are compile-time shape metadata used for indexing and grid inference, not a competing fixed length. See [`array-multidim-types.md`](array-multidim-types.html). `'actor'global`/`'actor'unified` compose with labeled arrays the same as with `[T]`/`[T,N]` — e.g. `mut [int, width=256, height=256]'actor'global histogram` is valid.
 
+**Host arrays passed to a resident parameter.** A local array is never made resident merely because it is handed to a `'kernel'global`/`'kernel'unified` parameter when the host also builds or edits it: a mutating method (`xs.push(..)`, `append`, `insert`, ...) or, outside a `kernel.tensors.*` operand role, an element access (`xs[i]`, `xs[i] = v`) keeps it a host `Vec<T>`, converted at the call and still readable afterwards. Only locals whose uses are all resident-compatible (arguments, `with`, kernel blocks, tensor operands) take the callee's qualifier. Write `'kernel'global`/`'kernel'unified` on the declaration to opt in explicitly.
+
 ---
 
 **Host-context** (bindings outside `kernel` struct):

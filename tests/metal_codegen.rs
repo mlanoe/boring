@@ -5055,3 +5055,71 @@ def main() throws:
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("generic kernel `Fill`"), "{}", String::from_utf8_lossy(&result.stderr));
 }
+
+// ─── host-built arrays passed to a resident parameter stay host arrays ────────
+
+// `mut [float32] xs = []` filled by `push`/indexation and then handed to a
+// `[float32]'kernel'global` parameter used to be inferred `'kernel'global` itself
+// (demanded by the callee), so every use -- `xs.push(..)` included -- was emitted
+// against a `BoringKernelArg`, E0599 in the generated Rust. It now stays a `Vec<f32>`
+// and is wrapped at the call, also when read after the call.
+fn host_built_array_program(extra: &str) -> String {
+    format!(r#"
+pub req [float32]'kernel'unified scale([float32]'kernel'global src, int n) throws:
+    kernel(block = 64, grid = (n + 63) / 64):
+        mut [float32]'unified dst = [0.0 for ..<n]
+        let i = .thread.x + .block.x * .block_dim.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+        dst
+
+[float32] passthrough([float32] x):
+    x
+
+def main() throws:
+    mut [float32] xs = []
+    mut [float32] ys = []
+    var int i = 0
+    while i < 8:
+        xs.push(1.5)
+        ys.push(2.5)
+        i += 1
+    ys[0] = 4.0
+    let r = scale(xs, 8)
+    let s = scale(ys, 8)
+    let h = passthrough(r)
+    print "{{h[3]}} {{passthrough(s)[0]}}"
+{extra}"#)
+}
+
+fn assert_host_built_array_compiles(test_name: &str, src: &str) -> String {
+    let (_, rs) = metal_codegen(test_name, src);
+    assert!(rs.contains("let mut xs: Vec<f32> = vec![];"), "xs must stay a host Vec:\n{rs}");
+    assert!(rs.contains("scale(BoringKernelArg::Host(xs.clone()), 8)"), "host array converted at the call:\n{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let check = common::SharedCargo::new("metal_codegen")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(
+        check.status.success(),
+        "generated Rust must type-check:\n{}\n--- Rust ---\n{rs}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    rs
+}
+
+#[test]
+fn host_built_array_passed_to_resident_param_stays_host_array() {
+    assert_host_built_array_compiles("host_built_array_pushed", &host_built_array_program(""));
+}
+
+#[test]
+fn host_built_array_is_readable_after_resident_call() {
+    let rs = assert_host_built_array_compiles("host_built_array_read_after", &host_built_array_program(
+        "    print \"{xs[2]} {xs.length}\"\n"));
+    assert!(!rs.contains("xs: BoringKernelArg"), "{rs}");
+}
