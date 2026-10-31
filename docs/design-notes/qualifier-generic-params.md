@@ -42,7 +42,7 @@ The bound is a *candidate set*, the notion the inference already uses (`T'new` =
 actor, guard}`, docs/qualifiers.md "Candidate sets"); without `as` it is the full set, like a bare
 `T`. A qualifier argument outside it is a checker error. `mut` stays on the element
 (`[mut Point'elem]`), it is not part of the parameter. A label must not be a qualifier keyword
-(`'actor` is rejected).
+(`'actor` is rejected), and a struct cannot declare a type parameter and a qualifier parameter of the same name (the argument `T'actor` is read against the callee's declaration, see labelled-generic-args.md).
 
 ### Use of the parameter
 
@@ -59,9 +59,13 @@ arguments.
 
 1. **Explicit constructor** (`Board<elem'actor>()`): substitute, check against the bound.
 2. **Written on a binding** (`let Board<elem'actor> a`): same.
-3. **In a signature** (`def f(Board<elem'actor> b)`, or `Board<elem'elem>` with `f` itself declaring
-   `elem`): the function is specialised per instantiation (viral, see 4.4); the draft requires the
-   argument to be written so the dependency is visible.
+3. **In a signature** (`def f(Board<elem'actor> b)`): just a concrete type, `Board_actor`. The
+   argument says how `Board` stores its elements *internally*; it imposes nothing on the function and
+   is unrelated to the qualifier of the parameter itself (`Board<elem'actor>'shared b`, `mut
+   Board<elem'actor> b`, ...), which the existing mechanisms infer as for any struct. The function
+   is not generic and not specialised. (A function that wants to stay generic over the element
+   qualifier would declare its own parameter, `def f<'q>(Board<elem'q> b)`; that is the optional
+   phase 2.)
 4. A bare `Board` with no arguments is an error ("qualifier parameter `elem` of `Board` must be
    given") rather than a guess; a later iteration may infer it per instance from the usage signals
    (an alias read of an element wants `actor`/`guard`/`shared`, a `def` call through an element
@@ -131,10 +135,15 @@ struct is rejected).
 - New per-instance candidate sets for a binding of a qualifier-generic struct, fed by the signals
   of 2.3. This is the largest piece and the riskiest (a wrong choice shows up as a rustc error
   far from the source).
-- Viral propagation: a function/method with a parameter or return type `Board<elem'...>` is specialised
-  per instantiation; a trait method signature mentioning it cannot be (see 4.8).
-- `infer_actor_params` (stored `mut` param → `'actor`) and `infer_actor_elems` interact: an
-  inferred-`'actor` parameter stored into `Board<elem'actor>.cells` forces `elem = actor` for that instance.
+- No propagation: a function or method receiving or returning `Board<elem'actor>` sees the
+  concrete `Board_actor`; parameter/local qualifier inference (including the lent-`mut` rules) runs
+  as today against the specialised declaration. The element qualifier never flows from the callee
+  into `Board`'s argument, nor from the argument into the parameter's own qualifier.
+- Pass order matters, not the semantics: `infer_actor_params` (a `mut` param stored by name into an
+  `'actor` member/element becomes `'actor`) and `infer_actor_elems` run right after parsing, i.e.
+  *before* specialisation, where the field type is still `[mut Point'elem]`. They must either be
+  re-run on the specialised copies or learn to skip an unresolved `'elem`; otherwise a `mut` param
+  stored into `Board<elem'actor>.cells` would keep the lent-param store error.
 - `--show-qualifiers` must print the resolved argument per instance and the signals that led to it.
 
 ### 4.5 Transpiler (general path)
@@ -164,8 +173,25 @@ error, bounds like `as 'inline|owned` being the way to declare a kernel-safe str
 ### 4.8 Traits, `ext`, enums, dyn
 - `struct Board<'elem as 'new> as Drawable`: one impl per instance; trait objects over several instances
   (`[Drawable]` holding `Board_actor` and `Board_inline`) are fine, they are distinct concrete types.
-- A trait method whose signature names `Board<elem'...>` has no way to quantify `elem`: rejected in v1.
-- Enums and `ext` blocks: same registry as generic methods (`MethodOwnerKind`); v1 may limit to structs.
+- A trait method whose signature names `Board<elem'...>` concretely (`Board<elem'actor>`) is fine; one
+  that would need to be generic over `elem` (`Board<elem'q>`) has nothing to quantify `q`: rejected in v1.
+- **Enums and `ext` are in scope** (decided), not only structs. The syntax already exists in the
+  grammar (`enum_decl` and `ext_decl` both take `type_params?`), so the declaration form is the same:
+  `enum Slot<'elem as 'new>: Full([mut Point'elem])`, `ext Board<'elem>: def …`.
+  - *Enum*: the variant payload types use `Point'elem`; one specialised enum per qualifier
+    argument (`Slot_actor`), with `match` arms and constructors rewritten to it. The monomorphizer
+    today specialises generic **methods** of struct/ext/enum owners (`MethodOwnerKind`) and has a
+    body-substitution helper for enums (`substitute_types_in_enum_body`), but its declaration
+    registry for whole-declaration specialisation covers structs and free functions only: it must
+    grow an enum entry.
+  - *`ext`*: `ext Board<'elem>` adds methods to an existing generic type, so the ext block is
+    specialised **in lock-step with the struct instance** (`ext Board_actor`), never on its own;
+    its parameters must match the extended type's. An ext on a non-generic type keeps ignoring
+    qualifier parameters (it has none to resolve).
+  - An `ext` header can also name a concrete instance: `ext Board<elem'actor>:` adds methods to
+    `Board_actor` only, while `ext Board<'elem>:` declares the parameter and applies to every instance.
+  - `trait` headers also take `type_params?`; a qualifier-generic **trait** is left out of v1
+    (see the trait-method bullet above).
 
 ### 4.9 Cross-file and `[deps]`
 Qualifier arguments appear in `use`d declarations and in callers in other files; the registry is
@@ -186,10 +212,12 @@ Inference is out of scope for the first iteration (decided).
    and const parameters in parser, checker and monomorphizer, with tests. Useful on its own
    (`Pair<K = int, V = string>`). The qualifier form `label'value` is defined here but implemented
    with phase 1.
-1. **Explicit instantiation** (`Board<elem'actor>`, bound check, specialisation, structs only).
+1. **Explicit instantiation** (`Board<elem'actor>`, bound check, specialisation; structs, enums and `ext` blocks).
    Self-contained, verifiable; solves "two variants of one struct" without inference.
-2. **Propagation**: generic functions/methods over a qualifier label, other structs holding
-   `Board<elem'elem>`, requirement to write the argument in signatures.
+2. **Passing the parameter on** (optional): other structs holding `Board<elem'elem>` (they declare
+   their own `'elem`), and functions/methods that declare a qualifier parameter of their own
+   (`def f<'q>(Board<elem'q> b)`). Plain functions taking a concrete `Board<elem'actor>` need
+   nothing and work from phase 1.
 
 ## 6. Open questions
 
@@ -197,7 +225,7 @@ Inference is out of scope for the first iteration (decided).
 - Should a qualifier parameter accept chained qualifiers (`'actor'observed`)? (Draft: no, v1.)
 - Checker on the unspecialised declaration: conservative intersection vs deferring all
   qualifier-dependent checks to the specialised copy.
-- Enum/`ext` support, and whether a qualifier parameter may be defaulted (`<elem'inline\|owned = inline>`),
+- Whether a qualifier parameter may be defaulted (`<elem'inline\|owned = inline>`),
   which would also make the existing unparameterised `[mut T]` inference a special case.
 - Interaction with a future implicit parameter for unqualified `[mut T]` fields (unifying with
   `infer_actor_elems`): attractive but explodes every struct into instances; out of scope here.
