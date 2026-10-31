@@ -567,7 +567,7 @@ impl Transpiler {
                 if let (true, Some((src_kvar, src_field))) = (self.config.is_simd_target, resident_alias.as_ref()) {
                     // CPU buffers are ordinary vectors: an alias is a plain copy (through the
                     // residency hooks when a backend may hold the newest data).
-                    if self.routed_array_field_of(src_kvar, src_field).is_some() && self.routed_array_field_of(&var_name, field_name).is_some() {
+                    if self.routed_array_field_of(src_kvar, src_field).is_some() && self.routed_array_field_of(var_name, field_name).is_some() {
                         let inner = kernel_host_scalar_type(&array_inner_type(&field.ty));
                         self.line(&format!("{var_name}.copy_{field_name}_to_device(&{src_kvar}.copy_{src_field}_to_host().iter().map(|&x| x as {inner}).collect::<Vec<{inner}>>());"));
                     } else {
@@ -1608,7 +1608,7 @@ pub(crate) fn interned_fixed_name(f: &crate::fixed::FixedFmt) -> &'static str {
     static NAMES: OnceLock<Mutex<std::collections::HashMap<String, &'static str>>> = OnceLock::new();
     let mut names = NAMES.get_or_init(Default::default).lock().unwrap();
     let key = f.rust_name();
-    *names.entry(key.clone()).or_insert_with(|| Box::leak(key.into_boxed_str()))
+    names.entry(key.clone()).or_insert_with(|| Box::leak(key.into_boxed_str()))
 }
 
 /// Removes the numeric `as` conversions the shared kernel-host emitters wrap around a

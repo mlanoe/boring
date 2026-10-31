@@ -150,7 +150,7 @@ fn desugar_inject_or_exit(
     deps: &std::collections::HashMap<String, PathBuf>,
 ) -> ast::Program {
     match desugar_inject::desugar_inject(program, current_env_flag().as_deref(), path.parent(), deps)
-        .and_then(|p| lower_view::lower_module_with_imports(p, path.parent(), &deps))
+        .and_then(|p| lower_view::lower_module_with_imports(p, path.parent(), deps))
     {
         Ok(p) => p,
         Err(e) => {

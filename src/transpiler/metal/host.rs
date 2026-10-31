@@ -436,7 +436,7 @@ impl HostEmitter {
             _ => return None,
         };
         if !matches!(elem.without_mut(), Type::Qualified(_, OwnerQual::Actor)) { return None; }
-        let mut wrap = |s: &mut Self, e: &Expr| {
+        let wrap = |s: &mut Self, e: &Expr| {
             let v = s.expr(e);
             if s.is_fresh_struct_ctor(e) { format!("std::sync::Arc::new(std::sync::Mutex::new({v}))") } else { v }
         };
@@ -2669,7 +2669,7 @@ impl HostEmitter {
         Some(match raw {
             Some(r) => format!("{}::from_raw({})", f.rust_name(), r),
             None => {
-                crate::transpiler::helpers::report_unsupported(e.line, e.col, &format!(
+                crate::transpiler::helpers::report_unsupported(e.line, e.col, format!(
                     "literal out of range for {} (range [{}, {}])",
                     f.name(), f.format_exact(f.min_raw()), f.format_exact(f.max_raw())));
                 format!("{}::default()", f.rust_name())

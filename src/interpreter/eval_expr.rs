@@ -186,6 +186,7 @@ fn coerce_float_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr) -> (Val
 /// nearest and an out-of-range one is a runtime error. Two resolved values of
 /// different formats (or fixed and int/float variables) are left mismatched so
 /// the operator reports the strict-mixing error.
+#[allow(clippy::too_many_arguments)]
 fn coerce_fixed_literal_pair(l: Value, r: Value, lhs: &Expr, rhs: &Expr, line: usize, lcol: usize, llen: usize, rcol: usize, rlen: usize) -> Result<(Value, Value), Signal> {
     fn lit(v: &Value, fmt: &crate::fixed::FixedFmt) -> Option<Option<Value>> {
         match v {

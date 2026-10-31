@@ -138,9 +138,7 @@ impl Transpiler {
     pub(crate) fn type_lacks_hash(&self, ty: &Type, visiting: &mut Vec<String>) -> bool {
         match ty {
             Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) => self.type_lacks_hash(i, visiting),
-            Type::Qualified(i, q) => {
-                if matches!(q, OwnerQual::Shared) || q.is_owned_or_new() { self.type_lacks_hash(i, visiting) } else { true }
-            }
+            Type::Qualified(i, q) if matches!(q, OwnerQual::Shared) || q.is_owned_or_new() => self.type_lacks_hash(i, visiting),
             Type::Tuple(es) => es.iter().any(|e| self.type_lacks_hash(e, visiting)),
             Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
             | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 | Type::Str | Type::Bool => false,

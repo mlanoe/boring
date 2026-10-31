@@ -93,7 +93,7 @@ pub fn __fxw_add(a: i128, b: i128) -> (u128, bool, bool) {
 
 /// Exact `a - b`.
 pub fn __fxw_sub(a: i128, b: i128) -> (u128, bool, bool) {
-    __fxw_addsm(a.unsigned_abs(), a < 0, b.unsigned_abs(), !(b < 0))
+    __fxw_addsm(a.unsigned_abs(), a < 0, b.unsigned_abs(), b >= 0)
 }
 
 /// `(a * b) >> m`, truncated toward zero, or rounded to nearest (ties away from

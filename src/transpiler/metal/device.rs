@@ -6,7 +6,7 @@
 use crate::fixed::FixedFmt;
 use crate::ast::*;
 use crate::transpiler::tensor_host::{
-    Q4K_ROWS_PER_SIMDGROUP, Q6K_ROWS_PER_SIMDGROUP, Q8_ROWS_PER_SIMDGROUP,
+    Q4K_ROWS_PER_SIMDGROUP, Q8_ROWS_PER_SIMDGROUP,
 };
 use crate::transpiler::helpers::{
     reachable_free_fns,

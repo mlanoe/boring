@@ -1684,7 +1684,7 @@ impl HostEmitter {
             _ => return None,
         };
         if !matches!(elem.without_mut(), Type::Qualified(_, OwnerQual::Actor)) { return None; }
-        let mut wrap = |s: &mut Self, e: &Expr| {
+        let wrap = |s: &mut Self, e: &Expr| {
             let v = s.expr(e);
             if s.is_fresh_struct_ctor(e) { format!("std::sync::Arc::new(std::sync::Mutex::new({v}))") } else { v }
         };
