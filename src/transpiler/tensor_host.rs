@@ -348,10 +348,11 @@ fn lower_function_body(
                 && !(dynamic.format == Some("q5_k") && tensor_config.algorithm(dynamic.format, true) == "scalar");
             let prefix = if tensor_config.native_dynamic_float_linear && dynamic.format.is_none()
                 && element == TensorElement::Float32 {
-                "BoringTensorDynamicFloatNative"
+                "BoringTensorDynamicFloatNative".to_string()
             } else if native_packed {
-                let half_prefill = tensor_config.prefill_precision.as_deref() == Some("half");
-                match dynamic.format {
+                let mixed_prefill = tensor_config.prefill_precision.as_deref() == Some("mixed");
+                let half_prefill = mixed_prefill || tensor_config.prefill_precision.as_deref() == Some("half");
+                let prefix = match dynamic.format {
                     Some("q4_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" && half_prefill => "BoringTensorDynamicQ4KNativeScalarDecodeHalfPrefill",
                     Some("q6_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" && half_prefill => "BoringTensorDynamicQ6KNativeScalarDecodeHalfPrefill",
                     Some("q4_k") if tensor_config.algorithm(dynamic.format, true) == "scalar" => "BoringTensorDynamicQ4KNativeScalarDecode",
@@ -368,11 +369,12 @@ fn lower_function_body(
                     Some("q8_0") if tensor_config.algorithm(dynamic.format, true) == "rows" => "BoringTensorDynamicQ8NativeRows",
                     _ if half_prefill => "BoringTensorDynamicQ8NativeHalfPrefill",
                     _ => "BoringTensorDynamicQ8Native",
-                }
+                };
+                if mixed_prefill { prefix.replace("HalfPrefill", "MixedPrefill") } else { prefix.to_string() }
             } else {
-                "BoringTensorHost"
+                "BoringTensorHost".to_string()
             };
-            let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names, prefix);
+            let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names, &prefix);
             let split_native_q8 = native_packed && dynamic.format == Some("q8_0");
             let q8_entrypoints = if split_native_q8 {
                 let decode_name = format!("{kernel_name}Decode");
@@ -1072,7 +1074,7 @@ fn parse_dynamic_replacement_stmts(
         && !(call.format == Some("q8_0") && decode_algorithm == "scalar")
         && !(call.format == Some("q5_k") && decode_algorithm == "scalar");
     let native_scalar_decode = native_packed && decode_algorithm == "scalar";
-    let native_prefill_rows = if tensor_config.prefill_precision.as_deref() == Some("half") { 128 } else { 64 };
+    let native_prefill_rows = if matches!(tensor_config.prefill_precision.as_deref(), Some("half" | "mixed")) { 128 } else { 64 };
     let native_prefill_columns = 64;
     let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
         && call.format.is_some()
@@ -1093,7 +1095,7 @@ fn parse_dynamic_replacement_stmts(
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed {
         let rows_per_block = 8 * Q8_ROWS_PER_SIMDGROUP;
-        if call.format == Some("q8_0") && tensor_config.prefill_precision.as_deref() != Some("half") {
+        if call.format == Some("q8_0") && !matches!(tensor_config.prefill_precision.as_deref(), Some("half" | "mixed")) {
             format!("    if {m} == 1:\n        if {n} <= 256 and {k} <= 2048:\n            kernel:\n                {instance}(block = 128, grid = ({n} + 1) / 2)\n        else:\n            kernel:\n                {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, k = call.k, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
         } else {
             format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)

@@ -829,10 +829,30 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
     assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill0Decode_kernel"), "{msl}");
     assert!(msl.contains("BoringTensorDynamicQ8NativeHalfPrefill0Prefill_kernel"), "{msl}");
     assert!(msl.contains("threadgroup half* bp_a_tile"), "{msl}");
-    assert!(msl.contains("threadgroup uint bp_scratch[8192]"), "{msl}");
+    assert!(msl.contains("threadgroup uint bp_scratch[6656]"), "tiles + per-SIMD-group edge scratch only:\n{msl}");
     assert!(msl.contains("constexpr uint bp_simdgroups = 4"), "separate decode must permit split-K with half prefill:\n{msl}");
     assert!(msl.contains("bp_a_tile + 8192"), "{msl}");
     assert!(msl.contains("bp_base += 64"), "{msl}");
+    assert!(host.contains("+ 127") && host.contains("/ 128"), "{host}");
+}
+
+#[test]
+fn dynamic_quantized_prefill_mixed_precision_keeps_float_activations() {
+    let source = r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k, format = "q4_k")
+    y
+"#;
+    let (msl, host, _) = run_metal_with_config(
+        "dynamic_q4k_mixed_prefill", source,
+        Some("[tensor.linear.prefill]\nprecision = \"mixed\"\n"),
+    );
+    assert!(msl.contains("BoringTensorDynamicQ4KNativeMixedPrefill0"), "{msl}");
+    assert!(msl.contains("threadgroup float* bp_a_tile"), "{msl}");
+    assert!(msl.contains("threadgroup half* bp_b_tile"), "{msl}");
+    assert!(msl.contains("threadgroup uint bp_scratch[5632]"), "{msl}");
+    assert!(msl.contains("bp_base += 32"), "{msl}");
     assert!(host.contains("+ 127") && host.contains("/ 128"), "{host}");
 }
 
@@ -4612,4 +4632,119 @@ run([1.0 as float32, 2.0 as float32])
         let quiet = build(target, "resident_slot_warn_empty", "[]");
         assert!(!quiet.contains("device-to-host readback"), "{target}: {quiet}");
     }
+}
+
+// ─── Named-kernel helper methods reading scalar fields ───────────────────────
+
+const HELPER_READS_SCALAR_FIELD: &str = r#"
+kernel DecKernel:
+    let [uint8]'global w
+    mut [float32]'unified out
+    let int n
+
+    init([uint8]'global wi, int nn):
+        w = wi
+        n = nn
+        out = [0.0 for ..<nn]
+
+    def int u16le(int i):
+        int(w[i * 2]) | (int(w[i * 2 + 1]) << 8)
+
+    def int scaled(int i):
+        u16le(i) + n
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        if i < n:
+            out[i] = scaled(i) as float32
+
+pub req [float32]'kernel'unified run_b([uint8]'kernel'global w, int n) throws:
+    mut k = DecKernel(w, n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    k.out
+
+def main() throws:
+    let n = 4
+    let w = [1 as uint8, 0 as uint8, 2 as uint8, 1 as uint8, 3 as uint8, 0 as uint8, 0 as uint8, 2 as uint8]
+    mut k = DecKernel(w, n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    print "{k.out[0]} {k.out[1]} {k.out[2]} {k.out[3]}"
+"#;
+
+#[test]
+fn helper_method_passes_scalar_const_field_pointer_consistently() {
+    let (msl, _rs) = metal_codegen("helper_scalar_field_codegen", HELPER_READS_SCALAR_FIELD);
+    assert!(msl.contains("constant int64_t* __n"), "{msl}");
+    assert!(msl.contains("const int64_t n = *__n;"), "helper must deref the pointer:\n{msl}");
+    assert!(msl.contains("DecKernel_u16le(w, out, __n, i)"), "nested helper call forwards __n:\n{msl}");
+    assert!(msl.contains("DecKernel_scaled(w, out, __n, i)"), "entry call forwards __n:\n{msl}");
+}
+
+#[test]
+fn helper_method_reading_scalar_field_runs_on_metal() {
+    let test_name = "helper_scalar_field_run";
+    let (_msl, _rs, _toml) = run_metal(test_name, HELPER_READS_SCALAR_FIELD);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "helper scalar-field kernel failed:\n{stdout}\n{stderr}");
+    // u16le = 1, 258, 3, 512; + n (4)
+    assert_eq!(stdout.trim_end(), "5 262 7 516");
+}
+
+const HELPER_READS_LOCAL_SCALAR_FIELD: &str = r#"
+kernel AccKernel:
+    mut [float32]'unified out
+    let int n
+    mut int acc
+
+    init(int nn):
+        n = nn
+        acc = 10
+        out = [0.0 for ..<nn]
+
+    def int bump(int i):
+        acc = acc + i
+        acc + n
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        if i < n:
+            out[i] = bump(i) as float32
+
+def main() throws:
+    let n = 4
+    mut k = AccKernel(n)
+    kernel:
+        k(block = 64, grid = (n + 63) / 64)
+    print "{k.out[0]} {k.out[3]}"
+"#;
+
+#[test]
+fn helper_method_reading_mut_scalar_field_runs_on_metal() {
+    let test_name = "helper_local_scalar_field_run";
+    let (msl, _rs, _toml) = run_metal(test_name, HELPER_READS_LOCAL_SCALAR_FIELD);
+    assert!(msl.contains("thread int64_t& acc"), "{msl}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "helper mut-scalar kernel failed:\n{stdout}\n{stderr}");
+    // per thread: acc = 10 + i, result = acc + n = 14 + i
+    assert_eq!(stdout.trim_end(), "14 17");
 }

@@ -254,6 +254,13 @@ activations and dequantized weights to float16 while keeping float32
 accumulation. It is never selected implicitly; `precision = "float"` is the
 default.
 
+`precision = "mixed"` (Metal only; other targets treat it as `float`) keeps the
+activations in float32 and rounds only the dequantized weights to float16, which
+lets the half-weight matrix multiply run on a 128x64 tile. On Qwen2.5-3B Q4_K_M it
+moved no logit statistic measurably (same top-1 and mean logit difference as
+`float` against llama.cpp) and gave the same generated text, at about +8% end-to-end
+prefill (`half`: +13%).
+
 ## Current limitations
 
 - No public hardware-fragment types or direct `mma.sync`-style API.

@@ -7,7 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Metal: a named-kernel helper method (`def <T> name(...)`) that reads a scalar field no longer fails MSL compilation** (`no matching function for call to 'Kernel_helper'`). A scalar `let`/`'const` field is a `constant T* __name` helper parameter but call sites passed the dereferenced local `name`; they now forward `__name` and the helper derefs it into a local of the field's name (as the entry point does), including helper-to-helper calls. Scalar `mut`/`'local` fields were not passed to helpers at all (undeclared identifier in MSL); they now travel as `thread T& name` (fixed-size `'local` arrays as `thread T*`), so writes are visible to the caller. Regression tests in `tests/metal_codegen.rs` (codegen + run on Metal).
+
 ### Added
+
+- **Metal: `[tensor.linear.prefill] precision = "mixed"`** (float32 activations, float16-rounded dequantized weights, 128x64 tile) for the native quantized prefill, and the `half`/`mixed` edge output tile now bounces through a per-SIMD-group 8x8 scratch instead of a 32 KB threadgroup array — the old allocation limited the kernel to one threadgroup per core (a lab kernel went 2.51 -> 2.19 TFLOP/s with 32 KB). Qwen2.5-3B Q4_K_M end-to-end prefill, paired A/B: float 296, mixed 319 (+8%), half 334 (+13%) tok/s. `float` (default) is unchanged.
 
 - **Single-line raw strings `'...'`** (no interpolation, no escapes; `''` is the empty string). A `'` is the ownership-qualifier tick only when glued to the end of a type or name — preceded by a letter, digit, `_`, `]`, `}`, `)`, `>`, `?` or `&` (not `&&`, `->`, `=>`); otherwise it opens a string. Implemented in both `src/lexer/mod.rs` and the self-hosted `boring/interpreter/lexer.br`. Covered by `tests/cases/raw_single_quote_string.br` and the `raw_apostrophe_strings` lexer tests. See `docs/book.md` ("Raw strings").
 

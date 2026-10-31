@@ -3157,8 +3157,8 @@ fn tensor_linear_config_for_source(path: &Path) -> transpiler::tensor_host::Tens
         eprintln!("error: tensor linear warp and Q8 decode diagnostic algorithms are not implemented for prefill; use auto or scalar");
         process::exit(1);
     }
-    if config.prefill_precision.as_deref().is_some_and(|value| !matches!(value, "float" | "half")) {
-        eprintln!("error: unsupported tensor linear prefill precision '{}' (expected float or half)", config.prefill_precision.as_deref().unwrap());
+    if config.prefill_precision.as_deref().is_some_and(|value| !matches!(value, "float" | "half" | "mixed")) {
+        eprintln!("error: unsupported tensor linear prefill precision '{}' (expected float, half or mixed)", config.prefill_precision.as_deref().unwrap());
         process::exit(1);
     }
     config

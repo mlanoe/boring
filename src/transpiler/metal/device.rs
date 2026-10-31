@@ -321,6 +321,13 @@ impl DeviceEmitter {
         for p in &method.params {
             if let Some(ty) = &p.ty { self.locals.insert(p.name.clone(), ty.clone()); }
         }
+        // Scalar `'const` fields arrive as `constant T* __name`; deref into a local of the
+        // field's own name, as the entry point does, so the body reads `n` unchanged.
+        for f in fields {
+            if matches!(f.qual, GpuQual::Const) && is_const_scalar_field(f) {
+                self.line(&format!("const {} {} = *__{};", msl_type(&f.ty), msl_safe_ident(&f.name), f.name));
+            }
+        }
         let last_idx = method.body.len().saturating_sub(1);
         for (i, stmt) in method.body.iter().enumerate() { self.emit_stmt(stmt, i == last_idx); }
         self.indent -= 1;
@@ -509,8 +516,8 @@ impl DeviceEmitter {
                     self.emit_q8_rows_decode(has_bias, true);
                 }
             } else if decl.name.ends_with("Prefill") {
-                let activation = if decl.name.contains("HalfPrefill") { "half" } else { "float" };
-                self.emit_blocked_quant_prefill(has_bias, "q8_0", activation, activation);
+                let (activation, weight) = prefill_staging(&decl.name);
+                self.emit_blocked_quant_prefill(has_bias, "q8_0", activation, weight);
             } else {
                 self.emit_dynamic_packed_linear_body(has_bias, "q8_0", true, &decl.name);
             }
@@ -614,8 +621,7 @@ impl DeviceEmitter {
     }
 
     fn emit_dynamic_packed_linear_body(&mut self, has_bias: bool, format: &str, warp_decode: bool, kernel_name: &str) {
-        let activation = if kernel_name.contains("HalfPrefill") || kernel_name.contains("WeightFloatPrefill") { "half" } else { "float" };
-        let weight = if kernel_name.contains("HalfPrefill") || kernel_name.contains("ActivationFloatPrefill") { "half" } else { "float" };
+        let (activation, weight) = prefill_staging(kernel_name);
         let full_float = activation == "float" && weight == "float";
         if format != "q8_0" {
             self.emit_dynamic_k_quant_linear_body(has_bias, format, warp_decode, activation, weight);
@@ -1363,13 +1369,17 @@ impl DeviceEmitter {
     /// edge output tile after the final multiply.
     fn emit_blocked_quant_prefill(&mut self, has_bias: bool, format: &str, activation: &str, weight: &str) {
         let half = activation == "half" && weight == "half";
-        let (bm, bk, sg_n, fm, fn_) = if half { (128, 64, 2, 4, 4) } else { (64, 32, 4, 4, 2) };
+        let mixed = activation == "float" && weight == "half";
+        let (bm, bk, sg_n, fm, fn_) = if half { (128, 64, 2, 4, 4) } else if mixed { (128, 32, 2, 4, 4) } else { (64, 32, 4, 4, 2) };
         let kf = bk / 8;
         let fragments = fm * fn_;
         let out_cells = bm * 64;
-        self.line(&format!("threadgroup uint bp_scratch[{}];", if half { 8192 } else { 4096 }));
+        let compact_edge = half || mixed;
+        let tile_words = (bm * bk * if half { 2 } else { 4 } + 64 * bk * if half || mixed { 2 } else { 4 }) / 4;
+        let scratch_words = if compact_edge { tile_words + 8 * 64 } else { 4096 };
+        self.line(&format!("threadgroup uint bp_scratch[{scratch_words}];"));
         self.line(&format!("threadgroup {activation}* bp_a_tile = (threadgroup {activation}*)bp_scratch;"));
-        self.line(&format!("threadgroup {weight}* bp_b_tile = bp_a_tile + {};", bm * bk));
+        self.line(&format!("threadgroup {weight}* bp_b_tile = (threadgroup {weight}*)(bp_a_tile + {});", bm * bk));
         self.line("const uint bp_thread = __thread_pos.x;");
         self.line("const uint bp_warp = bp_thread / 32;");
         self.line(&format!("const uint bp_sg_m = bp_warp / {sg_n}, bp_sg_n = bp_warp % {sg_n};"));
@@ -1589,6 +1599,27 @@ impl DeviceEmitter {
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
+        if compact_edge {
+            // Edge tile: each SIMD group bounces its fragments through a private 8x8 float scratch
+            // (after the staged tiles), so the shared allocation stays the size of the tiles and
+            // keeps two threadgroups resident per core.
+            self.line(&format!("threadgroup float* bp_out_tile = (threadgroup float*)bp_scratch + {} + bp_warp * 64;", tile_words));
+            let bias = if has_bias { " + bias[bp_output_col]" } else { "" };
+            for i in 0..fm { for j in 0..fn_ {
+                let r = i * fn_ + j;
+                self.line(&format!("simdgroup_store(bp_result{r}, bp_out_tile, 8, ulong2(0, 0), false);"));
+                self.line("simdgroup_barrier(mem_flags::mem_threadgroup);");
+                self.line("for (uint bp_e = 0; bp_e < 2; ++bp_e) {");
+                self.indent += 1;
+                self.line("const uint bp_idx = __simd_lane_id * 2 + bp_e;");
+                self.line(&format!("const uint bp_output_row = bp_row + (bp_sg_m * {fm} + {i}) * 8 + bp_idx / 8;"));
+                self.line(&format!("const uint bp_output_col = bp_col + (bp_sg_n * {fn_} + {j}) * 8 + bp_idx % 8;"));
+                self.line(&format!("if (bp_output_row < (uint)m && bp_output_col < (uint)n) c[(ulong)bp_output_row * (ulong)n + bp_output_col] = bp_out_tile[bp_idx]{bias};"));
+                self.indent -= 1;
+                self.line("}");
+                self.line("simdgroup_barrier(mem_flags::mem_threadgroup);");
+            } }
+        } else {
         self.line("threadgroup float* bp_out_tile = (threadgroup float*)bp_scratch;");
         for i in 0..fm { for j in 0..fn_ {
             let r = i * fn_ + j;
@@ -1608,6 +1639,7 @@ impl DeviceEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -2776,7 +2808,19 @@ fn const_array_count(e: &Expr) -> Option<usize> {
 fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Actor | GpuQual::Local => None,
+            GpuQual::Actor => None,
+            // Thread-private registers/arrays live in the entry point's body; a helper
+            // reaches them by reference (scalar) / pointer (array, decays at the call).
+            GpuQual::Local => {
+                let name = msl_safe_ident(&f.name);
+                if is_const_scalar_field(f) {
+                    Some(format!("thread {}& {}", msl_type(&f.ty), name))
+                } else if matches!(f.ty, Type::ArrayN(_, _)) {
+                    Some(format!("thread {}* {}", elem_msl_type(&f.ty), name))
+                } else {
+                    None
+                }
+            }
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
                 let elem = elem_msl_type(&f.ty);
                 let constness = if matches!(f.binding, FieldBinding::Let) { "const " } else { "" };
@@ -2802,12 +2846,24 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
     }).collect()
 }
 
+/// True for a `'const` kernel field that is a scalar (not an array / labeled array).
+fn is_const_scalar_field(f: &KernelFieldDecl) -> bool {
+    !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _))
+        && f.ty.as_labeled_array().is_none()
+}
+
 /// Argument names to pass at a call site for `buffer_field_params(fields)` — same
 /// filtering as that function, but just the bare field names.
 fn buffer_field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
     fields.iter().filter_map(|f| {
         match f.qual {
-            GpuQual::Actor | GpuQual::Local => None,
+            GpuQual::Actor => None,
+            GpuQual::Local if is_const_scalar_field(f) || matches!(f.ty, Type::ArrayN(_, _)) => Some(msl_safe_ident(&f.name)),
+            GpuQual::Local => None,
+            // A scalar `'const` field travels as its `constant T* __name` pointer (see
+            // `buffer_field_params`), so the call site forwards that pointer, not the
+            // dereferenced local of the same bare name.
+            GpuQual::Const if is_const_scalar_field(f) => Some(format!("__{}", f.name)),
             GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface => {
                 Some(msl_safe_ident(&f.name))
             }
@@ -3314,3 +3370,13 @@ fn is_float_ty(t: &Type) -> bool {
 }
 
 fn inferred_fixed_ty(t: Option<&Type>) -> Option<FixedFmt> { t.and_then(fixed_fmt_of_type) }
+
+/// Staging element types `(activation, weight)` of a native quantized prefill kernel, from the
+/// precision suffix of its name: `HalfPrefill` rounds both to half, `MixedPrefill` keeps float
+/// activations and rounds only the dequantized weights (the MMA then runs half-weight, which is
+/// what makes the wide tile profitable), anything else stages float32 exactly.
+fn prefill_staging(kernel_name: &str) -> (&'static str, &'static str) {
+    if kernel_name.contains("HalfPrefill") { ("half", "half") }
+    else if kernel_name.contains("MixedPrefill") { ("float", "half") }
+    else { ("float", "float") }
+}

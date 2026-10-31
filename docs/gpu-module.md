@@ -64,6 +64,8 @@ kernel Name:
         <body>
 ```
 
+Device helpers can read and write every field of the kernel (arrays, scalar `let`/`'const` fields, and thread-private `mut`/`'local` scalars and fixed arrays) and call one another; on `--target metal` scalars reach a helper as a dereferenced `constant` pointer (`let`) or a `thread` reference (`mut`), so a helper's writes to a `mut` field are visible to its caller.
+
 `let`/`mut`/`var` are mandatory on every field. GPU memory qualifiers (`'unified`, `'global`, bare `'actor`, `'local`, `'const`) replace the usual ownership qualifiers inside a `kernel` struct. For scalars and fixed-size arrays the qualifier may be omitted — the transpiler infers it from the binding (see [Qualifier inference](#qualifier-inference) below).
 
 ---
