@@ -3513,7 +3513,7 @@ impl Interpreter {
             Type::Str => Err(err("use 'string' instead of bare 'String' (which has no ownership qualifier)", line)),
 
             // Type parameters — resolved later, skip
-            Type::TypeParam(_) => Ok(()),
+            Type::TypeParam(_) | Type::QualArg(_) => Ok(()),
 
             // Explicitly qualified — ownership is stated; no need to recurse into inner
             Type::Qualified(_, _) => Ok(()),

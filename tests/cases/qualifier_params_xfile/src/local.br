@@ -1,0 +1,9 @@
+# Same-project sibling of main.br: uses the dependency's `Board<elem'actor>` too, so the same
+# instance is requested from two files (one `Board_actor`, emitted once).
+use boardlib.board.*
+
+pub def int sibling_total():
+    mut b = Board<elem'actor>()
+    let p = Point(40)
+    b.add(p)
+    b.total()

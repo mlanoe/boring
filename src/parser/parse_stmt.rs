@@ -65,6 +65,9 @@ impl Parser {
     }
 
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        if self.is_dispatch_stmt() {
+            return self.parse_dispatch_stmt();
+        }
         match self.peek().clone() {
             TokenKind::Comment(text) => {
                 self.advance();

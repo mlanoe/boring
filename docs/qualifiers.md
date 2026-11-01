@@ -1025,6 +1025,19 @@ Named qualifier groups expand to the corresponding member sets:
 
 **Scope: parameters only.** Qualifier groups are not useful on local variables — the inference starting set already covers the same information.
 
+### Qualifier parameters — the qualifier chosen at the use site
+
+Inference picks one qualifier per *declared* type (see "One qualifier per declared type" in the book), so a struct whose member wants different qualifiers in different places needs a **qualifier parameter**: `struct Board<'elem>` with `[mut Point'elem] cells`, instantiated as `Board<elem'actor>` or `Board<elem'inline>`. Each distinct argument is one specialised, non-generic copy (`Board_actor`, `Board_inline`), so the qualifier machinery below sees a plain declaration with an explicit qualifier, exactly as if the author had written it.
+
+- **The bound is a candidate set** (see "Candidate sets"): without `as` the parameter ranges over `{inline, owned, shared, actor, guard}`, the set of a bare `T`; `as 'new` is `T'new`'s set `{owned, shared, actor, guard}`; `as 'inline|owned` (or `'one`, `'many`) lists it. An argument outside the bound is an error.
+- **Inference at construction, never by usage.** `<...>` is only needed when the construction does not determine the parameter: the expected type first, then the *written* qualifier of the arguments feeding a `T'elem` slot (`Board(cells = [a, b])` with `a`, `b` declared `Point'actor`). A qualifier that is itself inferred (`let p = Point(1)`) or a fresh literal is no evidence, there is no fixpoint with the usual qualifier inference, and conflicting evidence is an error. The result is the explicit instance. See the book's "Inference at construction".
+- **Default value.** `struct Board<'elem = 'inline>` (or `'elem as 'inline|owned = 'inline`): the default belongs to the bound and is the last step of the evidence order, after explicit arguments, the expected type and the written qualifier of the arguments, so it never overrides evidence. A bare `Board` is valid when every parameter has a default and is the same specialisation as the explicit instance.
+- **Chained qualifiers.** An argument, a bound member or a default may be a chain, `Board<elem'actor'observed>`, `as 'actor|'actor'observed`, `= 'inline'observed`, with the validity of the same chain on a type (`'shared'observed` stays an error). Bound membership is by whole chain, `Point'elem` becomes `Point'actor'observed`, and the instance is named `Board_actor_observed`.
+- **After substitution the usual rules apply.** `mut 'shared` stays an error, the lock-aware element access applies to an `'actor`/`'guard` instance and a plain `Vec<T>` is used for `'inline`/`'owned`. Checks that need the resolved qualifier are not run on the declaration itself, where `'elem` is still open (the "cannot store the `mut` parameter" diagnostic and the `'actor` promotion of a stored `mut` parameter, see "A `mut` parameter stored in an `'actor` member", are skipped for a declaration with qualifier parameters): write the method parameter `Point'elem p`, which follows the instance.
+- **Targets.** Specialised by the standard transpiler (and the GPU host emitters, which share it); `--linux` rejects the feature.
+
+See the book's "Qualifier parameters" for the syntax, `ext`/enum support, and the errors.
+
 ### Explicit annotation — escape hatch
 
 When inference cannot resolve a qualifier, an explicit annotation overrides everything:

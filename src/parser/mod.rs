@@ -11,6 +11,7 @@
 
 mod generic_args;
 mod parse_array_block;
+mod parse_dispatch;
 mod parse_expr;
 mod parse_fn;
 mod parse_stmt;
@@ -96,6 +97,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
         resolving.generic_decls = Some(generic_args::decls_rc(&program));
         program = resolving.parse_program()?;
     }
+    generic_args::check_bare_qual_uses(&program)?;
     crate::infer_actor_params::infer_actor_params(&mut program);
     crate::infer_actor_elems::infer_actor_elems(&mut program);
     Ok(program)
@@ -138,6 +140,11 @@ struct Parser {
     pub(crate) generic_decls: Option<std::rc::Rc<generic_args::GenericDecls>>,
     /// A labelled generic argument list was seen: the file needs the two-phase parse.
     pub(crate) saw_labelled_generics: bool,
+    /// First error found inside `parse_type_params` (whose signature cannot carry one); reported by
+    /// `parse_program` right after the item it occurred in.
+    pub(crate) pending_err: Option<ParseError>,
+    /// Qualifier parameters of the top-level declaration being parsed (`T'elem` is valid for these).
+    pub(crate) qual_scope: Vec<String>,
 }
 
 impl Parser {
@@ -151,6 +158,8 @@ impl Parser {
             in_inline_context: false,
             generic_decls: None,
             saw_labelled_generics: false,
+            pending_err: None,
+            qual_scope: Vec::new(),
         }
     }
 
@@ -314,7 +323,9 @@ impl Parser {
         let mut items = Vec::new();
         self.skip_newlines_and_indent(); // also skip Dedent at top level (from multi-line parens)
         while !self.check(&TokenKind::Eof) {
+            self.qual_scope.clear();
             let item = self.parse_item(false)?;
+            if let Some(e) = self.pending_err.take() { return Err(e); }
             items.push(item);
             self.skip_newlines_and_indent();
         }
@@ -1683,6 +1694,18 @@ impl Parser {
         let mut where_clause = Vec::new();
         self.skip_newlines_and_indent();
         loop {
+            // Qualifier parameter: `'elem`, `'elem as 'new` (docs/design-notes/qualifier-generic-params.md).
+            if self.check(&TokenKind::Tick) {
+                match self.parse_qual_param_decl() {
+                    Ok(p) => params.push(p),
+                    Err(e) => { self.pending_err.get_or_insert(e); break; }
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines_and_indent();
+                continue;
+            }
             if self.check(&TokenKind::Ampersand) {
                 let next_is_lifetime = matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
@@ -1772,7 +1795,20 @@ impl Parser {
             self.skip_newlines_and_indent();
         }
         self.skip_newlines_and_indent();
+        let gt = (self.line(), self.col(), self.tok_len());
         let _ = self.expect(&TokenKind::Gt);
+        for p in &params {
+            if let Some(n) = qual_param_name(p) { self.qual_scope.push(n.to_string()); }
+        }
+        if let Some(clash) = params.iter().find_map(|p| {
+            let q = qual_param_name(p)?;
+            params.iter().any(|o| o == q).then_some(q)
+        }) {
+            self.pending_err.get_or_insert(ParseError::Generic {
+                msg: format!("`{clash}` is declared both as a type parameter and as a qualifier parameter"),
+                line: gt.0, col: gt.1, len: gt.2,
+            });
+        }
         (params, where_clause)
     }
 
@@ -2376,7 +2412,13 @@ impl Parser {
                     Some(TokenKind::As)
                 );
 
-                if is_type_param {
+                if self.check(&TokenKind::Tick) {
+                    let decl = self.parse_qual_param_decl()?;
+                    let name = qual_param_name(&decl).unwrap_or_default().to_string();
+                    self.qual_scope.push(name.clone());
+                    type_args.push(Type::QualArg(vec![OwnerQual::Param(name)]));
+                    type_params.push(decl);
+                } else if is_type_param {
                     let param_name = self.expect_ident()?;
                     self.expect(&TokenKind::As)?;
                     let bound = self.expect_ident()?;
@@ -2389,7 +2431,7 @@ impl Parser {
                     type_args.push(Type::TypeParam(param_name));
                 } else {
                     let arg = self.parse_generic_arg(|p| p.parse_type())?;
-                    labelled |= arg.label.is_some();
+                    labelled |= arg.label.is_some() || generic_args::qual_arg_shape(&arg.ty).is_some();
                     type_args.push(arg.ty.clone());
                     ext_args.push(arg);
                 }
@@ -3087,3 +3129,6 @@ mod tests_labeled_array;
 mod tests_recursion_depth;
 #[cfg(test)]
 mod tests_labelled_generics;
+
+#[cfg(test)]
+mod tests_qualifier_params;

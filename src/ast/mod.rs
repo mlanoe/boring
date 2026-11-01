@@ -1408,6 +1408,11 @@ pub enum OwnerQual {
     /// `infer_qualifiers.rs`/`collect_anonymous_vars`, which special-case exactly this
     /// shape to preserve that local-narrowing behavior).
     Union(Vec<OwnerQual>),
+    /// `T'elem` — use of a qualifier parameter declared as `struct Board<'elem>`
+    /// (docs/design-notes/qualifier-generic-params.md). Substituted by the monomorphizer
+    /// (`Board<elem'actor>` → `Board_actor`) before any later pass sees it; the checker and
+    /// the interpreter treat it as an unresolved qualifier.
+    Param(String),
 }
 
 impl OwnerQual {
@@ -1554,6 +1559,15 @@ pub enum Type {
     TypeParam(String),
     // Generic type application: Future<int>, Dict<string, int>
     Generic(String, Vec<Type>),
+    /// A qualifier in generic-argument position: the positional carrier of `elem'actor` in
+    /// `Board<elem'actor>` (labels are resolved to positions at parse time, like every
+    /// labelled generic argument). Never a type of a value; the monomorphizer replaces the
+    /// whole `Generic(base, [QualArg..])` by the specialised `Named(base_actor)`.
+    ///
+    /// The payload is a *chain*: a base qualifier optionally followed by one composable suffix,
+    /// outermost layer last (`elem'actor'observed` → `[Actor, Observed]`), validated by
+    /// `OwnerQual::check_chain`. In an `ext` header it is `[Param(name)]`.
+    QualArg(Vec<OwnerQual>),
     /// Associated type reference: `Self.Output` or bare `Output` inside trait/struct context.
     SelfAssoc(String),
     /// Associated type access on a named type: `LinkedList.Index`, `Tree<T>.Node`.
@@ -1816,6 +1830,7 @@ impl Type {
             Type::Qualified(_, _) => true,
             Type::TypeParam(_) => true,   // assumed copy at runtime, erased
             Type::Generic(_, _) => false, // heap type
+            Type::QualArg(_) => true,
             // Same shape (flat buffer) as Array/ArrayN — never Copy, regardless
             // of fixed vs dynamic axes.
             Type::LabeledArray(_, _) => false,
@@ -1861,8 +1876,10 @@ impl Type {
             // own task-safety, same as Union above. A still-bare `Qualified(Named, Observed)`
             // (unresolved bare `'observed`) conservatively delegates to `Named`'s `false`.
             Type::Qualified(inner, OwnerQual::Observed) => inner.is_task_safe(),
+            Type::Qualified(inner, OwnerQual::Param(_)) => inner.is_task_safe(),
             Type::TypeParam(_) => true,
             Type::Generic(_, _) => false, // unless qualified, keep simple for now
+            Type::QualArg(_) => true,
             // Unqualified, like Array/ArrayN — sharing semantics undefined without a qualifier.
             Type::LabeledArray(_, _) => false,
             Type::Dyn(inner) | Type::Impl(inner) => inner.is_task_safe(),
@@ -2589,5 +2606,134 @@ pub fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(WalkNode<'a>)) {
         ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)
         | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void
         | ExprKind::DotIdent(_) => {}
+    }
+}
+
+/// A qualifier chain: base qualifier, then an optional suffix (`'actor'observed`).
+pub type QualChain = Vec<OwnerQual>;
+
+/// Declaration of a qualifier parameter inside a `type_params` list:
+/// `^elem[:member,member...][=default]`. A bare `^elem` has the full candidate set; members and
+/// the default are chains spelled by `OwnerQual::chain_name` (`actor'observed`).
+/// `^` cannot start any other parameter spelling (`T`, `$N:usize`, `'a`).
+pub fn qual_param_decl(p: &str) -> Option<(&str, Vec<QualChain>)> {
+    let rest = p.strip_prefix('^')?;
+    let rest = rest.split_once('=').map_or(rest, |(r, _)| r);
+    let (name, bound) = match rest.split_once(':') {
+        Some((n, b)) => (n, Some(b)),
+        None => (rest, None),
+    };
+    let set = match bound {
+        None => OwnerQual::BARE_MEMBERS.iter().map(|q| vec![q.clone()]).collect(),
+        Some(b) => b.split(',').filter_map(OwnerQual::chain_from_name).collect(),
+    };
+    Some((name, set))
+}
+
+/// Default value of a qualifier parameter declaration (`^elem=inline'observed`), if any.
+pub fn qual_param_default(p: &str) -> Option<QualChain> {
+    let rest = p.strip_prefix('^')?;
+    OwnerQual::chain_from_name(rest.split_once('=')?.1)
+}
+
+/// Label of a qualifier parameter in a `type_params` list (`^elem:..` → `elem`).
+pub fn qual_param_name(p: &str) -> Option<&str> { qual_param_decl(p).map(|(n, _)| n) }
+
+impl OwnerQual {
+    /// Every qualifier a bare `T` may take — the unbounded candidate set of `struct Board<'elem>`.
+    pub const BARE_MEMBERS: [OwnerQual; 5] =
+        [OwnerQual::Inline, OwnerQual::Owned, OwnerQual::Shared, OwnerQual::Actor, OwnerQual::Guard];
+
+    /// Spelling used in `type_params` bounds and in mangled instance names.
+    pub fn bound_name(&self) -> Option<&'static str> {
+        Some(match self {
+            OwnerQual::Inline => "inline",
+            OwnerQual::Owned => "owned",
+            OwnerQual::Shared => "shared",
+            OwnerQual::Actor => "actor",
+            OwnerQual::Guard => "guard",
+            _ => return None,
+        })
+    }
+
+    pub fn from_bound_name(s: &str) -> Option<OwnerQual> {
+        Some(match s {
+            "inline" => OwnerQual::Inline,
+            "owned" => OwnerQual::Owned,
+            "shared" => OwnerQual::Shared,
+            "actor" => OwnerQual::Actor,
+            "guard" => OwnerQual::Guard,
+            _ => return None,
+        })
+    }
+}
+
+impl OwnerQual {
+    /// `actor'observed`: the spelling of a chain in bounds, defaults and diagnostics. `None` when
+    /// a link is not a qualifier a parameter may take.
+    pub fn chain_name(chain: &[OwnerQual]) -> Option<String> {
+        let mut words = Vec::with_capacity(chain.len());
+        for q in chain {
+            words.push(match q {
+                OwnerQual::ActorTask => "actor'task",
+                OwnerQual::GuardTask => "guard'task",
+                OwnerQual::Observed => "observed",
+                OwnerQual::Weak => "weak",
+                other => other.bound_name()?,
+            });
+        }
+        Some(words.join("'"))
+    }
+
+    /// Name used in a specialised instance's mangled name (`actor_observed`).
+    pub fn chain_mangle(chain: &[OwnerQual]) -> Option<String> {
+        Self::chain_name(chain).map(|n| n.replace('\'', "_"))
+    }
+
+    /// Inverse of `chain_name`.
+    pub fn chain_from_name(s: &str) -> Option<QualChain> {
+        let mut out: QualChain = Vec::new();
+        for w in s.split('\'') {
+            let q = match (w, out.last()) {
+                ("task", Some(OwnerQual::Actor)) => { out.pop(); OwnerQual::ActorTask }
+                ("task", Some(OwnerQual::Guard)) => { out.pop(); OwnerQual::GuardTask }
+                ("observed", _) => OwnerQual::Observed,
+                ("weak", _) => OwnerQual::Weak,
+                (w, _) => Self::from_bound_name(w)?,
+            };
+            out.push(q);
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// Validity of a chain as a qualifier-parameter argument, bound member or default, with the
+    /// same rules as the same chain written on a type: the base is one of the five qualifiers a
+    /// bare `T` may take (or `'actor'task` / `'guard'task`), followed by at most one suffix;
+    /// `'weak` needs a ref-counted base, and `'shared'observed` is rejected.
+    pub fn check_chain(chain: &[OwnerQual]) -> Result<(), String> {
+        let (base, suffix) = match chain {
+            [b] => (b, None),
+            [b, s] => (b, Some(s)),
+            _ => return Err("a qualifier chain is a base qualifier and at most one suffix".into()),
+        };
+        let base_ok = Self::BARE_MEMBERS.contains(base) || matches!(base, OwnerQual::ActorTask | OwnerQual::GuardTask);
+        if !base_ok {
+            return Err("must start with one of 'inline, 'owned, 'shared, 'actor, 'guard".into());
+        }
+        match suffix {
+            None => Ok(()),
+            Some(OwnerQual::Observed) if matches!(base, OwnerQual::Shared) => Err(
+                "cannot combine `'observed` with `'shared`: `'shared` has no interior mutability, \
+                 so there is nothing to notify about (use `'actor'observed` or `'guard'observed`)".into()),
+            Some(OwnerQual::Observed) => Ok(()),
+            Some(OwnerQual::Weak) if matches!(base, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => Ok(()),
+            Some(OwnerQual::Weak) => Err("`'weak` chains only onto 'shared, 'actor or 'guard".into()),
+            Some(_) => Err("the only suffixes of a chain are 'observed and 'weak".into()),
+        }
+    }
+
+    /// `T` with every layer of `chain` applied: `Qualified(Qualified(T, Actor), Observed)`.
+    pub fn apply_chain(inner: Type, chain: &[OwnerQual]) -> Type {
+        chain.iter().fold(inner, |t, q| Type::Qualified(Box::new(t), q.clone()))
     }
 }

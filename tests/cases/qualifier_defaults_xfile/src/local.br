@@ -1,0 +1,10 @@
+# Same-project sibling of main.br: the dependency's defaulted `Board` and `Watched`, bare, so the
+# default instance requested from two files is still emitted once.
+use boardlib.board.*
+
+pub def int sibling_total():
+    mut b = Board()
+    b.add(Point(40))
+    mut Watched w = Watched()
+    w.bump()
+    b.total() + w.get()

@@ -1,0 +1,23 @@
+# Qualifier-generic declarations living in ANOTHER project (`[deps]`): `Board`, its `ext` block and
+# `Slot` come from fixtures/qualifier_params_lib, the instances are requested here and in the
+# sibling src/local.br. Registered by tests/run.rs (`qualifier_params_xfile`) and tests/transpile.rs
+# (`transpile_project_test!(qualifier_params_xfile)`).
+use boardlib.board.*
+use local
+
+def main():
+    mut a = Board<elem'actor>()
+    let p = Point(2)
+    a.add(p)
+    print a.total()
+    print a.doubled()
+    print sibling_total()
+
+    mut b = Board<elem'inline>()
+    b.add(Point(5))
+    print b.total()
+
+    let Slot<elem'inline> s = Slot.Full(Point(9))
+    match s:
+        Empty: print "empty"
+        Full(q): print "full {q.x}"

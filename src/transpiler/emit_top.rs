@@ -436,6 +436,25 @@ impl Transpiler {
             rewritten = cloned;
             &rewritten
         };
+        // Qualifier arguments (`Board<elem'actor>`) become their specialised names before anything
+        // is registered (see `monomorphize::rewrite_qual_program`).
+        let qual_rewritten;
+        let mut qual_uses = Vec::new();
+        let program = match monomorphize::rewrite_qual_program(program) {
+            Some((p, uses)) => {
+                self.has_qual_generics = true;
+                qual_uses = uses;
+                qual_rewritten = p;
+                &qual_rewritten
+            }
+            None => program,
+        };
+        // An `'observed` chain given as a qualifier argument only becomes a type of the emitted
+        // program in the specialised copy, which may live in another file than the entry one
+        // whose syntactic scan decides on the runtime support (`program_uses_observed`).
+        if qual_uses.iter().any(|u| u.type_args.iter().any(|a| matches!(a, Type::QualArg(c) if c.contains(&OwnerQual::Observed)))) {
+            self.uses_observed.set(true);
+        }
         if self.dyn_fact_pass {
             self.dyn_facts.collect(program);
             return self.deep_pre_scan_uses(program, visited);
@@ -494,6 +513,10 @@ impl Transpiler {
                 }
                 // Same generic-method registry, for an enum's own methods.
                 crate::ast::Item::Enum(en) => {
+                    if monomorphize::has_qual_params(&en.type_params) {
+                        self.global_qual_enums.entry(en.name.clone()).or_insert_with(|| en.clone());
+                        self.has_qual_generics = true;
+                    }
                     for m in &en.methods {
                         let own_type_params: Vec<String> = m.type_params.iter()
                             .filter(|p| !en.type_params.contains(p))
@@ -510,6 +533,7 @@ impl Transpiler {
             }
         }
         let candidates = monomorphize::collect_candidate_calls(program);
+        self.pending_generic_call_candidates.extend(qual_uses);
         self.pending_generic_call_candidates.extend(candidates.free);
         self.pending_method_call_candidates.extend(candidates.methods);
         self.deep_pre_scan_uses(program, visited);
@@ -3796,6 +3820,7 @@ impl Transpiler {
                 }
             }
             Type::Generic(name, args) => format!("{}<{}>", name, args.iter().map(|t| self.emit_type(t)).collect::<Vec<_>>().join(", ")),
+            Type::QualArg(_) => "compile_error!(\"unresolved qualifier argument\")".into(),
             Type::SelfAssoc(name) => format!("Self::{}", name),
             // `LinkedList.Index` → resolved concrete type if known, else `LinkedList::Index`.
             // For generic bases `Tree<T>.Node` we use only the base type name for the lookup.
@@ -4064,6 +4089,8 @@ impl Transpiler {
                 // concrete base first (see `Transpiler::observed_locals`) — but falls
                 // back to wrapping the bare inner type directly rather than panicking.
                 OwnerQual::Observed => format!("BoringObserved<{}>", self.emit_type(inner)),
+                // A qualifier parameter is substituted by `monomorphize` before emission.
+                OwnerQual::Param(p) => format!("compile_error!(\"unresolved qualifier parameter '{}'\") /* {} */", p, self.emit_type(inner)),
                 // Host-context `'kernel'unified`/`'kernel'global`: emits as the plain inner
                 // type. Confirmed against real usage (`examples/saxpy.br`'s
                 // `var mut [float]'kernel'unified x = [0.0 for ..N]`, freely indexed/assigned

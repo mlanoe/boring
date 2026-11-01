@@ -1,0 +1,131 @@
+# Inference of qualifier arguments at construction (docs/book.md, "Qualifier parameters"): `<...>` is
+# only written when the construction does not determine the parameter. Evidence, in order: the
+# expected type, then the *written* qualifier of the arguments feeding a `T'elem` slot.
+struct Point:
+    var int x = 0
+
+struct Board<'elem>:
+    var [mut Point'elem] cells = []
+
+    def add(Point'elem p):
+        cells.push(p)
+
+    req int size():
+        cells.len()
+
+    req int total():
+        var int sum = 0
+        for i in 0..<cells.len():
+            sum += cells[i].x
+        sum
+
+ext Board<'elem>:
+    req int doubled():
+        self.total() * 2
+
+# A bound restricts what can be inferred, like what can be written.
+struct Cell<'q as 'new>:
+    var Point'q pt = Point()
+
+    req int get():
+        pt.x
+
+# Two parameters, each fed by its own slot.
+struct Pair<'a, 'b>:
+    var Point'a first = Point()
+    var Point'b second = Point()
+
+    req int sum():
+        first.x + second.x
+
+# A dict slot.
+struct Index<'v>:
+    var {string = mut Point'v} byName = {=}
+
+    req int count():
+        byName.len()
+
+enum Slot<'elem>:
+    Empty
+    Full(Point'elem)
+
+# The expected type: a field, a parameter, a return type and an assignment name their instance.
+struct Game:
+    var mut Board<elem'inline> board = Board()
+    var int score = 0
+
+def int fill(Board<elem'actor> b):
+    b.size()
+
+Board<elem'inline> makeInline():
+    Board()
+
+Board<elem'actor> makeActor():
+    return Board()
+
+# The expected type and the argument agree.
+Board<elem'actor> tail():
+    let Point'actor p = Point(4)
+    Board(cells = [p])
+
+def main():
+    # 3. The written qualifier of the arguments: `a`, `b` are declared `Point'actor`.
+    let Point'actor a = Point(1)
+    let Point'actor b = Point(2)
+    let board = Board(cells = [a, b])
+    print "actor {board.total()} {board.size()} {board.doubled()}"
+
+    # The result is the instance the explicit form names: it passes where `Board<elem'actor>` is expected.
+    print "fill {fill(board)}"
+    let Point'actor a2 = Point(5)
+    let explicit = Board<elem'actor>(cells = [a2])
+    print "explicit {explicit.size()}"
+
+    # A single argument, and a different written qualifier.
+    let Point'inline c = Point(3)
+    mut inline_board = Board(cells = [c])
+    print "inline {inline_board.total()}"
+
+    # 2. The expected type, including an empty literal and a call argument.
+    mut Board<elem'actor> empty = Board()
+    mut Board<elem'inline> empty2 = Board(cells = [])
+    print "empty {empty.size()} {empty2.size()}"
+    print "param {fill(Board())}"
+    var mut Board<elem'inline> var_board = Board()
+    var_board = Board()
+    print "assigned {var_board.size()}"
+
+    # A labelled argument of another struct names the expected type too.
+    let g = Game(board = Board())
+    print "game {g.board.size()} {g.score}"
+    print "returns {makeInline().size()} {makeActor().size()} {tail().total()}"
+
+    # Positional arguments and several parameters.
+    let Point'actor pa = Point(10)
+    let Point'inline pi = Point(20)
+    let pair = Pair(pa, pi)
+    print "pair {pair.sum()}"
+    let Point'actor pa2 = Point(10)
+    let pair2 = Pair(second = pi, first = pa2)
+    print "pair2 {pair2.sum()}"
+
+    # A bound.
+    let Point'shared ps = Point(7)
+    let cell = Cell(ps)
+    print "cell {cell.get()}"
+
+    # A dict literal.
+    let Point'actor a3 = Point(6)
+    let idx = Index(byName = {"a" = a3})
+    print "index {idx.count()}"
+
+    # An enum variant: the payload slot is `Point'elem`.
+    let Point'inline q = Point(9)
+    let s = Slot.Full(q)
+    match s:
+        Empty: print "empty"
+        Full(p): print "full {p.x}"
+    let Slot<elem'actor> e = Slot.Empty
+    match e:
+        Empty: print "slot empty"
+        Full(p): print "full {p.x}"

@@ -998,6 +998,16 @@ impl Interpreter {
                 Box::new(self.resolve_type(inner)),
                 qual.clone(),
             ),
+            // Qualifier arguments (`Board<elem'actor>`) only pick a specialisation in the
+            // transpiler; the interpreter ignores qualifiers, so they are erased.
+            Type::Generic(name, args) if args.iter().any(|a| matches!(a, Type::QualArg(_))) => {
+                let rest: Vec<Type> = args.iter().filter(|a| !matches!(a, Type::QualArg(_))).cloned().collect();
+                if rest.is_empty() {
+                    self.resolve_type(&Type::Named(name.clone()))
+                } else {
+                    self.resolve_type(&Type::Generic(name.clone(), rest))
+                }
+            }
             Type::Generic(name, args) => match name.as_str() {
                 // Built-in collection generics: fold back into primitive collection types
                 // so that type checking, qualifier checks, etc. all work uniformly.
@@ -1490,6 +1500,7 @@ impl Interpreter {
                     OwnerQual::GpuLocal     => "'local".to_string(),
                     OwnerQual::GpuConst     => "'kernel'const".to_string(),
                     OwnerQual::Observed     => "'observed".to_string(),
+                    OwnerQual::Param(p)     => format!("'{}", p),
                     // `'new` (candidate-set qualifier, replaces the old bare tick) is
                     // represented as this exact Union shape — display it as `'new`
                     // rather than spelling out its members, matching source syntax.
@@ -1510,6 +1521,7 @@ impl Interpreter {
                 format!("{}{}", Self::display_type(inner), qual_str)
             }
             Type::TypeParam(name) => name.clone(),
+            Type::QualArg(_) => "'?".into(),
             Type::Generic(name, args) => {
                 if args.is_empty() {
                     name.clone()
@@ -1579,7 +1591,7 @@ impl Interpreter {
             // `mut` has no Rust-level representation and runtime values carry no
             // permission tag — strip and delegate to the inner type.
             Type::Mut(inner) => self.value_matches_type(val, inner),
-            Type::TypeParam(_) => true,
+            Type::TypeParam(_) | Type::QualArg(_) => true,
             Type::Named(name) => match val {
                 Value::Channel { is_sender, .. } => match name.as_str() {
                     "Sender"   => *is_sender,

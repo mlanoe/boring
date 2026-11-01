@@ -174,6 +174,7 @@ impl KernelTranspiler {
             ),
 
             Type::TypeParam(n) => n.clone(),
+            Type::QualArg(_) => "()".into(),
 
             Type::Generic(name, args) => {
                 if name == "Box" {

@@ -945,7 +945,7 @@ struct FastBoard:
 - `'inline`: plain values, no lock, an element read is a copy.
 - `'owned`: plain values, each in a `Box`, same trade-off as `'inline`.
 
-A program that needs both behaviours for the same data declares two structs, one per choice. Two shapes of "decide at the use site" were considered:
+A program that needs both behaviours for the same data declares two structs, one per choice, or one struct with a *qualifier parameter* (`struct Board<'elem>`, `Board<elem'actor>`, see "Qualifier parameters"). Two shapes of "decide at the use site" were considered:
 
 - *A Rust generic over the element handle* (`struct Board<H> { cells: Vec<H> }`, `H = Point` or `Arc<Mutex<Point>>`, behind a trait). Not adopted: Rust cannot abstract over "plain or locked", so every field access, method call and literal would go through a `with(|p| ..)` closure, which makes the generated Rust unreadable and lets the copy/alias semantics diverge between the two instantiations.
 - *Monomorphization on the Boring side* (a specialised copy per choice, `Board<actor>` / `Board<plain>`, reusing the existing turbofish monomorphization). Feasible and keeps the generated Rust plain, but it needs the choice to be inferred at call sites (only explicit instantiation is handled today), the two copies are distinct types (a function taking a `Board` becomes generic or is duplicated, and a trait, a `[Board]` or a cross-file use becomes ambiguous). Not implemented; the natural next step if a real program needs two variants of one struct is explicit instantiation first, inference second.
@@ -4577,6 +4577,102 @@ In an `ext` header, labels name an instance: `ext Pair<K = int, V = string>:` is
 
 **Rust equivalent**: none of its own — `Pair::<isize, Arc<str>>`, as for the positional spelling.
 
+### Qualifier parameters
+
+A struct, enum or `ext` block can leave the qualifier of some of its members open and let each use choose it. The parameter is **declared** with a leading tick (`'elem`, like a lifetime parameter, so it is never mistaken for a type parameter), **passed** as `label'qualifier` (`elem'actor`, the qualifier flavour of a labelled argument) and **used** as `T'label`:
+
+```boring
+struct Board<'elem>:
+    var [mut Point'elem] cells = []
+
+    def add(Point'elem p):
+        cells.push(p)
+
+let Board<elem'actor> a = Board()       # shared handles: `let q = a.cells[0]` aliases
+mut b = Board<elem'inline>()            # plain values: no lock, an element read is a copy
+```
+
+This is the use-site answer to "One qualifier per declared type" (see *Element mutability*): `Board<elem'actor>` and `Board<elem'inline>` are two distinct, plain, non-generic types in the generated Rust (`Board_actor`, `Board_inline`, named like `Pair_int_string`), each with its methods and `ext` blocks, so the Rust stays readable and no "plain or locked" generic exists.
+
+**Declaration**
+
+| Form | `elem` ranges over |
+|---|---|
+| `struct Board<'elem>` | every qualifier a bare `T` may take: `'inline`, `'owned`, `'shared`, `'actor`, `'guard` |
+| `struct Board<'elem as 'new>` | the indirection set of `T'new`: `'owned`, `'shared`, `'actor`, `'guard` |
+| `struct Board<'elem as 'inline\|owned>` | the listed qualifiers (`'one` = `inline\|owned`, `'many` = `shared\|actor\|guard` work too) |
+| `struct Cache<T, 'q as 'new>` | mixes with type (`T`), const (`uint N`) and lifetime (`&a`) parameters |
+| `struct Board<'elem = 'inline>` | the full set, with a default (see "Default value") |
+| `struct Cache<'q as 'inline\|owned = 'inline>` | the listed qualifiers, with a default that belongs to them |
+| `struct Watched<'q as 'actor\|'actor'observed>` | members may be chains (see "Chained qualifiers") |
+
+A qualifier argument outside the bound is an error, and so is a default outside it, and so is a label that is a qualifier word (`'actor`) or that equals a type parameter's name. `mut` stays on the element (`[mut Point'elem]`), it is not part of the parameter. Inside the declaration `'elem` is accepted wherever a written qualifier is (`T'elem`, `[T'elem]`, `{K = mut V'elem}`, `T'elem?`); not as a chained qualifier (`T'elem'observed`), and not in a struct that does not declare it.
+
+**Use.** A use names its arguments with `<...>`, or leaves them to the construction when it determines them (see "Inference at construction"), or to the parameter's default (see "Default value"). The argument is one qualifier (`'inline`, `'owned`, `'shared`, `'actor` or `'guard`, optionally chained, see "Chained qualifiers"), written glued to the label, and a qualifier parameter has no positional form:
+
+```boring
+mut a = Board<elem'actor>()                     # constructor
+let Board<elem'actor> a = Board()               # binding: the constructor on the right takes the declared instance
+def int fill(var Board<elem'actor> b): ...      # parameter, return type, field, ...
+let c = Cache<T = int, q'shared>(1)             # next to a labelled type argument
+```
+
+- A bare construction (`Board()`, `Board(cells = [a, b])`, `Slot.Full(p)`) needs no `<...>` when the construction determines every parameter, see "Inference at construction" below. Otherwise, and when no default applies, it is an error: ``cannot infer qualifier parameter `elem` of `Board`, write `Board<elem'...>```. A bare *type* (`let Board b`) is that error too, unless every parameter of `Board` has a default.
+- `Board<elem'actor>` in a function signature just names a concrete type. It says how `Board` stores its elements *internally* and imposes nothing on the function, which stays an ordinary, non-generic function (and is unrelated to the qualifier of the parameter itself: `Board<elem'actor>'shared b`, `mut Board<elem'actor> b`, ... are inferred as for any struct). A function that wants to stay generic over the element qualifier is not part of this version.
+- `Container<T'actor>` keeps its ordinary meaning (type argument `T`, qualified `'actor`) unless `Container` declares a qualifier parameter named `T`, in which case it is that parameter's argument. A declaration cannot have a type parameter and a qualifier parameter of the same name, so the reading is never ambiguous.
+
+**Inference at construction.** Like the constructor of a generic type in other languages, `<...>` is only written when the construction does not determine the parameter. The evidence, in order (two pieces of evidence that disagree are an error, never a guess):
+
+1. explicit arguments, `Board<elem'actor>(...)`: used as written;
+2. the expected type: `let Board<elem'actor> b = Board()`, a field default, a function/constructor parameter, a return type or the tail expression of a function, or the left side of an assignment, whose type is written as a known `Board<...>`;
+3. the *written* qualifier of the arguments that feed a `T'elem` slot (`T'elem`, `[mut T'elem]`, `{K = mut V'elem}`, in a field, an `init` or an enum variant payload): a binding, parameter or field declared `Point'actor`, directly or as the elements of an array/dict/set literal;
+4. nothing determines it: the error above.
+
+```boring
+let Point'actor a = Point(1)
+let Point'actor b = Point(2)
+let board = Board(cells = [a, b])               # Board<elem'actor>
+mut Board<elem'inline> empty = Board()          # from the expected type
+let s = Slot.Full(q)                            # q declared Point'inline: Slot<elem'inline>
+```
+
+Only a qualifier that is *written* counts: `let p = Point(1)` (its qualifier is itself inferred) and a fresh literal (`Board(cells = [Point(1)])`) give no evidence, so those constructions still need `<...>` or an expected type. There is no inference from how the value is used afterwards (`let b = Board()` followed by `b.add(actorPoint)` stays an error). The result is exactly the explicit instance: `Board(cells = [a, b])` and `Board<elem'actor>(cells = [a, b])` are the same `Board_actor`. Evidence outside the declared bound is a bound error, and a conflict (`[a, b]` with `a'actor` and `b'inline`, or an expected `Board<elem'actor>` with an `'inline` argument) reports both sources: ``conflicting qualifiers for `elem` of `Board`: `'actor` (declared on `a`) and `'inline` (declared on `b`); write `Board<elem'...>` to choose``. A declaration that mixes type and qualifier parameters (`Cache<T, 'q>`) is only resolved through the expected type, since type arguments are not inferred by the specialiser; a function receiving `Board<elem'actor>` is not affected by how its argument was inferred.
+
+**Default value.** A qualifier parameter may declare a default after its optional bound, `= 'qualifier`:
+
+```boring
+struct Board<'elem = 'inline>:                       # no bound: the full set, default 'inline
+    var [mut Point'elem] cells = []
+
+struct Cache<'elem as 'inline|owned = 'inline>:      # bound, then default
+
+mut a = Board()                                      # Board<elem'inline>
+mut Board b = Board()                                # bare type: the same instance
+let Point'actor p = Point(1)
+mut c = Board(cells = [p])                           # evidence wins: Board<elem'actor>
+mut Board<elem'actor> d = Board()                    # so does an explicit argument or expected type
+```
+
+The default is a declared, explicit choice, so it is not a guess: it is the **last** step of the evidence order, after explicit arguments, the expected type and the written qualifier of the arguments, and before the "cannot infer" error. It never overrides evidence and never takes part in a conflict (`Board(cells = [actorPoint])` is `Board_actor` even though the default is `'inline`), and evidence outside the bound stays an error (the default does not rescue it). A default must belong to the bound. A parameter may be defaulted independently of the others, and a defaulted one may be followed by one without a default (all arguments are labelled). A bare `Board`, as a construction or in a type position (field, parameter, return type, `let`), is valid when **every** parameter has a default, and means the default instance: the same specialisation, with the same name (`Board_inline`), as the explicit `Board<elem'inline>`. Two caveats: a bare *type* annotation is the default instance, so `let Board b = Board(cells = [actorPoint])` is a type mismatch (write `Board<elem'actor>`, or drop the annotation), and a bare `Board` inside `Board`'s own declaration is the default instance too, not "myself". The default is not read by the inference of an unparameterised `[mut T]` field (`infer_actor_elems`).
+
+**Chained qualifiers.** An argument, a bound member and a default are *chains*: a base qualifier optionally followed by one composable suffix (`'observed`, `'weak`; `'actor'task` and `'guard'task` are bases), exactly the chains valid on a type:
+
+```boring
+mut a = Board<elem'actor'observed>()
+struct Watched<'q as 'actor|'actor'observed|'inline'observed = 'actor'observed>:
+    mut Point'q pt = Point()
+```
+
+The validity rules are those of the same chain written on a type: `'shared'observed` is an error (a bound or default that spells it is rejected at the declaration, an argument at the use), `'weak` needs `'shared`/`'actor`/`'guard`. **Membership in the bound is by whole chain**: `as 'actor` does not admit `'actor'observed`, write `as 'actor|'actor'observed` (there is no wildcard). A use site substitutes the whole chain, `Point'elem` becomes `Point'actor'observed`, and the instance name joins the chain with `_` so it cannot collide with a plain qualifier instance: `Board_actor_observed`. The written qualifier of an argument that is itself a chain (`Point'actor'observed p`) is evidence as a whole chain. A chain is not accepted for the parameter use (`T'elem'observed`). The interpreter has no `'observed`, so `boring run` erases the chain like any qualifier; the runtime support of `'observed` in the generated Rust is emitted when an instance with an `'observed` chain exists, even if only a `use`d file spells it. An `'observed` element inside an enum variant payload is not supported by `'observed` itself yet.
+
+**Enums and `ext` blocks.** `enum Slot<'elem as 'new>: Full(Point'elem)` is specialised the same way (`Slot_inline`). `ext Board<'elem>:` adds its methods to **every** instance; `ext Board<elem'actor>:` only to that instance (it is dropped if the program never uses it). Variant constructors name no argument: write `let Slot<elem'inline> s = Slot.Full(p)`, or let a written qualifier on `p` decide (`Slot.Full(p)`, above); match with the unqualified `Full(p):`. A qualified pattern `Slot.Full(p)` is not supported.
+
+**What is checked, and when.** Everything about the *arguments* (unknown label, argument given twice, outside the bound, positional use, bare use, name clashes) is reported while parsing, with a position, so `boring run` and `boring build` give the same diagnostic. The *body* of a qualifier-generic declaration is checked once, unspecialised, where `'elem` is unresolved: checks that depend on the element qualifier are left to rustc for the specialised copy. In particular the "cannot store the `mut` parameter" diagnostic (a lent `mut` parameter pushed into a member) is not raised inside such a declaration, and the `'actor` promotion of such a parameter is not applied to the copies (`infer_actor_params` and `infer_actor_elems` run before specialisation and skip a declaration with qualifier parameters). Declare the parameter `Point'elem p` instead of `mut Point p`, as above: it then follows the instance.
+
+**Targets.** (Defaults and chains change nothing here.) `boring run` ignores qualifiers, so it runs the unspecialised program; `boring build` (standard, single-threaded, managed) specialises, across files too (`[deps]` and `use`d files; one `Board_actor` is emitted by the file that declares `Board`, however many files ask for it). The GPU host emitters (`--target metal|cuda|rocm|wgpu`) reuse the general emission and get the same specialised copies. `--linux` (the `no_std` emitter, which has no lock-aware element access and no specialisation pass) rejects qualifier parameters: ``qualifier parameters ... are not supported on the Rust-for-Linux Linux target``; declare the qualifier in a plain struct there.
+
+**Rust equivalent**: two plain structs, `struct Board_actor { cells: Vec<Arc<Mutex<Point>>> }` and `struct Board_inline { cells: Vec<Point> }`, plus their `impl` blocks. A `boring run` of a program that relies on the copy semantics of `'inline` (`let q = b.cells[0]; q.x = 9`) sees an alias, as it does for every `'inline` today.
+
 ---
 
 ### Const generics — `<uint N>`
@@ -4642,6 +4738,28 @@ string describe<T, uint N>(Stack<T, uint N> s):
 | `<bool B>` | `const B: bool` | Feature flag at compile time |
 
 > `uint` maps to `usize` (not `u64`) for const generics — `usize` is the standard Rust type for sizes and indices.
+
+### Compile-time dispatch (`dispatch`)
+
+A const generic argument must be a literal (`Kernel<8>`), so building a const-generic kernel from a *runtime* value used to need a hand-written ladder, one copy of the body per value. `dispatch` writes that ladder for you:
+
+```boring
+req [float32]'kernel'unified warp_broadcast_gpu([float32]'kernel'global x, [uint8]'kernel'global w_packed,
+                       [float32]'kernel'global bv, int fmt, int seq, int d_in, int d_out) throws:
+    ...
+    dispatch fmt in [8, 6, 2, 20]:
+        mut k = WarpBroadcastKernel<fmt>(x, w_packed, bv, seq, d_in, d_out, warps_per_block)
+        kernel:
+            k(block = (32, warps_per_block), grid = (gx, gy))
+        return k.y
+```
+
+The body is parsed once, then expanded **in the parser** into `if fmt == 8: ... elif fmt == 6: ... elif ... else: throw`, with `fmt` replaced by the arm's integer literal in expressions and in generic-argument/type positions (`WarpBroadcastKernel<fmt>` becomes `WarpBroadcastKernel<8>`, and `fmt` in the body reads `8`). Each arm therefore instantiates its own specialised kernel — there is no runtime parameter — on every backend that supports const-generic kernels (Metal, CUDA, ROCm, wgpu) and in `req` functions; later stages only see an ordinary `if` ladder.
+
+- `NAME` is a plain variable; the values are integer literals (negative allowed), at least one, no duplicates. The substitution is purely textual over the arm's body: do not rebind `NAME` inside it.
+- A value matching no arm throws `dispatch: unsupported fmt = 5 (expected one of [8, 6, 2, 20])`, so the enclosing function must be `throws`. To handle it yourself (or to use `dispatch` in a function that cannot throw), add an `else:` block after the body.
+- Control flow is that of the ladder: an arm that does not `return` falls through to the code after the `dispatch`.
+- `dispatch` is a contextual keyword: it only starts a statement when followed by `IDENT in`, so existing variables and functions named `dispatch` are unaffected.
 
 ---
 

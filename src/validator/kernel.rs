@@ -57,6 +57,10 @@ pub struct KernelValidator {
 /// stack-budget rationale.
 const MAX_CHECK_DEPTH: usize = 200;
 
+/// Qualifier parameters need the std transpiler's specialisation pass (`monomorphize.rs`).
+const QUAL_PARAMS_UNSUPPORTED: &str = "qualifier parameters (`struct Board<'elem>`, `Board<elem'actor>`) are not supported on the Rust-for-Linux Linux target — \
+     they are specialised by the std transpiler; declare the element qualifier in a plain struct instead (`'inline` or `'owned`)";
+
 impl Default for KernelValidator {
     fn default() -> Self {
         Self::new()
@@ -122,6 +126,14 @@ impl KernelValidator {
             }
             Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "f64") => {
                 self.error(line, "float64 is not allowed in kernel context — FPU is disabled");
+            }
+            // Qualifier parameters (`Board<elem'actor>`) are specialised by the std transpiler;
+            // this target's emitter has no such pass.
+            Type::QualArg(_) | Type::Qualified(_, OwnerQual::Param(_)) => {
+                self.error(line, QUAL_PARAMS_UNSUPPORTED);
+            }
+            Type::Generic(_, args) if args.iter().any(|a| matches!(a, Type::QualArg(_))) => {
+                self.error(line, QUAL_PARAMS_UNSUPPORTED);
             }
             // Rule 6 — T'shared in kernel context always maps to Arc<T> (no Rc in kernel)
             Type::Qualified(inner, OwnerQual::Shared) => {
@@ -857,6 +869,7 @@ impl KernelValidator {
 
     fn check_struct(&mut self, s: &StructDecl) {
         let line = s.line;
+        if s.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
         for field in &s.fields {
             self.check_type(&field.ty, field.line);
             if let Some(def) = &field.default {
@@ -917,6 +930,7 @@ impl KernelValidator {
 
     fn check_enum(&mut self, e: &EnumDecl) {
         let line = e.line;
+        if e.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
         for variant in &e.variants {
             for field in &variant.fields {
                 self.check_type(&field.ty, line);
@@ -960,6 +974,7 @@ impl KernelValidator {
 
     fn check_ext(&mut self, ext: &ExtDecl) {
         let line = ext.line;
+        if ext.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
         for ty in &ext.type_args {
             self.check_type(ty, line);
         }

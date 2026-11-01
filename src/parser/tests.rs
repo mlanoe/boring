@@ -752,3 +752,51 @@ fn kernel_placement_hints_reject_unknown_classes_and_repeats() {
     let error = kernel_with_attrs("@prefer(.gpu)\n@prefer(.cpu)\n").unwrap_err();
     assert!(error.contains("`@prefer` is given twice"), "{error}");
 }
+
+// ─── `dispatch` statement ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod dispatch_tests {
+    use crate::ast::*;
+
+    fn main_body(src: &str) -> Vec<Stmt> {
+        let p = crate::parser::parse(crate::lexer::lex(src).expect("lex")).unwrap_or_else(|e| panic!("{}", e.msg()));
+        p.items.iter().find_map(|i| match i { Item::Fn(f) if f.name == "main" => Some(f.body.clone()), _ => None }).unwrap()
+    }
+
+    #[test]
+    fn expands_to_if_ladder_with_literal_generic_args() {
+        let body = main_body("def main(int fmt) throws:\n    dispatch fmt in [8, 6, -1]:\n        mut k = K<fmt>(fmt)\n        print k\n");
+        let Stmt::If(i) = &body[0] else { panic!("not an if") };
+        assert_eq!(i.branches.len(), 3);
+        for ((_, arm), want) in i.branches.iter().zip([8i64, 6, -1]) {
+            let Stmt::Let(l) = &arm[0] else { panic!() };
+            let ExprKind::GenericCall(_, targs, args) = &l.value.as_ref().unwrap().kind else { panic!() };
+            assert_eq!(targs, &[Type::ConstInt(want)]);
+            assert!(matches!(args[0].value.kind, ExprKind::Int(n) if n == want));
+        }
+        let Some(els) = &i.else_body else { panic!("no else") };
+        assert!(matches!(els[0], Stmt::Throw(_)));
+    }
+
+    #[test]
+    fn user_else_replaces_default_throw() {
+        let body = main_body("def main(int fmt):\n    dispatch fmt in [1]:\n        print fmt\n    else:\n        print 0\n");
+        let Stmt::If(i) = &body[0] else { panic!() };
+        assert!(!matches!(i.else_body.as_ref().unwrap()[0], Stmt::Throw(_)));
+    }
+
+    #[test]
+    fn rejects_non_literals_and_duplicates() {
+        let err = |s: &str| crate::parser::parse(crate::lexer::lex(s).expect("lex")).err().map(|e| e.msg()).unwrap_or_default();
+        assert!(err("def main(int f):\n    dispatch f in [x]:\n        print f\n").contains("integer literals"));
+        assert!(err("def main(int f):\n    dispatch f in [1, 1]:\n        print f\n").contains("duplicate"));
+        assert!(err("def main(int f):\n    dispatch f in []:\n        print f\n").contains("at least one"));
+    }
+
+    #[test]
+    fn dispatch_stays_an_ordinary_identifier_elsewhere() {
+        let body = main_body("def main():\n    let dispatch = 3\n    print dispatch\n");
+        assert!(matches!(body[0], Stmt::Let(_)));
+    }
+}

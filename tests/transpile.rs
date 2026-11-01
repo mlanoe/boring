@@ -1576,3 +1576,25 @@ transpile_test!(unresolved_receiver_user_method_name);
 // the `[deps]` + sibling-file project tests/cases/labelled_generics_xfile.
 transpile_test!(labelled_generics);
 transpile_project_test!(labelled_generics_xfile);
+
+// Qualifier parameters (`struct Board<'elem>`, `Board<elem'actor>`): one specialised copy per
+// argument, for structs, enums and `ext` blocks; see tests/cases/qualifier_params.br.
+transpile_test!(qualifier_params);
+
+// Qualifier-generic declarations in a `[deps]` project and a sibling file; the instances are
+// requested from two files. See tests/cases/qualifier_params_xfile.
+transpile_project_test!(qualifier_params_xfile);
+
+// Inference of the qualifier arguments at construction (`Board(cells = [a, b])`): the expected
+// type, then the written qualifier of the arguments; see tests/cases/qualifier_infer.br and, with
+// the declarations in a `[deps]` project, tests/cases/qualifier_infer_xfile.
+transpile_test!(qualifier_infer);
+transpile_project_test!(qualifier_infer_xfile);
+
+// Default values (`'elem = 'inline`) and chained qualifiers (`elem'actor'observed`) of qualifier
+// parameters; see tests/cases/qualifier_defaults_chains.br.
+transpile_test!(qualifier_defaults_chains);
+
+// The same declarations in a `[deps]` project and a sibling file: the default instance requested
+// from two files is emitted once. See tests/cases/qualifier_defaults_xfile.
+transpile_project_test!(qualifier_defaults_xfile);

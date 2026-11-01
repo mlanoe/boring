@@ -968,3 +968,75 @@ fn labelled_generics_xfile() {
     let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert_eq!(actual.trim_end(), "1\none\n7\n5");
 }
+
+// Qualifier parameters (`Board<elem'actor>`): the interpreter ignores qualifiers, so it runs the
+// same program `transpile_test!(qualifier_params)` builds.
+interp_test!(qualifier_params);
+
+// Qualifier arguments inferred at construction: the interpreter erases them, so it runs the
+// program `transpile_test!(qualifier_infer)` builds.
+interp_test!(qualifier_infer);
+
+// Defaults and chained qualifiers of qualifier parameters: erased by the interpreter, so it runs
+// the program `transpile_test!(qualifier_defaults_chains)` builds.
+interp_test!(qualifier_defaults_chains);
+
+// The project `transpile_project_test!(qualifier_defaults_xfile)` builds, run by the interpreter.
+#[test]
+fn qualifier_defaults_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/qualifier_defaults_xfile/src/main.br");
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+    assert!(
+        output.status.success(),
+        "qualifier_defaults_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "2 3\n41\n9\n2 1");
+}
+
+// The project `transpile_project_test!(qualifier_params_xfile)` builds, run by the interpreter.
+#[test]
+fn qualifier_params_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/qualifier_params_xfile/src/main.br");
+
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        output.status.success(),
+        "qualifier_params_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "2\n4\n40\n5\nfull 9");
+}
+
+// The project `transpile_project_test!(qualifier_infer_xfile)` builds, run by the interpreter.
+#[test]
+fn qualifier_infer_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/qualifier_infer_xfile/src/main.br");
+
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+
+    assert!(
+        output.status.success(),
+        "qualifier_infer_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "3\n40\n5\nfull 9");
+}

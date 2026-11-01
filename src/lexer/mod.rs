@@ -144,7 +144,7 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
         // escapes, ends at the next `'` on the same line. Re-encoded as a regular
         // `"..."` token, like the triple form. (The triple form was handled above,
         // so `''` here is the empty string.)
-        if ch == '\'' && !tick_is_qualifier(&chars, i) {
+        if ch == '\'' && !tick_is_qualifier(&chars, i) && !tick_in_decl_header(&chars, i) {
             let start_line = line;
             let mut j = i + 1;
             while j < n && chars[j] != '\'' && chars[j] != '\n' {
@@ -385,6 +385,31 @@ fn tick_is_qualifier(chars: &[char], i: usize) -> bool {
         '&' => before != Some('&'),
         _ => false,
     }
+}
+
+/// Is the `'` at `chars[i]` inside the `<...>` list of a `struct`/`enum`/`trait`/`ext` header
+/// line (`struct Board<'elem as 'new>:`)? A raw string cannot occur there, so every tick in the
+/// list is a qualifier-parameter tick (docs/design-notes/qualifier-generic-params.md). Only
+/// the text of the current line before the tick is looked at.
+fn tick_in_decl_header(chars: &[char], i: usize) -> bool {
+    let start = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    let line: String = chars[start..i].iter().collect();
+    let mut rest = line.trim_start();
+    if let Some(r) = rest.strip_prefix("pub ") { rest = r.trim_start(); }
+    let Some(kw_end) = rest.find(|c: char| !c.is_alphanumeric() && c != '_') else { return false };
+    if !matches!(&rest[..kw_end], "struct" | "enum" | "trait" | "ext") { return false; }
+    rest = rest[kw_end..].trim_start();
+    let Some(name_end) = rest.find(|c: char| !c.is_alphanumeric() && c != '_') else { return false };
+    if name_end == 0 || !rest[name_end..].starts_with('<') { return false; }
+    let mut depth = 0i32;
+    for c in rest[name_end..].chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth >= 1
 }
 
 /// Strip common leading indentation from a triple-quoted string's raw content.
@@ -1904,6 +1929,39 @@ mod raw_apostrophe_strings {
     fn unterminated_single_line_raw_string_is_an_error() {
         assert!(matches!(lex("let x = 'abc\nlet y = 1"), Err(LexError::UnterminatedString { .. })));
         assert!(matches!(lex("let x = 'abc"), Err(LexError::UnterminatedString { .. })));
+    }
+
+    // Qualifier parameter declarations (`struct Board<'elem>`): inside the `<...>` of a
+    // struct/enum/trait/ext header every tick is a qualifier tick, never a raw string.
+    #[test]
+    fn ticks_in_a_declaration_header_are_qualifier_ticks() {
+        for src in [
+            "struct Board<'elem>:",
+            "pub struct Board<'elem as 'new>:",
+            "struct Board<'elem as 'inline|owned>:",
+            "struct Pair<'a as 'actor|guard, 'b>:",
+            "struct Cache<T, 'q as 'new>:",
+            "struct Cache<T, 'q> as Show:",
+            "enum Slot<'elem as 'new>:",
+            "ext Board<'elem>:",
+            "trait Draw<'q>:",
+            "struct Board<'elem",
+        ] {
+            let ks = kinds(src);
+            assert!(ks.iter().any(|k| matches!(k, TokenKind::Tick)), "{src}");
+            assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+    }
+
+    #[test]
+    fn raw_strings_next_to_angle_brackets_are_unchanged() {
+        for src in ["x < 'a'", "f(a < 'b', 'c')", "let x = a < 'b' and c > 'd'"] {
+            assert!(kinds(src).iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+        // Only a header line counts: the same text in an expression is a string.
+        assert!(kinds("let s = foo<'a'").iter().any(|k| matches!(k, TokenKind::Str(_))));
+        // After the header's list is closed a raw string is a string again.
+        assert!(kinds("struct S<T>: 'x'").iter().any(|k| matches!(k, TokenKind::Str(_))));
     }
 }
 

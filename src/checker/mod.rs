@@ -269,6 +269,9 @@ struct Checker {
     /// A bare name that resolves only to a *global* binding but is also a field of the
     /// enclosing struct is the field (implicit `self`), not that global.
     current_struct_fields: std::collections::HashSet<String>,
+    /// Inside a declaration with qualifier parameters (`struct Board<'elem>`): checks that depend
+    /// on the still-unresolved qualifier are deferred to the specialised copies.
+    in_qual_generic_decl: bool,
     /// Name of the struct whose inits/methods are being checked (`None` outside one).
     current_struct: Option<String>,
     /// Names of every user struct and enum — what makes a `mut T` parameter a lent `&mut T`
@@ -379,6 +382,7 @@ impl Checker {
             fn_returns_collection: std::collections::HashSet::new(),
             task_handle_vars: std::collections::HashSet::new(),
             current_struct_fields: std::collections::HashSet::new(),
+            in_qual_generic_decl: false,
             current_struct: None,
             user_types: std::collections::HashSet::new(),
             type_traits: crate::downcast::TypeTraits::default(),
@@ -1403,8 +1407,10 @@ impl Checker {
             s.fields.iter().map(|f| f.name.clone()).collect(),
         );
         let prev_struct = self.current_struct.replace(s.name.clone());
+        let prev_qual = std::mem::replace(&mut self.in_qual_generic_decl, s.type_params.iter().any(|p| qual_param_name(p).is_some()));
         for init in &s.inits { self.check_init(init); }
         for m in &s.methods { self.check_fn(m); }
+        self.in_qual_generic_decl = prev_qual;
         self.current_struct = prev_struct;
         self.current_struct_fields = prev_fields;
         for m in &s.type_methods {

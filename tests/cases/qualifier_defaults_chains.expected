@@ -1,0 +1,14 @@
+default 3 3 doubled 6 size 2
+explicit 1 5
+actor 6
+evidence 7
+slotted 0
+slotted actor 0
+watched 1
+watched inline 1
+plain ok
+game 4 1
+returned 8
+full 9
+observed watcher 1
+cargo 11

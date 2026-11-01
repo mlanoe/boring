@@ -1726,6 +1726,9 @@ impl Transpiler {
         if self.try_emit_gpu_resident_alias_let(s) {
             return;
         }
+        if self.try_emit_gpu_resident_if_let(s) {
+            return;
+        }
         // A GPU-qualified local inside a resident-returning GPU function is a
         // loop-carried residency slot even when its initial value is ordinary
         // host data. Start it in the Host variant so a later synthesized tensor
@@ -1733,20 +1736,27 @@ impl Transpiler {
         // Not limited to resident-returning functions: an empty placeholder `mut
         // [T]'kernel'unified v = []` in an ordinary function is the same slot, and typing it
         // `Vec<T>` made every later `v = <resident call>` a blocking device-to-host readback
-        // (a Metal batch flush). A non-empty literal stays a plain host array.
+        // (a Metal batch flush). A host-typed non-literal initialiser (`mut [T]'kernel'unified v = cache.hk`) starts the slot in
+        // the Host variant too. A non-empty literal stays a plain host array.
         let resident_init = s.value.as_ref().filter(|_| {
             self.is_gpu_target
                 && !self.config.is_simd_target
                 && (self.current_fn_returns_resident.is_some()
                     || (s.binding.is_mutable()
                         && !self.fn_returns_resident.is_empty()
-                        && s.value.as_ref().is_some_and(|v| matches!(&v.kind, ExprKind::Array(e) if e.is_empty()))))
+                        && s.value.as_ref().is_some_and(|v| !matches!(&v.kind, ExprKind::Array(e) if !e.is_empty()))))
                 && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
         });
         if let Some(value_expr) = resident_init {
-            let value = self.emit_expr_owned(value_expr);
             let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
-            self.line(&format!("{kw} {} = BoringKernelArg::Host({value});", escape_rust_keyword(&s.name)));
+            if self.expr_is_gpu_resident_field(value_expr) {
+                // The field already is a `BoringKernelArg<T>`: share it (an `Arc` clone), don't re-wrap.
+                let value = self.emit_expr(value_expr);
+                self.line(&format!("{kw} {} = {value}.clone();", escape_rust_keyword(&s.name)));
+            } else {
+                let value = self.emit_expr_owned(value_expr);
+                self.line(&format!("{kw} {} = BoringKernelArg::Host({value});", escape_rust_keyword(&s.name)));
+            }
             self.resident_call_vars.insert(s.name.clone(), s.ty.as_ref().unwrap().without_mut().clone());
             self.known_local_vars.insert(s.name.clone());
             return;

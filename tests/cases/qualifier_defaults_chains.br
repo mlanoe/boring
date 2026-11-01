@@ -1,0 +1,143 @@
+# Qualifier parameters, phase 3 (docs/design-notes/qualifier-generic-params.md, section 10):
+# default values (`'elem = 'inline`) and chained qualifiers (`elem'actor'observed`).
+struct Point:
+    var int x = 0
+
+    def bump():
+        x += 1
+
+    req int get():
+        x
+
+# A defaulted parameter: a bare `Board` is `Board<elem'inline>`, the same specialisation.
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+    def add(Point'elem p):
+        cells.push(p)
+
+    req int size():
+        cells.len()
+
+    req int total():
+        var int sum = 0
+        for i in 0..<cells.len():
+            sum += cells[i].x
+        sum
+
+ext Board<'elem>:
+    req int doubled():
+        self.total() * 2
+
+# Bound, then default; the default is a member of the bound.
+struct Slotted<'q as 'actor|inline = 'inline>:
+    var Point'q pt = Point()
+
+    req int get():
+        pt.x
+
+# A chain in the bound (whole-chain membership) and as the default.
+struct Watched<'q as 'actor|'actor'observed|'inline'observed = 'actor'observed>:
+    mut Point'q pt = Point()
+
+    def bump():
+        pt.bump()
+
+    req int get():
+        pt.get()
+
+struct Plain<'q as 'actor|'actor'observed = 'actor>:
+    mut Point'q pt = Point()
+
+    def bump():
+        pt.bump()
+
+# `ext` on the chained instance only; the enum has a chain in its bound (a payload cannot be
+# `'observed` yet, so it is given the plain member).
+ext Watched<q'actor'observed>:
+    req string kind():
+        "observed watcher"
+
+enum Cargo<'q as 'actor|'actor'observed = 'actor'observed>:
+    Empty
+    Full(Point'q)
+
+# Bare uses in field, return and parameter position are the default instance.
+struct Game:
+    var mut Board board = Board()
+    var int score = 0
+
+    def play():
+        board.add(Point(4))
+        score += 1
+
+Board makeDefault():
+    mut b = Board()
+    b.add(Point(8))
+    b
+
+int sizeOf(Board b):
+    b.size()
+
+enum Slot<'elem = 'inline>:
+    Empty
+    Full(Point'elem)
+
+def main():
+    # Default, in construction and type position.
+    mut a = Board()
+    a.add(Point(1))
+    a.add(Point(2))
+    mut Board b = Board()
+    b.add(Point(3))
+    print "default {a.total()} {b.total()} doubled {a.doubled()} size {sizeOf(a)}"
+
+    # The explicit instance is the very same specialisation.
+    mut c = Board<elem'inline>()
+    c.add(Point(5))
+    print "explicit {sizeOf(c)} {c.total()}"
+
+    # An explicit argument and an expected type override the default.
+    mut Board<elem'actor> d = Board()
+    let Point'actor p = Point(6)
+    d.add(p)
+    print "actor {d.total()}"
+
+    # A written qualifier on the arguments overrides the default.
+    let Point'actor q = Point(7)
+    mut e = Board(cells = [q])
+    print "evidence {e.total()}"
+
+    let s = Slotted()
+    print "slotted {s.get()}"
+    let Slotted<q'actor> s2 = Slotted()
+    print "slotted actor {s2.get()}"
+
+    mut w = Watched()
+    w.bump()
+    print "watched {w.get()}"
+    mut w2 = Watched<q'inline'observed>()
+    w2.bump()
+    print "watched inline {w2.get()}"
+    mut pl = Plain()
+    pl.bump()
+    mut Plain<q'actor'observed> pl2 = Plain()
+    pl2.bump()
+    print "plain ok"
+
+    mut g = Game()
+    g.play()
+    print "game {g.board.total()} {g.score}"
+    let m = makeDefault()
+    print "returned {m.total()}"
+
+    let Slot sl = Slot.Full(Point(9))
+    match sl:
+        Empty: print "empty"
+        Full(pt): print "full {pt.x}"
+
+    print "{w.kind()} {w2.get()}"
+    let Cargo<q'actor> cg = Cargo.Full(Point(11))
+    match cg:
+        Empty: print "empty"
+        Full(pt): print "cargo {pt.x}"

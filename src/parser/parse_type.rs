@@ -530,6 +530,12 @@ impl Parser {
                 }
             }
             TokenKind::Ident(ref s) => match s.as_str() {
+                // `T'elem` — a qualifier parameter of the enclosing declaration.
+                p if self.qual_scope.iter().any(|q| q == p) => {
+                    let name = p.to_string();
+                    self.advance();
+                    OwnerQual::Param(name)
+                }
                 "shared" => { self.advance(); OwnerQual::Shared }
                 "weak"   => { self.advance(); OwnerQual::Weak }
                 "inline" => { self.advance(); OwnerQual::Inline }

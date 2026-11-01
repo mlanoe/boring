@@ -73,7 +73,7 @@ impl Decls {
             Type::Int | Type::Uint | Type::Uint8 | Type::Int8 | Type::Int16 | Type::Int32
             | Type::Int64 | Type::Int128 | Type::Uint16 | Type::Uint32 | Type::Uint64
             | Type::Uint128 | Type::Float16 | Type::Fixed(_) | Type::Float32 | Type::Float64 | Type::Str | Type::Bool
-            | Type::Nil | Type::Void | Type::Never | Type::ConstInt(_)
+            | Type::Nil | Type::Void | Type::Never | Type::ConstInt(_) | Type::QualArg(_)
             | Type::Tuple(_) | Type::Optional(_) | Type::Fn(..) => Value,
             Type::Array(_) | Type::ArrayN(..) | Type::ArrayNExpr(..) | Type::LabeledArray(..)
             | Type::Dict(..) | Type::Set(_) => Mutable,

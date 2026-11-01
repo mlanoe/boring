@@ -545,6 +545,11 @@ struct Transpiler {
     pub(crate) global_generic_structs: std::collections::HashMap<String, StructDecl>,
     /// Same as `global_generic_structs`, for free generic functions.
     pub(crate) global_generic_fns: std::collections::HashMap<String, FnDecl>,
+    /// Qualifier-generic enums (`enum Slot<'elem>`) of the reachable graph, for `build_instantiation_map`.
+    pub(crate) global_qual_enums: std::collections::HashMap<String, EnumDecl>,
+    /// Some declaration or use of a qualifier parameter exists in the reachable graph: every file
+    /// goes through `monomorphize_program` (type-position uses must be rewritten everywhere).
+    pub(crate) has_qual_generics: bool,
     /// Every turbofish (`ExprKind::GenericCall`) call site found anywhere in the
     /// reachable file graph during `deep_pre_scan`, recorded unconditionally (before
     /// it's known whether the callee resolves to a known generic decl at all) —
@@ -1573,6 +1578,8 @@ impl Transpiler {
             global_generic_fns: std::collections::HashMap::new(),
             pending_generic_call_candidates: Vec::new(),
             global_instantiations: monomorphize::InstantiationMap::new(),
+            global_qual_enums: std::collections::HashMap::new(),
+            has_qual_generics: false,
             global_generic_methods: std::collections::HashMap::new(),
             pending_method_call_candidates: Vec::new(),
             global_method_instantiations: monomorphize::MethodInstantiationMap::new(),
@@ -2326,6 +2333,7 @@ impl Transpiler {
                 &self.pending_generic_call_candidates,
                 &self.global_generic_structs,
                 &self.global_generic_fns,
+                &self.global_qual_enums,
             );
             // `rewrite_call_sites` turns a cross-file `f<T>(...)` into a call to the
             // specialized name before the file declaring `f` is emitted. Register
@@ -2360,6 +2368,7 @@ impl Transpiler {
         let owned_program;
         let program: &Program = if monomorphize::program_declares_generics(program)
             || monomorphize::program_contains_generic_call(program)
+            || self.has_qual_generics
         {
             let mut cloned = program.clone();
             self.monomorphize_program(&mut cloned);

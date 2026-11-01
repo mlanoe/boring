@@ -1,0 +1,8 @@
+# Same-project sibling of main.br: infers the dependency's `Board<elem'actor>` from the written
+# qualifier of its argument, so the instance requested from two files is still emitted once.
+use boardlib.board.*
+
+pub def int sibling_total():
+    let Point'actor p = Point(40)
+    let b = Board(cells = [p])
+    b.total()

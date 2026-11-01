@@ -779,7 +779,7 @@ impl Checker {
     /// `h.field = p`, or `p` as an argument of a mutating call on a field (`items.push(p)`) -- is
     /// rejected; the diagnostic asks for an explicit `.clone()` (or a `'shared`/`'actor` type).
     pub(super) fn check_lent_param_stored(&mut self, f: &FnDecl) {
-        if self.kernel_dispatch_only { return; }
+        if self.kernel_dispatch_only || self.in_qual_generic_decl { return; }
         let lent: std::collections::HashSet<&str> = f.params.iter()
             .filter(|p| self.is_lent_method_param(p))
             .map(|p| p.name.as_str()).collect();

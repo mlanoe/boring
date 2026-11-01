@@ -1,0 +1,7 @@
+[project]
+name = "qualifier_defaults_xfile"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+boardlib = "../fixtures/qualifier_defaults_lib"

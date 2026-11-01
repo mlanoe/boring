@@ -2189,3 +2189,50 @@ kernel:
         other => panic!("expected output to be an Array, got {:?}", other),
     }
 }
+
+// ─── `dispatch` — compile-time specialisation ladder ────────────────────────
+
+const DISPATCH_PRELUDE: &str = r#"
+kernel Scale<int N>:
+    let [float]'global input
+    mut [float]'global output
+
+    init([float] inp, [float] out):
+        input  = inp
+        output = out
+
+    def ():
+        let i = .thread.x
+        output[i] = input[i] * N
+
+def [float] scaled(int n, [float] inp, [float] out) throws:
+    dispatch n in [2, 3]:
+        mut k = Scale<n>(inp, out)
+        kernel:
+            k(block = 2)
+        return k.output
+    return out
+
+"#;
+
+fn floats(interp: &Interpreter, name: &str) -> Vec<f64> {
+    let Value::Array(arr) = get_var(interp, name) else { panic!("{name}: expected array") };
+    arr.iter().map(|v| if let Value::Float64(f) = v { *f } else { panic!("{v:?}") }).collect()
+}
+
+#[test]
+fn test_dispatch_selects_specialised_kernel_per_value() {
+    let src = format!("{DISPATCH_PRELUDE}let a = scaled(2, [1.0, 2.0], [0.0, 0.0])\nlet b = scaled(3, [1.0, 2.0], [0.0, 0.0])\n");
+    let (interp, result) = run(&src);
+    result.expect("runtime error");
+    assert_eq!(floats(&interp, "a"), [2.0, 4.0]);
+    assert_eq!(floats(&interp, "b"), [3.0, 6.0]);
+}
+
+#[test]
+fn test_dispatch_unlisted_value_throws() {
+    let src = format!("{DISPATCH_PRELUDE}let a = scaled(5, [1.0, 2.0], [0.0, 0.0])\n");
+    let (_interp, result) = run(&src);
+    let err = format!("{:?}", result.expect_err("5 is not a listed value"));
+    assert!(err.contains("dispatch: unsupported n = 5"), "{err}");
+}

@@ -47,7 +47,181 @@
 //! const-generic-only specialization mechanism untouched.
 
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+
+// ─── Qualifier parameters (docs/design-notes/qualifier-generic-params.md) ───────
+//
+// A declaration with a qualifier parameter (`struct Board<'elem>`; encoded `^elem` in
+// `type_params`) has no generic-Rust form: every use names its qualifier argument
+// (`Board<elem'actor>`, parsed to `Type::Generic("Board", [QualArg(Actor)])` /
+// `GenericCall(Var("Board"), [QualArg(Actor)], ..)`) and is specialised like a type
+// argument: `QualArg` mangles to its name (`Board_actor`), and `substitute_type` replaces
+// `T'elem` (`OwnerQual::Param`) by the argument. What generic type arguments never needed:
+// *type-position* uses (`let Board<elem'actor> a`, fields, params) must be rewritten to the
+// specialised name too, since there is no generic declaration left to fall back on. That is
+// done by the same type walker (`substitute_type`) in a mode switched on thread-locally, rather
+// than by a second full AST walker: `QUAL_COLLECT` records the uses (for the instantiation
+// map), `QUAL_REWRITE` replaces them, `QUAL_CHECK` finds bare uses (`Board` with no argument).
+
+thread_local! {
+    static QUAL_REWRITE: Cell<bool> = const { Cell::new(false) };
+    static QUAL_COLLECT: RefCell<Option<Vec<CandidateCall>>> = const { RefCell::new(None) };
+    static QUAL_CHECK: RefCell<Option<QualCheck>> = const { RefCell::new(None) };
+    /// Declarations whose qualifier parameters all have a default: a bare use in type position
+    /// is that instance (`Board` → `Board<elem'inline>`).
+    static QUAL_DEFAULTS: RefCell<HashMap<String, Vec<Type>>> = RefCell::new(HashMap::new());
+}
+
+fn set_qual_defaults(program: &Program) {
+    let d = if crate::qual_infer::qual_decls_seen() { crate::qual_infer::default_instances(program) } else { HashMap::new() };
+    QUAL_DEFAULTS.with(|c| *c.borrow_mut() = d);
+}
+
+fn qual_default_args(name: &str) -> Option<Vec<Type>> {
+    QUAL_DEFAULTS.with(|c| c.borrow().get(name).cloned())
+}
+
+struct QualCheck {
+    names: HashSet<String>,
+    hits: Vec<(String, usize, usize)>,
+    /// Position of the nearest enclosing declaration the walker has passed (types carry none).
+    pos: (usize, usize),
+}
+
+fn qual_check_set_pos(line: usize, col: usize) {
+    QUAL_CHECK.with(|c| { if let Some(q) = c.borrow_mut().as_mut() { q.pos = (line, col); } });
+}
+
+fn qual_check_hit(name: &str, pos: Option<(usize, usize)>) {
+    QUAL_CHECK.with(|c| {
+        if let Some(q) = c.borrow_mut().as_mut() {
+            if q.names.contains(name) {
+                let at = pos.unwrap_or(q.pos);
+                q.hits.push((name.to_string(), at.0, at.1));
+            }
+        }
+    });
+}
+
+/// True when a declaration's `type_params` contains a qualifier parameter.
+pub(crate) fn has_qual_params(type_params: &[String]) -> bool {
+    type_params.iter().any(|p| qual_param_name(p).is_some())
+}
+
+fn has_qual_arg(args: &[Type]) -> bool { args.iter().any(|a| matches!(a, Type::QualArg(_))) }
+
+/// A struct/enum/ext header of `item` names a qualifier parameter or a qualifier argument.
+pub(crate) fn is_qual_generic_item(item: &Item) -> bool {
+    match item {
+        Item::Struct(s) => has_qual_params(&s.type_params),
+        Item::Enum(e) => has_qual_params(&e.type_params),
+        Item::Ext(e) => has_qual_params(&e.type_params) || has_qual_arg(&e.type_args),
+        _ => false,
+    }
+}
+
+/// `program` with every qualifier-argument use rewritten to its specialised name
+/// (`Board<elem'actor>` → `Board_actor`, a pure function of the arguments), and the uses it
+/// found (as candidate calls). `None` when the program mentions no qualifier parameter at all.
+/// Works on a clone: the walker is the mutating substitution one. Run on every reachable file
+/// before the pre-scan, so signatures are registered under the names the emitted code uses.
+pub(crate) fn rewrite_qual_program(program: &Program) -> Option<(Program, Vec<CandidateCall>)> {
+    QUAL_COLLECT.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    set_qual_defaults(program);
+    let mut clone = program.clone();
+    // Constructions the context determines (`Board(cells = [a, b])`) become their instance first.
+    if crate::qual_infer::qual_decls_seen() {
+        let (resolved, _) = crate::qual_infer::infer_qual_ctors(&mut clone);
+        QUAL_COLLECT.with(|c| {
+            if let Some(v) = c.borrow_mut().as_mut() {
+                for (name, type_args) in resolved {
+                    v.push(CandidateCall { name, type_args, enclosing_type_params: Vec::new() });
+                }
+            }
+        });
+    }
+    rewrite_qual_lets(&mut clone.items);
+    QUAL_REWRITE.with(|c| c.set(true));
+    let empty = HashMap::new();
+    for item in clone.items.iter_mut() { substitute_types_in_item(item, &empty); }
+    QUAL_REWRITE.with(|c| c.set(false));
+    let uses = QUAL_COLLECT.with(|c| c.borrow_mut().take()).unwrap_or_default();
+    if uses.is_empty() && !program.items.iter().any(is_qual_generic_item) { return None; }
+    Some((clone, uses))
+}
+
+/// Bare uses of the qualifier-generic declarations `names` in `program` (`Board`, `Board()`,
+/// `Slot.Full(x)` with no qualifier argument): `(name, line, col)`. A `let Board<elem'actor> a =
+/// Board()` binding names its argument on the type, so its constructor is not a bare use.
+pub(crate) fn find_bare_qual_uses(program: &Program, names: HashSet<String>) -> (Vec<(String, usize, usize)>, crate::qual_infer::Diags) {
+    QUAL_CHECK.with(|c| *c.borrow_mut() = Some(QualCheck { names, hits: Vec::new(), pos: (0, 0) }));
+    let mut clone = program.clone();
+    let (_, diags) = crate::qual_infer::infer_qual_ctors(&mut clone);
+    // After the pass above: reading the declarations is what marks that any exist.
+    set_qual_defaults(program);
+    rewrite_qual_lets(&mut clone.items);
+    let empty = HashMap::new();
+    for item in clone.items.iter_mut() { substitute_types_in_item(item, &empty); }
+    (QUAL_CHECK.with(|c| c.borrow_mut().take()).map(|q| q.hits).unwrap_or_default(), diags)
+}
+
+/// `let Board<elem'actor> a = Board()` (also `var`/`mut`, and an enum's `Slot.Full(x)`): the
+/// bare constructor on the right takes the instance named by the declared type.
+pub(crate) fn rename_ctor(value: &mut Expr, base: &str, mangled: &str) {
+    match &mut value.kind {
+        ExprKind::Call(callee, _) => match &mut callee.kind {
+            ExprKind::Var(n) if n == base => *n = mangled.to_string(),
+            ExprKind::Field(recv, _) => {
+                if let ExprKind::Var(n) = &mut recv.kind { if n == base { *n = mangled.to_string(); } }
+            }
+            _ => {}
+        },
+        ExprKind::MethodCall(recv, _, _) | ExprKind::Field(recv, _) => {
+            if let ExprKind::Var(n) = &mut recv.kind { if n == base { *n = mangled.to_string(); } }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_qual_let(ty: &Option<Type>, value: &mut Option<Expr>) {
+    // `mut Board<..> a`, `Board<..>'shared a`: look through the permission and the qualifier.
+    let mut t = ty.as_ref();
+    while let Some(Type::Mut(i) | Type::Qualified(i, _)) = t { t = Some(i.as_ref()); }
+    if let (Some(Type::Generic(base, args)), Some(v)) = (t, value) {
+        if has_qual_arg(args) {
+            if let Some(m) = mangled_name(base, args) { rename_ctor(v, base, &m); }
+        }
+    }
+}
+
+fn rewrite_qual_lets_in_stmts(stmts: &mut [Stmt]) {
+    let mut on_expr = |_: &mut Expr| {};
+    let mut on_stmt = |s: &mut Stmt| {
+        if let Stmt::Let(l) = s { rewrite_qual_let(&l.ty, &mut l.value); }
+    };
+    let mut w = crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+    w.stmts(stmts);
+}
+
+fn rewrite_qual_lets(items: &mut [Item]) {
+    for item in items {
+        match item {
+            Item::Fn(f) => rewrite_qual_lets_in_stmts(&mut f.body),
+            Item::Struct(s) => {
+                for m in &mut s.methods { rewrite_qual_lets_in_stmts(&mut m.body); }
+                for i in &mut s.inits { rewrite_qual_lets_in_stmts(&mut i.body); }
+                for f in &mut s.fields { rewrite_qual_let(&Some(f.ty.clone()), &mut f.default); }
+            }
+            Item::Enum(e) => { for m in &mut e.methods { rewrite_qual_lets_in_stmts(&mut m.body); } }
+            Item::Ext(e) => { for m in &mut e.methods { rewrite_qual_lets_in_stmts(&mut m.body); } }
+            Item::Mod(m) => rewrite_qual_lets(&mut m.items),
+            Item::Let(l) => rewrite_qual_let(&l.ty, &mut l.value),
+            Item::Stmt(s) => rewrite_qual_lets_in_stmts(std::slice::from_mut(s)),
+            _ => {}
+        }
+    }
+}
 
 // ─── Type substitution ─────────────────────────────────────────────────────────
 
@@ -60,7 +234,23 @@ use std::collections::HashMap;
 /// parameter.
 pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     match ty {
-        Type::Named(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Named(n) => {
+            if !subst.contains_key(n) {
+                if let Some(args) = qual_default_args(n) {
+                    QUAL_COLLECT.with(|c| {
+                        if let Some(v) = c.borrow_mut().as_mut() {
+                            v.push(CandidateCall { name: n.clone(), type_args: args.clone(), enclosing_type_params: Vec::new() });
+                        }
+                    });
+                    if QUAL_REWRITE.with(Cell::get) {
+                        if let Some(m) = mangled_name(n, &args) { return Type::Named(m); }
+                    }
+                    return ty.clone();
+                }
+            }
+            qual_check_hit(n, None);
+            subst.get(n).cloned().unwrap_or_else(|| ty.clone())
+        }
         Type::TypeParam(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
         Type::Optional(inner) => Type::Optional(Box::new(substitute_type(inner, subst))),
         Type::Array(inner) => Type::Array(Box::new(substitute_type(inner, subst))),
@@ -75,10 +265,28 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
             params.iter().map(|t| substitute_type(t, subst)).collect(),
             *throws, *task, *req,
         ),
+        // `T'elem`: the qualifier parameter is replaced by its argument.
+        Type::Qualified(inner, OwnerQual::Param(p)) => match subst.get(&format!("^{p}")) {
+            Some(Type::QualArg(q)) => OwnerQual::apply_chain(substitute_type(inner, subst), q),
+            _ => Type::Qualified(Box::new(substitute_type(inner, subst)), OwnerQual::Param(p.clone())),
+        },
         Type::Qualified(inner, q) => Type::Qualified(Box::new(substitute_type(inner, subst)), q.clone()),
         Type::Dyn(inner) => Type::Dyn(Box::new(substitute_type(inner, subst))),
         Type::Impl(inner) => Type::Impl(Box::new(substitute_type(inner, subst))),
-        Type::Generic(name, args) => Type::Generic(name.clone(), args.iter().map(|t| substitute_type(t, subst)).collect()),
+        Type::Generic(name, args) => {
+            let args: Vec<Type> = args.iter().map(|t| substitute_type(t, subst)).collect();
+            if has_qual_arg(&args) {
+                QUAL_COLLECT.with(|c| {
+                    if let Some(v) = c.borrow_mut().as_mut() {
+                        v.push(CandidateCall { name: name.clone(), type_args: args.clone(), enclosing_type_params: Vec::new() });
+                    }
+                });
+                if QUAL_REWRITE.with(Cell::get) {
+                    if let Some(m) = mangled_name(name, &args) { return Type::Named(m); }
+                }
+            }
+            Type::Generic(name.clone(), args)
+        }
         Type::AssocOf(base, name) => Type::AssocOf(Box::new(substitute_type(base, subst)), name.clone()),
         Type::Mut(inner) => Type::Mut(Box::new(substitute_type(inner, subst))),
         // Int/Uint/.../Str/Bool/Nil/Void/Never/ConstInt/SelfAssoc — no nested Type, no
@@ -94,6 +302,7 @@ fn substitute_type_opt(ty: &Option<Type>, subst: &HashMap<String, Type>) -> Opti
 // ─── AST body walker: substitute every `Type` annotation nested in a body ──────
 
 fn substitute_types_in_param(p: &mut Param, subst: &HashMap<String, Type>) {
+    qual_check_set_pos(p.line, p.col);
     p.ty = substitute_type_opt(&p.ty, subst);
     if let Some(d) = &mut p.default { substitute_types_in_expr(d, subst); }
 }
@@ -127,6 +336,7 @@ pub(crate) fn substitute_types_in_stmts(stmts: &mut [Stmt], subst: &HashMap<Stri
 pub(crate) fn substitute_types_in_stmt(stmt: &mut Stmt, subst: &HashMap<String, Type>) {
     match stmt {
         Stmt::Let(l) => {
+            qual_check_set_pos(l.line, l.col);
             l.ty = substitute_type_opt(&l.ty, subst);
             if let Some(v) = &mut l.value { substitute_types_in_expr(v, subst); }
         }
@@ -214,6 +424,7 @@ pub(crate) fn substitute_types_in_stmt(stmt: &mut Stmt, subst: &HashMap<String, 
 /// nested declaration found inside a generic body, not the top-level specialization
 /// entry point (see `substitute_fn_decl` for that).
 fn substitute_types_in_fn_body(f: &mut FnDecl, subst: &HashMap<String, Type>) {
+    qual_check_set_pos(f.line, f.col);
     for p in &mut f.params { substitute_types_in_param(p, subst); }
     f.return_ty = substitute_type_opt(&f.return_ty, subst);
     f.throws_ty = substitute_type_opt(&f.throws_ty, subst);
@@ -238,6 +449,7 @@ fn substitute_types_in_fn_body(f: &mut FnDecl, subst: &HashMap<String, Type>) {
 
 fn substitute_types_in_struct_body(s: &mut StructDecl, subst: &HashMap<String, Type>) {
     for f in &mut s.fields {
+        qual_check_set_pos(f.line, f.col);
         f.ty = substitute_type(&f.ty, subst);
         if let Some(d) = &mut f.default { substitute_types_in_expr(d, subst); }
     }
@@ -301,7 +513,10 @@ fn substitute_types_in_item(item: &mut Item, subst: &HashMap<String, Type>) {
             }
         }
         Item::Mod(m) => { for it in &mut m.items { substitute_types_in_item(it, subst); } }
-        Item::Let(l) => { if let Some(v) = &mut l.value { substitute_types_in_expr(v, subst); } }
+        Item::Let(l) => {
+            l.ty = substitute_type_opt(&l.ty, subst);
+            if let Some(v) = &mut l.value { substitute_types_in_expr(v, subst); }
+        }
         Item::Alias(a) => { a.ty = substitute_type(&a.ty, subst); }
         Item::Stmt(s) => substitute_types_in_stmt(s, subst),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) => {}
@@ -319,6 +534,28 @@ fn substitute_types_in_string_segments(segs: &mut [StringSegment], subst: &HashM
 }
 
 pub(crate) fn substitute_types_in_expr(expr: &mut Expr, subst: &HashMap<String, Type>) {
+    substitute_types_in_expr_inner(expr, subst);
+    // `Board<elem'actor>(..)` → `Board_actor(..)` (the name is a pure function of the arguments).
+    if QUAL_REWRITE.with(Cell::get) {
+        let mangled = match &expr.kind {
+            ExprKind::GenericCall(callee, targs, _) if has_qual_arg(targs) => match &callee.kind {
+                ExprKind::Var(base) => mangled_name(base, targs),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(mangled) = mangled {
+            let (line, col, len) = (expr.line, expr.col, expr.len);
+            let old = std::mem::replace(expr, Expr { kind: ExprKind::Void, line, col, len });
+            let ExprKind::GenericCall(old_callee, _, args) = old.kind else { unreachable!() };
+            let callee = Expr { kind: ExprKind::Var(mangled), line: old_callee.line, col: old_callee.col, len: old_callee.len };
+            expr.kind = ExprKind::Call(Box::new(callee), args);
+        }
+    }
+}
+
+fn substitute_types_in_expr_inner(expr: &mut Expr, subst: &HashMap<String, Type>) {
+    if let ExprKind::Var(n) = &expr.kind { qual_check_hit(n, Some((expr.line, expr.col))); }
     match &mut expr.kind {
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_)
             | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void | ExprKind::Var(_)
@@ -344,8 +581,20 @@ pub(crate) fn substitute_types_in_expr(expr: &mut Expr, subst: &HashMap<String, 
         }
         ExprKind::MethodCall(obj, _, args) => { substitute_types_in_expr(obj, subst); substitute_types_in_args(args, subst); }
         ExprKind::GenericCall(callee, type_args, args) => {
-            substitute_types_in_expr(callee, subst);
+            // `Board<elem'actor>(..)`: the callee names the declaration, it is not a bare use.
+            if !(has_qual_arg(type_args) && matches!(callee.kind, ExprKind::Var(_))) {
+                substitute_types_in_expr(callee, subst);
+            }
             for t in type_args.iter_mut() { *t = substitute_type(t, subst); }
+            if has_qual_arg(type_args) {
+                if let ExprKind::Var(base) = &callee.kind {
+                    QUAL_COLLECT.with(|c| {
+                        if let Some(v) = c.borrow_mut().as_mut() {
+                            v.push(CandidateCall { name: base.clone(), type_args: type_args.clone(), enclosing_type_params: Vec::new() });
+                        }
+                    });
+                }
+            }
             substitute_types_in_args(args, subst);
         }
         ExprKind::Pipe(lhs, _, args) => { substitute_types_in_expr(lhs, subst); substitute_types_in_args(args, subst); }
@@ -436,7 +685,9 @@ fn build_type_subst(type_params: &[String], type_args: &[Type]) -> HashMap<Strin
     for p in type_params {
         if p.starts_with('$') { continue; }
         if let Some(arg) = arg_iter.next() {
-            subst.insert(p.clone(), arg.clone());
+            // A qualifier parameter `^elem:bound` is keyed `^elem` (what `T'elem` looks up).
+            let key = match qual_param_name(p) { Some(n) => format!("^{n}"), None => p.clone() };
+            subst.insert(key, arg.clone());
         }
     }
     subst
@@ -451,6 +702,35 @@ pub(crate) fn substitute_struct_decl(decl: &StructDecl, subst: &HashMap<String, 
     out.type_params = Vec::new();
     out.where_clause = Vec::new();
     substitute_types_in_struct_body(&mut out, subst);
+    out
+}
+
+/// Specialised copy of a qualifier-generic enum (`Slot<'elem>` + `[actor]` → `Slot_actor`).
+pub(crate) fn substitute_enum_decl(decl: &EnumDecl, subst: &HashMap<String, Type>, new_name: &str) -> EnumDecl {
+    let mut out = decl.clone();
+    out.name = new_name.to_string();
+    out.type_params = Vec::new();
+    substitute_types_in_enum_body(&mut out, subst);
+    out
+}
+
+/// Specialised copy of an `ext` block for one instance: `ext Board<'elem>` or
+/// `ext Board<elem'actor>` → `ext Board_actor`.
+pub(crate) fn substitute_ext_decl(decl: &ExtDecl, subst: &HashMap<String, Type>, new_name: &str) -> ExtDecl {
+    let mut out = decl.clone();
+    out.type_name = new_name.to_string();
+    out.type_params = Vec::new();
+    out.type_args = Vec::new();
+    out.where_clause = Vec::new();
+    for m in &mut out.methods { substitute_types_in_fn_body(m, subst); }
+    for conv in &mut out.conversions {
+        conv.ty = substitute_type(&conv.ty, subst);
+        substitute_types_in_stmts(&mut conv.body, subst);
+    }
+    for set in &mut out.setters {
+        set.param_ty = substitute_type(&set.param_ty, subst);
+        substitute_types_in_stmts(&mut set.body, subst);
+    }
     out
 }
 
@@ -478,7 +758,7 @@ pub(crate) fn specialized_free_fn_decls(
     for (name, insts) in instantiations {
         let Some(decl) = generic_fns.get(name) else { continue };
         for inst in insts {
-            if inst.is_struct { continue; }
+            if inst.is_struct || inst.is_enum { continue; }
             let subst = build_type_subst(&decl.type_params, &inst.type_args);
             out.push(substitute_fn_decl(decl, &subst, &inst.mangled));
         }
@@ -525,6 +805,7 @@ pub(crate) fn mangle_type(ty: &Type) -> Option<String> {
         // docs/book.md's known gap this module doesn't yet close, "mut Type" section
         // in the final report).
         Type::Mut(inner) => mangle_type(inner).map(|s| format!("mut_{}", s)),
+        Type::QualArg(q) => OwnerQual::chain_mangle(q),
         _ => None,
     }
 }
@@ -551,6 +832,8 @@ pub(crate) struct Instantiation {
     pub type_args: Vec<Type>,
     pub mangled: String,
     pub is_struct: bool,
+    /// A qualifier-generic enum (`enum Slot<'elem>`); never set together with `is_struct`.
+    pub is_enum: bool,
 }
 
 /// Keyed by `base_name`, deduplicated by mangled name (the practical equality key —
@@ -574,6 +857,7 @@ fn instantiation_map_insert(map: &mut InstantiationMap, inst: Instantiation) {
 fn is_concrete_type(ty: &Type, enclosing_type_params: &[String]) -> bool {
     match ty {
         Type::TypeParam(_) => false,
+        Type::QualArg(q) => !matches!(q.as_slice(), [OwnerQual::Param(_)]),
         Type::Named(n) => !enclosing_type_params.iter().any(|p| p == n),
         Type::Optional(inner) | Type::Array(inner) | Type::ArrayN(inner, _)
             | Type::ArrayNExpr(inner, _) | Type::Set(inner) | Type::Qualified(inner, _)
@@ -919,6 +1203,7 @@ pub(crate) fn build_instantiation_map(
     candidates: &[CandidateCall],
     generic_structs: &HashMap<String, StructDecl>,
     generic_fns: &HashMap<String, FnDecl>,
+    qual_enums: &HashMap<String, EnumDecl>,
 ) -> InstantiationMap {
     let mut map = InstantiationMap::new();
     for cand in candidates {
@@ -926,9 +1211,13 @@ pub(crate) fn build_instantiation_map(
             (true, &s.type_params)
         } else if let Some(f) = generic_fns.get(cand.name.as_str()) {
             (false, &f.type_params)
+        } else if let Some(e) = qual_enums.get(cand.name.as_str()) {
+            (false, &e.type_params)
         } else {
             continue;
         };
+        let is_enum = qual_enums.contains_key(cand.name.as_str()) && !is_struct
+            && !generic_fns.contains_key(cand.name.as_str());
         if !cand.type_args.iter().all(|t| is_concrete_type(t, &cand.enclosing_type_params)) { continue; }
         let Some(mangled) = mangled_name(&cand.name, &cand.type_args) else { continue; };
         // Sanity: the number of ordinary (non-const-generic) type params must match
@@ -941,6 +1230,7 @@ pub(crate) fn build_instantiation_map(
             type_args: cand.type_args.clone(),
             mangled,
             is_struct,
+            is_enum,
         });
     }
     map
@@ -1328,8 +1618,8 @@ pub(crate) fn program_declares_generics(program: &Program) -> bool {
         // declaring file must still be monomorphized so the specialized method
         // clone can be appended, even when the only turbofish call site naming
         // it lives in a different file. Mirrors the struct arm's method check.
-        Item::Ext(e) => e.methods.iter().any(|m| m.type_params.iter().any(|p| !e.type_params.contains(p))),
-        Item::Enum(en) => en.methods.iter().any(|m| m.type_params.iter().any(|p| !en.type_params.contains(p))),
+        Item::Ext(e) => is_qual_generic_item(item) || e.methods.iter().any(|m| m.type_params.iter().any(|p| !e.type_params.contains(p))),
+        Item::Enum(en) => has_qual_params(&en.type_params) || en.methods.iter().any(|m| m.type_params.iter().any(|p| !en.type_params.contains(p))),
         _ => false,
     })
 }
@@ -1365,6 +1655,11 @@ impl Transpiler {
     /// visibility works with zero prefixing because the emitted Rust is one flat,
     /// concatenated namespace (see this module's top-level doc comment).
     pub(crate) fn monomorphize_program(&mut self, program: &mut Program) {
+        // Constructions a context determines take their instance's name (the instances were
+        // registered by `rewrite_qual_program`). Before the qualifier-generic declarations are
+        // dropped below: the pass reads them.
+        if crate::qual_infer::qual_decls_seen() { crate::qual_infer::infer_qual_ctors(program); }
+        set_qual_defaults(program);
         // Which base names does THIS file declare? (Local, cheap, name-only scan —
         // the actual decl clones already live in `self.global_generic_structs`/
         // `global_generic_fns`, populated once for the whole reachable graph.)
@@ -1495,12 +1790,50 @@ impl Transpiler {
             let decl = decl.clone();
             let insts = insts.clone();
             for inst in insts {
-                if inst.is_struct { continue; }
+                if inst.is_struct || inst.is_enum { continue; }
                 let subst = build_type_subst(&decl.type_params, &inst.type_args);
                 let spec = substitute_fn_decl(&decl, &subst, &inst.mangled);
                 program.items.push(Item::Fn(spec));
             }
         }
+
+        // Qualifier-generic enums and `ext` blocks: one specialised copy per instance, then the
+        // generic declarations are dropped (no generic-Rust fallback exists for them).
+        let mut specialised: Vec<Item> = Vec::new();
+        for item in &program.items {
+            match item {
+                Item::Enum(e) if has_qual_params(&e.type_params) => {
+                    for inst in self.global_instantiations.get(&e.name).into_iter().flatten().filter(|i| i.is_enum) {
+                        let subst = build_type_subst(&e.type_params, &inst.type_args);
+                        specialised.push(Item::Enum(substitute_enum_decl(e, &subst, &inst.mangled)));
+                    }
+                }
+                Item::Ext(e) if is_qual_generic_item(item) => {
+                    let declares = has_qual_params(&e.type_params);
+                    for inst in self.global_instantiations.get(&e.type_name).into_iter().flatten().filter(|i| i.is_struct || i.is_enum) {
+                        // `ext Board<'elem>` extends every instance; `ext Board<elem'actor>` one.
+                        if declares {
+                            if ordinary_type_param_names(&e.type_params).len() != inst.type_args.len() { continue; }
+                        } else if e.type_args != inst.type_args {
+                            continue;
+                        }
+                        let subst = build_type_subst(&e.type_params, &inst.type_args);
+                        specialised.push(Item::Ext(substitute_ext_decl(e, &subst, &inst.mangled)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if specialised.iter().any(|_| true) || program.items.iter().any(is_qual_generic_item) {
+            program.items.retain(|it| !(is_qual_generic_item(it) && !matches!(it, Item::Struct(_))));
+            program.items.retain(|it| !matches!(it, Item::Struct(s) if has_qual_params(&s.type_params)));
+            program.items.extend(specialised);
+        }
+        rewrite_qual_lets(&mut program.items);
+        QUAL_REWRITE.with(|c| c.set(true));
+        let empty = HashMap::new();
+        for item in program.items.iter_mut() { substitute_types_in_item(item, &empty); }
+        QUAL_REWRITE.with(|c| c.set(false));
 
         rewrite_call_sites(program, &self.global_instantiations, &self.global_method_instantiations);
     }

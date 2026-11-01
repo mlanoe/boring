@@ -1,0 +1,23 @@
+# Qualifier-generic declarations living in ANOTHER project (`[deps]`), constructed here without
+# `<...>`: the declared qualifier of the arguments and the expected type decide the instance.
+# Registered by tests/run.rs (`qualifier_infer_xfile`) and tests/transpile.rs
+# (`transpile_project_test!(qualifier_infer_xfile)`).
+use boardlib.board.*
+use local
+
+def main():
+    let Point'actor a = Point(1)
+    let Point'actor c = Point(2)
+    let board = Board(cells = [a, c])
+    print board.total()
+    print sibling_total()
+
+    mut Board<elem'inline> b = Board()
+    b.add(Point(5))
+    print b.total()
+
+    let Point'inline q = Point(9)
+    let s = Slot.Full(q)
+    match s:
+        Empty: print "empty"
+        Full(p): print "full {p.x}"

@@ -1,0 +1,25 @@
+# Defaulted and chained qualifier parameters declared in ANOTHER project (`[deps]`): bare uses
+# take the default instance, `<...>` picks another one, a chain names the whole suffix.
+# Registered by tests/run.rs and tests/transpile.rs (`qualifier_defaults_xfile`).
+use boardlib.board.*
+use local
+
+def main():
+    mut b = Board()
+    b.add(Point(2))
+    mut Board b2 = Board()
+    b2.add(Point(3))
+    print "{b.total()} {b2.total()}"
+    print sibling_total()
+
+    let Point'actor q = Point(9)
+    mut Board<elem'actor> c = Board()
+    c.add(q)
+    print c.total()
+
+    mut w = Watched<q'actor>()
+    w.bump()
+    w.bump()
+    mut w2 = Watched<q'actor'observed>()
+    w2.bump()
+    print "{w.get()} {w2.get()}"

@@ -1,0 +1,100 @@
+# Qualifier parameters (docs/book.md, "Qualifier parameters"): `struct Board<'elem>` declares a
+# qualifier parameter; every use names it (`Board<elem'actor>`), and the transpiler emits one
+# plain, non-generic copy per distinct argument (`Board_actor`, `Board_inline`).
+struct Point:
+    var int x = 0
+
+struct Board<'elem>:
+    var [mut Point'elem] cells = []
+
+    def add(Point'elem p):
+        cells.push(p)
+
+    req int size():
+        cells.len()
+
+    req int total():
+        var int sum = 0
+        for i in 0..<cells.len():
+            sum += cells[i].x
+        sum
+
+# One block for every instance...
+ext Board<'elem>:
+    req int doubled():
+        self.total() * 2
+
+# ...and one for a single instance.
+ext Board<elem'actor>:
+    req string kind():
+        "actor board"
+
+# A bound restricts the arguments: `'new` is {owned, shared, actor, guard}.
+struct Cell<'q as 'new>:
+    var Point'q pt = Point()
+
+    req int get():
+        pt.x
+
+# Type, const-free and qualifier parameters mix; a labelled type argument and a qualifier
+# argument share one list.
+struct Cache<T, 'q as 'new>:
+    var T key
+    var Point'q pt = Point()
+
+    req int get():
+        pt.x + 1
+
+# A struct field, a return type and a parameter name their instance like any other use.
+struct Game:
+    var mut Board<elem'inline> board = Board<elem'inline>()
+    var int score = 0
+
+    def play():
+        board.add(Point(4))
+        score += 1
+
+Board<elem'inline> makeInline():
+    mut b = Board<elem'inline>()
+    b.add(Point(8))
+    b
+
+enum Slot<'elem>:
+    Empty
+    Full(Point'elem)
+
+# The argument says how `Board` stores its elements; it imposes nothing on the function.
+def int fill(var Board<elem'actor> b):
+    for i in 0..<3:
+        let p = Point(i + 1)
+        b.add(p)
+    b.total()
+
+def main():
+    mut Board<elem'actor> a = Board()
+    print "actor total {fill(a)}"
+    print "actor size {a.size()} doubled {a.doubled()} {a.kind()}"
+
+    mut b = Board<elem'inline>()
+    let p5 = Point(5)
+    let p6 = Point(6)
+    b.add(p5)
+    b.add(p6)
+    print "inline total {b.total()} size {b.size()} doubled {b.doubled()}"
+
+    let Cell<q'shared> c = Cell()
+    print "cell {c.get()}"
+
+    let c2 = Cache<T = int, q'shared>(1)
+    print "cache {c2.get()}"
+
+    mut g = Game()
+    g.play()
+    print "game {g.board.total()} {g.score}"
+    let bi = makeInline()
+    print "returned {bi.total()}"
+
+    let Slot<elem'inline> s = Slot.Full(Point(7))
+    match s:
+        Empty: print "empty"
+        Full(p): print "full {p.x}"

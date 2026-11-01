@@ -1,0 +1,8 @@
+actor total 6
+actor size 3 doubled 12 actor board
+inline total 11 size 2 doubled 22
+cell 0
+cache 1
+game 4 1
+returned 8
+full 7

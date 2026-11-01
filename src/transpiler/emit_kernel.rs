@@ -93,7 +93,7 @@ impl Transpiler {
         // means this isn't our concern (e.g. `let [float] n = k.alpha`, reading a
         // kernel field into a differently-qualified/plain binding on purpose).
         let has_explicit_qual = match &s.ty {
-            Some(ty) => ty.gpu_resident_qual().is_some(),
+            Some(ty) => ty.without_mut().gpu_resident_qual().is_some(),
             None => false,
         };
         if s.ty.is_some() && !has_explicit_qual {
@@ -154,7 +154,7 @@ impl Transpiler {
         let Some(ret_ty) = self.fn_returns_resident.get(fn_name.as_str()).cloned() else { return false };
 
         let has_explicit_qual = match &s.ty {
-            Some(ty) => ty.gpu_resident_qual().is_some(),
+            Some(ty) => ty.without_mut().gpu_resident_qual().is_some(),
             None => false,
         };
         if s.ty.is_some() && !has_explicit_qual {
@@ -170,6 +170,83 @@ impl Transpiler {
         let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
         self.line(&format!("{} {} = {};", kw, s.name, call_rust));
         self.resident_call_vars.insert(s.name.clone(), ret_ty);
+        self.known_local_vars.insert(s.name.clone());
+        true
+    }
+
+    /// `let y = if c: f_gpu(..) else: g_gpu(..)` where every branch ends in a call to a
+    /// resident-returning function (or a resident local) keeps `y` a `BoringKernelArg<T>`.
+    /// Typed as an ordinary value the if-expression materialised each branch into a host
+    /// `Vec<T>` (a blocking device-to-host readback, then a re-upload when `y` is passed on).
+    /// Needs an `else`, and the tails must agree on the host element type; otherwise `false`
+    /// and the ordinary path (with its readback) applies.
+    pub(crate) fn try_emit_gpu_resident_if_let(&mut self, s: &LetStmt) -> bool {
+        if !self.is_gpu_target || self.config.is_simd_target || self.fn_returns_resident.is_empty() {
+            return false;
+        }
+        let Some(val) = &s.value else { return false };
+        let ExprKind::If(if_stmt) = &val.kind else { return false };
+        let Some(else_body) = &if_stmt.else_body else { return false };
+        if s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_none()) {
+            return false;
+        }
+        let mut bodies: Vec<&Vec<Stmt>> = if_stmt.branches.iter().map(|(_, b)| b).collect();
+        bodies.push(else_body);
+        let mut elem_ty: Option<Type> = None;
+        for body in &bodies {
+            let Some(Stmt::Expr(tail)) = body.last() else { return false };
+            let ty = match &tail.kind {
+                ExprKind::Call(callee, _) => match &callee.kind {
+                    ExprKind::Var(f) => self.fn_returns_resident.get(f.as_str()).cloned(),
+                    _ => None,
+                },
+                ExprKind::Var(v) => self.resident_call_vars.get(v.as_str()).cloned(),
+                _ => None,
+            };
+            let Some(ty) = ty else { return false };
+            let host = kernel_host_element_type(&array_inner_type(match &ty { Type::Qualified(i, _) => i, o => o }));
+            match &elem_ty {
+                None => elem_ty = Some(ty),
+                Some(first) => {
+                    let first_host = kernel_host_element_type(&array_inner_type(match first { Type::Qualified(i, _) => i, o => o }));
+                    if first_host != host { return false; }
+                }
+            }
+        }
+        let elem_ty = elem_ty.expect("at least the else body");
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        let name = escape_rust_keyword(&s.name);
+        let mut sub = self.make_sub();
+        sub.fn_returns_void = false;
+        sub.suppress_ok_wrap = true;
+        sub.fn_return_ty = None;
+        sub.current_fn_returns_resident = None;
+        sub.current_fn_returns_resident_tuple = None;
+        let emit_branch = |sub: &mut Self, body: &[Stmt]| {
+            let (tail, prefix) = body.split_last().expect("checked non-empty");
+            for st in prefix { sub.emit_stmt(st, false); }
+            let Stmt::Expr(tail) = tail else { unreachable!() };
+            let tail_s = match &tail.kind {
+                ExprKind::Var(v) => format!("{}.clone()", escape_rust_keyword(v)),
+                _ => sub.emit_expr_owned(tail),
+            };
+            sub.line(&tail_s);
+        };
+        for (i, (cond, body)) in if_stmt.branches.iter().enumerate() {
+            let kw = if i == 0 { "if" } else { "} else if" };
+            let cond_s = sub.emit_expr(cond);
+            sub.line(&format!("{kw} {cond_s} {{"));
+            sub.indent += 1;
+            emit_branch(&mut sub, body);
+            sub.indent -= 1;
+        }
+        sub.line("} else {");
+        sub.indent += 1;
+        emit_branch(&mut sub, else_body);
+        sub.indent -= 1;
+        sub.line("}");
+        self.line(&format!("{kw} {name} = {{\n{}}};", sub.out));
+        self.resident_call_vars.insert(s.name.clone(), elem_ty);
         self.known_local_vars.insert(s.name.clone());
         true
     }

@@ -210,6 +210,11 @@
           "match": "'(?:owned|new|inline|shared|actor|guard|weak|copy|const|static|sync|unified|global|local|observed|atomic|task|kernel)\\b|&(?:owned|inline|shared|actor|guard|option|weak)\\b"
         },
         {
+          "comment": "qualifier parameter: declared 'elem / 'elem as 'new / 'elem = 'inline in struct/enum/ext headers (the default and chained bound members 'actor'observed are covered by the qualifier-word rule above), used as T'elem, passed as elem'actor or elem'actor'observed (a label that is not a qualifier word)",
+          "name": "storage.modifier.ownership.boring",
+          "match": "'(?=[a-z_][A-Za-z0-9_]*\\b(?:\\s+as\\b|\\s*[,>|\\])\\s]|\\s*$))[a-z_][A-Za-z0-9_]*"
+        },
+        {
           "comment": "bare tick before identifier or opening paren — ownership inferred from RHS",
           "name": "storage.modifier.ownership.boring",
           "match": "'(?=[A-Za-z(])"

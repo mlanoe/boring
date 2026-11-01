@@ -5123,3 +5123,80 @@ fn host_built_array_is_readable_after_resident_call() {
         "    print \"{xs[2]} {xs.length}\"\n"));
     assert!(!rs.contains("xs: BoringKernelArg"), "{rs}");
 }
+
+const RESIDENT_SCALE_KERNEL: &str = r#"
+kernel Saxpy:
+    let TY alpha
+    let [TY]'unified x
+    mut [TY]'unified y
+
+    init(TY a, [TY]'unified xs, [TY]'unified ys):
+        alpha = a
+        x = xs
+        y = ys
+
+    def ():
+        let i = .thread.x + .block.x * .block_dim.x
+        y[i] = alpha * x[i] + y[i]
+
+req [TY]'kernel'unified scale_gpu([TY]'kernel'unified xv, TY factor) throws:
+    var [TY] zero = [0.0, 0.0]
+    mut k = Saxpy(factor, xv, zero)
+    kernel:
+        k(block = 2)
+    k.y
+"#;
+
+/// `mut [T]'kernel'unified v = <resident call | resident struct field>` used to be typed
+/// `Vec<T>` (the `mut` wrapper hid the qualifier from the residency checks), so each later
+/// assignment from a GPU result was a blocking device-to-host readback. Holds for float16 too.
+#[test]
+fn mut_resident_slot_with_non_empty_initialiser_stays_resident() {
+    for ty in ["float32", "float16"] {
+        let body = r#"
+struct Cache:
+    [TY]'kernel'unified hk
+
+def run(Cache lc) throws:
+    mut [TY]'kernel'unified v = lc.hk
+    v = scale_gpu(v, 4.0 as TY)
+    mut [TY]'kernel'unified w = scale_gpu(v, 2.0 as TY)
+    w = scale_gpu(w, 5.0 as TY)
+    let b = scale_gpu(w, 5.0 as TY)
+    with b:
+        print "{b[0]}"
+"#;
+        let src = format!("{RESIDENT_SCALE_KERNEL}{body}").replace("TY", ty);
+        let (_msl, rs) = metal_codegen(&format!("mut_resident_slot_init_{ty}"), &src);
+        let run_fn = rs.split("fn run(").nth(1).and_then(|s| s.split("\nfn ").next()).expect("run fn");
+        assert!(!run_fn.contains("Vec<") || run_fn.matches("Vec<").count() == run_fn.matches("collect::<Vec<").count(),
+            "{ty}: slots must not be host Vecs:\n{run_fn}");
+        assert_eq!(run_fn.matches("__boring_gpu_copy_d2h").count(), 1,
+            "{ty}: only the explicit `with b:` may read back:\n{run_fn}");
+    }
+}
+
+/// `let y = if c: f_gpu(..) else: g_gpu(..)` over resident results stays resident: no
+/// per-branch readback, no re-upload when `y` is passed on.
+#[test]
+fn if_expression_over_resident_results_stays_resident() {
+    let body = r#"
+def run([TY] ha, bool flag) throws:
+    let a = scale_gpu(ha, 2.0 as TY)
+    let y = if flag:
+        scale_gpu(a, 3.0 as TY)
+    else:
+        scale_gpu(a, 4.0 as TY)
+    let b = scale_gpu(y, 5.0 as TY)
+    with b:
+        print "{b[0]}"
+
+run([1.0 as TY, 2.0 as TY], true)
+"#;
+    let src = format!("{RESIDENT_SCALE_KERNEL}{body}").replace("TY", "float32");
+    let (_msl, rs) = metal_codegen("if_expr_resident", &src);
+    let run_fn = rs.split("fn run(").nth(1).and_then(|s| s.split("\nfn ").next()).expect("run fn");
+    assert_eq!(run_fn.matches("__boring_gpu_copy_d2h").count(), 1,
+        "only the explicit `with b:` may read back:\n{run_fn}");
+    assert!(!run_fn.contains("BoringKernelArg::Host(y"), "{run_fn}");
+}

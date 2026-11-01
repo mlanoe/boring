@@ -1,0 +1,7 @@
+[project]
+name = "qualifier_params_xfile"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+boardlib = "../fixtures/qualifier_params_lib"

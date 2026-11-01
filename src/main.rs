@@ -23,6 +23,7 @@ mod fixed_wide_vectors;
 pub mod parser;
 pub mod infer_actor_params;
 pub mod infer_actor_elems;
+pub mod qual_infer;
 pub mod desugar_labeled_array;
 pub mod desugar_inline_kernel;
 pub mod desugar_tensor_fields;
