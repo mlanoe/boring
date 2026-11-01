@@ -438,7 +438,7 @@ impl Interpreter {
                 // Absorb break/continue at the closure boundary so they don't
                 // escape into the enclosing loop. `break val` returns `val`;
                 // bare `break` and `continue` return nil.
-                match self.eval_block_as_expr(&stmts, fn_env) {
+                match self.eval_body_as_expr(&stmts, fn_env) {
                     Err(Signal::Break(val)) => Ok(val),
                     Err(Signal::Continue)   => Ok(Value::Nil),
                     other                   => other,

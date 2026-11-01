@@ -2369,11 +2369,21 @@ impl Interpreter {
             }
             match self.exec_stmt(stmt, Rc::clone(&env)) {
                 Ok(()) => {}
-                Err(Signal::Return(v)) => return Ok(v),
                 Err(other) => return Err(other),
             }
         }
         Ok(last)
+    }
+
+    /// Evaluate a function/method/closure body as an expression. Unlike
+    /// `eval_block_as_expr` (used for nested `if`/`match`/block values, where
+    /// `return` must propagate to the enclosing function), this is a function
+    /// boundary and absorbs `Signal::Return` into the body's value.
+    pub(crate) fn eval_body_as_expr(&mut self, stmts: &[Stmt], env: EnvRef) -> Eval {
+        match self.eval_block_as_expr(stmts, env) {
+            Err(Signal::Return(v)) => Ok(v),
+            other => other,
+        }
     }
 
     /// Execute every statement in `stmts` except the very last one.

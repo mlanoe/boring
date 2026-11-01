@@ -2271,7 +2271,7 @@ impl Interpreter {
                         // Push a fresh defer frame so that any `defer:` inside the getter
                         // runs when the getter returns, not when the enclosing function exits.
                         self.defer_stack.push(Vec::new());
-                        let result = self.eval_block_as_expr(&method.body, Rc::clone(&fn_env));
+                        let result = self.eval_body_as_expr(&method.body, Rc::clone(&fn_env));
                         if let Some(frame) = self.defer_stack.pop() {
                             for deferred in frame.into_iter().rev() {
                                 let _ = self.exec_block(&deferred, Rc::clone(&fn_env));
@@ -2322,7 +2322,7 @@ impl Interpreter {
                         fn_env.borrow_mut().define_mut("self", obj.clone());
                         // Same defer-frame isolation as the struct getter above.
                         self.defer_stack.push(Vec::new());
-                        let result = self.eval_block_as_expr(&method.body, Rc::clone(&fn_env));
+                        let result = self.eval_body_as_expr(&method.body, Rc::clone(&fn_env));
                         if let Some(frame) = self.defer_stack.pop() {
                             for deferred in frame.into_iter().rev() {
                                 let _ = self.exec_block(&deferred, Rc::clone(&fn_env));
@@ -3135,7 +3135,7 @@ impl Interpreter {
                     let body = as_decl.body.clone();
                     let fn_env = Env::child(captured);
                     fn_env.borrow_mut().define_mut("self", val);
-                    return self.eval_block_as_expr(&body, fn_env);
+                    return self.eval_body_as_expr(&body, fn_env);
                 }
             }
         }
@@ -3150,7 +3150,7 @@ impl Interpreter {
                     let body = as_decl.body.clone();
                     let fn_env = Env::child(captured);
                     fn_env.borrow_mut().define_mut("self", val);
-                    return self.eval_block_as_expr(&body, fn_env);
+                    return self.eval_body_as_expr(&body, fn_env);
                 }
             }
         }
