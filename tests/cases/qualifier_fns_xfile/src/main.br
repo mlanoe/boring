@@ -1,0 +1,26 @@
+# Calls to qualifier-generic functions and methods declared in a dependency, from this file and from
+# a sibling: each instance (`count_actor`, `Game_actor.merge_actor`, ...) is requested from several
+# files and emitted once, by the file that declares it.
+# Registered by tests/run.rs and tests/transpile.rs (`qualifier_fns_xfile`).
+use shapes.shapes.*
+use local
+
+# A function of this file, generic over a qualifier, calling the dependency's.
+int size_of<'q>(Board<elem'q> b):
+    count_twice(b) + count(b)
+
+def main():
+    mut Board<elem'actor> a = Board()
+    let Point'actor p = Point(1)
+    grow(a, p)
+    mut Board<elem'inline> i = Board()
+    grow(i, Point(2))
+    grow(i, Point(3))
+    print "{count(a)} {count(i)} {count_twice(i)}"
+    print "{size_of(a)} {size_of(i)}"
+    print sibling_total()
+
+    mut Game<cells'actor> g = Game()
+    g.merge(a)
+    g.merge(i)
+    print g.total()

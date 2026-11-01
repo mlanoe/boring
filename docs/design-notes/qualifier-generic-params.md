@@ -1,7 +1,6 @@
 # Qualifier parameters on structs — draft
 
-Status: **phases 0, 1 and 2 implemented** (labelled generic arguments; explicit instantiation of structs, enums and `ext` blocks; inference at construction, section 8), **plus default values and chained qualifiers** (section 10). The pass-through of a
-parameter (the old phase 3, now phase 4) remains a draft. Decisions taken while implementing are in section 7. Purpose of
+Status: **phases 0, 1 and 2 implemented** (labelled generic arguments; explicit instantiation of structs, enums and `ext` blocks; inference at construction, section 8), **plus default values and chained qualifiers** (section 10), **passing the parameter to an enclosing struct** (section 11) and **functions and methods that declare a parameter of their own** (`def f<'q>(Board<elem'q> b)`, section 12). Decisions taken while implementing are in section 7. Purpose of
 the document: list the impacts before deciding whether and how to build it. Origin: the `let q = arr[i]` aliasing work (`src/infer_actor_elems.rs`, book.md
 "Element mutability") picks one qualifier per *declared* type, so a struct field that wants
 different qualifiers in different places has no answer except two hand-written structs.
@@ -218,10 +217,12 @@ Inference is out of scope for the first iteration (decided); section 8 proposes 
 2. **Inference at construction** (section 8: expected type, then declared qualifier of arguments,
    else an error; `<...>` only when the construction does not determine it).
 3. **Default values and chained qualifiers** (section 10).
-4. **Passing the parameter on** (optional): other structs holding `Board<elem'elem>` (they declare
-   their own `'elem`), and functions/methods that declare a qualifier parameter of their own
-   (`def f<'q>(Board<elem'q> b)`). Plain functions taking a concrete `Board<elem'actor>` need
-   nothing and work from phase 1.
+4. **Passing the parameter to an enclosing struct** (section 11, implemented): other structs, enums and
+   `ext` blocks holding `Board<elem'cells>` inside their own `'cells`. Plain functions taking a concrete
+   `Board<elem'actor>` need nothing and work from phase 1.
+5. **Functions and methods that declare a parameter of their own** (`def f<'q>(Board<elem'q> b)`,
+   section 12, implemented): one specialisation per argument chain, a declaration that is optional
+   in a signature, calls inferred from written qualifiers, methods specialised per method instance.
 
 ## 6. Open questions
 
@@ -230,6 +231,8 @@ Inference is out of scope for the first iteration (decided); section 8 proposes 
 - Checker on the unspecialised declaration: conservative intersection vs deferring all
   qualifier-dependent checks to the specialised copy.
 - ~~Whether a qualifier parameter may be defaulted~~ Decided and implemented: yes, see section 10.
+- ~~Whether a struct may pass its parameter to a contained struct~~ Decided and implemented: yes, written explicitly, see section 11.
+- ~~Whether a function may declare its own qualifier parameter~~ Decided and implemented: yes, with an optional declaration in signatures, see section 12.
 - Interaction with a future implicit parameter for unqualified `[mut T]` fields (unifying with
   `infer_actor_elems`): attractive but explodes every struct into instances; out of scope here.
 
@@ -464,5 +467,215 @@ rejection, `run`/`build` parity.
   (`run` + `build`, four configs), `tests/qualifier_params_errors.rs`, `tests/qualifier_params_targets.rs`,
   `src/parser/tests_qualifier_params.rs`.
 
-Phase numbering: passing the parameter on (functions and enclosing structs declaring their own
-parameter) is now phase 4.
+Phase numbering: passing the parameter to an enclosing struct is phase 4 (section 11); functions
+declaring their own parameter are phase 5.
+
+## 11. Passing the parameter to an enclosing struct (phase 4)
+
+### Design
+
+An enclosing struct, enum or `ext` that holds a qualifier-generic struct hands its own parameter on:
+
+```boring
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()   # 'cells of Game is 'elem of Board
+    var int turn = 0
+
+let Game<cells'actor> g = Game()        # Game_actor holds Board_actor holds Point'actor
+let Game g2 = Game()                    # Game_inline / Board_inline (defaults)
+let Board<elem'actor> b = Board()
+let g3 = Game(board = b)                # cells = actor, from the written qualifier of b
+```
+
+Rules:
+
+1. In a field, parameter, return type or body of a declaration that declares `'cells`, the argument
+   `elem'cells` reads "the `elem` of `Board` receives the value of my `cells`". The names are independent.
+2. The specialisation cascades: struct, enum and `ext`, chains included (`Game<cells'actor'observed>` →
+   `Board<elem'actor'observed>`, `Game_actor_observed`).
+3. The passed name must be declared by the enclosing declaration (`unknown qualifier parameter`, with position).
+4. The enclosing bound must fit inside the receiving one, checked at the declaration, not only at the
+   instantiation. The receiving default applies only when the parameter is not passed.
+5. **Choice (A), always explicit.** A bare `Board` or `Board()` in a field of `Game` takes `Board`'s own default,
+   never `Game`'s parameter. There is no implicit propagation (no invisible generics, section 9) and no
+   usage-based inference; only written qualifiers are evidence. A bare construction under an expected type that
+   passes a parameter (`var Board<elem'cells> b = Board()`) is an error rather than a silent default.
+6. A concrete argument in the field (`var Board<elem'actor> b`) freezes the instance; the enclosing declaration
+   needs no parameter.
+7. Section 8's inference extends: `Game(board = b)` takes `cells` from the written qualifier of `b`, same conflict
+   rule; an expected `Game<cells'actor>` makes the `board` argument a `Board<elem'actor>`.
+8. Recursive and mutually recursive holders (`Node<q'q>?`, `Ping`/`Pong`) resolve with a fixed point over the
+   reachable `(declaration, chain)` instances.
+9. Cross-file and `[deps]`: the registry is global, as for every instance.
+10. `boring run` erases the parameters (same diagnostics, same output); GPU host emitters share the general
+    emission; `--linux` keeps rejecting the feature.
+
+Out of scope: functions and methods that declare their own parameter, invisible generics, a qualifier-generic
+trait, `--explain-inference`.
+
+### As implemented
+
+- **Parser.** `elem'cells` parses as a labelled qualifier argument whose chain is `[Param("cells")]` (the type
+  parser already produced `Param` for a name in `qual_scope`; an unknown name now reports ``unknown qualifier parameter `x` `` with the
+  position). `resolve_generic_args` accepts a pass-through chain and checks the enclosing bound (kept in
+  `Parser::qual_bounds` next to `qual_scope`) against the receiving bound member by member: ``the bound of `c` (...) is not within the bound of `q` in `Cell`: `'inline` is outside it``.
+  `parse_without_inference` (used to read the declarations of other files) now resolves labelled lists too, with a
+  re-entrancy guard so a cycle of imports cannot recurse; before, a field `Board<elem'cells>` of an imported
+  struct was read in the lenient (unresolved) shape.
+- **Specialisation.** `substitute_type` replaces a `QualArg([Param(p)])` by the instance's argument, so
+  specialising `Game` for `actor` yields `Board<elem'actor>` in its fields, field defaults, `init`s, method
+  signatures and bodies, which the existing rewrite turns into `Board_actor`. The instance set is closed in
+  `build_instantiation_map` (worklist over struct and enum instances, plus the `ext` blocks that apply to them,
+  `Transpiler::global_qual_exts`): the uses recorded while specialising an instance are new candidates.
+- **Termination.** An argument is either a written chain or a pass-through of one, never built from other
+  arguments, so the `(declaration, chain)` pairs reachable are finite and the worklist, which drops pairs it has
+  already seen, always ends. A non-terminating cycle therefore cannot occur and has no error; the only
+  remaining failure of a self-holding struct is the ordinary one of Rust (a recursive type without indirection,
+  e.g. two structs holding each other directly through `Option`, `E0072`), unchanged by this feature (use an
+  array or an `'owned` link).
+- **Inference.** `qual_infer.rs`: `from_ty` reads a pass-through slot against a written `Board<elem'actor>`
+  (declared type of a name, or an explicit `Board<elem'actor>()`), and `resolve_site` pushes the resolved
+  instance's parameter types (`subst_pass`) into the arguments, also for `Game<cells'actor>(board = Board())`.
+  An expected type that still contains a pass-through is not evidence: the bare construction is reported.
+- **Tests.** `tests/cases/qualifier_enclosing.br`, `qualifier_enclosing_chains.br`, `qualifier_enclosing_xfile`
+  (`run` + `build`, four configs), `tests/qualifier_params_errors.rs` (unknown name, bound, bare construction,
+  conflict, out-of-bound evidence), `tests/qualifier_params_targets.rs` (metal/cuda/rocm text, `--linux`),
+  `src/parser/tests_qualifier_params.rs`.
+- **Known gaps.** An enum payload of an `'actor`/managed-`'owned` instance hits the existing `PartialEq` derive
+  limits of enums (unrelated to the parameter); `elem'cells'observed` (a suffix added on top of a passed parameter)
+  is not accepted.
+
+## 12. Qualifier-generic functions and methods (phase 5)
+
+### Design
+
+A function or a method declares a qualifier parameter of its own, so that it works for every instance
+of a qualifier-generic struct instead of one `Board<elem'actor>`:
+
+```boring
+int count<'q>(Board<elem'q> b):                  # declared
+    b.cells.len()
+
+int count2(Board<elem'q> b):                     # declared by its use in the signature
+    b.cells.len()
+
+def add<'q as 'inline|owned = 'inline>(Board<elem'q> b, Point'q p):
+    b.cells.push(p)
+
+struct Game<'cells = 'inline>:
+    var Board<elem'cells> board = Board<elem'cells>()
+    def merge<'q>(Board<elem'q> other):          # the method's own parameter, distinct from 'cells
+        ...
+
+let Board<elem'actor> a = Board()
+count(a)                                         # q = actor, from the written qualifier of a
+count<q'owned>(Board<elem'owned>())              # explicit
+```
+
+Rules (decided with the user):
+
+1. **Declaration.** `<'q>` with bound and default exactly as on a struct (`<'q as 'inline|owned = 'inline>`),
+   the bound checked at the declaration (the default must belong to it; a parameter passed on must fit
+   inside the receiving bound, section 11). A function is **specialised per argument chain**, named like a
+   type instance (`count_actor`, `count_actor_observed`).
+2. **The declaration is optional for functions and methods only.** A qualifier identifier that appears in
+   the signature (parameters and return type) without being declared and that is not a known qualifier
+   word is introduced by its first occurrence. The list of words is the compiler's real one, not a copy
+   of this document (`generic_args::QUALIFIER_WORDS`, the same list that forbids naming a parameter
+   `'actor`). The explicit declaration stays **mandatory** when a bound or a default is needed. The
+   omission does **not** extend to a struct/enum/`ext`/trait (there `<'cells>` is part of the type) nor
+   to the body (a `'q` the signature did not introduce is an error). It is still *visible*: no invisible
+   generics (section 9), the parameter is written in the signature. Typo guard: an implicit parameter
+   written once in the whole function (signature and body) produces the warning ``qualifier parameter `q`
+   is never related to another use``, never an error.
+3. **Methods, choice (A).** A method may declare its own parameter independent of the struct's. It is
+   specialised by instance of the struct **and** by instance of the method, only for the calls that are
+   in the program.
+4. **Calls infer with the existing rules** (sections 8 and 10): explicit arguments, the expected type, the
+   written qualifier of the arguments, the default, otherwise ``cannot infer qualifier parameter `q` of
+   `count`, write `count<q'...>` ``; two disagreeing proofs are a conflict, a proof outside the bound a
+   bound error.
+5. **The parameter is passed on**: in the body `Board<elem'q>` (locals, constructions), calls to other
+   generic functions `g<q'q>(...)` or inferred; the specialisation cascades by a fixed point over the
+   reachable instances, with a clear error if it does not terminate.
+6. **Cross-file**, 7. **parity** `run`/`build` (erasure, same diagnostics at parse time), GPU hosts share
+   the general emission, `--linux` rejection unchanged. 8. **No inference by usage**: only written
+   qualifiers are proofs.
+
+Out of scope: invisible generics (section 9), `--explain-inference`, qualifier-generic traits,
+`elem'cells'observed` (a suffix on a passed parameter), type-argument inference.
+
+### As implemented
+
+- **Lexer.** `tick_in_fn_header`: the `<...>` list that follows a function's name and closes with a `>`
+  directly followed by `(` is a declaration header, every tick in it is a qualifier tick. The prefix
+  before the name must not contain `=` nor start with a statement keyword, which keeps `x < 'a'`,
+  `f(a < 'b', c > (d))` and the like raw strings.
+- **Parser.** The return type is written before the `<'q>` list, so `parse_fn_decl` first reads the
+  signature ahead (`prescan_fn_qual_params`, up to the `:` at depth 0): a tick preceded by `<` or `,` is a
+  declaration (read with `parse_qual_param_decl`, which gives the real bound for the pass-through check of
+  the return type), any other `'name` that is not a qualifier word and not already in scope is introduced.
+  They are pushed on `qual_scope` for the whole function and truncated after it, so nothing leaks into
+  the next declaration, and a name equal to one of the enclosing struct's is an error for an explicit
+  declaration (``has the same name as one of the enclosing declaration``). An implicit parameter is
+  appended to `type_params` as `^q` (after the explicit ones, in order of first occurrence) and recorded
+  in `FnDecl::implicit_quals` with its occurrence count over the whole function, which the checker turns
+  into the warning. A body occurrence of an unintroduced name keeps the old "unknown qualifier parameter"
+  error, whose text now says only a signature introduces one. A trait method declaring a parameter is an
+  error. Also fixed: a parameter type whose generic/qualifier list is wrong was retried as a bare name
+  and reported as ``expected RParen, got Lt``; `parse_params` now reports the real error.
+- **Specialisation** reuses the free-function and generic-method machinery: a function with `^q` in
+  `type_params` is in `global_generic_fns`, a call `f<q'actor>(..)` is a candidate, the instance is
+  `f_actor`, `substitute_fn_decl` substitutes `T'q` and `Board<elem'q>`, and the generic declaration is
+  dropped (no generic-Rust fallback exists). `build_instantiation_map` is now **one worklist** over
+  struct, enum, `ext`, function and method instances; every specialised body is harvested for the
+  qualifier uses it names (`Board<elem'actor>`) and for the calls it makes (free and method), which
+  become new candidates once concrete. That is the fixed point of rule 5. Termination: an argument is a
+  written chain or a pass-through of one, never built from other arguments (`q'q'observed` is rejected at
+  the call), so the set of `(declaration, chain)` pairs reachable is finite and a pair already seen is
+  never specialised again: polymorphic recursion, mutual recursion and self-holding structs resolve. A
+  non-terminating cycle therefore does not exist and has no error (same conclusion as section 11).
+- **Methods.** A method's own parameter (`^q` in `m.type_params`, the struct's are not copied there) goes
+  through the existing generic-method registry (`global_generic_methods`, name-only resolution, a name
+  owned by several declarations is ambiguous). `monomorphize_program` appends one instance per method
+  instance to the struct, `ext` or enum (and to the stored copy of a generic struct, so every instance
+  of the struct receives it) and drops the generic method (`substitute_*_decl` and a final retain).
+  Consequence of the name-only resolution: a method instance is attached to **every instance of its
+  type that exists**, not only to the ones the calls use; correct, with some unused code. Tightening it
+  would need the receiver's instance at each call site.
+- **Inference** (`src/qual_infer.rs`). `Decls` gained the qualifier-generic functions (`qfns`) and methods
+  (`qmethods`, with the count of methods per name for receiver-less resolution). `qcall_args` collects the
+  evidence (the expected type against the return type, then each argument's written type against its
+  parameter slot, with parameters of the enclosing function accepted as pass-through evidence, which
+  struct constructions deliberately do not accept), chooses per parameter (conflict, bound, default) and
+  the call becomes `GenericCall(count, [q'actor], args)`, rewritten to `count_actor` by the ordinary
+  call-site rewrite. A method call needs the receiver's declaration name: written type of the receiver,
+  `self` inside its own type, or a method name that is unique; otherwise the error asks for
+  `merge<q'...>`. The explicit forms (`count<q'owned>(Board())`) push the instance's parameter types into
+  their arguments like a constructor does. A function that also has type parameters is not inferred.
+  The initialiser of an untyped top-level `let` is walked too.
+- **Cross-file.** Declarations come from the same `Decls`/`GenericDecls` readers as for structs.
+  Specialised bodies are registered before any file is emitted: `Transpiler::pre_scan_qual_instances`
+  runs the specialisation over the registry of generic declarations and scans the result (struct shapes,
+  signatures, borrow qualifiers), because the per-file specialisation otherwise happens too late for a
+  caller in another file or earlier in the same one (it passed `count_actor(x.clone())` where the callee
+  takes a borrow).
+- **Checker and targets.** The warning is raised in `check_fn`. `--linux` rejects any function or method
+  with a qualifier parameter, called or not (`validator/kernel.rs`); the GPU host emitters share the
+  general emission.
+- **Known limits.** An explicit `count<q'owned>(..)` or `Board<elem'owned>()` written inside a string
+  interpolation is not resolved (the interpolation is parsed on its own, without the declarations);
+  positions of an error inside an interpolation point at the start of the string. A method instance is
+  attached to every instance of its type (above). The interpreter's behaviour is unchanged: it erases
+  the parameters. Two pre-existing `managed` limits showed up in tests and are not related to the
+  feature: a `Point'owned` local passed to a `Point'owned` parameter is wrapped twice in single-thread
+  managed mode, and a `'owned` parameter pushed into an array takes a lock it then moves in multi-thread
+  managed mode.
+- **Tests.** `tests/cases/qualifier_fns.br`, `qualifier_fns_cascade.br`, `qualifier_fns_methods.br`,
+  `qualifier_fns_xfile` (`run` + `build`, four configs), `tests/qualifier_fns_errors.rs` (conflict, bound,
+  cannot infer, unknown label, body and struct introduction, shadowing, passed bound, suffix on a passed
+  parameter, the warning), `tests/qualifier_params_targets.rs` (metal/cuda/rocm text, `--linux`),
+  `src/parser/tests_qualifier_params.rs`, lexer tests.

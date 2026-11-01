@@ -4665,6 +4665,63 @@ struct Watched<'q as 'actor|'actor'observed|'inline'observed = 'actor'observed>:
 
 The validity rules are those of the same chain written on a type: `'shared'observed` is an error (a bound or default that spells it is rejected at the declaration, an argument at the use), `'weak` needs `'shared`/`'actor`/`'guard`. **Membership in the bound is by whole chain**: `as 'actor` does not admit `'actor'observed`, write `as 'actor|'actor'observed` (there is no wildcard). A use site substitutes the whole chain, `Point'elem` becomes `Point'actor'observed`, and the instance name joins the chain with `_` so it cannot collide with a plain qualifier instance: `Board_actor_observed`. The written qualifier of an argument that is itself a chain (`Point'actor'observed p`) is evidence as a whole chain. A chain is not accepted for the parameter use (`T'elem'observed`). The interpreter has no `'observed`, so `boring run` erases the chain like any qualifier; the runtime support of `'observed` in the generated Rust is emitted when an instance with an `'observed` chain exists, even if only a `use`d file spells it. An `'observed` element inside an enum variant payload is not supported by `'observed` itself yet.
 
+**Passing the parameter to an enclosing struct.** A struct that holds a qualifier-generic struct can hand its own parameter on, written explicitly: `elem'cells` inside a declaration of `'cells` reads "my `cells` is `Board`'s `elem`". The two names are independent.
+
+```boring
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()   # Game's 'cells is Board's 'elem
+    var int turn = 0
+
+let Game<cells'actor> g = Game()        # Game_actor holds Board_actor holds Point'actor
+let Game g2 = Game()                    # Game_inline / Board_inline (the defaults)
+let Board<elem'actor> b = Board()
+let g3 = Game(board = b)                # cells = actor, read off the written qualifier of b
+```
+
+- **Always explicit.** A `Board` or `Board()` written with no argument in a field of `Game` takes **`Board`'s own default**, never `Game`'s parameter; there is no implicit propagation and no invisible generic. A field typed `Board<elem'cells>` whose value is a bare `Board()` is an error (```Board` here takes its own default for `elem`, not `cells` of the enclosing declaration; write `Board<elem'cells>` to pass it on``).
+- **Cascade.** A specialised enclosing declaration specialises what it holds, through struct fields, `init`s, method signatures and bodies, enum payloads and `ext` blocks, chains included: `Game<cells'actor'observed>` holds `Board<elem'actor'observed>` (`Game_actor_observed`, `Board_actor_observed`). A struct that holds itself (`Node<q'q>?`) or two structs that hold each other resolve without instantiating forever: instances are tracked by `(declaration, chain)`, a pair already seen is not specialised again.
+- **A concrete value freezes the instance.** `var Board<elem'actor> b` in a struct fixes `Board_actor`; that struct needs no parameter of its own.
+- **The names are checked at the declaration.** The passed name must be a parameter of the enclosing struct, enum or `ext` (``unknown qualifier parameter `cells` ``, with the position), and the enclosing **bound must fit inside the receiving one**: `struct G<'c>` (full bound) cannot pass `c` to `Cell<'q as 'new>`, `'c as 'actor|'inline` can pass it only to a parameter whose bound contains both `actor` and `inline`. A default applies to a parameter only when it is not passed on.
+- **Inference extends.** `Game(board = b)` takes `cells` from the written qualifier of `b` (a `Board<elem'actor>` binding, parameter or field, or an explicit `Board<elem'actor>()`), with the usual conflict rule; a construction under an expected `Game<cells'actor>` makes its `board` argument a `Board<elem'actor>`.
+- **Not covered**: a qualifier-generic trait. A plain function takes the concrete instance (`def f(Game<cells'actor> g)`); one that should stay generic over the qualifier declares its own parameter, see the next section.
+
+**Functions and methods generic over a qualifier.** A function or a method can declare a qualifier parameter of its own, so that it works for any instance of a qualifier-generic struct instead of one `Board<elem'actor>`. The parameter is **visible in the signature**: it is declared with `<'q>` (bound and default as on a struct), or introduced by its first occurrence in the signature.
+
+```boring
+int count<'q>(Board<elem'q> b):                  # declared
+    b.cells.len()
+
+int count2(Board<elem'q> b):                     # introduced by its use: no `<'q>` written
+    count(b)                                     # passed on, inferred
+
+def add<'q as 'inline|owned = 'inline>(mut Board<elem'q> b, Point'q p):   # bound, then default
+    b.cells.push(p)
+
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()
+    var int turns = 0
+
+    def merge<'q>(Board<elem'q> other):          # the method's own parameter, distinct from 'cells
+        turns += count(other)
+
+let Board<elem'actor> a = Board()
+count(a)                                         # q = actor, read off the written qualifier of a
+count<q'owned>(Board<elem'owned>())              # explicit
+```
+
+- **One specialised, non-generic copy per instance**, named like a type instance with the chain joined by `_`: `count_actor`, `count_owned`, `count_actor_observed`. There is no generic Rust function (no Rust generic over "plain or locked"), so each call is resolved at compile time.
+- **Declaration is optional, and only in a signature.** A qualifier identifier that appears in the parameters or the return type without being declared, and is not one of the qualifier words (`'shared`, `'actor`, `'guard`, `'inline`, `'owned`, `'new`, `'weak`, `'task`, `'observed`, `'static`, `'atomic`, the GPU and kernel qualifiers, the groups...), is introduced by its first occurrence. A declaration with `<'q ...>` is **required as soon as the parameter needs a bound or a default**. The omission does not extend to a struct, enum, `ext` or trait (there the `<'cells>` is part of the type's contract: `var Board<elem'q> b` in a struct is ``unknown qualifier parameter `q` ``), nor to the body (a `'q` the signature does not introduce is an error). A parameter named like one of the enclosing struct's is an error for a method (`'cells` is the struct's). A parameter introduced implicitly that is written **once** in the whole function, signature and body, relates to nothing and is most likely a typo for another name: a warning (``qualifier parameter `q` is never related to another use``), never an error; declare it with `<'q>` to silence it.
+- **The bound is checked at the declaration.** `<'q as 'inline|owned = 'inline>` follows the struct rules: the default must belong to the bound, and a parameter passed on (`Board<elem'q>`) must have a bound that fits inside the receiving one (``the bound of `q` ... is not within the bound of `elem` in `Board` ``). A call whose evidence leaves the bound is an error naming the source of the evidence.
+- **Calls infer the parameter from written qualifiers only**, in the order of "Inference at construction": explicit arguments (`count<q'owned>(..)`), the expected type against the return type (`let Board<elem'actor> b = fresh()`), the *written* qualifier of the arguments that feed a `T'q` or `Board<elem'q>` slot, then the declared default. Two pieces of evidence that disagree are a conflict (both are named, `write add<q'...> to choose`), a piece outside the bound is a bound error, and when nothing determines the parameter the call reports ``cannot infer qualifier parameter `q` of `count`, write `count<q'...>` ``. A binding whose qualifier is itself inferred, a fresh construction or a bare `Board` is no evidence: there is no inference by usage. A function that also declares type parameters (`def f<T, 'q>(..)`) is called with its generic arguments written out (`f<T = int, q'actor>(1, b)`), type arguments are not inferred.
+- **The parameter is passed on.** Inside the body `Board<elem'q>` names the same parameter (locals, constructions: `Board<elem'q>()`), and a call to another qualifier-generic function either names it, `g<q'q>(b)`, or lets it be inferred from an argument written `Board<elem'q>`. The specialisation cascades through bodies: `count2_actor` calls `count_actor`, and a function that calls itself with its own parameter (polymorphic recursion) or two functions calling each other resolve to the instances reachable from the calls actually written. The set is finite by construction: an argument is a written chain or a parameter passed on whole, never built from another one (`q'q'observed` is rejected), so no instance can grow.
+- **Methods: one instance per method instance, only for the calls that exist.** A method (of a struct, an enum or an `ext` block, generic or not) may declare its own parameter next to the ones of its type. `g.merge(o)` and `g.merge(a)` with `o` and `a` of two different instances create `merge_owned` and `merge_actor`, nothing else; they are attached to every instance of the type that exists (`Game_actor`, and `Game_inline` if the program also builds it). The method's receiver is read from its written type (`self` inside the type itself); a call whose receiver type is not written and whose name is shared with another method must name the parameter: ``write `merge<q'...>` ``. A trait method cannot declare a qualifier parameter (qualifier-generic traits are not covered).
+- **Cross-file.** A function declared in a `use`d file or a `[deps]` project is specialised for the instances every file asks for, emitted once by the file that declares it.
+- **Known limits.** A string interpolation is parsed on its own, without the declarations of the file: an explicit `count<q'owned>(..)` or a `Board<elem'owned>()` written *inside* `"{...}"` is not resolved, bind it to a name first. An error found while inferring a call inside an interpolation is reported at the start of the string.
+- **Targets.** `boring run` ignores qualifiers (same diagnostics, same output); `boring build` specialises; the GPU host emitters share the general emission; `--linux` rejects the declaration, with or without a call (``qualifier parameters ... are not supported on the Rust-for-Linux Linux target``).
+
 **Enums and `ext` blocks.** `enum Slot<'elem as 'new>: Full(Point'elem)` is specialised the same way (`Slot_inline`). `ext Board<'elem>:` adds its methods to **every** instance; `ext Board<elem'actor>:` only to that instance (it is dropped if the program never uses it). Variant constructors name no argument: write `let Slot<elem'inline> s = Slot.Full(p)`, or let a written qualifier on `p` decide (`Slot.Full(p)`, above); match with the unqualified `Full(p):`. A qualified pattern `Slot.Full(p)` is not supported.
 
 **What is checked, and when.** Everything about the *arguments* (unknown label, argument given twice, outside the bound, positional use, bare use, name clashes) is reported while parsing, with a position, so `boring run` and `boring build` give the same diagnostic. The *body* of a qualifier-generic declaration is checked once, unspecialised, where `'elem` is unresolved: checks that depend on the element qualifier are left to rustc for the specialised copy. In particular the "cannot store the `mut` parameter" diagnostic (a lent `mut` parameter pushed into a member) is not raised inside such a declaration, and the `'actor` promotion of such a parameter is not applied to the copies (`infer_actor_params` and `infer_actor_elems` run before specialisation and skip a declaration with qualifier parameters). Declare the parameter `Point'elem p` instead of `mut Point p`, as above: it then follows the instance.

@@ -1,0 +1,30 @@
+# `Game` passes its `'cells` to the `Board` it holds, both declared in a dependency.
+pub struct Point:
+    pub var int x = 0
+
+pub struct Board<'elem = 'inline>:
+    pub var [mut Point'elem] cells = []
+
+    pub def add(Point'elem p):
+        cells.push(p)
+
+    pub req int total():
+        var int sum = 0
+        for i in 0..<cells.len():
+            sum += cells[i].x
+        sum
+
+pub struct Game<'cells = 'inline>:
+    pub var mut Board<elem'cells> board = Board<elem'cells>()
+    pub var int turn = 0
+
+    pub def play(Point'cells p):
+        board.add(p)
+        turn += 1
+
+    pub req int score():
+        board.total()
+
+ext Game<'cells>:
+    pub req int described():
+        self.board.total() + self.turn

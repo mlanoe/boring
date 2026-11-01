@@ -1,0 +1,82 @@
+# Functions and methods generic over a qualifier (docs/design-notes/qualifier-generic-params.md,
+# section 12): `int count<'q>(Board<elem'q> b)` is specialised per qualifier (`count_actor`,
+# `count_owned`), with an explicit declaration, an implicit one (the name written in the signature),
+# a bound and a default, a parameter passed on to another function, and a method that declares a
+# parameter of its own, independent of the one of its struct.
+struct Point:
+    var float x = 0.0
+    var float y = 0.0
+
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+    req int size():
+        cells.len()
+
+# Declared explicitly.
+int count<'q>(Board<elem'q> b):
+    b.size()
+
+# Declared implicitly: `q` is introduced by its first occurrence in the signature, and passed on.
+int count_twice(Board<elem'q> b):
+    count(b) + count<q'q>(b)
+
+# A bound, then a default: only `'inline` and `'owned` boards may grow through this function
+# (the default applies when nothing written says otherwise).
+def add<'q as 'inline|owned = 'inline>(mut Board<elem'q> b, Point'q p):
+    b.cells.push(p)
+
+# No bound: any qualifier, here read from the declared qualifier of both arguments.
+def grow<'q>(mut Board<elem'q> b, Point'q p):
+    b.cells.push(p)
+
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()
+    var int turns = 0
+
+    # A parameter of the method, distinct from `'cells`.
+    def merge<'q>(Board<elem'q> other):
+        turns += count(other)
+
+    def merge_own():
+        turns += count(board)
+
+    req int total():
+        turns
+
+let Board<elem'actor> a = Board()
+let Board<elem'owned> o = Board()
+let Board<elem'inline> i = Board()
+
+# `q` is read from the written qualifier of the argument.
+print "count {count(a)} {count(o)} {count(i)}"
+print "twice {count_twice(a)} {count_twice(o)}"
+
+# Explicit arguments, a construction passed straight in.
+let explicit = count<q'owned>(Board<elem'owned>())
+print "explicit {explicit}"
+
+# From the written qualifier of the board: `q` is `'inline`.
+mut Board<elem'inline> wb = Board()
+add(wb, Point(1.0, 2.0))
+let added = count(wb)
+print "added {added}"
+
+mut Board<elem'actor> ab = Board()
+let Point'actor pa = Point(5.0, 6.0)
+grow(ab, pa)
+print "grown {count(ab)}"
+
+# Nothing written, so the default (`'inline`) applies.
+mut Board ib = Board()
+add(ib, Point(3.0, 4.0))
+print "default {ib.size()}"
+
+# A method with a parameter of its own, called with two different instances.
+mut Game<cells'actor> g = Game()
+g.merge(o)
+g.merge(a)
+g.merge(wb)
+g.merge(ab)
+g.merge_own()
+print "game {g.total()}"

@@ -1,0 +1,27 @@
+# A struct of this file passes its own parameter to a dependency's `Game`, which passes it to the
+# dependency's `Board`: the cascade crosses two files and a project boundary.
+# Registered by tests/run.rs and tests/transpile.rs (`qualifier_enclosing_xfile`).
+use gamelib.game.*
+use local
+
+struct Mine<'q = 'inline>:
+    var mut Game<cells'q> game = Game<cells'q>()
+
+    def play(Point'q p):
+        game.play(p)
+
+    req int score():
+        game.score()
+
+def main():
+    mut Mine<q'actor> m = Mine()
+    let Point'actor p = Point(5)
+    m.play(p)
+    mut Mine m2 = Mine()
+    m2.play(Point(6))
+    print "{m.score()} {m2.score()}"
+    print sibling_total()
+
+    let Board<elem'actor> b = Board()
+    let g = Game(board = b)
+    print "{g.score()} {g.turn}"

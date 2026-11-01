@@ -1,0 +1,15 @@
+# A local declared `Point'owned` passed to a function parameter of the same
+# type must not be wrapped in the managed-mode lock cell a second time.
+struct Point:
+    var float x = 0.0
+
+struct Board:
+    var [mut Point'owned] cells = []
+
+def add_c(mut Board b, Point'owned p):
+    b.cells.push(p)
+
+mut Board ob = Board()
+let Point'owned p1 = Point(1.0)
+add_c(ob, p1)
+print "cells: {ob.cells.len()}"

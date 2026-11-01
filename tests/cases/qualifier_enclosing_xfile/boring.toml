@@ -1,0 +1,7 @@
+[project]
+name = "qualifier_enclosing_xfile"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+gamelib = "../fixtures/qualifier_enclosing_lib"

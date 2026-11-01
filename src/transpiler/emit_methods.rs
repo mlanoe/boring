@@ -7297,6 +7297,7 @@ impl Transpiler {
             global_generic_structs: self.global_generic_structs.clone(),
             global_generic_fns: self.global_generic_fns.clone(),
             global_qual_enums: self.global_qual_enums.clone(),
+            global_qual_exts: self.global_qual_exts.clone(),
             has_qual_generics: self.has_qual_generics,
             pending_generic_call_candidates: self.pending_generic_call_candidates.clone(),
             global_instantiations: self.global_instantiations.clone(),

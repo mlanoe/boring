@@ -115,6 +115,10 @@ pub struct FnDecl {
     /// `None` = untyped throw (transpiler emits `Box<dyn Error>` or equivalent).
     pub throws_ty: Option<Type>,
     pub type_params: Vec<String>,
+    /// Qualifier parameters of `type_params` that were not declared in a `<...>` list but
+    /// introduced by their first occurrence in the signature (`int count(Board<elem'q> b)`),
+    /// with the number of times the name is written in the signature and body.
+    pub implicit_quals: Vec<(String, usize)>,
     pub where_clause: Vec<(String, String)>,
     pub attrs: Vec<Attr>,
     pub line: usize,

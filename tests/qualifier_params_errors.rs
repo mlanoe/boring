@@ -108,3 +108,43 @@ fn default_and_chain_errors_are_the_same_for_run_and_build() {
         check(dir, 100 + i, &format!("{source}\ndef main():\n    print \"x\"\n"), fragment, pos);
     }
 }
+
+// ── Passing a parameter to an enclosing struct (design note, "Passing the parameter to an
+// enclosing struct") ──────────────────────────────────────────────────────────────
+
+const PRELUDE3: &str = "struct Point:\n    var int x = 0\n\nstruct Board<'elem = 'inline>:\n    var [mut Point'elem] cells = []\n\nstruct Cell<'q as 'new>:\n    var Point'q pt = Point()\n\nstruct Capped<'q as 'inline|owned = 'inline>:\n    var Point'q pt = Point()\n\nstruct Game<'cells = 'inline>:\n    var mut Board<elem'cells> board = Board<elem'cells>()\n\nstruct Narrow<'c as 'inline|actor>:\n    var Board<elem'c> board = Board<elem'c>()\n\nstruct Two<'q>:\n    var Board<elem'q> a = Board<elem'q>()\n    var Board<elem'q> b = Board<elem'q>()\n\n";
+
+const USE_CASES3: &[(&str, &str, &str)] = &[
+    // The qualifier written on the argument decides `cells`, and must be in the enclosing bound.
+    ("let Board<elem'shared> b = Board<elem'shared>()\n    let g = Narrow(board = b)",
+        "qualifier `'shared` (declared on `b`) is outside the bound of `c` in `Narrow` (allowed: inline, actor)", "25:13"),
+    ("let Board<elem'actor> a = Board<elem'actor>()\n    let Board<elem'inline> b = Board<elem'inline>()\n    let t = Two(a = a, b = b)",
+        "conflicting qualifiers for `q` of `Two`: `'actor` (declared on `a`) and `'inline` (declared on `b`)", "26:13"),
+    ("let Board<elem'inline> a = Board<elem'inline>()\n    let Game<cells'actor> g = Game(board = a)",
+        "conflicting qualifiers for `cells` of `Game`: `'actor` (the expected type) and `'inline` (declared on `a`)", "25:31"),
+    ("let g = Narrow<c'shared>()", "qualifier `'shared` is outside the bound of `c` in `Narrow` (allowed: inline, actor)", "24:20"),
+];
+
+const DECL_CASES3: &[(&str, &str, &str)] = &[
+    // The passed name must be a parameter of the enclosing declaration.
+    ("struct Bad<'cells>:\n    var Board<elem'cellz> b = Board<elem'cells>()\n", "unknown qualifier parameter `cellz`", "24:20"),
+    ("struct Bad:\n    var Board<elem'cells> b = Board<elem'inline>()\n", "unknown qualifier parameter `cells`", "24:20"),
+    ("enum Bad:\n    Held(Board<elem'cells>)\n", "unknown qualifier parameter `cells`", "24:21"),
+    // The enclosing bound must fit the receiving one, at the declaration.
+    ("struct Bad<'c>:\n    var Cell<q'c> b = Cell<q'c>()\n", "the bound of `c` (allowed: inline, owned, shared, actor, guard) is not within the bound of `q` in `Cell`: `'inline` is outside it (allowed: owned, shared, actor, guard)", "24:14"),
+    ("struct Bad<'c as 'inline|actor>:\n    var Capped<q'c> b = Capped<q'c>()\n", "the bound of `c` (allowed: inline, actor) is not within the bound of `q` in `Capped`: `'actor` is outside it (allowed: inline, owned)", "24:16"),
+    // Propagation is always written: a bare construction takes `Board`'s own default.
+    ("struct Bad<'c>:\n    var Board<elem'c> b = Board()\n", "`Board` here takes its own default for `elem`, not `c` of the enclosing declaration; write `Board<elem'c>` to pass it on", "24:27"),
+];
+
+#[test]
+fn enclosing_parameter_errors_are_the_same_for_run_and_build() {
+    let dir = Path::new("target/tmp/qualifier_params_errors3");
+    std::fs::create_dir_all(dir).expect("scratch dir");
+    for (i, (site, fragment, pos)) in USE_CASES3.iter().enumerate() {
+        check(dir, i, &format!("{PRELUDE3}def main():\n    {site}\n"), fragment, pos);
+    }
+    for (i, (source, fragment, pos)) in DECL_CASES3.iter().enumerate() {
+        check(dir, 100 + i, &format!("{PRELUDE3}{source}\ndef main():\n    print \"x\"\n"), fragment, pos);
+    }
+}

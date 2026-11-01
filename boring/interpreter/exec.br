@@ -1490,7 +1490,7 @@ bool fixed_result_has_literal([Stmt] body, bool tail):
 # `(fixed16_16, int) f(float64 x): (x, 1)`: a tuple-literal result passes when one of the
 # tuple-literal results gives every fixed slot a literal (same leniency as the scalar rule).
 def check_fixed_returned_tuple(Type ty, Value v, [Stmt] body, string fname):
-    mut string? first_err = nil
+    var string? first_err = nil
     var any_ok = false
     for e in fixed_result_exprs(body, true):
         match e.kind:

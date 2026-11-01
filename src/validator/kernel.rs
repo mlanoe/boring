@@ -58,7 +58,7 @@ pub struct KernelValidator {
 const MAX_CHECK_DEPTH: usize = 200;
 
 /// Qualifier parameters need the std transpiler's specialisation pass (`monomorphize.rs`).
-const QUAL_PARAMS_UNSUPPORTED: &str = "qualifier parameters (`struct Board<'elem>`, `Board<elem'actor>`) are not supported on the Rust-for-Linux Linux target — \
+const QUAL_PARAMS_UNSUPPORTED: &str = "qualifier parameters (`struct Board<'elem>`, `Board<elem'actor>`, `def f<'q>(..)`) are not supported on the Rust-for-Linux Linux target — \
      they are specialised by the std transpiler; declare the element qualifier in a plain struct instead (`'inline` or `'owned`)";
 
 impl Default for KernelValidator {
@@ -767,6 +767,9 @@ impl KernelValidator {
 
     fn check_fn(&mut self, fn_decl: &FnDecl) {
         let line = fn_decl.line;
+        // A function or method that declares a qualifier parameter (explicitly or by writing it in
+        // its signature) needs the specialisation pass this target's emitter does not have.
+        if fn_decl.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
 
         // `@inject`/`@provide`/`@singleton` (docs/book.md §33) assume a
         // full std runtime — dynamic dispatch (`Box<dyn Trait>`/`Arc<dyn Trait>`) and a

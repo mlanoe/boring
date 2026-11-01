@@ -295,6 +295,9 @@ impl Transpiler {
                     }
                 }
                 self.line(&format!("{} {}: {} = {};", kw, name, managed_ty, init));
+                // Record the true (qualified) type so a later call site sees an already-wrapped
+                // handle (`arg_is_heap_var`/`expr_already_owned_repr`) and doesn't wrap it again.
+                self.var_types.entry(s.name.clone()).or_insert_with(|| ty.without_mut().clone());
                 // Emit a lock guard so multi-field accesses in a single expression
                 // don't deadlock (two separate .lock().unwrap() on the same Mutex).
                 if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {

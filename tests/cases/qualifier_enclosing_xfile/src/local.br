@@ -1,0 +1,12 @@
+# Same-project sibling of main.br: it asks the dependency's `Game` for the `actor` and the default
+# instance too, so each instance (and the `Board` it cascades to) is requested from several files
+# and emitted once.
+use gamelib.game.*
+
+pub def int sibling_total():
+    mut Game<cells'actor> g = Game()
+    let Point'actor p = Point(40)
+    g.play(p)
+    mut g2 = Game()
+    g2.play(Point(1))
+    g.described() + g2.described()

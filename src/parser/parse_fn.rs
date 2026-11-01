@@ -12,6 +12,7 @@
 use super::*;
 use crate::ast::*;
 use crate::lexer::{TokenKind, RawInterpPart};
+use super::generic_args::QUALIFIER_WORDS;
 
 impl Parser {
     pub(crate) fn parse_fn_decl(&mut self, is_pub: bool, mutating: bool) -> Result<FnDecl, ParseError> {
@@ -67,10 +68,28 @@ impl Parser {
 
         // Return type is optional: `def foo()` defaults to void, `def int foo()` is explicit.
         // Only closures (`let f = (x): x * 2`) may omit parameter types.
+        // Qualifier parameters of this function (`<'q>` or introduced by a use in the signature)
+        // are in scope from the return type on, which is written before the name.
+        let scope_mark = self.qual_scope.len();
+        let enclosing_quals: Vec<String> = self.qual_scope.clone();
+        let sig_start = self.pos;
+        let sig_quals = self.prescan_fn_qual_params(&enclosing_quals);
+        for (n, decl) in &sig_quals {
+            let bound = decl.as_deref().and_then(qual_param_decl).map(|(_, b)| b)
+                .unwrap_or_else(|| OwnerQual::BARE_MEMBERS.iter().map(|q| vec![q.clone()]).collect());
+            self.qual_scope.push(n.clone());
+            self.qual_bounds.insert(n.clone(), bound);
+        }
         let (return_ty, qualifier, name) = self.parse_fn_head()?;
         // Default to void when no return type is specified.
         let return_ty = return_ty.or(Some(Type::Void));
         let (mut type_params, where_clause) = self.parse_type_params();
+        if let Some(shadow) = type_params.iter().find_map(|p| qual_param_name(p).filter(|n| enclosing_quals.iter().any(|e| e == n))) {
+            self.pending_err.get_or_insert(ParseError::Generic {
+                msg: format!("qualifier parameter `{shadow}` of `{name}` has the same name as one of the enclosing declaration; give the function's own parameter another name"),
+                line, col, len: self.span_len(line, col),
+            });
+        }
 
         let params = self.parse_params()?;
         // All parameters in a `def`/`req` declaration must have explicit type annotations.
@@ -139,6 +158,20 @@ impl Parser {
             }
         }
 
+        // A qualifier parameter that is not declared in a `<...>` list is introduced by its first
+        // occurrence in the signature; how many times it is written anywhere in the function is
+        // kept for the "never related to another use" warning.
+        let mut implicit_quals: Vec<(String, usize)> = Vec::new();
+        for (n, decl) in &sig_quals {
+            if decl.is_some() || type_params.iter().any(|p| qual_param_name(p) == Some(n.as_str())) { continue; }
+            type_params.push(format!("^{n}"));
+            let uses = (sig_start..self.pos.saturating_sub(1)).filter(|&k| {
+                matches!(self.tokens.get(k).map(|t| &t.kind), Some(TokenKind::Tick))
+                    && matches!(self.tokens.get(k + 1).map(|t| &t.kind), Some(TokenKind::Ident(w)) if w == n)
+            }).count();
+            implicit_quals.push((n.clone(), uses));
+        }
+        self.qual_scope.truncate(scope_mark);
         Ok(FnDecl {
             name,
             qualifier,
@@ -155,11 +188,53 @@ impl Parser {
             return_mutable,
             is_native,
             type_params,
+            implicit_quals,
             where_clause,
             attrs: vec![],
             line,
             col,
         })
+    }
+
+    /// Names of the qualifier parameters a function signature uses, in first-occurrence order,
+    /// read ahead of the real parse (the return type is written before the `<'q>` list that
+    /// declares them): `(name, Some(declaration))` for a name declared in a `<...>` list (the
+    /// declaration is the encoding of `ast::qual_param_decl`), `(name, None)` for one that is only
+    /// used. A name that is a qualifier word or already in scope (a parameter of the enclosing
+    /// struct) is not a new parameter. Errors are left to the real parse.
+    pub(crate) fn prescan_fn_qual_params(&mut self, in_scope: &[String]) -> Vec<(String, Option<String>)> {
+        let mut out: Vec<(String, Option<String>)> = Vec::new();
+        let mut depth = 0i32;
+        let mut k = self.pos;
+        let saved = self.pos;
+        while k < self.tokens.len() {
+            match &self.tokens[k].kind {
+                TokenKind::Eof => break,
+                TokenKind::Newline if depth <= 0 => break,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                TokenKind::Colon if depth <= 0 => break,
+                TokenKind::Tick => {
+                    let Some(TokenKind::Ident(n)) = self.tokens.get(k + 1).map(|t| t.kind.clone()) else { k += 1; continue };
+                    if QUALIFIER_WORDS.contains(&n.as_str()) || in_scope.iter().any(|e| *e == n) { k += 1; continue; }
+                    let declaring = k > 0 && matches!(self.tokens[k - 1].kind, TokenKind::Lt | TokenKind::Comma);
+                    let decl = if declaring {
+                        self.pos = k;
+                        let d = self.parse_qual_param_decl().ok();
+                        self.pos = saved;
+                        d
+                    } else { None };
+                    match out.iter_mut().find(|(o, _)| *o == n) {
+                        Some(entry) => { if entry.1.is_none() { entry.1 = decl; } }
+                        None => out.push((n, decl)),
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        self.pos = saved;
+        out
     }
 
     pub(crate) fn parse_fn_decl_with_attrs(&mut self, is_pub: bool, mutating: bool, attrs: Vec<Attr>) -> Result<FnDecl, ParseError> {
@@ -246,6 +321,15 @@ impl Parser {
 
     pub(crate) fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
         self.expect(&TokenKind::LParen)?;
+        self.param_type_err = None;
+        let params = self.parse_param_list();
+        match params {
+            Ok(p) => { self.param_type_err = None; Ok(p) }
+            Err(e) => Err(self.param_type_err.take().unwrap_or(e)),
+        }
+    }
+
+    fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
         self.skip_newlines_and_indent(); // allow `(\n    param,` multi-line form
         let mut params = Vec::new();
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
@@ -261,6 +345,13 @@ impl Parser {
     }
 
     pub(crate) fn parse_param(&mut self) -> Result<Param, ParseError> {
+        // A parameter type that fails to parse is retried as a bare name, whose own error (or the
+        // one of the list that follows) then hides the real one; when the type error is about a
+        // generic or qualifier argument (`Board<elem'actor>`), `parse_params` reports that one.
+        self.parse_param_inner()
+    }
+
+    fn parse_param_inner(&mut self) -> Result<Param, ParseError> {
         let line = self.line();
         let col = self.col();
         let rebindable = self.eat(&TokenKind::Var);
@@ -276,7 +367,17 @@ impl Parser {
         // Support `Type[qual][...]? name` (Swift-style) or bare `name` parameter syntax.
         let (name, ty, owned) = if self.is_type_start_before_ident() {
             let saved = self.pos;
-            if let Ok(t) = self.parse_type() {
+            let parsed = self.parse_type();
+            let parsed = match parsed {
+                Err(ParseError::Generic { msg, line, col, len }) => {
+                    if msg.contains("qualifier") || msg.contains("generic") || msg.contains("bound") {
+                        self.param_type_err = Some(ParseError::Generic { msg: msg.clone(), line, col, len });
+                    }
+                    Err(ParseError::Generic { msg, line, col, len })
+                }
+                other => other,
+            };
+            if let Ok(t) = parsed {
                 // Apply ownership qualifier: `Dog'`, `Dog'copy`, etc.
                 let t = self.parse_type_qualifier(t)?;
                 // `var T&` → mutable borrow: absorb `mutable` into the type qualifier.
@@ -655,6 +756,7 @@ impl Parser {
             return_mutable: false,
             is_native,
             type_params: vec![],
+            implicit_quals: vec![],
             where_clause: vec![],
             attrs: vec![],
             line,
@@ -858,6 +960,12 @@ impl Parser {
         let return_mutable = if !shorthand { self.eat(&TokenKind::Mut) } else { false };
         let (return_ty, _qualifier, name) = self.parse_fn_head()?;
         let (type_params, _) = self.parse_type_params();
+        if type_params.iter().any(|p| qual_param_name(p).is_some()) {
+            self.pending_err.get_or_insert(ParseError::Generic {
+                msg: format!("trait method `{name}` cannot declare a qualifier parameter: qualifier-generic traits are not supported"),
+                line, col, len: self.span_len(line, col),
+            });
+        }
         let params = self.parse_params()?;
         // Same requirement as a top-level `def`/`req` — a trait method (abstract
         // signature or default implementation) with an untyped param produces
@@ -889,7 +997,7 @@ impl Parser {
                 name, qualifier: None, params, return_ty, body,
                 is_pub: false, throws, task, stream: false, stream_capacity: None, mutating,
                 return_mutable, is_native: false, throws_ty,
-                type_params, where_clause: vec![], attrs: vec![], line, col,
+                type_params, implicit_quals: vec![], where_clause: vec![], attrs: vec![], line, col,
             }))
         } else {
             self.expect_newline()?;

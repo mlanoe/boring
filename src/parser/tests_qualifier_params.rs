@@ -129,3 +129,121 @@ fn chain_names_round_trip() {
     assert!(OwnerQual::check_chain(&[OwnerQual::Inline, OwnerQual::Weak]).is_err());
     assert!(OwnerQual::check_chain(&[OwnerQual::Weak]).is_err());
 }
+
+// ── A parameter passed on to a contained struct (`Board<elem'cells>`) ──────────────────
+
+const ENCLOSING: &str = "struct Point:\n    var int x = 0\n\n\
+    struct Board<'elem = 'inline>:\n    var [mut Point'elem] cells = []\n\n\
+    struct Cell<'q as 'new>:\n    var Point'q pt = Point()\n\n";
+
+#[test]
+fn a_passed_parameter_is_a_pass_through_argument() {
+    let p = parse(&format!("{ENCLOSING}struct Game<'cells = 'inline>:\n    var Board<elem'cells> board = Board<elem'cells>()\n\ndef main():\n    print \"x\"\n")).unwrap();
+    let field = &struct_named(&p, "Game").fields[0];
+    assert_eq!(field.ty, Type::Generic("Board".into(), vec![Type::QualArg(vec![OwnerQual::Param("cells".into())])]));
+    let Some(Expr { kind: ExprKind::GenericCall(_, args, _), .. }) = &field.default else { panic!("{:?}", field.default) };
+    assert_eq!(args, &vec![Type::QualArg(vec![OwnerQual::Param("cells".into())])]);
+}
+
+#[test]
+fn a_passed_parameter_must_be_declared_and_fit_the_receiving_bound() {
+    let msg = |src: &str| parse(&format!("{ENCLOSING}{src}\ndef main():\n    print \"x\"\n")).err().map(|e| e.msg());
+    assert!(msg("struct G:\n    var Board<elem'cells> b = Board<elem'inline>()\n").unwrap().contains("unknown qualifier parameter `cells`"));
+    assert!(msg("struct G<'c>:\n    var Cell<q'c> b = Cell<q'c>()\n").unwrap().contains("is not within the bound of `q` in `Cell`"));
+    assert!(msg("struct G<'c as 'actor|guard>:\n    var Cell<q'c> b = Cell<q'c>()\n").is_none());
+    assert!(msg("struct G<'c = 'inline>:\n    var Board<elem'c> b = Board<elem'c>()\n").is_none());
+}
+
+// ── Functions and methods (design note, section 12) ─────────────────────────────
+
+fn fn_named<'a>(p: &'a Program, name: &str) -> &'a FnDecl {
+    p.items.iter().find_map(|i| match i { Item::Fn(f) if f.name == name => Some(f), _ => None }).expect("fn")
+}
+
+const FN_PRELUDE: &str = "struct Point:\n    var int x = 0\n\n\
+    struct Board<'elem>:\n    var [mut Point'elem] cells = []\n\n";
+
+#[test]
+fn function_qualifier_parameters_are_declared_with_bounds_and_defaults() {
+    let p = parse(&format!("{FN_PRELUDE}int a<'q>(Board<elem'q> b):\n    1\n\n\
+        def b<'q as 'inline|owned = 'inline>(Board<elem'q> b, Point'q p):\n    pass\n\n\
+        def c<T, 'q>(T t, Board<elem'q> b):\n    pass\n\n\
+        def main():\n    print \"x\"\n")).unwrap();
+    assert_eq!(fn_named(&p, "a").type_params, ["^q"]);
+    assert_eq!(fn_named(&p, "b").type_params, ["^q:inline,owned=inline"]);
+    assert_eq!(fn_named(&p, "c").type_params, ["T", "^q"]);
+    assert!(fn_named(&p, "a").implicit_quals.is_empty());
+}
+
+#[test]
+fn a_qualifier_written_in_a_signature_is_introduced_by_its_first_occurrence() {
+    let p = parse(&format!("{FN_PRELUDE}int one(Board<elem'q> b):\n    1\n\n\
+        Board<elem'r> two(Board<elem'q> b, Point'q p):\n    b\n\n\
+        def main():\n    print \"x\"\n")).unwrap();
+    // One parameter, written once: counted, so the checker can warn about it.
+    assert_eq!(fn_named(&p, "one").type_params, ["^q"]);
+    assert_eq!(fn_named(&p, "one").implicit_quals, [("q".to_string(), 1)]);
+    // Return type first, then the parameters in order of first occurrence; `q` is written twice.
+    assert_eq!(fn_named(&p, "two").type_params, ["^r", "^q"]);
+    assert_eq!(fn_named(&p, "two").implicit_quals, [("r".to_string(), 1), ("q".to_string(), 2)]);
+}
+
+#[test]
+fn a_function_parameter_does_not_leak_into_the_next_declaration() {
+    // `q` is in scope in `a` only: `Point'q` in `b` introduces its own, `main` has none.
+    let p = parse(&format!("{FN_PRELUDE}int a<'q>(Point'q p):\n    1\n\n\
+        int b(Point'q p):\n    2\n\n\
+        def main():\n    print \"x\"\n")).unwrap();
+    assert_eq!(fn_named(&p, "a").type_params, ["^q"]);
+    assert_eq!(fn_named(&p, "b").type_params, ["^q"]);
+    assert!(fn_named(&p, "main").type_params.is_empty());
+    let err = parse(&format!("{FN_PRELUDE}int a<'q>(Point'q p):\n    1\n\nstruct Bad:\n    var Point'q p = Point()\n")).err().expect("error");
+    assert!(err.msg().contains("unknown qualifier parameter `q`"), "{}", err.msg());
+}
+
+#[test]
+fn a_method_declares_its_own_parameter_next_to_the_one_of_its_struct() {
+    let p = parse(&format!("{FN_PRELUDE}struct Game<'cells = 'inline>:\n    var mut Board<elem'cells> board = Board<elem'cells>()\n\n    \
+        def merge<'q>(Board<elem'q> other, Point'cells p):\n        pass\n\n    \
+        def own(Point'cells p):\n        pass\n\n\
+        def main():\n    print \"x\"\n")).unwrap();
+    let game = struct_named(&p, "Game");
+    assert_eq!(game.type_params, ["^cells=inline"]);
+    let merge = game.methods.iter().find(|m| m.name == "merge").unwrap();
+    // `cells` belongs to the struct, only `q` is the method's.
+    assert_eq!(merge.type_params, ["^q"]);
+    assert!(game.methods.iter().find(|m| m.name == "own").unwrap().type_params.is_empty());
+}
+
+#[test]
+fn qualifier_words_are_never_introduced_as_parameters() {
+    let p = parse(&format!("{FN_PRELUDE}def f(Point'actor a, Point'owned b, Point'shared c, Point'inline d, Point'guard e, Point'new g, Point'atomic h):\n    pass\n\n\
+        def main():\n    print \"x\"\n")).unwrap();
+    assert!(fn_named(&p, "f").type_params.is_empty());
+}
+
+#[test]
+fn a_function_cannot_shadow_a_parameter_of_its_struct_and_a_body_cannot_introduce_one() {
+    let err = parse(&format!("{FN_PRELUDE}struct Game<'q>:\n    var Point'q p = Point()\n\n    def m<'q>(Point'q x):\n        pass\n")).err().expect("error");
+    assert!(err.msg().contains("qualifier parameter `q` of `m` has the same name as one of the enclosing declaration"), "{}", err.msg());
+    let err = parse(&format!("{FN_PRELUDE}def f(int x):\n    let Point'r p = Point()\n")).err().expect("error");
+    assert!(err.msg().contains("unknown qualifier parameter `r`"), "{}", err.msg());
+}
+
+#[test]
+fn trait_methods_do_not_take_qualifier_parameters() {
+    let err = parse(&format!("{FN_PRELUDE}trait Sized:\n    req int size<'q>(Board<elem'q> b)\n")).err().expect("error");
+    assert!(err.msg().contains("trait method `size` cannot declare a qualifier parameter"), "{}", err.msg());
+}
+
+#[test]
+fn a_declared_default_or_bound_is_checked_at_the_function() {
+    for (sig, fragment) in [
+        ("def f<'q as 'inline|owned = 'actor>(Point'q p):", "default `'actor` of qualifier parameter `q` is outside its bound"),
+        ("def f<'actor>(int x):", "`'actor` is a qualifier, it cannot name a qualifier parameter"),
+        ("def f<'q as 'weak>(Point'q p):", "`'weak` cannot bound a qualifier parameter"),
+    ] {
+        let err = parse(&format!("{FN_PRELUDE}{sig}\n    pass\n")).err().expect("error");
+        assert!(err.msg().contains(fragment), "{sig}: {}", err.msg());
+    }
+}

@@ -499,6 +499,10 @@ impl Transpiler {
                 // "owner name" is the ext block's extended type name
                 // (`ExtDecl::type_name`) rather than a struct's own `name`.
                 crate::ast::Item::Ext(ext) => {
+                    if monomorphize::is_qual_generic_item(item) {
+                        self.global_qual_exts.push(ext.clone());
+                        self.has_qual_generics = true;
+                    }
                     for m in &ext.methods {
                         let own_type_params: Vec<String> = m.type_params.iter()
                             .filter(|p| !ext.type_params.contains(p))
@@ -533,6 +537,12 @@ impl Transpiler {
             }
         }
         let candidates = monomorphize::collect_candidate_calls(program);
+        // Method calls resolved by qualifier inference (`g.merge(b)`) are reported under the
+        // method's name behind a dot: they feed the method registry, not the free one.
+        let (method_uses, qual_uses): (Vec<_>, Vec<_>) = qual_uses.into_iter().partition(|u| u.name.starts_with('.'));
+        self.pending_method_call_candidates.extend(method_uses.into_iter().map(|u| monomorphize::MethodCandidateCall {
+            method_name: u.name[1..].to_string(), type_args: u.type_args, enclosing_type_params: u.enclosing_type_params,
+        }));
         self.pending_generic_call_candidates.extend(qual_uses);
         self.pending_generic_call_candidates.extend(candidates.free);
         self.pending_method_call_candidates.extend(candidates.methods);
@@ -2034,7 +2044,11 @@ impl Transpiler {
         let prev_managed_param_shadows = std::mem::take(&mut self.managed_param_shadows);
         if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
             for p in &f.params {
-                if self.managed_mutex_vars.contains(&p.name) {
+                // A param moved whole (passed bare as an argument, e.g. `cells.push(p)`)
+                // can't keep a live lock guard: the move would hit E0505.
+                if self.managed_mutex_vars.contains(&p.name)
+                    && !param_moved_in_body(&p.name, &f.body)
+                {
                     let shadow = format!("__{}_mg", p.name);
                     self.line(&format!("let mut {shadow} = {name}.lock().unwrap();",
                         shadow = shadow, name = p.name));
@@ -4180,6 +4194,28 @@ impl Transpiler {
 
 /// Collects every variable name compared against `nil` (`x == nil`, `x != nil`,
 /// `x is nil`, `x is not nil`) anywhere in `stmts`.
+/// True when `name` appears as a bare `Var` argument of a call/method call or as a bare
+/// array/tuple element anywhere in `body` (a by-value use that moves a managed param).
+fn param_moved_in_body(name: &str, body: &[Stmt]) -> bool {
+    let is_var = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if v == name);
+    let mut found = false;
+    crate::ast::walk_stmts(body, &mut |n| {
+        if let crate::ast::WalkNode::Expr(e) = n {
+            match &e.kind {
+                ExprKind::Call(_, args) | ExprKind::MethodCall(_, _, args)
+                | ExprKind::GenericCall(_, _, args) | ExprKind::Pipe(_, _, args) => {
+                    if args.iter().any(|a| is_var(&a.value)) { found = true; }
+                }
+                ExprKind::Array(es) | ExprKind::Tuple(es) => {
+                    if es.iter().any(|x| is_var(x)) { found = true; }
+                }
+                _ => {}
+            }
+        }
+    });
+    found
+}
+
 fn collect_nil_tested_vars(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
     let mut owned = stmts.to_vec();
     let mut on_expr = |e: &mut Expr| {

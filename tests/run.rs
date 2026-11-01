@@ -674,6 +674,7 @@ interp_test!(qualified_member_store);
 interp_test!(managed_owned_member_read);
 interp_test!(managed_owned_member_call);
 interp_test!(actor_collection_element_access);
+interp_test!(managed_owned_param_push);
 interp_test!(mut_elem_alias);
 interp_test!(struct_set_dict_key);
 interp_test!(struct_transient_hash);
@@ -981,6 +982,14 @@ interp_test!(qualifier_infer);
 // the program `transpile_test!(qualifier_defaults_chains)` builds.
 interp_test!(qualifier_defaults_chains);
 
+// Same program as `transpile_test!(qualifier_enclosing)`: the interpreter erases the parameters.
+interp_test!(qualifier_enclosing);
+interp_test!(qualifier_enclosing_chains);
+interp_test!(qualifier_fns);
+interp_test!(qualifier_fns_cascade);
+interp_test!(qualifier_fns_methods);
+interp_test!(managed_owned_local_arg);
+
 // The project `transpile_project_test!(qualifier_defaults_xfile)` builds, run by the interpreter.
 #[test]
 fn qualifier_defaults_xfile() {
@@ -997,6 +1006,42 @@ fn qualifier_defaults_xfile() {
     );
     let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert_eq!(actual.trim_end(), "2 3\n41\n9\n2 1");
+}
+
+// The project `transpile_project_test!(qualifier_enclosing_xfile)` builds, run by the interpreter.
+#[test]
+fn qualifier_enclosing_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/qualifier_enclosing_xfile/src/main.br");
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+    assert!(
+        output.status.success(),
+        "qualifier_enclosing_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "5 6\n43\n0 0");
+}
+
+// The project `transpile_project_test!(qualifier_fns_xfile)` builds, run by the interpreter.
+#[test]
+fn qualifier_fns_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/qualifier_fns_xfile/src/main.br");
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+    assert!(
+        output.status.success(),
+        "qualifier_fns_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "1 2 4\n3 6\n2\n3");
 }
 
 // The project `transpile_project_test!(qualifier_params_xfile)` builds, run by the interpreter.

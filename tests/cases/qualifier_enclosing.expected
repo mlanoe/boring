@@ -1,0 +1,11 @@
+actor 2 turn 1 size 1 actor game 1
+inline 3 turn 1 size 1
+inferred 0 turn 0 size 0 actor game
+chosen 0
+plain 0 0
+fixed 0
+narrow 0
+held 0
+outer 0
+node 0
+ping 0

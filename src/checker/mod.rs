@@ -1578,6 +1578,15 @@ impl Checker {
     // ── Functions ─────────────────────────────────────────────────────────────
 
     fn check_fn(&mut self, f: &FnDecl) {
+        // A qualifier parameter introduced by one occurrence in the signature and used nowhere
+        // else relates to nothing: most likely a typo for another parameter's name.
+        for (name, uses) in &f.implicit_quals {
+            if *uses <= 1 {
+                self.warning(format!(
+                    "qualifier parameter `{name}` is never related to another use: it is written once in `{}` (a typo? declare it with `<'{name}>` to silence this)",
+                    f.name), f.line, f.col);
+            }
+        }
         self.push_scope();
         // `'static` provenance gate — authorized inside `main`'s body only, never a
         // nested fn (including one declared inside `main` via `Stmt::Fn`, which would

@@ -62,6 +62,16 @@ struct QParam {
     default: Option<QualChain>,
 }
 
+/// A function with qualifier parameters (`int count<'q>(Board<elem'q> b)`).
+struct QFn {
+    params: Params,
+    /// One entry per declared generic parameter: `Some` for a qualifier parameter.
+    qparams: Vec<Option<QParam>>,
+    /// Every generic parameter is a qualifier parameter (type arguments are not inferred).
+    pure: bool,
+    ret: Option<Type>,
+}
+
 struct QualDecl {
     /// One entry per declared parameter: `Some((name, bound))` for a qualifier parameter.
     params: Vec<Option<QParam>>,
@@ -74,6 +84,27 @@ struct Decls {
     ctors: HashMap<String, Option<Ctor>>,
     quals: HashMap<String, QualDecl>,
     fns: HashMap<String, Option<Params>>,
+    /// Qualifier-generic functions; `None` when declared more than once.
+    qfns: HashMap<String, Option<QFn>>,
+    /// Methods with a qualifier parameter of their own, by method name: `(owner, method)`.
+    qmethods: HashMap<String, Vec<(String, QFn)>>,
+    /// How many methods (of any owner, generic or not) carry each name: a receiver whose type is
+    /// unknown can only be resolved when the name is unique.
+    method_names: HashMap<String, usize>,
+}
+
+/// The qualifier-generic view of a function or method; `None` when it has no qualifier parameter
+/// or a parameter without a written type (positions would shift).
+fn qfn_of(f: &FnDecl) -> Option<QFn> {
+    if !f.type_params.iter().any(|p| qual_param_name(p).is_some()) { return None; }
+    if !f.params.iter().all(|p| p.ty.is_some()) { return None; }
+    note_qual_decl();
+    let qparams: Vec<_> = f.type_params.iter()
+        .map(|p| qual_param_decl(p).map(|(n, b)| QParam { name: n.to_string(), bound: b, default: qual_param_default(p) }))
+        .collect();
+    let pure = qparams.iter().all(Option::is_some);
+    let params = f.params.iter().filter_map(|p| p.ty.clone().map(|t| (Some(p.name.clone()), t))).collect::<Params>();
+    Some(QFn { params, qparams, pure, ret: f.return_ty.clone() })
 }
 
 fn add_unique<V>(map: &mut HashMap<String, Option<V>>, name: &str, v: V) {
@@ -94,6 +125,7 @@ impl Decls {
                     }).collect();
                     add_unique(&mut self.ctors, &s.name, Ctor::Struct { fields, inits });
                     self.add_qual(&s.name, &s.type_params);
+                    self.add_methods(&s.name, &s.methods);
                 }
                 Item::Enum(e) => {
                     let variants = e.variants.iter().map(|v| {
@@ -101,16 +133,32 @@ impl Decls {
                     }).collect();
                     add_unique(&mut self.ctors, &e.name, Ctor::Enum(variants));
                     self.add_qual(&e.name, &e.type_params);
+                    self.add_methods(&e.name, &e.methods);
                 }
                 Item::Fn(f) => {
                     let params = f.params.iter().filter_map(|p| p.ty.clone().map(|t| (Some(p.name.clone()), t))).collect::<Params>();
                     // A parameter without a type would shift positions: treat as unknown.
                     let complete = f.params.iter().all(|p| p.ty.is_some());
                     if complete { add_unique(&mut self.fns, &f.name, params); } else { self.fns.insert(f.name.clone(), None); }
+                    if f.qualifier.is_none() {
+                        match qfn_of(f) {
+                            Some(qf) => add_unique(&mut self.qfns, &f.name, qf),
+                            None if f.type_params.iter().any(|p| qual_param_name(p).is_some()) => { self.qfns.insert(f.name.clone(), None); }
+                            None => {}
+                        }
+                    }
                 }
+                Item::Ext(e) => self.add_methods(&e.type_name, &e.methods),
                 Item::Mod(m) => self.collect(&m.items),
                 _ => {}
             }
+        }
+    }
+
+    fn add_methods(&mut self, owner: &str, methods: &[FnDecl]) {
+        for m in methods {
+            *self.method_names.entry(m.name.clone()).or_default() += 1;
+            if let Some(qf) = qfn_of(m) { self.qmethods.entry(m.name.clone()).or_default().push((owner.to_string(), qf)); }
         }
     }
 
@@ -215,23 +263,48 @@ fn written_chain(ty: &Type) -> Option<QualChain> {
     Some(chain)
 }
 
+/// Inside a qualifier-generic function body the parameter of the function is itself a written
+/// qualifier: `Point'q` is the chain `[Param(q)]`, to be passed on (`g<r'q>(..)`).
+fn pass_chain(ty: &Type) -> Option<QualChain> {
+    match ty {
+        Type::Qualified(_, OwnerQual::Param(p)) => Some(vec![OwnerQual::Param(p.clone())]),
+        _ => None,
+    }
+}
+
 /// The declared type of an argument against the parameter slot type `decl`.
-fn from_ty(decl: &Type, arg: &Type, desc: &str, out: &mut Evidence) {
+
+/// `from_ty`; with `pass`, a parameter of the enclosing function is evidence too (a call from the
+/// body of a qualifier-generic function to another one).
+fn from_ty_in(decl: &Type, arg: &Type, desc: &str, pass: bool, out: &mut Evidence) {
     let (d, a) = (peel(decl), peel(arg));
     match (d, a) {
         (Type::Qualified(_, OwnerQual::Param(p)), Type::Qualified(..)) => {
-            if let Some(chain) = written_chain(a) { out.push((p.clone(), chain, desc.to_string())); }
+            if let Some(chain) = written_chain(a).or_else(|| pass.then(|| pass_chain(a)).flatten()) { out.push((p.clone(), chain, desc.to_string())); }
         }
-        (Type::Array(di), Type::Array(ai)) | (Type::Set(di), Type::Set(ai)) => from_ty(di, ai, desc, out),
-        (Type::Dict(dk, dv), Type::Dict(ak, av)) => { from_ty(dk, ak, desc, out); from_ty(dv, av, desc, out); }
-        (Type::Tuple(ds), Type::Tuple(az)) => { for (x, y) in ds.iter().zip(az) { from_ty(x, y, desc, out); } }
+        // `Board<elem'cells>` slot (an enclosing parameter passed on) against an argument declared
+        // `Board<elem'actor>`: the written argument gives `cells`.
+        (Type::Generic(db, dargs), Type::Generic(ab, aargs)) if db == ab && dargs.len() == aargs.len() => {
+            for (x, y) in dargs.iter().zip(aargs) {
+                if let (Type::QualArg(dq), Type::QualArg(aq)) = (x, y) {
+                    if let [OwnerQual::Param(p)] = dq.as_slice() {
+                        if pass || !matches!(aq.as_slice(), [OwnerQual::Param(_)]) { out.push((p.clone(), aq.clone(), desc.to_string())); }
+                    }
+                }
+            }
+        }
+        (Type::Array(di), Type::Array(ai)) | (Type::Set(di), Type::Set(ai)) => from_ty_in(di, ai, desc, pass, out),
+        (Type::Dict(dk, dv), Type::Dict(ak, av)) => { from_ty_in(dk, ak, desc, pass, out); from_ty_in(dv, av, desc, pass, out); }
+        (Type::Tuple(ds), Type::Tuple(az)) => { for (x, y) in ds.iter().zip(az) { from_ty_in(x, y, desc, pass, out); } }
         _ => {}
     }
 }
 
 /// An argument expression against the parameter slot type `decl`: a declared name, or a literal
 /// whose elements are declared names.
-fn from_expr(decl: &Type, e: &Expr, declared: &Declared, out: &mut Evidence) {
+fn from_expr(decl: &Type, e: &Expr, declared: &Declared, out: &mut Evidence) { from_expr_in(decl, e, declared, false, out) }
+
+fn from_expr_in(decl: &Type, e: &Expr, declared: &Declared, pass: bool, out: &mut Evidence) {
     let d = peel(decl);
     match &e.kind {
         ExprKind::Var(_) | ExprKind::Field(..) => {
@@ -241,20 +314,28 @@ fn from_expr(decl: &Type, e: &Expr, declared: &Declared, out: &mut Evidence) {
                     ExprKind::Field(_, n) => format!("declared on `self.{n}`"),
                     _ => unreachable!(),
                 };
-                from_ty(d, t, &desc, out);
+                from_ty_in(d, t, &desc, pass, out);
+            }
+        }
+        // `Board<elem'actor>()` passed where a `Board<elem'cells>` is expected.
+        ExprKind::GenericCall(callee, targs, _) => {
+            if let (ExprKind::Var(b), Type::Generic(db, dargs)) = (&callee.kind, d) {
+                if b == db && dargs.len() == targs.len() {
+                    from_ty_in(d, &Type::Generic(b.clone(), targs.clone()), &format!("written on the `{b}<..>` argument"), pass, out);
+                }
             }
         }
         ExprKind::Array(items) | ExprKind::Set(items) => match d {
-            Type::Array(di) | Type::Set(di) => { for it in items { from_expr(di, it, declared, out); } }
+            Type::Array(di) | Type::Set(di) => { for it in items { from_expr_in(di, it, declared, pass, out); } }
             _ => {}
         },
         ExprKind::Dict(pairs) => {
             if let Type::Dict(dk, dv) = d {
-                for (k, v) in pairs { from_expr(dk, k, declared, out); from_expr(dv, v, declared, out); }
+                for (k, v) in pairs { from_expr_in(dk, k, declared, pass, out); from_expr_in(dv, v, declared, pass, out); }
             }
         }
         ExprKind::Tuple(items) => {
-            if let Type::Tuple(ds) = d { for (x, it) in ds.iter().zip(items) { from_expr(x, it, declared, out); } }
+            if let Type::Tuple(ds) = d { for (x, it) in ds.iter().zip(items) { from_expr_in(x, it, declared, pass, out); } }
         }
         _ => {}
     }
@@ -342,6 +423,8 @@ struct Out {
 struct Ctx<'a> {
     decls: &'a Decls,
     out: RefCell<Out>,
+    /// The struct, enum or `ext` target whose methods are being walked (the type of `self`).
+    owner: RefCell<Option<String>>,
 }
 
 fn qual_args_of(ty: &Type) -> Option<(&str, &[Type])> {
@@ -350,6 +433,44 @@ fn qual_args_of(ty: &Type) -> Option<(&str, &[Type])> {
     match t {
         Type::Generic(base, args) if args.iter().any(|a| matches!(a, Type::QualArg(_))) => Some((base, args)),
         _ => None,
+    }
+}
+
+/// `elem'cells` of a declaration of `'cells`: an enclosing parameter passed on, not yet resolved.
+fn is_pass_through(t: &Type) -> bool {
+    matches!(t, Type::QualArg(q) if matches!(q.as_slice(), [OwnerQual::Param(_)]))
+}
+
+/// The substitution `parameter name -> its argument` of a resolved instance of `qd`.
+fn inst_subst(qd: &QualDecl, args: &[Type]) -> HashMap<String, QualChain> {
+    qd.params.iter().zip(args).filter_map(|(p, a)| match (p, a) {
+        (Some(p), Type::QualArg(q)) => Some((p.name.clone(), q.clone())),
+        _ => None,
+    }).collect()
+}
+
+/// `t` with the parameters of the enclosing declaration replaced by `subst` (a pass-through
+/// argument `elem'cells` and a use `Point'cells`).
+fn subst_pass(t: &Type, subst: &HashMap<String, QualChain>) -> Type {
+    let go = |x: &Type| Box::new(subst_pass(x, subst));
+    match t {
+        Type::QualArg(q) => match q.as_slice() {
+            [OwnerQual::Param(p)] => subst.get(p).map_or_else(|| t.clone(), |c| Type::QualArg(c.clone())),
+            _ => t.clone(),
+        },
+        Type::Qualified(inner, OwnerQual::Param(p)) => match subst.get(p) {
+            Some(c) => OwnerQual::apply_chain(subst_pass(inner, subst), c),
+            None => t.clone(),
+        },
+        Type::Qualified(inner, q) => Type::Qualified(go(inner), q.clone()),
+        Type::Generic(n, args) => Type::Generic(n.clone(), args.iter().map(|a| subst_pass(a, subst)).collect()),
+        Type::Array(i) => Type::Array(go(i)),
+        Type::Set(i) => Type::Set(go(i)),
+        Type::Optional(i) => Type::Optional(go(i)),
+        Type::Mut(i) => Type::Mut(go(i)),
+        Type::Dict(k, v) => Type::Dict(go(k), go(v)),
+        Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| subst_pass(x, subst)).collect()),
+        _ => t.clone(),
     }
 }
 
@@ -369,6 +490,7 @@ impl Ctx<'_> {
                 }
             }
             _ => {
+                self.resolve_fn_call(e, Some(expected), declared);
                 if let Some((base, args)) = qual_args_of(expected) {
                     self.resolve_site(e, Some((base, args)), declared);
                 } else {
@@ -387,11 +509,42 @@ impl Ctx<'_> {
         if let Some((eb, _)) = expected { if eb != base { return; } }
         let expected_args = expected.map(|(_, a)| a);
         let base = base.to_string();
+        // The expected type passes an enclosing parameter on (`Board<elem'cells>` in a field of
+        // `Game<'cells>`): a bare construction never takes it implicitly, it is written out.
+        if let Some(a) = expected_args {
+            if let Some(i) = a.iter().position(is_pass_through) {
+                let label = qd.params.get(i).and_then(|p| p.as_ref()).map_or("?", |p| p.name.as_str());
+                let Some(Type::QualArg(q)) = a.get(i) else { return };
+                let OwnerQual::Param(p) = &q[0] else { return };
+                self.out.borrow_mut().diags.insert(pos, format!(
+                    "`{base}` here takes its own default for `{label}`, not `{p}` of the enclosing declaration; write `{base}<{label}'{p}>` to pass it on"));
+                return;
+            }
+        }
         match self.infer(&base, qd, &shape, expected_args, declared) {
             Ok(Some(args)) => {
                 if let Some(m) = crate::transpiler::monomorphize::mangled_name(&base, &args) {
+                    // What each argument is expected to be, now that the instance is known
+                    // (`Game<cells'actor>` makes `board` a `Board<elem'actor>`).
+                    let subst = inst_subst(qd, &args);
+                    let pushed: Vec<(usize, Type)> = match ctor_params(self.decls, &base, &shape) {
+                        Some(ps) => {
+                            let call_args = shape_args(&shape);
+                            bind_args(call_args, ps).into_iter()
+                                .filter_map(|(a, t)| call_args.iter().position(|x| std::ptr::eq(x, a)).map(|i| (i, subst_pass(t, &subst))))
+                                .collect()
+                        }
+                        None => Vec::new(),
+                    };
                     crate::transpiler::monomorphize::rename_ctor(e, &base, &m);
                     self.out.borrow_mut().resolved.push((base, args));
+                    let call_args = match &mut e.kind {
+                        ExprKind::Call(_, a) | ExprKind::MethodCall(_, _, a) => Some(a),
+                        _ => None,
+                    };
+                    if let Some(call_args) = call_args {
+                        for (i, t) in pushed { if let Some(a) = call_args.get_mut(i) { self.resolve_expected(&mut a.value, &t, declared); } }
+                    }
                 }
             }
             Ok(None) => {}
@@ -473,7 +626,24 @@ impl Ctx<'_> {
             ExprKind::Assign(l, r) => {
                 if let Some(t) = declared.of_expr(l) { let t = t.clone(); self.resolve_expected(r, &t, declared); }
             }
+            // `Game<cells'actor>(board = Board())`: the written arguments fix the instance, so the
+            // arguments take the parameter types of that instance.
+            ExprKind::GenericCall(callee, targs, args) => {
+                if matches!(&callee.kind, ExprKind::Field(..)) { self.push_fn_arg_types(e, declared); return; }
+                let ExprKind::Var(n) = &callee.kind else { return };
+                if self.decls.qfns.contains_key(n.as_str()) { self.push_fn_arg_types(e, declared); return; }
+                let Some(qd) = self.decls.quals.get(n.as_str()) else { return };
+                let subst = inst_subst(qd, targs);
+                if subst.is_empty() { return; }
+                let Some(ps) = ctor_params(self.decls, n, &Shape::Struct(args)) else { return };
+                let pushed: Vec<(usize, Type)> = bind_args(args, ps).into_iter()
+                    .filter_map(|(a, t)| args.iter().position(|x| std::ptr::eq(x, a)).map(|i| (i, subst_pass(t, &subst))))
+                    .collect();
+                for (i, t) in pushed { if let Some(a) = args.get_mut(i) { self.resolve_expected(&mut a.value, &t, declared); } }
+            }
             ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+                self.resolve_fn_call(e, None, declared);
+                if matches!(e.kind, ExprKind::GenericCall(..)) { return; }
                 // Arguments take the parameter types of the callee (a function, a struct or an
                 // enum variant), then the call itself may be a construction.
                 let bound: Vec<(usize, Type)> = {
@@ -508,6 +678,143 @@ impl Ctx<'_> {
         w.stmts(body);
     }
 
+    /// The arguments of a call to the qualifier-generic `qf` (a function or a method): resolved from
+    /// the evidence (the expected type against the return type, then the written qualifiers of the
+    /// arguments, then the declared defaults). Evidence that disagrees or leaves the bound, or a
+    /// parameter nothing determines, is reported at `pos` and gives `None`.
+    fn qcall_args(&self, qf: &QFn, name: &str, pos: (usize, usize), args: &[Arg], expected: Option<&Type>, declared: &Declared) -> Option<Vec<Type>> {
+        let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_else(|| match c.as_slice() {
+            [OwnerQual::Param(p)] => p.clone(),
+            _ => "?".into(),
+        });
+        let fail = |msg: String| { self.out.borrow_mut().diags.insert(pos, msg); None };
+        if !qf.pure {
+            return fail(format!("`{name}` also declares type parameters, which are not inferred: write its generic arguments, `{name}<...>`"));
+        }
+        let mut ev = Evidence::new();
+        if let (Some(t), Some(ret)) = (expected, &qf.ret) { from_ty_in(ret, t, "the expected type", true, &mut ev); }
+        for (arg, ty) in bind_args(args, &qf.params) { from_expr_in(ty, &arg.value, declared, true, &mut ev); }
+        let mut targs: Vec<Type> = Vec::with_capacity(qf.qparams.len());
+        let mut missing: Vec<&str> = Vec::new();
+        for p in &qf.qparams {
+            let Some(QParam { name: q, bound, default }) = p else { missing.push("?"); continue };
+            let mut chosen: Option<(QualChain, String)> = None;
+            for (_, c, desc) in ev.iter().filter(|(n, _, _)| n == q) {
+                match &chosen {
+                    None => chosen = Some((c.clone(), desc.clone())),
+                    Some((x, xdesc)) if x != c => {
+                        return fail(format!(
+                            "conflicting qualifiers for `{q}` of `{name}`: `'{}` ({xdesc}) and `'{}` ({desc}); write `{name}<{q}'...>` to choose",
+                            shown(x), shown(c)));
+                    }
+                    _ => {}
+                }
+            }
+            match chosen {
+                Some((c, desc)) => {
+                    // A parameter of the enclosing function is checked where it is declared.
+                    if !matches!(c.as_slice(), [OwnerQual::Param(_)]) && !bound.contains(&c) {
+                        let allowed: Vec<String> = bound.iter().map(&shown).collect();
+                        return fail(format!(
+                            "qualifier `'{}` ({desc}) is outside the bound of `{q}` in `{name}` (allowed: {})",
+                            shown(&c), allowed.join(", ")));
+                    }
+                    targs.push(Type::QualArg(c));
+                }
+                None => match default {
+                    Some(d) => targs.push(Type::QualArg(d.clone())),
+                    None => missing.push(q.as_str()),
+                },
+            }
+        }
+        if !missing.is_empty() {
+            let (plural, quoted, write) = (
+                if missing.len() == 1 { "" } else { "s" },
+                missing.iter().map(|q| format!("`{q}`")).collect::<Vec<_>>().join(", "),
+                qf.qparams.iter().flatten().map(|p| format!("{}'...", p.name)).collect::<Vec<_>>().join(", "),
+            );
+            return fail(format!("cannot infer qualifier parameter{plural} {quoted} of `{name}`, write `{name}<{write}>`"));
+        }
+        Some(targs)
+    }
+
+    /// A call `count(a)` to a qualifier-generic function becomes `count<q'actor>(a)`; so does a
+    /// method call `g.merge(b)` to a method that declares a parameter of its own.
+    fn resolve_fn_call(&self, e: &mut Expr, expected: Option<&Type>, declared: &Declared) {
+        match &e.kind {
+            ExprKind::Call(callee, args) => {
+                let ExprKind::Var(name) = &callee.kind else { return };
+                let Some(Some(qf)) = self.decls.qfns.get(name.as_str()) else { return };
+                let Some(targs) = self.qcall_args(qf, name, (callee.line, callee.col), args, expected, declared) else { return };
+                let name = name.clone();
+                let ExprKind::Call(callee, args) = std::mem::replace(&mut e.kind, ExprKind::Void) else { return };
+                if targs.iter().all(|t| !is_pass_through(t)) { self.out.borrow_mut().resolved.push((name, targs.clone())); }
+                e.kind = ExprKind::GenericCall(callee, targs, args);
+                self.push_fn_arg_types(e, declared);
+            }
+            ExprKind::MethodCall(recv, m, args) => {
+                let Some(cands) = self.decls.qmethods.get(m.as_str()) else { return };
+                // The span of a method call starts at its dot: the name follows it.
+                let pos = (e.line, e.col + 1);
+                let recv_base = self.receiver_base(recv, declared);
+                let qf = match &recv_base {
+                    Some(b) => match cands.iter().find(|(o, _)| o == b) { Some((_, qf)) => qf, None => return },
+                    None if cands.len() == 1 && self.decls.method_names.get(m.as_str()) == Some(&1) => &cands[0].1,
+                    None => {
+                        self.out.borrow_mut().diags.insert(pos, format!(
+                            "cannot infer qualifier parameter of method `{m}`: the type of its receiver is not written, write `{m}<q'...>`"));
+                        return;
+                    }
+                };
+                let Some(targs) = self.qcall_args(qf, m, pos, args, expected, declared) else { return };
+                let m = m.clone();
+                let ExprKind::MethodCall(recv, _, args) = std::mem::replace(&mut e.kind, ExprKind::Void) else { return };
+                if targs.iter().all(|t| !is_pass_through(t)) { self.out.borrow_mut().resolved.push((format!(".{m}"), targs.clone())); }
+                let callee = Expr { kind: ExprKind::Field(recv, m), line: e.line, col: e.col, len: e.len };
+                e.kind = ExprKind::GenericCall(Box::new(callee), targs, args);
+                self.push_fn_arg_types(e, declared);
+            }
+            _ => {}
+        }
+    }
+
+    /// The declaration name of the type of a method receiver, when it is written.
+    fn receiver_base(&self, recv: &Expr, declared: &Declared) -> Option<String> {
+        if matches!(&recv.kind, ExprKind::Var(n) if n == "self") { return self.owner.borrow().clone(); }
+        let mut t = declared.of_expr(recv)?;
+        while let Type::Mut(i) | Type::Qualified(i, _) | Type::Optional(i) = t { t = i; }
+        match t {
+            Type::Generic(b, _) | Type::Named(b) => Some(b.clone()),
+            _ => None,
+        }
+    }
+
+    /// `f<q'actor>(Board())`: the arguments take the parameter types of that instance.
+    fn push_fn_arg_types(&self, e: &mut Expr, declared: &Declared) {
+        let ExprKind::GenericCall(callee, targs, args) = &mut e.kind else { return };
+        let qf: &QFn = match &callee.kind {
+            ExprKind::Var(n) => match self.decls.qfns.get(n.as_str()) { Some(Some(q)) => q, _ => return },
+            ExprKind::Field(recv, m) => {
+                let Some(cands) = self.decls.qmethods.get(m.as_str()) else { return };
+                match self.receiver_base(recv, declared) {
+                    Some(b) => match cands.iter().find(|(o, _)| *o == b) { Some((_, q)) => q, None => return },
+                    None if cands.len() == 1 => &cands[0].1,
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        let subst: HashMap<String, QualChain> = qf.qparams.iter().zip(targs.iter()).filter_map(|(p, a)| match (p, a) {
+            (Some(p), Type::QualArg(q)) => Some((p.name.clone(), q.clone())),
+            _ => None,
+        }).collect();
+        if subst.is_empty() { return; }
+        let pushed: Vec<(usize, Type)> = bind_args(args, &qf.params).into_iter()
+            .filter_map(|(a, t)| args.iter().position(|x| std::ptr::eq(x, a)).map(|i| (i, subst_pass(t, &subst))))
+            .collect();
+        for (i, t) in pushed { if let Some(a) = args.get_mut(i) { self.resolve_expected(&mut a.value, &t, declared); } }
+    }
+
     fn callee_params(&self, name: &str, args: &[Arg]) -> Option<&Params> {
         match self.decls.fns.get(name) {
             Some(Some(p)) => Some(p),
@@ -538,7 +845,9 @@ impl Ctx<'_> {
                     for f in &mut s.fields {
                         if let Some(d) = &mut f.default { let t = f.ty.clone(); self.resolve_expected(d, &t, globals); }
                     }
+                    *self.owner.borrow_mut() = Some(s.name.clone());
                     for m in &mut s.methods { self.run_fn(m, &fields, globals); }
+                    *self.owner.borrow_mut() = None;
                     for i in &mut s.inits {
                         let mut declared = globals.clone();
                         for (n, t) in &fields { declared.declare(n, Some(t)); }
@@ -550,14 +859,27 @@ impl Ctx<'_> {
                         self.run_body(&declared, None, &mut i.body);
                     }
                 }
-                Item::Enum(e) => { for m in &mut e.methods { self.run_fn(m, &[], globals); } }
+                Item::Enum(e) => {
+                    *self.owner.borrow_mut() = Some(e.name.clone());
+                    for m in &mut e.methods { self.run_fn(m, &[], globals); }
+                    *self.owner.borrow_mut() = None;
+                }
                 Item::Ext(e) => {
                     let fields = self.decls.struct_fields(&e.type_name);
+                    *self.owner.borrow_mut() = Some(e.type_name.clone());
                     for m in &mut e.methods { self.run_fn(m, &fields, globals); }
+                    *self.owner.borrow_mut() = None;
                 }
                 Item::Mod(m) => self.run_items(&mut m.items, globals),
                 Item::Let(l) => {
                     if let (Some(t), Some(v)) = (&l.ty, &mut l.value) { self.resolve_expected(v, t, globals); }
+                    // The initialiser is an ordinary expression too: calls inside it are resolved.
+                    if let Some(v) = l.value.take() {
+                        let mut stmt = [Stmt::Expr(v)];
+                        self.run_body(globals, None, &mut stmt);
+                        let [Stmt::Expr(v)] = stmt else { unreachable!() };
+                        l.value = Some(v);
+                    }
                 }
                 Item::Stmt(s) => self.run_body(globals, None, std::slice::from_mut(s)),
                 _ => {}
@@ -581,13 +903,13 @@ fn shape_args_of(e: &Expr) -> Option<&[Arg]> {
 /// untouched.
 pub(crate) fn infer_qual_ctors(program: &mut Program) -> (Resolved, Diags) {
     let decls = Decls::of_program(program);
-    if decls.quals.is_empty() { return (Vec::new(), Diags::new()); }
+    if decls.quals.is_empty() && decls.qfns.is_empty() { return (Vec::new(), Diags::new()); }
     // Top-level bindings are visible from every function.
     let mut globals = Declared::default();
     for it in &program.items {
         if let Item::Let(l) = it { globals.declare(&l.name, l.ty.as_ref()); }
     }
-    let ctx = Ctx { decls: &decls, out: RefCell::new(Out::default()) };
+    let ctx = Ctx { decls: &decls, out: RefCell::new(Out::default()), owner: RefCell::new(None) };
     ctx.run_items(&mut program.items, &globals);
     let out = ctx.out.into_inner();
     (out.resolved, out.diags)

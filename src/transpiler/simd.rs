@@ -136,7 +136,9 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
                             .params
                             .iter()
                             .map(|param| match &param.ty {
-                                Some(t) if is_array(t) => if matches!(t, Type::Qualified(..)) { 2 } else { 1 },
+                                // A plain (non-`mut`) qualified array is borrowed like an unqualified one; the free
+                                // function signature is `&Vec<T>` either way, never an owned `Vec<T>`.
+                                Some(t) if is_array(t) => if param.mutable && matches!(t.without_mut(), Type::Qualified(..)) { 2 } else { 1 },
                                 _ => 0,
                             })
                             .collect(),

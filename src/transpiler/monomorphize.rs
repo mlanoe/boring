@@ -117,6 +117,7 @@ pub(crate) fn is_qual_generic_item(item: &Item) -> bool {
         Item::Struct(s) => has_qual_params(&s.type_params),
         Item::Enum(e) => has_qual_params(&e.type_params),
         Item::Ext(e) => has_qual_params(&e.type_params) || has_qual_arg(&e.type_args),
+        Item::Fn(f) => has_qual_params(&f.type_params),
         _ => false,
     }
 }
@@ -271,6 +272,15 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
             _ => Type::Qualified(Box::new(substitute_type(inner, subst)), OwnerQual::Param(p.clone())),
         },
         Type::Qualified(inner, q) => Type::Qualified(Box::new(substitute_type(inner, subst)), q.clone()),
+        // `Board<elem'cells>` inside a declaration of `'cells`: the parameter is passed on, so the
+        // argument becomes whatever the enclosing instance resolved `cells` to.
+        Type::QualArg(q) => match q.as_slice() {
+            [OwnerQual::Param(p)] => match subst.get(&format!("^{p}")) {
+                Some(arg @ Type::QualArg(_)) => arg.clone(),
+                _ => ty.clone(),
+            },
+            _ => ty.clone(),
+        },
         Type::Dyn(inner) => Type::Dyn(Box::new(substitute_type(inner, subst))),
         Type::Impl(inner) => Type::Impl(Box::new(substitute_type(inner, subst))),
         Type::Generic(name, args) => {
@@ -701,6 +711,9 @@ pub(crate) fn substitute_struct_decl(decl: &StructDecl, subst: &HashMap<String, 
     out.name = new_name.to_string();
     out.type_params = Vec::new();
     out.where_clause = Vec::new();
+    // A method with a qualifier parameter of its own has no generic-Rust form: only its
+    // specialised instances (appended by `monomorphize_program`) stay.
+    out.methods.retain(|m| !has_qual_params(&m.type_params));
     substitute_types_in_struct_body(&mut out, subst);
     out
 }
@@ -710,6 +723,7 @@ pub(crate) fn substitute_enum_decl(decl: &EnumDecl, subst: &HashMap<String, Type
     let mut out = decl.clone();
     out.name = new_name.to_string();
     out.type_params = Vec::new();
+    out.methods.retain(|m| !has_qual_params(&m.type_params));
     substitute_types_in_enum_body(&mut out, subst);
     out
 }
@@ -722,6 +736,7 @@ pub(crate) fn substitute_ext_decl(decl: &ExtDecl, subst: &HashMap<String, Type>,
     out.type_params = Vec::new();
     out.type_args = Vec::new();
     out.where_clause = Vec::new();
+    out.methods.retain(|m| !has_qual_params(&m.type_params));
     for m in &mut out.methods { substitute_types_in_fn_body(m, subst); }
     for conv in &mut out.conversions {
         conv.ty = substitute_type(&conv.ty, subst);
@@ -760,10 +775,21 @@ pub(crate) fn specialized_free_fn_decls(
         for inst in insts {
             if inst.is_struct || inst.is_enum { continue; }
             let subst = build_type_subst(&decl.type_params, &inst.type_args);
-            out.push(substitute_fn_decl(decl, &subst, &inst.mangled));
+            let mut spec = substitute_fn_decl(decl, &subst, &inst.mangled);
+            // A qualifier-generic function has no generic-Rust form: its signature names the
+            // specialised types (`Board_actor`) the emitted code uses.
+            if has_qual_params(&decl.type_params) { rewrite_qual_types_in_fn(&mut spec); }
+            out.push(spec);
         }
     }
     out
+}
+
+/// Rewrites the qualifier-argument uses of `f` (`Board<elem'actor>`) to their specialised names.
+fn rewrite_qual_types_in_fn(f: &mut FnDecl) {
+    QUAL_REWRITE.with(|c| c.set(true));
+    substitute_types_in_fn_body(f, &HashMap::new());
+    QUAL_REWRITE.with(|c| c.set(false));
 }
 
 // ─── Mangled naming ─────────────────────────────────────────────────────────────
@@ -1201,12 +1227,17 @@ fn record_candidate(callee: &Expr, type_args: &[Type], enclosing: &[String], ctx
 /// may reference a decl from another file.
 pub(crate) fn build_instantiation_map(
     candidates: &[CandidateCall],
+    method_candidates: &[MethodCandidateCall],
     generic_structs: &HashMap<String, StructDecl>,
     generic_fns: &HashMap<String, FnDecl>,
     qual_enums: &HashMap<String, EnumDecl>,
-) -> InstantiationMap {
+    qual_exts: &[ExtDecl],
+    generic_methods: &GenericMethodMap,
+) -> (InstantiationMap, MethodInstantiationMap) {
     let mut map = InstantiationMap::new();
-    for cand in candidates {
+    let mut method_map = MethodInstantiationMap::new();
+    // Resolves one candidate against the registries; `Some` when it is a new instance.
+    let add = |map: &mut InstantiationMap, cand: &CandidateCall| -> Option<Instantiation> {
         let (is_struct, type_params) = if let Some(s) = generic_structs.get(cand.name.as_str()) {
             (true, &s.type_params)
         } else if let Some(f) = generic_fns.get(cand.name.as_str()) {
@@ -1214,32 +1245,164 @@ pub(crate) fn build_instantiation_map(
         } else if let Some(e) = qual_enums.get(cand.name.as_str()) {
             (false, &e.type_params)
         } else {
-            continue;
+            return None;
         };
         let is_enum = qual_enums.contains_key(cand.name.as_str()) && !is_struct
             && !generic_fns.contains_key(cand.name.as_str());
-        if !cand.type_args.iter().all(|t| is_concrete_type(t, &cand.enclosing_type_params)) { continue; }
-        let Some(mangled) = mangled_name(&cand.name, &cand.type_args) else { continue; };
+        if !cand.type_args.iter().all(|t| is_concrete_type(t, &cand.enclosing_type_params)) { return None; }
+        let mangled = mangled_name(&cand.name, &cand.type_args)?;
         // Sanity: the number of ordinary (non-const-generic) type params must match
         // the number of concrete type args supplied, or the zip in `build_type_subst`
         // would silently under/over-substitute. Skip (don't specialize) on a
         // mismatch rather than emit a broken clone.
-        if ordinary_type_param_names(type_params).len() != cand.type_args.len() { continue; }
-        instantiation_map_insert(&mut map, Instantiation {
+        if ordinary_type_param_names(type_params).len() != cand.type_args.len() { return None; }
+        if instantiation_map_contains(map, &cand.name, &mangled) { return None; }
+        let inst = Instantiation {
             base_name: cand.name.clone(),
             type_args: cand.type_args.clone(),
             mangled,
             is_struct,
             is_enum,
-        });
+        };
+        instantiation_map_insert(map, inst.clone());
+        Some(inst)
+    };
+    // The method-call analogue: `Some` when the call names a new instance of a generic method.
+    let add_method = |map: &mut MethodInstantiationMap, cand: &MethodCandidateCall| -> Option<MethodInstantiation> {
+        let inst = method_instance_of(cand, generic_methods)?;
+        if method_instantiation_map_contains(map, &cand.method_name, &inst.mangled) { return None; }
+        method_instantiation_map_insert(map, &cand.method_name, inst.clone());
+        Some(inst)
+    };
+    enum Work { Decl(Instantiation), Method(String, MethodInstantiation) }
+    let mut work: Vec<Work> = Vec::new();
+    for cand in candidates {
+        if let Some(inst) = add(&mut map, cand) { work.push(Work::Decl(inst)); }
     }
-    map
+    for cand in method_candidates {
+        if let Some(inst) = add_method(&mut method_map, cand) { work.push(Work::Method(cand.method_name.clone(), inst)); }
+    }
+    // Closure over the instances a specialisation reaches: `struct Game<'cells>` holding
+    // `Board<elem'cells>` makes `Game_actor` also a use of `Board_actor`; a qualifier-generic
+    // function or method whose specialised body names `Board<elem'actor>` or calls `g<q'actor>(..)`
+    // reaches those too. Only a parameter passed on as a whole is ever substituted (an argument is a
+    // written chain or a pass-through, never built from other arguments), so the set of reachable
+    // `(declaration, chain)` pairs is finite and the worklist, which drops every instance it has
+    // already seen, always ends; this is also what makes a struct that holds itself through
+    // `Node<q'q>?`, two mutually recursive structs or a polymorphically recursive function resolve
+    // instead of instantiating forever.
+    while let Some(item) = work.pop() {
+        let mut found: Vec<CandidateCall> = Vec::new();
+        let mut found_methods: Vec<MethodCandidateCall> = Vec::new();
+        let harvest = |item: Item, found: &mut Vec<CandidateCall>, found_methods: &mut Vec<MethodCandidateCall>| {
+            let calls = collect_candidate_calls(&Program { items: vec![item] });
+            found.extend(calls.free);
+            found_methods.extend(calls.methods);
+        };
+        match item {
+            Work::Method(name, inst) => {
+                let Some((_, _, own, decl)) = generic_methods.get(&name).and_then(|o| o.first()) else { continue };
+                if !has_qual_params(own) { continue; }
+                let subst = build_type_subst(own, &inst.type_args);
+                let mut spec = None;
+                found.extend(collect_specialisation_uses(|| { spec = Some(substitute_fn_decl(decl, &subst, &inst.mangled)); }));
+                if let Some(spec) = spec {
+                    let mut ctx = CollectCtx { candidates: Vec::new(), method_candidates: Vec::new() };
+                    collect_in_fn(&spec, &[], &mut ctx);
+                    found.extend(ctx.candidates);
+                    found_methods.extend(ctx.method_candidates);
+                }
+            }
+            Work::Decl(inst) if !(inst.is_struct || inst.is_enum) => {
+                let Some(f) = generic_fns.get(&inst.base_name).filter(|f| has_qual_params(&f.type_params)) else { continue };
+                let subst = build_type_subst(&f.type_params, &inst.type_args);
+                let mut spec = None;
+                found.extend(collect_specialisation_uses(|| { spec = Some(substitute_fn_decl(f, &subst, &inst.mangled)); }));
+                if let Some(spec) = spec { harvest(Item::Fn(spec), &mut found, &mut found_methods); }
+            }
+            Work::Decl(inst) => {
+                let decl_params: Option<&Vec<String>> = if inst.is_struct {
+                    generic_structs.get(&inst.base_name).map(|s| &s.type_params)
+                } else {
+                    qual_enums.get(&inst.base_name).map(|e| &e.type_params)
+                };
+                if let Some(params) = decl_params.filter(|p| has_qual_params(p)) {
+                    let subst = build_type_subst(params, &inst.type_args);
+                    let mut spec: Option<Item> = None;
+                    found.extend(collect_specialisation_uses(|| {
+                        if inst.is_struct {
+                            if let Some(s) = generic_structs.get(&inst.base_name) { spec = Some(Item::Struct(substitute_struct_decl(s, &subst, &inst.mangled))); }
+                        } else if let Some(e) = qual_enums.get(&inst.base_name) {
+                            spec = Some(Item::Enum(substitute_enum_decl(e, &subst, &inst.mangled)));
+                        }
+                    }));
+                    if let Some(spec) = spec { harvest(spec, &mut found, &mut found_methods); }
+                }
+                for e in qual_exts.iter().filter(|e| ext_applies(e, &inst)) {
+                    let subst = build_type_subst(&e.type_params, &inst.type_args);
+                    let mut spec = None;
+                    found.extend(collect_specialisation_uses(|| { spec = Some(substitute_ext_decl(e, &subst, &inst.mangled)); }));
+                    if let Some(spec) = spec { harvest(Item::Ext(spec), &mut found, &mut found_methods); }
+                }
+            }
+        }
+        for cand in &found {
+            if let Some(i) = add(&mut map, cand) { work.push(Work::Decl(i)); }
+        }
+        for cand in &found_methods {
+            if let Some(i) = add_method(&mut method_map, cand) { work.push(Work::Method(cand.method_name.clone(), i)); }
+        }
+    }
+    (map, method_map)
+}
+
+/// Resolution is deliberately name-only (no receiver-type tracking): a method name owned by more
+/// than one struct/ext/enum in the reachable graph is AMBIGUOUS and skipped, so the call site falls
+/// through to the ordinary generic emission.
+/// A method call site against the generic-method registry (name-only, see
+/// `build_instantiation_map`): the instance it names, when it is resolvable.
+fn method_instance_of(cand: &MethodCandidateCall, generic_methods: &GenericMethodMap) -> Option<MethodInstantiation> {
+    let owners = generic_methods.get(cand.method_name.as_str())?;
+    if owners.len() != 1 { return None; }
+    let (owner_name, owner_kind, own_type_params, _decl) = &owners[0];
+    if !cand.type_args.iter().all(|t| is_concrete_type(t, &cand.enclosing_type_params)) { return None; }
+    let mangled = mangled_name(&cand.method_name, &cand.type_args)?;
+    if ordinary_type_param_names(own_type_params).len() != cand.type_args.len() { return None; }
+    Some(MethodInstantiation {
+        owner_name: owner_name.clone(),
+        owner_kind: *owner_kind,
+        type_args: cand.type_args.clone(),
+        mangled,
+    })
+}
+
+/// Whether the `ext` block `e` is specialised for `inst`: `ext Board<'elem>` extends every instance
+/// of the right arity, `ext Board<elem'actor>` one.
+pub(crate) fn ext_applies(e: &ExtDecl, inst: &Instantiation) -> bool {
+    if !(has_qual_params(&e.type_params) || has_qual_arg(&e.type_args)) || e.type_name != inst.base_name || !(inst.is_struct || inst.is_enum) {
+        return false;
+    }
+    if has_qual_params(&e.type_params) {
+        ordinary_type_param_names(&e.type_params).len() == inst.type_args.len()
+    } else {
+        e.type_args == inst.type_args
+    }
+}
+
+/// Runs `f` (a specialisation of one declaration) with the qualifier-use collector on and the
+/// rewrite off, and returns the uses it recorded.
+fn collect_specialisation_uses(f: impl FnOnce()) -> Vec<CandidateCall> {
+    let prev = QUAL_COLLECT.with(|c| c.borrow_mut().replace(Vec::new()));
+    let prev_rewrite = QUAL_REWRITE.with(|c| c.replace(false));
+    f();
+    QUAL_REWRITE.with(|c| c.set(prev_rewrite));
+    QUAL_COLLECT.with(|c| std::mem::replace(&mut *c.borrow_mut(), prev)).unwrap_or_default()
 }
 
 /// Which kind of declaration a resolved generic method (`MethodInstantiation`)
 /// was found on — a `StructDecl`, an `ExtDecl` (`ext TypeName: def m<U>(...): ...`),
 /// or an `EnumDecl`. Resolution itself is name-only across all three kinds (see
-/// `build_method_instantiation_map`'s doc comment) — this tag is only consulted
+/// `method_instance_of`'s doc comment) — this tag is only consulted
 /// afterward, at method-append time in `monomorphize_program`, to find the right
 /// container item (matched by kind AND owner name) to attach the specialized
 /// clone to.
@@ -1252,7 +1415,7 @@ pub(crate) enum MethodOwnerKind {
 
 /// `(owner_name, owner_kind, own_type_params, method_decl)` — one entry in
 /// `Transpiler::global_generic_methods` / the `generic_methods` map passed to
-/// `build_method_instantiation_map`. Named to keep both signatures under
+/// `build_instantiation_map`. Named to keep both signatures under
 /// clippy's `type_complexity` threshold; see `global_generic_methods`'s own
 /// doc comment for what each tuple field means.
 pub(crate) type GenericMethodEntry = (String, MethodOwnerKind, Vec<String>, FnDecl);
@@ -1286,42 +1449,6 @@ fn method_instantiation_map_contains(map: &MethodInstantiationMap, method_name: 
 fn method_instantiation_map_insert(map: &mut MethodInstantiationMap, method_name: &str, inst: MethodInstantiation) {
     if method_instantiation_map_contains(map, method_name, &inst.mangled) { return; }
     map.entry(method_name.to_string()).or_default().push(inst);
-}
-
-/// Method-call analogue of `build_instantiation_map`. Resolution here is
-/// deliberately name-only (no receiver-type tracking — see this module's
-/// top-level doc comment and `Transpiler::global_generic_methods`): a method
-/// name owned by more than one struct/ext/enum in the whole reachable graph —
-/// regardless of which of the three kinds each owner is — is AMBIGUOUS and is
-/// skipped entirely (zero entries emitted for it) rather than guessing — the
-/// call site then safely falls through to the pre-existing `emit_generic_call`
-/// fallback, emitting ordinary (unspecialized) generic Rust.
-pub(crate) fn build_method_instantiation_map(
-    candidates: &[MethodCandidateCall],
-    generic_methods: &GenericMethodMap,
-) -> MethodInstantiationMap {
-    let mut map = MethodInstantiationMap::new();
-    for cand in candidates {
-        let Some(owners) = generic_methods.get(cand.method_name.as_str()) else { continue };
-        // Ambiguous (declared with its own type param on more than one
-        // struct/ext/enum anywhere in the reachable graph, combined across all
-        // three kinds) — skip, safe no-op fallback.
-        if owners.len() != 1 { continue; }
-        let (owner_name, owner_kind, own_type_params, _decl) = &owners[0];
-        if !cand.type_args.iter().all(|t| is_concrete_type(t, &cand.enclosing_type_params)) { continue; }
-        let Some(mangled) = mangled_name(&cand.method_name, &cand.type_args) else { continue; };
-        // Sanity: the method's own (non-const-generic) type param count must match
-        // the turbofish arg count, or the zip in `build_type_subst` would silently
-        // under/over-substitute. Skip (don't specialize) on a mismatch.
-        if ordinary_type_param_names(own_type_params).len() != cand.type_args.len() { continue; }
-        method_instantiation_map_insert(&mut map, &cand.method_name, MethodInstantiation {
-            owner_name: owner_name.clone(),
-            owner_kind: *owner_kind,
-            type_args: cand.type_args.clone(),
-            mangled,
-        });
-    }
-    map
 }
 
 // ─── Call-site rewriting ────────────────────────────────────────────────────────
@@ -1771,6 +1898,17 @@ impl Transpiler {
             }
         }
 
+        // Methods with a qualifier parameter of their own have no generic-Rust form: their
+        // instances were appended above, the generic declarations go. (Struct and ext copies made
+        // below drop them in `substitute_*_decl`.)
+        for item in program.items.iter_mut() {
+            match item {
+                Item::Struct(s) if !has_qual_params(&s.type_params) => s.methods.retain(|m| !has_qual_params(&m.type_params)),
+                Item::Ext(e) if !(has_qual_params(&e.type_params) || has_qual_arg(&e.type_args)) => e.methods.retain(|m| !has_qual_params(&m.type_params)),
+                Item::Enum(e) if !has_qual_params(&e.type_params) => e.methods.retain(|m| !has_qual_params(&m.type_params)),
+                _ => {}
+            }
+        }
         for name in &local_generic_struct_names {
             let Some(insts) = self.global_instantiations.get(name) else { continue };
             let Some(decl) = self.global_generic_structs.get(name) else { continue };
@@ -1809,14 +1947,9 @@ impl Transpiler {
                     }
                 }
                 Item::Ext(e) if is_qual_generic_item(item) => {
-                    let declares = has_qual_params(&e.type_params);
-                    for inst in self.global_instantiations.get(&e.type_name).into_iter().flatten().filter(|i| i.is_struct || i.is_enum) {
+                    for inst in self.global_instantiations.get(&e.type_name).into_iter().flatten() {
                         // `ext Board<'elem>` extends every instance; `ext Board<elem'actor>` one.
-                        if declares {
-                            if ordinary_type_param_names(&e.type_params).len() != inst.type_args.len() { continue; }
-                        } else if e.type_args != inst.type_args {
-                            continue;
-                        }
+                        if !ext_applies(e, inst) { continue; }
                         let subst = build_type_subst(&e.type_params, &inst.type_args);
                         specialised.push(Item::Ext(substitute_ext_decl(e, &subst, &inst.mangled)));
                     }
@@ -1829,6 +1962,8 @@ impl Transpiler {
             program.items.retain(|it| !matches!(it, Item::Struct(s) if has_qual_params(&s.type_params)));
             program.items.extend(specialised);
         }
+        // Qualifier-generic functions have no generic-Rust form either: only their instances stay.
+        program.items.retain(|it| !matches!(it, Item::Fn(f) if has_qual_params(&f.type_params)));
         rewrite_qual_lets(&mut program.items);
         QUAL_REWRITE.with(|c| c.set(true));
         let empty = HashMap::new();

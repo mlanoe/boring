@@ -547,6 +547,9 @@ struct Transpiler {
     pub(crate) global_generic_fns: std::collections::HashMap<String, FnDecl>,
     /// Qualifier-generic enums (`enum Slot<'elem>`) of the reachable graph, for `build_instantiation_map`.
     pub(crate) global_qual_enums: std::collections::HashMap<String, EnumDecl>,
+    /// `ext` blocks of the reachable graph that declare or name a qualifier argument; their bodies
+    /// may pass an enclosing parameter on, so the instance closure reads them.
+    pub(crate) global_qual_exts: Vec<ExtDecl>,
     /// Some declaration or use of a qualifier parameter exists in the reachable graph: every file
     /// goes through `monomorphize_program` (type-position uses must be rewritten everywhere).
     pub(crate) has_qual_generics: bool,
@@ -1579,6 +1582,7 @@ impl Transpiler {
             pending_generic_call_candidates: Vec::new(),
             global_instantiations: monomorphize::InstantiationMap::new(),
             global_qual_enums: std::collections::HashMap::new(),
+            global_qual_exts: Vec::new(),
             has_qual_generics: false,
             global_generic_methods: std::collections::HashMap::new(),
             pending_method_call_candidates: Vec::new(),
@@ -2329,12 +2333,17 @@ impl Transpiler {
             for sig in self.fn_sigs.values_mut() {
                 for ty in sig.iter_mut() { *ty = share_dyn_traits::shared_if_bare(ty, &targets); }
             }
-            self.global_instantiations = monomorphize::build_instantiation_map(
+            let (instantiations, method_instantiations) = monomorphize::build_instantiation_map(
                 &self.pending_generic_call_candidates,
+                &self.pending_method_call_candidates,
                 &self.global_generic_structs,
                 &self.global_generic_fns,
                 &self.global_qual_enums,
+                &self.global_qual_exts,
+                &self.global_generic_methods,
             );
+            self.global_instantiations = instantiations;
+            self.global_method_instantiations = method_instantiations;
             // `rewrite_call_sites` turns a cross-file `f<T>(...)` into a call to the
             // specialized name before the file declaring `f` is emitted. Register
             // every such concrete signature globally now, so the ordinary call
@@ -2346,10 +2355,7 @@ impl Transpiler {
             for f in &specialized_fns {
                 self.pre_register_fn(f);
             }
-            self.global_method_instantiations = monomorphize::build_method_instantiation_map(
-                &self.pending_method_call_candidates,
-                &self.global_generic_methods,
-            );
+            self.pre_scan_qual_instances();
         }
 
         // Boring-side monomorphization: specialize fully-concrete turbofish
@@ -4621,6 +4627,25 @@ impl Transpiler {
                 _ => {}
             }
         }
+    }
+
+    /// The specialised copies of every qualifier-generic declaration (`Board_actor`,
+    /// `count_actor`, `Game_actor.merge_owned`) are produced per file, only when that file is
+    /// emitted; the signatures, struct shapes and parameter qualifiers a caller in another file
+    /// (or emitted earlier) relies on must exist before. This runs the same specialisation on the
+    /// registry of generic declarations and scans the result, exactly as a file's own program is
+    /// scanned before emission.
+    fn pre_scan_qual_instances(&mut self) {
+        let mut items: Vec<Item> = Vec::new();
+        items.extend(self.global_generic_structs.values().filter(|s| monomorphize::has_qual_params(&s.type_params)).cloned().map(Item::Struct));
+        items.extend(self.global_qual_enums.values().cloned().map(Item::Enum));
+        items.extend(self.global_qual_exts.iter().cloned().map(Item::Ext));
+        items.extend(self.global_generic_fns.values().filter(|f| monomorphize::has_qual_params(&f.type_params)).cloned().map(Item::Fn));
+        if items.is_empty() { return; }
+        let mut synth = Program { items };
+        self.monomorphize_program(&mut synth);
+        self.pre_scan(&synth);
+        self.pre_infer_fn_qualifiers(&synth);
     }
 
     fn pre_scan(&mut self, program: &Program) {

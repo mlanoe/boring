@@ -1,0 +1,78 @@
+# The specialisation of a qualifier-generic function cascades: through the bodies of the functions it
+# calls (inferred `g(b)` or explicit `g<q'q>(b)`), through itself (polymorphic recursion) and
+# through a method, and a return type is read against the expected type.
+struct Point:
+    var float x = 0.0
+    var float y = 0.0
+
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+    req int size():
+        cells.len()
+
+int leaf<'q>(Board<elem'q> b):
+    b.size()
+
+def fill<'q>(mut Board<elem'q> b, Point'q p):
+    b.cells.push(p)
+
+# `middle` passes its parameter on, inferred (two boards of one instance); `top` passes it on
+# explicitly.
+int middle(Board<elem'q> b, Board<elem'q> c):
+    leaf(b) + leaf(c) + 10
+
+int top<'q>(Board<elem'q> b):
+    middle(b, b) + leaf<q'q>(b) * 100
+
+# Polymorphic recursion: `walk` calls `walk` with its own parameter, which stays the same instance.
+int walk<'q>(Board<elem'q> b, int depth):
+    if depth == 0:
+        return leaf(b)
+    walk(b, depth - 1) + 1
+
+# Mutual recursion between two functions with a parameter each.
+int ping<'a>(Board<elem'a> b, int n):
+    if n == 0:
+        return 0
+    pong(b, n - 1) + 1
+
+int pong<'b>(Board<elem'b> b, int n):
+    if n == 0:
+        return 0
+    ping(b, n - 1) + 1
+
+# A function returning a board of its parameter: read against the expected type.
+Board<elem'q> fresh<'q>():
+    Board<elem'q>()
+
+# A chain is a whole: the instance is `peek_actor_observed`.
+struct Watched<'w as 'actor|'actor'observed = 'actor>:
+    mut Point'w pt = Point()
+
+int peek<'q as 'actor|'actor'observed>(Watched<w'q> x):
+    7
+
+struct Holder<'h = 'inline>:
+    var mut Board<elem'h> inner = Board<elem'h>()
+
+    req int through():
+        top(inner)
+
+mut Board<elem'actor> a = Board()
+mut Board<elem'inline> i = Board()
+let Point'actor pa = Point(1.0, 2.0)
+fill(a, pa)
+fill(a, pa)
+fill(i, Point(3.0, 4.0))
+print "top {top(a)} {top(i)}"
+print "walk {walk(a, 3)} {walk(i, 0)}"
+print "ping {ping(a, 5)} {pong(i, 4)}"
+let Board<elem'actor> made = fresh()
+let Board<elem'inline> made2 = fresh()
+print "fresh {made.size()} {made2.size()}"
+let Holder<h'actor> h = Holder()
+print "holder {h.through()}"
+let Watched<w'actor'observed> wo = Watched()
+let Watched<w'actor> wa = Watched()
+print "peek {peek(wo)} {peek(wa)}"

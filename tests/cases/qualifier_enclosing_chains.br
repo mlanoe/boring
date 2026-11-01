@@ -1,0 +1,52 @@
+# A chained qualifier passed through an enclosing struct (design note, "Passing the parameter to an
+# enclosing struct"): `Holder<c'actor'observed>` holds `Held<q'actor'observed>`; the whole chain
+# travels, and the instance name keeps it (`Holder_actor_observed`, `Held_actor_observed`).
+struct Point:
+    var int x = 0
+
+    def bump():
+        x += 1
+
+    req int get():
+        x
+
+struct Held<'q as 'actor|'actor'observed = 'actor'observed>:
+    mut Point'q pt = Point()
+
+    def bump():
+        pt.bump()
+
+    req int get():
+        pt.get()
+
+# The enclosing bound may be narrower than the receiving one, never wider.
+struct Holder<'c as 'actor|'actor'observed = 'actor'observed>:
+    var mut Held<q'c> inner = Held<q'c>()
+
+    def bump():
+        inner.bump()
+
+    req int get():
+        inner.get()
+
+struct Plain<'c as 'actor = 'actor>:
+    var mut Held<q'c> inner = Held<q'c>()
+
+    def bump():
+        inner.bump()
+
+    req int get():
+        inner.get()
+
+# `Holder`'s default is `'actor'observed`; `Held`'s is used where nothing is passed.
+def main():
+    mut Holder h = Holder()
+    h.bump()
+    h.bump()
+    mut Holder<c'actor> h2 = Holder()
+    h2.bump()
+    mut Holder<c'actor'observed> h3 = Holder()
+    h3.bump()
+    mut Plain p = Plain()
+    p.bump()
+    print "{h.get()} {h2.get()} {h3.get()} {p.get()}"

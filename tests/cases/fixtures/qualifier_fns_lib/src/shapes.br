@@ -1,0 +1,30 @@
+# Qualifier-generic functions and a method declared in a dependency: `count`, `count_twice`
+# (implicit declaration), `grow` and `Game.merge` are specialised for the instances the files that
+# use them ask for.
+pub struct Point:
+    pub var int x = 0
+
+pub struct Board<'elem = 'inline>:
+    pub var [mut Point'elem] cells = []
+
+    pub req int size():
+        cells.len()
+
+pub int count<'q>(Board<elem'q> b):
+    b.size()
+
+pub int count_twice(Board<elem'q> b):
+    count(b) * 2
+
+pub def grow<'q>(mut Board<elem'q> b, Point'q p):
+    b.cells.push(p)
+
+pub struct Game<'cells = 'inline>:
+    pub var mut Board<elem'cells> board = Board<elem'cells>()
+    pub var int turns = 0
+
+    pub def merge<'q>(Board<elem'q> other):
+        turns += count(other)
+
+    pub req int total():
+        turns

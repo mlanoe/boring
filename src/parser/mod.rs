@@ -19,6 +19,7 @@ mod parse_type;
 
 use crate::ast::*;
 use crate::lexer::{LexError, Token, TokenKind};
+use std::collections::HashMap;
 use thiserror::Error;
 
 use generic_args::ArgTarget;
@@ -84,7 +85,22 @@ impl ParseError {
 
 /// `parse` minus the parse-time inference passes: for reading another file's declarations.
 pub(crate) fn parse_without_inference(tokens: Vec<Token>) -> Result<Program, ParseError> {
-    Parser::new(tokens).parse_program()
+    thread_local! { static RESOLVING_DECLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    let mut p = Parser::new(tokens);
+    let program = p.parse_program()?;
+    // The declarations read here (fields, parameters) must have the shape the real parse gives
+    // them: `Board<elem'cells>` is a qualifier-parameter argument only once the labelled list is
+    // resolved against the declaration table. The table of a file is built from its own imports in
+    // lenient mode (the guard), so a cycle of imports cannot recurse.
+    if p.saw_labelled_generics && !RESOLVING_DECLS.with(|c| c.get()) {
+        RESOLVING_DECLS.with(|c| c.set(true));
+        let decls = generic_args::decls_rc(&program);
+        RESOLVING_DECLS.with(|c| c.set(false));
+        let mut resolving = Parser::new(std::mem::take(&mut p.tokens));
+        resolving.generic_decls = Some(decls);
+        if let Ok(resolved) = resolving.parse_program() { return Ok(resolved); }
+    }
+    Ok(program)
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
@@ -143,8 +159,13 @@ struct Parser {
     /// First error found inside `parse_type_params` (whose signature cannot carry one); reported by
     /// `parse_program` right after the item it occurred in.
     pub(crate) pending_err: Option<ParseError>,
+    /// Error of a parameter type that was then retried as a bare name (see `parse_param`).
+    pub(crate) param_type_err: Option<ParseError>,
     /// Qualifier parameters of the top-level declaration being parsed (`T'elem` is valid for these).
     pub(crate) qual_scope: Vec<String>,
+    /// Bound (member chains) of each name in `qual_scope`, to check a parameter passed on to
+    /// another declaration (`Board<elem'cells>`) against the bound of the receiving parameter.
+    pub(crate) qual_bounds: HashMap<String, Vec<QualChain>>,
 }
 
 impl Parser {
@@ -159,7 +180,9 @@ impl Parser {
             generic_decls: None,
             saw_labelled_generics: false,
             pending_err: None,
+            param_type_err: None,
             qual_scope: Vec::new(),
+            qual_bounds: HashMap::new(),
         }
     }
 
@@ -319,11 +342,20 @@ impl Parser {
         // else: newline was already consumed (e.g. by a block form) — just proceed
     }
 
+    /// Brings the qualifier parameter declared as `decl` (`^elem:..`) into scope.
+    pub(crate) fn push_qual_scope(&mut self, decl: &str) {
+        if let Some((n, bound)) = qual_param_decl(decl) {
+            self.qual_scope.push(n.to_string());
+            self.qual_bounds.insert(n.to_string(), bound);
+        }
+    }
+
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut items = Vec::new();
         self.skip_newlines_and_indent(); // also skip Dedent at top level (from multi-line parens)
         while !self.check(&TokenKind::Eof) {
             self.qual_scope.clear();
+            self.qual_bounds.clear();
             let item = self.parse_item(false)?;
             if let Some(e) = self.pending_err.take() { return Err(e); }
             items.push(item);
@@ -1797,9 +1829,7 @@ impl Parser {
         self.skip_newlines_and_indent();
         let gt = (self.line(), self.col(), self.tok_len());
         let _ = self.expect(&TokenKind::Gt);
-        for p in &params {
-            if let Some(n) = qual_param_name(p) { self.qual_scope.push(n.to_string()); }
-        }
+        for p in &params { self.push_qual_scope(p); }
         if let Some(clash) = params.iter().find_map(|p| {
             let q = qual_param_name(p)?;
             params.iter().any(|o| o == q).then_some(q)
@@ -2415,7 +2445,7 @@ impl Parser {
                 if self.check(&TokenKind::Tick) {
                     let decl = self.parse_qual_param_decl()?;
                     let name = qual_param_name(&decl).unwrap_or_default().to_string();
-                    self.qual_scope.push(name.clone());
+                    self.push_qual_scope(&decl);
                     type_args.push(Type::QualArg(vec![OwnerQual::Param(name)]));
                     type_params.push(decl);
                 } else if is_type_param {

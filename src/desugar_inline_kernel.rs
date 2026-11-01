@@ -220,7 +220,7 @@ fn lower_expr(
         name: String::new(), qualifier: None, params: vec![], return_ty: None,
         body: device_body, is_pub: false, throws: false, task: false, stream: false,
         stream_capacity: None, mutating: true, return_mutable: false, is_native: false,
-        throws_ty: None, type_params: vec![], where_clause: vec![], attrs: vec![],
+        throws_ty: None, type_params: vec![], implicit_quals: vec![], where_clause: vec![], attrs: vec![],
         line: expr.line, col: expr.col,
     };
     generated.push(KernelDecl {

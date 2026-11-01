@@ -243,6 +243,19 @@ generic_value   ::= type | INT_LITERAL | const_param | lifetime_param   # a cons
 # declaration with qualifier parameters is an error, except as the constructor of
 # `let Board<elem'actor> a = Board()`. Inside the declaration the parameter is used as `T'label`.
 qual_arg        ::= IDENT "'" qual_chain
+# Inside a declaration of a qualifier parameter `'cells`, the chain may instead be that parameter,
+# passed on whole to a contained declaration: `Board<elem'cells>` (`elem` is Board's parameter,
+# `cells` the enclosing one). The enclosing bound must fit inside the receiving one.
+qual_arg_pass   ::= IDENT "'" IDENT            # the second IDENT is a qualifier parameter in scope
+
+# A function or method may declare qualifier parameters in its own `type_params` (`def add<'q as
+# 'inline|owned = 'inline>(Board<elem'q> b, Point'q p)`, `int count<'q>(Board<elem'q> b)`), with the
+# same `qual_param` form as a struct. The declaration is OPTIONAL for functions and methods only: a
+# qualifier name written in the signature (parameters or return type) that is neither declared nor a
+# qualifier word is introduced by its first occurrence (`int count(Board<elem'q> b)`); it is required
+# as soon as the parameter needs a bound or a default, and it never applies to the body or to a
+# struct, enum, `ext` or trait. A call infers the parameters (`count(a)`) or names them
+# (`count<q'owned>(b)`, `generic_args` above); a trait method takes none.
 
 # Functions do NOT need explicit lifetime params: they are auto-inferred from the signature.
 #   def str&a longest(str&a x, str&a y):   — transpiles to fn longest<'a>(…) automatically

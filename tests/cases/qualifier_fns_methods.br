@@ -1,0 +1,62 @@
+# Methods that declare a qualifier parameter of their own, wherever a method can live: a struct that
+# is not generic itself, an `ext` block of a qualifier-generic struct (specialised in lock-step with
+# each instance), an `ext` of an enum; and a function mixing a type parameter and a qualifier
+# parameter, written out in full (type arguments are never inferred).
+struct Point:
+    var float x = 0.0
+
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+    def push(Point'elem p):
+        cells.push(p)
+
+    req int size():
+        cells.len()
+
+int count<'q>(Board<elem'q> b):
+    b.size()
+
+# A struct that is not generic: one method instance per qualifier it is called with.
+struct Counter:
+    var int n = 0
+
+    def add<'q>(Board<elem'q> b):
+        n += count(b)
+
+# On every instance of `Board`, with a parameter of its own.
+ext Board<'elem>:
+    req int plus<'q>(Board<elem'q> o):
+        self.size() + count(o)
+
+enum Tag:
+    A
+    B
+
+ext Tag:
+    req int weigh<'q>(Board<elem'q> b):
+        count(b) + 1
+
+T pick<T, 'q>(T x, Board<elem'q> b):
+    x
+
+mut Board<elem'actor> a = Board()
+mut Board<elem'inline> i = Board()
+let Point'actor pa = Point(1.0)
+a.push(pa)
+a.push(pa)
+i.push(Point(2.0))
+mut Counter c = Counter()
+c.add(a)
+c.add(i)
+c.add(i)
+print "counter {c.n}"
+let plus_ai = a.plus(i)
+let plus_ia = i.plus(a)
+print "plus {plus_ai} {plus_ia}"
+let Tag t = Tag.A
+let weigh_a = t.weigh(a)
+let weigh_i = t.weigh(i)
+print "weigh {weigh_a} {weigh_i}"
+let pk = pick<T = int, q'actor>(5, a)
+print "pick {pk}"

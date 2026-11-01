@@ -144,7 +144,7 @@ fn preprocess_triple_strings(source: &str) -> Result<String, LexError> {
         // escapes, ends at the next `'` on the same line. Re-encoded as a regular
         // `"..."` token, like the triple form. (The triple form was handled above,
         // so `''` here is the empty string.)
-        if ch == '\'' && !tick_is_qualifier(&chars, i) && !tick_in_decl_header(&chars, i) {
+        if ch == '\'' && !tick_is_qualifier(&chars, i) && !tick_in_decl_header(&chars, i) && !tick_in_fn_header(&chars, i) {
             let start_line = line;
             let mut j = i + 1;
             while j < n && chars[j] != '\'' && chars[j] != '\n' {
@@ -410,6 +410,55 @@ fn tick_in_decl_header(chars: &[char], i: usize) -> bool {
         }
     }
     depth >= 1
+}
+
+/// Is the `'` at `chars[i]` inside the `<...>` list of a function or method header
+/// (`def f<'q>(...)`, `int count<'q as 'inline|owned = 'inline>(...)`)? The list must follow the
+/// function's name directly and be closed by a `>` that is immediately followed by `(`, which no
+/// comparison written on a statement line is (`x < 'a'`, `f(a < 'b', c > (d))` keep their raw
+/// strings): every tick in such a list is a qualifier-parameter tick
+/// (docs/design-notes/qualifier-generic-params.md, section 12).
+fn tick_in_fn_header(chars: &[char], i: usize) -> bool {
+    let start = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    let end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
+    let line = &chars[start..end];
+    let tick = i - start;
+    // The innermost `<` still open before the tick.
+    let mut open: Vec<usize> = Vec::new();
+    for (k, &c) in line[..tick].iter().enumerate() {
+        match c {
+            '<' => open.push(k),
+            '>' if !matches!(k.checked_sub(1).map(|j| line[j]), Some('-') | Some('=')) => { open.pop(); }
+            _ => {}
+        }
+    }
+    let Some(&lt) = open.last() else { return false };
+    // Directly after an identifier (the function name).
+    let name_end = lt;
+    let mut name_start = name_end;
+    while name_start > 0 && (line[name_start - 1].is_alphanumeric() || line[name_start - 1] == '_') { name_start -= 1; }
+    if name_start == name_end { return false; }
+    // What precedes the name is `def`/`req`/modifiers and an optional return type: never a statement.
+    let prefix: String = line[..name_start].iter().collect();
+    if prefix.contains('=') { return false; }
+    let first = prefix.trim_start().split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
+    if matches!(first, "let" | "var" | "return" | "if" | "elif" | "while" | "for" | "print" | "match"
+        | "guard" | "else" | "yield" | "assert" | "use" | "struct" | "enum" | "trait" | "ext") { return false; }
+    // The list closes with a `>` followed directly by `(`.
+    let mut depth = 0i32;
+    let mut k = lt;
+    while k < line.len() {
+        match line[k] {
+            '<' => depth += 1,
+            '>' if !matches!(k.checked_sub(1).map(|j| line[j]), Some('-') | Some('=')) => {
+                depth -= 1;
+                if depth == 0 { return line.get(k + 1) == Some(&'('); }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    false
 }
 
 /// Strip common leading indentation from a triple-quoted string's raw content.
@@ -1950,6 +1999,39 @@ mod raw_apostrophe_strings {
             let ks = kinds(src);
             assert!(ks.iter().any(|k| matches!(k, TokenKind::Tick)), "{src}");
             assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+    }
+
+    // Qualifier parameters of a function or method (`def f<'q>(..)`): the list that follows the
+    // name and closes with `>(` is a declaration header, a comparison in a statement is not.
+    #[test]
+    fn ticks_in_a_function_header_are_qualifier_ticks() {
+        for src in [
+            "def add<'q>(Board<elem'q> b, Point'q p):",
+            "int count<'q>(Board<elem'q> b):",
+            "pub def add<'q as 'inline|owned = 'inline>(Board<elem'q> b):",
+            "    def merge<'q>(Board<elem'q> other):",
+            "req mut Board<elem'q> make<'q>():",
+            "Board<elem'q> make<'a, 'b>():",
+            "def Game.merge<'q>(int x):",
+            "task def f<'q>():",
+        ] {
+            let ks = kinds(src);
+            assert!(ks.iter().any(|k| matches!(k, TokenKind::Tick)), "{src}");
+            assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+    }
+
+    #[test]
+    fn comparisons_with_raw_strings_are_not_function_headers() {
+        for src in [
+            "let b = f<'a'",
+            "if f < 'a' and g > ('b'):",
+            "print x<'a'>(1)",
+            "let ok = count < 'a'",
+            "return f<'a', 'b'>(c)",
+        ] {
+            assert!(kinds(src).iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
         }
     }
 

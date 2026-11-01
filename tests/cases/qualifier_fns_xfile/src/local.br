@@ -1,0 +1,13 @@
+# Same-project sibling of main.br: it asks the dependency's functions and method for the instances
+# main.br asks for as well (`actor`), and one more (`shared`).
+use shapes.shapes.*
+
+pub def int sibling_total():
+    mut Board<elem'actor> a = Board()
+    let Point'actor p = Point(5)
+    grow(a, p)
+    let Board<elem'shared> o = Board()
+    mut Game<cells'actor> g = Game()
+    g.merge(a)
+    g.merge(o)
+    count(a) + count(o) + g.total()

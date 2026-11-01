@@ -1001,6 +1001,7 @@ transpile_test!(qualified_member_store);
 transpile_test!(managed_owned_member_read);
 transpile_test!(managed_owned_member_call);
 transpile_test!(actor_collection_element_access);
+transpile_test!(managed_owned_param_push);
 transpile_test!(mut_elem_alias);
 // A struct is a set element / dict key: auto-derived `Eq + Hash` when every field is hashable.
 transpile_test!(struct_set_dict_key);
@@ -1598,3 +1599,48 @@ transpile_test!(qualifier_defaults_chains);
 // The same declarations in a `[deps]` project and a sibling file: the default instance requested
 // from two files is emitted once. See tests/cases/qualifier_defaults_xfile.
 transpile_project_test!(qualifier_defaults_xfile);
+
+// A qualifier parameter passed to an enclosing struct (`Board<elem'cells>` inside
+// `struct Game<'cells>`), through struct, enum and `ext`; see tests/cases/qualifier_enclosing.br.
+transpile_test!(qualifier_enclosing);
+
+// The whole chain (`'actor'observed`) travels through the enclosing struct and names the instances
+// (`Holder_actor_observed`, `Held_actor_observed`); see tests/cases/qualifier_enclosing_chains.br.
+transpile_test!(qualifier_enclosing_chains);
+
+// The same pass-through across files: `Game`/`Board` in a `[deps]` project and a sibling file, a
+// struct of the entry file passing its own parameter to the dependency's `Game`. See
+// tests/cases/qualifier_enclosing_xfile.
+transpile_project_test!(qualifier_enclosing_xfile);
+
+// Functions and methods generic over a qualifier (`int count<'q>(Board<elem'q> b)`): explicit and
+// implicit declaration, bound and default, a parameter passed on, a method with a parameter of its
+// own; see tests/cases/qualifier_fns.br.
+transpile_test!(qualifier_fns);
+
+// The specialisation cascades through the functions a function calls, through itself and through
+// mutual recursion, and a return type is read against the expected type; see
+// tests/cases/qualifier_fns_cascade.br.
+transpile_test!(qualifier_fns_cascade);
+
+// Methods with a parameter of their own on a non-generic struct, an `ext` block and an enum, and a
+// function mixing a type and a qualifier parameter; see tests/cases/qualifier_fns_methods.br.
+transpile_test!(qualifier_fns_methods);
+// A `'owned` local passed to a same-typed parameter isn't re-wrapped in managed mode. No
+// managed+multi config: its eager `__p1_mg` lock guard is still alive when the local is
+// moved into the call (E0505) — a separate, pre-existing gap.
+mod managed_owned_local_arg {
+    use super::*;
+    #[test]
+    fn strict_multi()   { run_transpile_case_with_config("managed_owned_local_arg", "strict",  "multi"); }
+    #[test]
+    fn strict_single()  { run_transpile_case_with_config("managed_owned_local_arg", "strict",  "single"); }
+    #[test]
+    fn managed_single() { run_transpile_case_with_config("managed_owned_local_arg", "managed", "single"); }
+}
+
+// The same functions and a method declared in a `[deps]` project, called from the entry file and
+// a sibling: each instance is requested from several files and emitted once. See
+// tests/cases/qualifier_fns_xfile.
+transpile_project_test!(qualifier_fns_xfile);
+

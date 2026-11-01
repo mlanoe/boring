@@ -598,8 +598,8 @@ impl Parser {
                 // the following ident, e.g. the variable name in `let BigData' backup`).
                 // Write the qualifier explicitly; use `'owned` when heap placement is
                 // required.
-                _ => return Err(ParseError::Generic {
-                    msg: "expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'atomic, 'inline, 'weak, 'copy, 'const) — bare tick is not supported".into(),
+                other => return Err(ParseError::Generic {
+                    msg: format!("unknown qualifier parameter `{other}`: expected an ownership qualifier after ' (e.g. 'owned, 'shared, 'actor, 'guard, 'atomic, 'inline, 'weak, 'copy, 'const) or a qualifier parameter: declared with `<'{other}>` on the enclosing struct, enum or ext, or declared or written in the signature of the enclosing function (only a function introduces one implicitly: a struct, enum or ext declares its parameters, and a function body cannot add one) — bare tick is not supported"),
                     line: self.line(), col: self.col(), len: self.tok_len(),
                 }),
             },

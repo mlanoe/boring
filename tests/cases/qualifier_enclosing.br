@@ -1,0 +1,120 @@
+# Passing a qualifier parameter to an enclosing struct (docs/design-notes/qualifier-generic-params.md,
+# "Passing the parameter to an enclosing struct"): `struct Game<'cells>` hands its own parameter to
+# the `Board` it holds, written explicitly as `Board<elem'cells>`; the names are independent.
+struct Point:
+    var float x = 0.0
+    var float y = 0.0
+
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+    def add(Point'elem p):
+        cells.push(p)
+
+    req int size():
+        cells.len()
+
+    req float total():
+        var float sum = 0.0
+        for i in 0..<cells.len():
+            sum += cells[i].x
+        sum
+
+# `'cells` of `Game` is `'elem` of `Board`.
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()
+    var int turn = 0
+
+    def play(Point'cells p):
+        board.add(p)
+        turn += 1
+
+    req float score():
+        board.total()
+
+# The cascade reaches `ext` blocks too, on every instance...
+ext Game<'cells>:
+    req string describe():
+        "turn {self.turn} size {self.board.size()}"
+
+# ...and on one instance only.
+ext Game<cells'actor>:
+    req string kind():
+        "actor game"
+
+# A bare `Board` in a field is `Board`'s own default, never `Game`'s parameter.
+struct Plain<'cells = 'actor>:
+    var Board board = Board()
+    var int tag = 0
+
+# A concrete value freezes the instance: `Fixed` needs no parameter of its own.
+struct Fixed:
+    var Board<elem'actor> board = Board<elem'actor>()
+
+# A bound narrower than the child's is fine; the chain is passed whole.
+struct Narrow<'c as 'inline|actor>:
+    var Board<elem'c> board = Board<elem'c>()
+
+# An enum passes it on as well.
+enum Slot<'cells = 'inline>:
+    Empty
+    Held(Board<elem'cells>)
+
+# Two levels: `Outer` hands its parameter to `Game`, which hands it to `Board`.
+struct Outer<'q = 'inline>:
+    var Game<cells'q> game = Game<cells'q>()
+
+# A struct that holds itself through an optional, and two structs that hold each other.
+struct Node<'q = 'inline>:
+    var int v = 0
+    var Node<q'q>? next = nil
+    var Board<elem'q> board = Board<elem'q>()
+
+struct Ping<'q = 'inline>:
+    var [Pong<q'q>] others = []
+    var int n = 0
+
+struct Pong<'q = 'inline>:
+    var [Ping<q'q>] others = []
+    var int m = 0
+
+def int boardSize(Game<cells'actor> g):
+    g.board.size()
+
+def main():
+    # Explicit on the binding: `Game_actor` holds `Board_actor` holds `Point'actor`.
+    mut Game<cells'actor> g = Game()
+    let Point'actor p = Point(2.0, 0.0)
+    g.play(p)
+    print "actor {g.score()} {g.describe()} {g.kind()} {boardSize(g)}"
+
+    # Defaults: `Game_inline` / `Board_inline`.
+    mut g2 = Game()
+    g2.play(Point(3.0, 0.0))
+    print "inline {g2.score()} {g2.describe()}"
+
+    # The qualifier written on the argument decides (phase 2 evidence through the field).
+    let Board<elem'actor> b = Board()
+    let g3 = Game(board = b)  # `cells` is `actor`, read off `b`
+    print "inferred {g3.score()} {g3.describe()} {g3.kind()}"
+
+    # A chain is passed whole: `Game_actor_observed` holds `Board_actor_observed`.
+    let Game<cells'inline> chosen = Game<cells'inline>()
+    print "chosen {chosen.turn}"
+
+    let pl = Plain()
+    print "plain {pl.board.size()} {pl.tag}"
+    let Fixed f = Fixed()
+    print "fixed {f.board.size()}"
+    let Narrow<c'actor> n = Narrow()
+    print "narrow {n.board.size()}"
+    let Slot<cells'inline> s = Slot.Held(Board())
+    match s:
+        Empty: print "empty"
+        Held(bd): print "held {bd.size()}"
+    let Outer<q'actor> o = Outer()
+    print "outer {o.game.turn}"
+    let Node<q'actor> nd = Node()
+    print "node {nd.v}"
+    let Ping<q'actor> pg = Ping()
+    print "ping {pg.n}"

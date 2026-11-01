@@ -141,7 +141,7 @@ pub(crate) fn qual_arg_shape(ty: &Type) -> Option<(&str, QualChain)> {
 
 /// Words that are qualifiers, so cannot label a qualifier parameter (`'actor` would be ambiguous
 /// with the qualifier it names).
-const QUALIFIER_WORDS: &[&str] = &[
+pub(crate) const QUALIFIER_WORDS: &[&str] = &[
     "inline", "owned", "shared", "actor", "guard", "new", "weak", "atomic", "static", "task",
     "one", "many", "mut", "req", "kernel", "unified", "global", "local", "const", "surface",
     "observed", "copy",
@@ -391,6 +391,19 @@ impl Parser {
                             "generic parameter `{label}` of {what} is given more than once")));
                     }
                     match (qual_param_decl(&params[i]), &a.ty) {
+                        // `Board<elem'cells>`: the enclosing declaration's `'cells` is passed on.
+                        (Some((_, bound)), Type::QualArg(q)) if matches!(q.as_slice(), [OwnerQual::Param(_)]) => {
+                            let [OwnerQual::Param(p)] = q.as_slice() else { unreachable!() };
+                            let mine = self.qual_bounds.get(p).cloned().unwrap_or_default();
+                            if let Some(out) = mine.iter().find(|m| !bound.contains(m)) {
+                                let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_else(|| "?".into());
+                                let allowed: Vec<String> = bound.iter().map(shown).collect();
+                                let given: Vec<String> = mine.iter().map(shown).collect();
+                                return Err(err(a.line, a.col, a.len, format!(
+                                    "the bound of `{p}` (allowed: {}) is not within the bound of `{label}` in {what}: `'{}` is outside it (allowed: {}); narrow it with `'{p} as ...`",
+                                    given.join(", "), shown(out), allowed.join(", "))));
+                            }
+                        }
                         (Some((_, bound)), Type::QualArg(q)) => {
                             let Some(shown) = OwnerQual::chain_name(q) else {
                                 return Err(err(a.line, a.col, a.len, format!(
@@ -447,7 +460,8 @@ pub(crate) fn check_bare_qual_uses(program: &Program) -> Result<(), ParseError> 
             if !names.is_empty() { qual.insert(name.clone(), names); }
         }
     }
-    if qual.is_empty() { return Ok(()); }
+    let has_qual_fn = decls.fns.values().any(|lists| lists.iter().any(|l| l.iter().any(|p| qual_param_name(p).is_some())));
+    if qual.is_empty() && !has_qual_fn { return Ok(()); }
     let names = qual.keys().cloned().collect();
     let (hits, diags) = crate::transpiler::monomorphize::find_bare_qual_uses(program, names);
     // A construction whose evidence was wrong (conflict, bound) says so, even when another rule
