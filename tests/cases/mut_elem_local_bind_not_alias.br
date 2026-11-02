@@ -1,0 +1,43 @@
+# A bound element read from a local scratch array that is never touched again is not an alias:
+# the file's `[mut Node]` types stay plain `Vec<Node>` (no 'actor inference) and the pattern
+# fill -> `mut t = inner[0]` -> edit -> push back transpiles and runs the same as in the interpreter.
+struct Node:
+    var string name = ""
+    var int level = 0
+    var mut [mut Node] children = []
+
+def fill(mut [mut Node] out):
+    mut n = Node(name = "a", level = 1)
+    out.push(n)
+
+def wrap(mut [mut Node] out, string label):
+    mut inner = []
+    fill(inner)
+    if inner.length != 1:
+        for n in inner:
+            out.push(n)
+        return
+    mut target = inner[0]
+    target.name = label
+    target.level = 2
+    out.push(target)
+
+def int total(mut [mut Node] nodes):
+    var sum = 0
+    for i in 0..<nodes.length:
+        sum += nodes[i].level
+        sum += total(nodes[i].children)
+    return sum
+
+def string describe([Node] nodes):
+    var s = ""
+    for n in nodes:
+        s = "{s}{n.name}:{n.level} "
+    return s
+
+def main():
+    mut out = []
+    wrap(out, "x")
+    wrap(out, "y")
+    print describe(out)
+    print total(out)

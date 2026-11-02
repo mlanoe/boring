@@ -47,10 +47,8 @@ pub fn infer_actor_elems(program: &mut Program) {
     }
     if structs.is_empty() { return; }
     let mut aliased = false;
-    visit_bodies(&mut program.items, &mut |stmt| {
-        if let Stmt::Let(l) = stmt {
-            if matches!(&l.value, Some(Expr { kind: ExprKind::Index(..), .. })) { aliased = true; }
-        }
+    visit_fn_bodies(&mut program.items, &mut |body| {
+        if body_aliases_element(body) { aliased = true; }
     });
     if !aliased { return; }
     rewrite_items(&mut program.items, &structs);
@@ -87,6 +85,87 @@ fn visit_bodies(items: &mut [Item], f: &mut dyn FnMut(&mut Stmt)) {
             _ => {}
         }
     }
+}
+
+/// Calls `f` with every function/method/init body, and with each top-level statement as a body of its own.
+fn visit_fn_bodies(items: &mut [Item], f: &mut dyn FnMut(&mut [Stmt])) {
+    for it in items {
+        match it {
+            Item::Fn(d) => f(&mut d.body),
+            Item::Struct(s) => {
+                for m in &mut s.methods { f(&mut m.body); }
+                for i in &mut s.inits { f(&mut i.body); }
+            }
+            Item::Ext(e) => { for m in &mut e.methods { f(&mut m.body); } }
+            Item::Mod(m) => visit_fn_bodies(&mut m.items, f),
+            Item::Stmt(s) => f(std::slice::from_mut(s)),
+            _ => {}
+        }
+    }
+}
+
+fn is_loop(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::While(_) | Stmt::WhileLet(_) | Stmt::DoWhile(_) | Stmt::Loop(_) | Stmt::For(_))
+}
+
+/// Whether `body` binds an element read (`let q = arr[i]`) in a way another name can observe. A
+/// bind whose source is a plain local declared in the same body, outside any loop, and never
+/// mentioned again after the bind (the element is only edited through the new name and pushed
+/// elsewhere, as in `mut t = inner[0]; t.name = "x"; out.push(t)`) has no second name to alias.
+fn body_aliases_element(body: &mut [Stmt]) -> bool {
+    use std::cell::RefCell;
+    // Binds inside any loop body: the loop's next iteration is a "later" use.
+    let in_loop: RefCell<HashSet<*const Stmt>> = RefCell::new(HashSet::new());
+    walk(body, &mut |stmt| {
+        if is_loop(stmt) {
+            let mut inner: Vec<*const Stmt> = Vec::new();
+            let mut collect = |s: &mut Stmt| { if matches!(s, Stmt::Let(_)) { inner.push(s as *const Stmt); } };
+            match stmt {
+                Stmt::While(w) => walk(&mut w.body, &mut collect),
+                Stmt::WhileLet(w) => walk(&mut w.body, &mut collect),
+                Stmt::DoWhile(d) => walk(&mut d.body, &mut collect),
+                Stmt::Loop(l) => walk(&mut l.body, &mut collect),
+                Stmt::For(f) => walk(&mut f.body, &mut collect),
+                _ => {}
+            }
+            in_loop.borrow_mut().extend(inner);
+        }
+    });
+    struct State {
+        declared: HashSet<String>,
+        /// Local roots bound from so far, each still waiting for a later mention.
+        pending: HashSet<String>,
+        skip: Option<String>,
+        aliased: bool,
+    }
+    let st = RefCell::new(State { declared: HashSet::new(), pending: HashSet::new(), skip: None, aliased: false });
+    Walker {
+        expr: &mut |e| {
+            if let ExprKind::Var(n) = &e.kind {
+                let mut st = st.borrow_mut();
+                if st.skip.as_deref() == Some(n.as_str()) { st.skip = None; }
+                else if st.pending.contains(n) { st.aliased = true; }
+            }
+        },
+        stmt: &mut |stmt| {
+            let ptr = stmt as *const Stmt;
+            let Stmt::Let(l) = stmt else { return };
+            let mut st = st.borrow_mut();
+            if let Some(Expr { kind: ExprKind::Index(obj, _), .. }) = &l.value {
+                match &obj.kind {
+                    ExprKind::Var(root) if st.declared.contains(root) && !in_loop.borrow().contains(&ptr) => {
+                        st.pending.insert(root.clone());
+                        st.skip = Some(root.clone());
+                    }
+                    _ => st.aliased = true,
+                }
+            }
+            // A later `let` of the same name (a sibling branch's own scratch array) is a new variable.
+            st.pending.remove(&l.name);
+            st.declared.insert(l.name.clone());
+        },
+    }.stmts(body);
+    st.into_inner().aliased
 }
 
 fn walk(stmts: &mut [Stmt], f: &mut dyn FnMut(&mut Stmt)) {
