@@ -194,12 +194,16 @@ pub view Text:
 pub view Column:
     AxisAlignment alignment = .Center
     float? spacing = nil
+    # Equal shares along the stack's own axis: every child's ideal size is raised to the largest one, so the space left over is split evenly
+    # (children whose maximum allows it end up the same size). `Grid` uses it for its rows.
+    bool equal = false
     [View] children
     body(): native
 
 pub view Row:
     AxisAlignment alignment = .Center
     float? spacing = nil
+    bool equal = false
     [View] children
     body(): native
 
@@ -251,9 +255,10 @@ pub view Spacer:
 
 # ── Painting wrappers ───────────────────────────────────────────────────────────────────────────
 
-# Paints `color` (a color name or `#rrggbb`) over the wrapper's bounds, then its child.
+# Paints `color` (a color name or `#rrggbb`) over the wrapper's bounds (with rounded corners of `radius`), then its child.
 pub view Background:
     string color
+    float radius = 0.0
     [View] children
     body(): native
 
@@ -523,6 +528,13 @@ pub view Popover:
 pub view OnHover:
     bind bool value
     int delay = 0
+    [View] children
+    body(): native
+
+# OnContext: writes true into the bound `value` when a secondary press (the right mouse button, `contextPress`) lands anywhere inside its
+# child; the view that owns `value` decides what opens (`ContextMenu` in boring-ui opens a menu). Layout-transparent.
+pub view OnContext:
+    bind bool value
     [View] children
     body(): native
 
