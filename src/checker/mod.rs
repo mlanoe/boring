@@ -1870,7 +1870,6 @@ impl Checker {
     }
 
     fn check_call_arg_types(&mut self, callee: &Expr, args: &[Arg]) {
-        if self.kernel_dispatch_only { return; }
         if args.iter().any(|a| a.spread || a.default_rest) { return; }
         let ExprKind::Var(name) = &callee.kind else { return };
         if self.fn_overloaded.contains(name.as_str()) || self.lookup(name).is_some() { return; }
@@ -1886,7 +1885,6 @@ impl Checker {
     }
 
     fn check_method_arg_types(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
-        if self.kernel_dispatch_only { return; }
         if args.iter().any(|a| a.spread || a.default_rest) { return; }
         let Some((ArgClass::User(s), _)) = self.arg_class(recv) else { return };
         let key = (s.clone(), method.to_string());
@@ -1902,6 +1900,7 @@ impl Checker {
     fn report_arg_mismatches(&mut self, fname: &str, params: &[(String, Option<Type>)], args: &[Arg]) {
         let mut pos = 0;
         let mut found: Vec<(usize, String, String, String, usize, usize)> = Vec::new();
+        let mut gpu_found: Vec<(usize, String, usize, usize)> = Vec::new();
         for a in args {
             let idx = match &a.label {
                 Some(l) => params.iter().position(|p| &p.0 == l),
@@ -1913,6 +1912,12 @@ impl Checker {
                 Type::Optional(inner) => (**inner).clone(),
                 t => t.clone(),
             };
+            if matches!(Self::gpu_resident_qual(&params[i].1), Some(OwnerQual::GpuUnified))
+                && matches!(self.arg_gpu_resident_qual(&a.value), Some(OwnerQual::GpuGlobal))
+            {
+                gpu_found.push((i + 1, pn.clone(), a.value.line, a.value.col));
+            }
+            if self.kernel_dispatch_only { continue; }
             let Some((pc, pname)) = self.type_class(&pty) else { continue };
             let Some((ac, aname)) = self.arg_class(&a.value) else { continue };
             if pc == ac || (pc == ArgClass::Num && ac == ArgClass::Num) { continue; }
@@ -1923,6 +1928,45 @@ impl Checker {
                 format!("argument {} of {} (parameter '{}') expects {}, got {}", n, fname, pn, pname, aname),
                 line, col,
             );
+        }
+        for (n, pn, line, col) in gpu_found {
+            self.error(
+                format!(
+                    "argument {} of {} (parameter '{}') expects `'kernel'unified` (host-visible), got a device-only `'kernel'global` value; \
+                     only `'unified` -> `'global` is accepted (declare the source `'unified`)",
+                    n, fname, pn,
+                ),
+                line, col,
+            );
+        }
+    }
+
+    /// The GPU residency qualifier (`GpuUnified`/`GpuGlobal`) written on a type, looking through `mut`.
+    fn gpu_resident_qual(ty: &Option<Type>) -> Option<OwnerQual> {
+        fn go(t: &Type) -> Option<OwnerQual> {
+            match t {
+                Type::Qualified(_, q @ (OwnerQual::GpuUnified | OwnerQual::GpuGlobal)) => Some(q.clone()),
+                Type::Qualified(i, _) | Type::Mut(i) => go(i),
+                _ => None,
+            }
+        }
+        go(ty.as_ref()?)
+    }
+
+    /// Best-effort residency qualifier of a call argument: a bound variable's declared type, or
+    /// `obj.field` where `obj` is a variable of a known user struct type. `None` when not evident.
+    fn arg_gpu_resident_qual(&self, e: &Expr) -> Option<OwnerQual> {
+        match &e.kind {
+            ExprKind::Var(n) => Self::gpu_resident_qual(&self.lookup(n)?.ty),
+            ExprKind::Field(obj, f) => {
+                let ExprKind::Var(v) = &obj.kind else { return None };
+                let mut ty = self.lookup(v)?.ty.clone()?;
+                while let Type::Mut(i) | Type::Qualified(i, _) = ty { ty = *i; }
+                let Type::Named(sn) = ty else { return None };
+                let fty = self.struct_field_types.get(&sn)?.iter().find(|(n, _)| n == f)?.1.clone();
+                Self::gpu_resident_qual(&Some(fty))
+            }
+            _ => None,
         }
     }
 

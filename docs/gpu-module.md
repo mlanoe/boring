@@ -205,6 +205,10 @@ Explicit qualifiers remain valid (`let float'const alpha` is equivalent to `let 
 | `'kernel'unified` | unified host + device DRAM |
 | `'kernel'global` | device-only DRAM |
 
+**Coercion between the two at a call boundary.** `'kernel'unified` is a superset of `'kernel'global` (the same device buffer, plus host visibility), so a `'kernel'unified` argument may be passed to a `'kernel'global` parameter — deliberate, accepted on every target. The reverse is a checker error: a device-only `'kernel'global` value cannot be passed to a `'kernel'unified` parameter, because the callee may read it back on the host (on wgpu a `'global` buffer has no `COPY_SRC`). Enforced for free-function and method calls whose argument is a bound variable or a field of a variable of a known struct type; pinned by `tests/gpu_qualifier_arg_direction.rs`.
+
+**Coercion between the two at a call boundary.** `'kernel'unified` is a superset of `'kernel'global` (the same device buffer, plus host visibility), so a `'kernel'unified` argument may be passed to a `'kernel'global` parameter — deliberate, accepted on every target. The reverse is a checker error: a device-only `'kernel'global` value cannot be passed to a `'kernel'unified` parameter, because the callee may read it back on the host (on wgpu a `'global` buffer has no `COPY_SRC`). Enforced for free-function and method calls whose argument is a bound variable or a field of a variable of a known struct type; pinned by `tests/gpu_qualifier_arg_direction.rs`.
+
 **Inferred for `kernel.tensors.*` operands.** A labeled-array binding or parameter with no
 qualifier that is connected to a host `kernel.tensors.matmul/mma/linear` operand gets its
 residency inferred, so `let [float32, k = 64, m = 64] a = ...` needs no `'kernel'global`. It follows

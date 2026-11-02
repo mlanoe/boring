@@ -1,0 +1,14 @@
+struct Holder:
+    [float32]'kernel'global a
+
+pub req [float32]'kernel'unified take([float32]'kernel'unified x) throws:
+    let int n = x.length
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0
+        out
+
+req [float32]'kernel'unified pick(Holder h) throws:
+    take(h.a)
