@@ -5096,7 +5096,7 @@ kernel F:
 
 #[test]
 fn fixed_point_unsupported_cases_are_compile_errors_on_wgpu() {
-    let cases: [(&str, &str, &str); 5] = [
+    let cases: [(&str, &str, &str); 4] = [
         ("w128", r#"
 kernel F:
     mut [fixed64_64]'unified out
@@ -5105,14 +5105,6 @@ kernel F:
     def ():
         out[.thread.x] = 1.0
 "#, "fixed64_64"),
-        ("ln", r#"
-kernel F:
-    mut [fixed16_16]'unified out
-    init([fixed16_16]'unified o):
-        out = o
-    def ():
-        out[.thread.x] = out[.thread.x].ln()
-"#, "ln"),
         ("checked_member", r#"
 kernel F:
     mut [fixed16_16]'unified out
@@ -5141,7 +5133,7 @@ kernel F:
     for (name, src, needle) in cases {
         let err = run_wgpu_expect_failure(&format!("fixed_err_{name}"), src);
         assert!(err.contains(needle), "[{name}] expected `{needle}` in:\n{err}");
-        if name != "literal_out_of_range" && name != "actor_fixed_buffer" && name != "ln" && name != "checked_member" {
+        if name != "literal_out_of_range" && name != "actor_fixed_buffer" && name != "checked_member" {
             assert!(err.contains("--target wgpu"), "[{name}] {err}");
         }
     }
@@ -5691,16 +5683,20 @@ fn assert_math_member_matches_interpreter(t: &str, method: &str, positive_only: 
     let w = digits[0] + digits[1];
     let max: i128 = if signed { (1i128 << (w - 1)) - 1 } else { ((1i128 << w) - 1).min(i64::MAX as i128) };
     let k = max / 17;
-    let raws: Vec<String> = (0..16i128).map(|i| {
-        let v = match i {
-            0 => 0, 1 => 1, 2 => 3,
-            _ if signed && !positive_only => (i - 9) * k,
-            _ => i * k,
-        };
-        v.to_string()
+    let raws: Vec<i128> = (0..16i128).map(|i| match i {
+        0 => 0, 1 => 1, 2 => 3,
+        _ if signed && !positive_only => (i - 9) * k,
+        _ => i * k,
     }).collect();
+    assert_math_member_with_raws(t, method, &raws);
+}
+
+/// Runs `<t>.<method>()` on the device over exactly `raws` and compares with `boring run`, raw for raw.
+fn assert_math_member_with_raws(t: &str, method: &str, raws: &[i128]) {
+    let raws: Vec<String> = raws.iter().map(|v| v.to_string()).collect();
+    let n = raws.len();
     let src = format!(r#"
-let N = 16
+let N = {n}
 let RA = [0 as int64, {raws}]
 mut [@T@]'kernel'unified a = [@T@.fromRaw(0) for ..<N]
 mut [@T@]'kernel'unified r = [@T@.fromRaw(0) for ..<N]
@@ -5727,6 +5723,25 @@ for i in 0..<N:
     assert_wgpu_matches_interpreter(&format!("fixed_{method}_{t}"), &src);
 }
 
+/// Raws of `fixed<N>_<M>` / `ufixed<N>_<M>` for the real values in `xs` whose `f(x)` stays well inside the format's
+/// range (so the interpreter neither overflows nor rejects a negative result for an unsigned format).
+fn raws_where_result_fits(t: &str, xs: &[f64], f: impl Fn(f64) -> f64) -> Vec<i128> {
+    let signed = !t.starts_with('u');
+    let d: Vec<i32> = t.trim_start_matches('u').trim_start_matches("fixed").split('_').map(|x| x.parse().unwrap()).collect();
+    let (w, m) = (d[0] + d[1], d[1]);
+    let max: i128 = if signed { (1i128 << (w - 1)) - 1 } else { ((1i128 << w) - 1).min(i64::MAX as i128) };
+    let lim = 2f64.powi(w - m - if signed { 1 } else { 0 }) * 0.9;
+    let mut out: Vec<i128> = xs.iter().filter_map(|&x| {
+        let raw = (x * 2f64.powi(m)).round() as i128;
+        let r = f(x);
+        let ok = raw <= max && (if signed { raw >= -max } else { raw >= 0 })
+            && r.is_finite() && r.abs() < lim && (signed || r >= 0.0);
+        ok.then_some(raw)
+    }).collect();
+    out.dedup();
+    out
+}
+
 #[test]
 fn fixed_point_sqrt_runs_on_wgpu_and_matches_interpreter() {
     for t in ["fixed16_16", "ufixed16_16", "fixed8_8", "ufixed8_8", "fixed4_4", "fixed4_28", "ufixed0_32",
@@ -5750,6 +5765,33 @@ fn fixed_point_sin_cos_run_on_wgpu_and_match_interpreter() {
     }
 }
 
+/// `tan`, `exp` and `ln` (the interpreter's 128-bit-intermediate algorithms, bit for bit) over inputs chosen so the
+/// result fits each format, on the device against `boring run`. Covers the normalisation of `ln` (tiny and huge
+/// arguments), the `exp` range reduction (negative and positive, underflow to 0), `tan` near its poles, and `M > 60`.
+#[test]
+fn fixed_point_tan_exp_ln_run_on_wgpu_and_match_interpreter() {
+    let ln_xs = [1e-6, 0.001, 0.0625, 0.1, 0.5, 0.75, 1.0, 1.0000001, 1.5, 2.0, 2.718281828, 3.0, 7.0, 10.0, 100.0,
+                 1000.0, 12345.678, 65535.5, 1e9, 1e12];
+    let exp_xs = [-50.0, -43.5, -20.0, -10.0, -5.0, -2.5, -1.0, -0.5, -0.001, 0.0, 0.001, 0.25, 0.5, 0.6931471805599453,
+                  1.0, 1.5, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 20.0];
+    let tan_xs = [-100.0, -4.0, -3.0, -1.5, -1.2, -1.0, -0.5, -0.1, 0.0, 0.0001, 0.1, 0.5, 0.7, 1.0, 1.2, 1.5, 1.5707,
+                  2.0, 3.0, 3.14159, 4.0, 10.0, 100.0];
+    for t in ["fixed16_16", "fixed8_8", "fixed4_28", "fixed32_32", "fixed48_16", "fixed16_48", "fixed2_62",
+              "ufixed16_16", "ufixed32_32", "ufixed48_16"] {
+        let mut ln = raws_where_result_fits(t, &ln_xs, f64::ln);
+        ln.retain(|&r| r > 0); // x rounded to a zero raw has no logarithm
+        let exp = raws_where_result_fits(t, &exp_xs, f64::exp);
+        let tan = raws_where_result_fits(t, &tan_xs, f64::tan);
+        for (m, raws) in [("ln", ln), ("exp", exp), ("tan", tan)] {
+            if raws.len() >= 3 { assert_math_member_with_raws(t, m, &raws); }
+        }
+    }
+    // `M > 60` unsigned: the argument is shifted right into the 60-bit domain; `tan` only (exp >= 1, ln < 0 do not fit).
+    for t in ["ufixed0_32", "ufixed0_64"] {
+        let tan = raws_where_result_fits(t, &[0.0, 0.01, 0.1, 0.25, 0.5, 0.7], f64::tan);
+        assert_math_member_with_raws(t, "tan", &tan);
+    }
+}
 
 /// Builds `src` for wgpu, runs the generated program on the real device and returns its stdout.
 fn run_wgpu_program(name: &str, src: &str) -> (String, String, String) {

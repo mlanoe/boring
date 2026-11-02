@@ -16,7 +16,7 @@
 const F: u32 = 60;
 const ONE: i128 = 1i128 << 60;
 pub const HALF_PI: i128 = 1811004864519280711;
-const LN2: i128 = 799144290325165979;
+pub const LN2: i128 = 799144290325165979;
 /// 1 / prod(sqrt(1 + 2^-2i)) for the 60 CORDIC iterations.
 pub const CORDIC_K: i128 = 700114967507363238;
 /// atan(2^-i) in F fractional bits.

@@ -581,6 +581,125 @@ fn bp_fx_sin(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> { return bp_fx_down(
 fn bp_fx_cos(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> { return bp_fx_down(bp_fx_sincos(raw, m, sg).c, m); }
 ";
 
+const H_UP128: &str = "fn bp_fx_up128(raw: vec2<u32>, m: u32, sg: bool) -> vec4<u32> {
+    let neg = sg && (raw.y >> 31u) == 1u;
+    let ext = select(0u, 0xffffffffu, neg);
+    var a = vec4<u32>(raw.x, raw.y, ext, ext);
+    if (m <= 60u) {
+        a = bp_fx_shl128(a, 60u - m);
+    } else {
+        let sh = select(bp_fx_lshr64(raw, m - 60u), bp_fx_asr64(raw, m - 60u), neg);
+        a = vec4<u32>(sh.x, sh.y, ext, ext);
+    }
+    return a;
+}
+";
+const H_DOWN128: &str = "fn bp_fx_down128(mag: vec4<u32>, neg: bool, m: u32) -> vec2<u32> {
+    var r = vec4<u32>(0u, 0u, 0u, 0u);
+    if (m >= 60u) {
+        r = bp_fx_shl128(mag, m - 60u);
+    } else {
+        let s = 60u - m;
+        r = bp_fx_shr128(bp_fx_add128(mag, bp_fx_shl128(vec4<u32>(1u, 0u, 0u, 0u), s - 1u)), s);
+    }
+    return select(r.xy, bp_fx_neg64(r.xy), neg);
+}
+";
+const H_UDIV128: &str = "fn bp_fx_udiv128by64(n: vec4<u32>, d: vec2<u32>) -> vec4<u32> {
+    var r = vec2<u32>(0u, 0u);
+    var q = vec4<u32>(0u, 0u, 0u, 0u);
+    for (var i: i32 = 127; i >= 0; i = i - 1) {
+        let k = u32(i);
+        let limb = select(select(n.x, n.y, k >= 32u), select(n.z, n.w, k >= 96u), k >= 64u);
+        let bit = (limb >> (k & 31u)) & 1u;
+        r = vec2<u32>((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        q = vec4<u32>(q.x << 1u, (q.y << 1u) | (q.x >> 31u), (q.z << 1u) | (q.y >> 31u), (q.w << 1u) | (q.z >> 31u));
+        if (!bp_fx_ult64(r, d)) { r = bp_fx_sub64(r, d); q.x = q.x | 1u; }
+    }
+    return q;
+}
+";
+const H_SMULFLOOR60: &str = "fn bp_fx_smulfloor60(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let na = (a.y >> 31u) == 1u;
+    let nb = (b.y >> 31u) == 1u;
+    var p = bp_fx_umul128(select(a, bp_fx_neg64(a), na), select(b, bp_fx_neg64(b), nb));
+    let neg = na != nb;
+    if (neg) { p = bp_fx_add128(p, vec4<u32>(0xffffffffu, 0x0fffffffu, 0u, 0u)); }
+    let r = bp_fx_shr128(p, 60u).xy;
+    return select(r, bp_fx_neg64(r), neg);
+}
+";
+const H_TAN: &str = "fn bp_fx_tan(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> {
+    let sc = bp_fx_sincos(raw, m, sg);
+    if (all(sc.c == vec2<u32>(0u, 0u))) { return vec2<u32>(0u, 0u); }
+    let sn = (sc.s.y >> 31u) == 1u;
+    let cn = (sc.c.y >> 31u) == 1u;
+    let sm = select(sc.s, bp_fx_neg64(sc.s), sn);
+    let cm = select(sc.c, bp_fx_neg64(sc.c), cn);
+    let q = bp_fx_udiv128by64(bp_fx_shl128(vec4<u32>(sm.x, sm.y, 0u, 0u), 60u), cm);
+    return bp_fx_down128(q, sn != cn, m);
+}
+";
+const H_EXP: &str = "fn bp_fx_exp(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> {
+    let a = bp_fx_up128(raw, m, sg);
+    let an = (a.w >> 31u) == 1u;
+    let mag = select(a, bp_fx_neg128(a), an);
+    let lim = select(45u, 43u, an);
+    if (!bp_fx_ule128(mag, bp_fx_shl128(vec4<u32>(lim, 0u, 0u, 0u), 60u))) {
+        return vec2<u32>(0u, 0u);
+    }
+    let ln2 = @LN2@;
+    let t = bp_fx_add128(a, vec4<u32>(@HALFLN2@, 0u, 0u));
+    let tneg = (t.w >> 31u) == 1u;
+    let qr = bp_fx_divrem128by64(select(t, bp_fx_neg128(t), tneg), ln2);
+    var q = qr.xy;
+    if (tneg) { q = bp_fx_neg64(select(q, bp_fx_add64(q, vec2<u32>(1u, 0u)), any(qr.zw != vec2<u32>(0u, 0u)))); }
+    let r = bp_fx_sub64(a.xy, bp_fx_umul128(q, ln2).xy);
+    var term = vec2<u32>(0u, 268435456u);
+    var sum = term;
+    for (var n: u32 = 1u; n <= 24u; n = n + 1u) {
+        term = bp_fx_smulfloor60(term, r);
+        let tn = (term.y >> 31u) == 1u;
+        let dq = bp_fx_udivrem64(select(term, bp_fx_neg64(term), tn), vec2<u32>(n, 0u), 0u).q;
+        term = select(dq, bp_fx_neg64(dq), tn);
+        sum = bp_fx_add64(sum, term);
+        if (all(term == vec2<u32>(0u, 0u))) { break; }
+    }
+    var v = vec4<u32>(sum.x, sum.y, 0u, 0u);
+    if ((q.y >> 31u) == 0u) { v = bp_fx_shl128(v, q.x); } else { v = bp_fx_shr128(v, bp_fx_neg64(q).x); }
+    return bp_fx_down128(v, false, m);
+}
+";
+const H_LN: &str = "fn bp_fx_ln(raw: vec2<u32>, m: u32, sg: bool) -> vec2<u32> {
+    if (sg && (raw.y >> 31u) == 1u) { return vec2<u32>(0u, 0u); }
+    let x = bp_fx_up128(raw, m, sg);
+    if (all(x == vec4<u32>(0u, 0u, 0u, 0u))) { return vec2<u32>(0u, 0u); }
+    var p = 0u;
+    if (x.w != 0u) { p = 127u - countLeadingZeros(x.w); }
+    else if (x.z != 0u) { p = 95u - countLeadingZeros(x.z); }
+    else if (x.y != 0u) { p = 63u - countLeadingZeros(x.y); }
+    else { p = 31u - countLeadingZeros(x.x); }
+    var v = vec2<u32>(0u, 0u);
+    if (p >= 60u) { v = bp_fx_shr128(x, p - 60u).xy; } else { v = bp_fx_shl128(x, 60u - p).xy; }
+    let one = vec2<u32>(0u, 268435456u);
+    let z = bp_fx_udivrem64(bp_fx_sub64(v, one), bp_fx_add64(v, one), 60u).q;
+    let z2 = bp_fx_umulshr64(z, z, 60u);
+    var term = z;
+    var sum = z;
+    for (var n: u32 = 3u; n <= 61u; n = n + 2u) {
+        term = bp_fx_umulshr64(term, z2, 60u);
+        sum = bp_fx_add64(sum, bp_fx_udivrem64(term, vec2<u32>(n, 0u), 0u).q);
+        if (all(term == vec2<u32>(0u, 0u))) { break; }
+    }
+    let e = i32(p) - 60;
+    var tot = bp_fx_umul128(vec2<u32>(u32(abs(e)), 0u), @LN2@);
+    if (e < 0) { tot = bp_fx_neg128(tot); }
+    tot = bp_fx_add128(tot, vec4<u32>(sum.x << 1u, (sum.y << 1u) | (sum.x >> 31u), sum.y >> 31u, 0u));
+    let tn = (tot.w >> 31u) == 1u;
+    return bp_fx_down128(select(tot, bp_fx_neg128(tot), tn), tn, m);
+}
+";
+
 /// Helper sources in dependency order: (name, text, depends on).
 const HELPERS: &[(&str, &str, &[&str])] = &[
     ("umul64", HELPER_UMUL64, &[]),
@@ -640,6 +759,13 @@ const HELPERS: &[(&str, &str, &[&str])] = &[
     ("divrem128", H_DIVREM128, &["ult64", "sub64"]),
     ("atan_tab", H_ATAN_TAB, &[]),
     ("sincos", H_SINCOS, &["shl128", "add128", "asr64", "lshr64", "divrem128", "umul128", "atan_tab", "add64", "sub64", "neg64", "shl64"]),
+    ("up128", H_UP128, &["shl128", "lshr64", "asr64"]),
+    ("down128", H_DOWN128, &["shl128", "shr128", "add128", "neg64"]),
+    ("udiv128", H_UDIV128, &["ult64", "sub64"]),
+    ("smulfloor60", H_SMULFLOOR60, &["umul128", "add128", "shr128", "neg64"]),
+    ("tan", H_TAN, &["sincos", "udiv128", "down128", "shl128", "neg64"]),
+    ("exp", H_EXP, &["up128", "down128", "add128", "ule128", "shl128", "shr128", "divrem128", "umul128", "smulfloor60", "udivrem64", "add64", "sub64", "neg64"]),
+    ("ln", H_LN, &["up128", "down128", "add128", "shl128", "shr128", "umul128", "umulshr64", "udivrem64", "add64", "sub64"]),
 ];
 
 impl DeviceEmitter {
@@ -654,15 +780,17 @@ impl DeviceEmitter {
             if used.len() == before { break; }
         }
         let text: String = HELPERS.iter().filter(|(n, _, _)| used.contains(n)).map(|(_, t, _)| *t).collect();
-        if !used.contains("sincos") { return text; }
-        // The CORDIC constants come from the interpreter's own tables (src/fixed_math_core.rs).
+        if !text.contains('@') { return text; }
+        // The CORDIC and ln 2 constants come from the interpreter's own tables (src/fixed_math_core.rs).
         use crate::fixed_math_core as c;
         let atan = c::ATAN.iter().map(|&v| lit64(v)).collect::<Vec<_>>().join(", ");
-        let half = lit64(c::HALF_PI / 2);
+        let inner = |v: i128| { let l = lit64(v); l[l.find('(').unwrap() + 1..l.len() - 1].to_string() };
         text.replace("@ATAN@", &atan)
             .replace("@HP@", &lit64(c::HALF_PI))
-            .replace("@HALFHP@", &half[half.find('(').unwrap() + 1..half.len() - 1])
+            .replace("@HALFHP@", &inner(c::HALF_PI / 2))
             .replace("@K@", &lit64(c::CORDIC_K))
+            .replace("@LN2@", &lit64(c::LN2))
+            .replace("@HALFLN2@", &inner(c::LN2 / 2))
     }
 
     fn use_fixed_helper(&mut self, name: &'static str) { self.fixed_helpers.insert(name); }
@@ -693,7 +821,7 @@ impl DeviceEmitter {
                     .or_else(|| self.ty_of(r).filter(|t| fixed_fmt_of_type(t).is_some() || is_float_ty(t)))
                     .or_else(|| self.ty_of(l)),
             ExprKind::UnaryOp(UnaryOp::Neg, inner) => self.ty_of(inner),
-            ExprKind::MethodCall(obj, m, _) if matches!(m.as_str(), "floor" | "ceil" | "trunc" | "fract" | "abs" | "min" | "max" | "round" | "signum" | "clamp" | "sqrt" | "sin" | "cos"
+            ExprKind::MethodCall(obj, m, _) if matches!(m.as_str(), "floor" | "ceil" | "trunc" | "fract" | "abs" | "min" | "max" | "round" | "signum" | "clamp" | "sqrt" | "sin" | "cos" | "tan" | "exp" | "ln"
                 | "saturatingAdd" | "saturatingSub" | "saturatingMul" | "saturatingDiv" | "mulRound" | "divRound")
                 || wrapping_op(m).is_some()
                 && self.fixed_fmt_of(obj).is_some() => self.ty_of(obj),
@@ -935,9 +1063,9 @@ impl DeviceEmitter {
             let call = format!("bp_fx_sqrt({a64}, {m}u, {})", f.signed);
             return self.narrow64(&f, call);
         }
-        if let ("sin" | "cos", []) = (method, args) {
+        if let ("sin" | "cos" | "tan" | "exp" | "ln", []) = (method, args) {
             let a64 = self.raw_to64(&f, &o);
-            self.use_fixed_helper("sincos");
+            self.use_fixed_helper(match method { "sin" | "cos" => "sincos", "tan" => "tan", "exp" => "exp", _ => "ln" });
             let call = format!("bp_fx_{method}({a64}, {m}u, {})", f.signed);
             return self.narrow64(&f, call);
         }
@@ -1107,7 +1235,7 @@ impl DeviceEmitter {
             format!("`{}.{}(..)` is not supported on --target wgpu: fixed-point kernels support \
                      `+ - * / %`, comparisons, `as` casts, `.raw`, `fromRaw`, `floor`, `ceil`, `round`, `trunc`, `fract`, \
                      `abs`, `signum`, `min`, `max`, `clamp`, `wrapping{{Add,Sub,Mul,Div}}`, `saturating{{Add,Sub,Mul,Div}}`, \
-                     `mulRound`, `divRound`, `sqrt`, `sin` and `cos`; the other math functions (`tan`, `exp`, `ln`) and the `checked*` \
+                     `mulRound`, `divRound`, `sqrt`, `sin`, `cos`, `tan`, `exp` and `ln`; the `checked*` \
                      variants (which return an optional) are CPU-only", f.name(), method),
             e.line, e.col));
         "0".to_string()
