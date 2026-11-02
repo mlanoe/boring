@@ -49,11 +49,11 @@ const DECL_CASES: &[(&str, &str, &str)] = &[
     // The bound of a parameter passed on must fit in the one of the receiving declaration.
     ("struct Point:\n    var int x = 0\n\nstruct Narrow<'e as 'inline|owned>:\n    var [mut Point'e] cells = []\n\nint f<'q>(Narrow<e'q> n):\n    1\n",
         "the bound of `q` (allowed: inline, owned, shared, actor, guard) is not within the bound of `e` in `Narrow`: `'shared` is outside it", "7:18"),
-    // The argument of a call is a written chain or a parameter passed on whole: a suffix added to a
-    // passed parameter is rejected, which is also why a polymorphic recursion can never grow its
-    // instance (`grow<q'q'observed>` would need an unbounded set of instances).
+    // A suffix added to a passed parameter is checked against the whole bound, which is also why a
+    // polymorphic recursion can never grow its instance: every member of `q` plus `'observed` must
+    // be a valid chain, and the chain is a base plus one suffix, so `grow<q'q'observed>` never fits.
     ("struct Point:\n    var int x = 0\n\nstruct Board<'elem as 'actor|'actor'observed = 'actor>:\n    var [mut Point'elem] cells = []\n\nint grow<'q as 'actor|'actor'observed>(Board<elem'q> b, int n):\n    if n == 0:\n        return 0\n    grow<q'q'observed>(b, n - 1)\n",
-        "qualifier argument `q` of function `grow` must be one of", "10:10"),
+        "`q` may be `'actor'observed`, and `'actor'observed'observed` added to it is not a valid chain", "10:10"),
     // A method may not reuse the name of a parameter of its struct.
     ("struct Point:\n    var int x = 0\n\nstruct Holder<'q>:\n    var Point'q p = Point()\n    def m<'q>(Point'q x):\n        pass\n",
         "qualifier parameter `q` of `m` has the same name as one of the enclosing declaration", "6:5"),

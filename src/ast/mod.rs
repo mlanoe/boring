@@ -2736,6 +2736,20 @@ impl OwnerQual {
         }
     }
 
+    /// A qualifier parameter passed on to another declaration (`elem'cells`, or with a suffix
+    /// added to its value, `elem'cells'observed`): the parameter's name and the suffix.
+    pub fn pass_through(chain: &[OwnerQual]) -> Option<(&str, &[OwnerQual])> {
+        match chain {
+            [OwnerQual::Param(p), rest @ ..] if rest.len() <= 1 && rest.iter().all(|q| matches!(q, OwnerQual::Observed | OwnerQual::Weak)) => Some((p.as_str(), rest)),
+            _ => None,
+        }
+    }
+
+    /// `value` followed by `suffix` (what a passed-on parameter with a suffix becomes).
+    pub fn with_suffix(value: &[OwnerQual], suffix: &[OwnerQual]) -> QualChain {
+        value.iter().chain(suffix).cloned().collect()
+    }
+
     /// `T` with every layer of `chain` applied: `Qualified(Qualified(T, Actor), Observed)`.
     pub fn apply_chain(inner: Type, chain: &[OwnerQual]) -> Type {
         chain.iter().fold(inner, |t, q| Type::Qualified(Box::new(t), q.clone()))

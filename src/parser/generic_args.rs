@@ -392,16 +392,27 @@ impl Parser {
                     }
                     match (qual_param_decl(&params[i]), &a.ty) {
                         // `Board<elem'cells>`: the enclosing declaration's `'cells` is passed on.
-                        (Some((_, bound)), Type::QualArg(q)) if matches!(q.as_slice(), [OwnerQual::Param(_)]) => {
-                            let [OwnerQual::Param(p)] = q.as_slice() else { unreachable!() };
+                        (Some((_, bound)), Type::QualArg(q)) if OwnerQual::pass_through(q).is_some() => {
+                            let (p, suffix) = OwnerQual::pass_through(q).unwrap();
                             let mine = self.qual_bounds.get(p).cloned().unwrap_or_default();
-                            if let Some(out) = mine.iter().find(|m| !bound.contains(m)) {
-                                let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_else(|| "?".into());
-                                let allowed: Vec<String> = bound.iter().map(shown).collect();
-                                let given: Vec<String> = mine.iter().map(shown).collect();
-                                return Err(err(a.line, a.col, a.len, format!(
-                                    "the bound of `{p}` (allowed: {}) is not within the bound of `{label}` in {what}: `'{}` is outside it (allowed: {}); narrow it with `'{p} as ...`",
-                                    given.join(", "), shown(out), allowed.join(", "))));
+                            let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_else(|| "?".into());
+                            let allowed: Vec<String> = bound.iter().map(shown).collect();
+                            let given: Vec<String> = mine.iter().map(shown).collect();
+                            let suffix_name = suffix.first().and_then(|s| OwnerQual::chain_name(std::slice::from_ref(s))).unwrap_or_default();
+                            for m in &mine {
+                                // What this member becomes on the way: valid, and inside the receiving bound.
+                                let value = OwnerQual::with_suffix(m, suffix);
+                                if let Err(why) = OwnerQual::check_chain(&value) {
+                                    return Err(err(a.line, a.col, a.len, format!(
+                                        "`{p}` may be `'{}`, and `'{}` added to it is not a valid chain: {why}; narrow it with `'{p} as ...`",
+                                        shown(m), shown(&value))));
+                                }
+                                if !bound.contains(&value) {
+                                    let why = if suffix.is_empty() { String::new() } else { format!(" once `'{suffix_name}` is added") };
+                                    return Err(err(a.line, a.col, a.len, format!(
+                                        "the bound of `{p}` (allowed: {}) is not within the bound of `{label}` in {what}: `'{}`{why} is outside it (allowed: {}); narrow it with `'{p} as ...`",
+                                        given.join(", "), shown(&value), allowed.join(", "))));
+                                }
                             }
                         }
                         (Some((_, bound)), Type::QualArg(q)) => {

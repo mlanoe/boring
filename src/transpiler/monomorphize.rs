@@ -274,12 +274,16 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
         Type::Qualified(inner, q) => Type::Qualified(Box::new(substitute_type(inner, subst)), q.clone()),
         // `Board<elem'cells>` inside a declaration of `'cells`: the parameter is passed on, so the
         // argument becomes whatever the enclosing instance resolved `cells` to.
-        Type::QualArg(q) => match q.as_slice() {
-            [OwnerQual::Param(p)] => match subst.get(&format!("^{p}")) {
-                Some(arg @ Type::QualArg(_)) => arg.clone(),
+        Type::QualArg(q) => match OwnerQual::pass_through(q) {
+            // A suffix added on the way (`elem'cells'observed`) is appended to the value.
+            Some((p, suffix)) => match subst.get(&format!("^{p}")) {
+                Some(Type::QualArg(v)) => {
+                    let chain = OwnerQual::with_suffix(v, suffix);
+                    if suffix.is_empty() || OwnerQual::check_chain(&chain).is_ok() { Type::QualArg(chain) } else { ty.clone() }
+                }
                 _ => ty.clone(),
             },
-            _ => ty.clone(),
+            None => ty.clone(),
         },
         Type::Dyn(inner) => Type::Dyn(Box::new(substitute_type(inner, subst))),
         Type::Impl(inner) => Type::Impl(Box::new(substitute_type(inner, subst))),
@@ -883,7 +887,7 @@ fn instantiation_map_insert(map: &mut InstantiationMap, inst: Instantiation) {
 fn is_concrete_type(ty: &Type, enclosing_type_params: &[String]) -> bool {
     match ty {
         Type::TypeParam(_) => false,
-        Type::QualArg(q) => !matches!(q.as_slice(), [OwnerQual::Param(_)]),
+        Type::QualArg(q) => OwnerQual::pass_through(q).is_none(),
         Type::Named(n) => !enclosing_type_params.iter().any(|p| p == n),
         Type::Optional(inner) | Type::Array(inner) | Type::ArrayN(inner, _)
             | Type::ArrayNExpr(inner, _) | Type::Set(inner) | Type::Qualified(inner, _)

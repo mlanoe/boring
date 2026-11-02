@@ -1,0 +1,70 @@
+# A qualifier-generic enum: constructors and qualified patterns name their instance by proof
+# (explicit argument, expected type, the written qualifier of the argument, the declared default),
+# with no `let Slot<elem'..> s = ...` binding needed. A qualified pattern is read against the
+# written type of the subject, or names its instance itself (`Slot<elem'inline>.Full(p)`).
+struct Point:
+    var int x = 0
+
+enum Slot<'elem = 'inline>:
+    Empty
+    Full(Point'elem)
+
+enum Choice<'q as 'actor|owned>:
+    None
+    One(Point'q)
+
+struct Holder<'cells = 'inline>:
+    var Slot<elem'cells> slot
+
+    # Inside a qualifier-generic declaration the pattern follows the subject's own instance.
+    req int peek():
+        match slot:
+            Slot.Empty: -1
+            Slot.Full(p): 7
+
+Slot<elem'actor> empty():
+    Slot.Empty
+
+Slot<elem'actor> full():
+    let Point'actor q = Point(3)
+    Slot.Full(q)
+
+string describe(Slot<elem'actor> s):
+    match s:
+        Slot.Empty: "empty"
+        Slot.Full(z): "full {z.x}"
+
+def main():
+    let Point'actor p = Point(5)
+    # The declared default makes a bare construction an instance.
+    let a = Slot.Empty
+    let b = Slot.Full(Point(4))
+    # The written qualifier of the argument, and the expected type.
+    let c = Slot.Full(p)
+    let Slot<elem'inline> d = Slot.Full(Point(6))
+    # A bound without a default: only the evidence decides.
+    let e = Choice.One(p)
+
+    match a:
+        Slot.Empty: print "a empty"
+        Slot.Full(z): print "a full"
+    match b:
+        Slot.Empty: print "b empty"
+        Slot.Full(z): print "b full {z.x}"
+    match d:
+        Slot<elem'inline>.Empty: print "d empty"
+        Slot<elem'inline>.Full(z): print "d full {z.x}"
+    match empty():
+        Slot.Empty: print "empty() empty"
+        Slot.Full(z): print "empty() full"
+    match full():
+        Slot.Empty: print "full() empty"
+        Slot<elem'actor>.Full(z): print "full() full"
+    print describe(full())
+    match e:
+        Choice.None: print "e none"
+        Choice.One(z): print "e one"
+    # The expected type (`Holder<cells'inline>`) passes its instance to the enum argument.
+    let Holder<cells'inline> h = Holder(slot = Slot.Empty)
+    let Holder h2 = Holder(slot = Slot.Full(Point(1)))
+    print "{h.peek()} {h2.peek()}"

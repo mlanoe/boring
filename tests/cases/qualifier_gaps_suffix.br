@@ -1,0 +1,53 @@
+# A suffix added to a passed-on qualifier parameter: `Held<q'c'observed>` inside `Holder<'c>`
+# hands `Held` the value of `c` followed by `'observed`. `Holder<c'actor>` holds
+# `Held<q'actor'observed>` (`Held_actor_observed`); `Holder<c'guard>` holds `'guard'observed`.
+# The chain validity rules are unchanged: the bound of `c` must only allow bases the suffix is
+# valid on (`'shared'observed` is an error, reported at the declaration).
+struct Point:
+    var int x = 0
+
+    def bump():
+        x += 1
+
+    req int get():
+        x
+
+struct Held<'q as 'actor'observed|'guard'observed>:
+    mut Point'q pt = Point()
+
+    def bump():
+        pt.bump()
+
+    req int get():
+        pt.get()
+
+struct Holder<'c as 'actor|'guard = 'actor>:
+    var mut Held<q'c'observed> inner = Held<q'c'observed>()
+
+    def bump():
+        inner.bump()
+
+    req int get():
+        inner.get()
+
+# A function passes its own parameter on with a suffix, too.
+int total<'q as 'actor|'guard>(Holder<c'q> h):
+    pass_on<r'q'observed>(Held<q'q'observed>()) + h.get()
+
+int pass_on<'r as 'actor'observed|'guard'observed>(Held<q'r> h):
+    h.get()
+
+def main():
+    mut Holder h = Holder()
+    h.bump()
+    h.bump()
+    mut Holder<c'actor> h2 = Holder()
+    h2.bump()
+    mut Holder<c'guard> h3 = Holder()
+    h3.bump()
+    h3.bump()
+    h3.bump()
+    print "{h.get()} {h2.get()} {h3.get()}"
+    let a = total<q'actor>(h2)
+    let g = total<q'guard>(h3)
+    print "{a} {g}"

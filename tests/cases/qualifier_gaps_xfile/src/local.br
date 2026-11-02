@@ -1,0 +1,15 @@
+# Same-project sibling of main.br: it uses the dependency's method, enum and wrapper as well.
+use shapes.shapes.*
+
+pub def int sibling_total():
+    mut Holder h = Holder()
+    h.put(Board())
+    h.put(Board())
+    let Slot<elem'actor> s = Slot.Empty
+    var int extra = 0
+    match s:
+        Slot.Empty: extra = 10
+        Slot.Full(z): extra = 20
+    mut Wrap<c'actor> w = Wrap()
+    w.bump()
+    h.n + extra + w.get()

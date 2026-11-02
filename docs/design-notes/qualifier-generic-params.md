@@ -1,6 +1,6 @@
 # Qualifier parameters on structs — draft
 
-Status: **phases 0, 1 and 2 implemented** (labelled generic arguments; explicit instantiation of structs, enums and `ext` blocks; inference at construction, section 8), **plus default values and chained qualifiers** (section 10), **passing the parameter to an enclosing struct** (section 11) and **functions and methods that declare a parameter of their own** (`def f<'q>(Board<elem'q> b)`, section 12). Decisions taken while implementing are in section 7. Purpose of
+Status: **phases 0, 1 and 2 implemented** (and the known gaps of later phases closed, section 13) (labelled generic arguments; explicit instantiation of structs, enums and `ext` blocks; inference at construction, section 8), **plus default values and chained qualifiers** (section 10), **passing the parameter to an enclosing struct** (section 11) and **functions and methods that declare a parameter of their own** (`def f<'q>(Board<elem'q> b)`, section 12). Decisions taken while implementing are in section 7. Purpose of
 the document: list the impacts before deciding whether and how to build it. Origin: the `let q = arr[i]` aliasing work (`src/infer_actor_elems.rs`, book.md
 "Element mutability") picks one qualifier per *declared* type, so a struct field that wants
 different qualifiers in different places has no answer except two hand-written structs.
@@ -243,9 +243,8 @@ Inference is out of scope for the first iteration (decided); section 8 proposes 
   positional carrier `Type::QualArg(OwnerQual)`, a use `Qualified(T, OwnerQual::Param("elem"))`.
   `label'qualifier` is recognised by the callee's declaration (`generic_args.rs`), so `T'actor`
   keeps its meaning for a callee without a qualifier parameter `T`.
-- **Lexer.** `tick_in_decl_header` (text of the current line only): inside the `<...>` of a
-  `struct`/`enum`/`trait`/`ext` header line every tick is a qualifier tick. A header whose list
-  spans several lines is not covered.
+- **Lexer.** `tick_in_decl_header`: inside the `<...>` of a `struct`/`enum`/`trait`/`ext` header
+  every tick is a qualifier tick (the list may span several lines, section 13).
 - **Specialisation** reuses the monomorphizer: `QualArg` mangles to its name, `build_type_subst`
   keys a qualifier parameter `^elem`, and the type walker (`substitute_type`) replaces `T'elem`.
   Since no generic-Rust fallback exists, type-position uses are rewritten by the same walker
@@ -264,12 +263,10 @@ Inference is out of scope for the first iteration (decided); section 8 proposes 
 - **Interpreter.** `resolve_type` erases `QualArg` (qualifiers are ignored), so `run` and `build`
   agree.
 - **Targets.** GPU host emitters reuse the general emission (text tests for metal/cuda/rocm);
-  `--linux` rejects declarations and uses (`validator/kernel.rs`), a stricter rule than the
-  "bounds like `as 'inline|owned` are kernel-safe" idea of 4.7, which would need a specialisation
-  pass in that emitter.
-- **Enums.** Constructors and patterns carry no argument: use the binding form
-  `let Slot<elem'inline> s = Slot.Full(p)`; a qualified pattern or a bare `Slot.Full(p)` is not
-  supported.
+  `--linux` first rejected declarations and uses outright, now it specialises kernel-safe bounds
+  (`as 'inline|owned`, section 13).
+- **Enums.** A bare constructor and a qualified pattern take their instance from the same evidence
+  as a struct (section 13); the binding form `let Slot<elem'inline> s = Slot.Full(p)` stays valid.
 
 ## 8. Phase 2 as implemented: inference at construction
 
@@ -323,7 +320,7 @@ Phase numbering: this becomes phase 2; passing the parameter on (former phase 2)
 - **Evidence** is as proposed, with these precisions. Expected types: `let` with a written type, field defaults, return/tail expression, assignment to a name with a written type, and arguments of calls to a free function, a struct constructor (field or unique `init`) or an enum variant, matched by label or position; array literals pass the element type down. Arguments: a name declared with a written qualifier (local, parameter, field of the enclosing type or `self.x`), directly or as elements of an array/set/dict/tuple literal. A name declared twice with different types, or without a written type, is unknown. Expected type and arguments that disagree are a conflict, as are two arguments.
 - **No type-argument inference was added.** The monomorphizer specialises explicit turbofish sites only; every other generic use stays on the generic-Rust path. So a declaration mixing type and qualifier parameters (`Cache<T, 'q>`) is resolved only through an expected type that names all its arguments; argument evidence applies to declarations whose parameters are all qualifiers.
 - **Diagnostics**: `cannot infer qualifier parameter(s) ... of `X`, write `X<...>`` (also for a bare type position), `conflicting qualifiers for ...`, `qualifier ... is outside the bound ...`; the first in source order is reported.
-- **Known gaps**: method-call arguments (`obj.m(Board())`) give no expected type; a `return` inside a closure is read against the enclosing function's return type; `--explain-inference` was not built.
+- **Known gaps**: `--explain-inference` was not built; method-call arguments and nested-function `return`s were closed later (section 13); type-argument inference for a mixed declaration stays undone (section 13, "Not done").
 
 ## 9. Idea considered: invisible qualifier parameters (not built)
 
@@ -546,7 +543,7 @@ trait, `--explain-inference`.
   `src/parser/tests_qualifier_params.rs`.
 - **Known gaps.** An enum payload of an `'actor`/managed-`'owned` instance hits the existing `PartialEq` derive
   limits of enums (unrelated to the parameter); `elem'cells'observed` (a suffix added on top of a passed parameter)
-  is not accepted.
+  was closed in section 13.
 
 ## 12. Qualifier-generic functions and methods (phase 5)
 
@@ -606,7 +603,7 @@ Rules (decided with the user):
    qualifiers are proofs.
 
 Out of scope: invisible generics (section 9), `--explain-inference`, qualifier-generic traits,
-`elem'cells'observed` (a suffix on a passed parameter), type-argument inference.
+type-argument inference (`elem'cells'observed` was added later, section 13).
 
 ### As implemented
 
@@ -679,3 +676,75 @@ Out of scope: invisible generics (section 9), `--explain-inference`, qualifier-g
   cannot infer, unknown label, body and struct introduction, shadowing, passed bound, suffix on a passed
   parameter, the warning), `tests/qualifier_params_targets.rs` (metal/cuda/rocm text, `--linux`),
   `src/parser/tests_qualifier_params.rs`, lexer tests.
+
+## 13. Known gaps closed
+
+Closed after phase 5, one commit each, with tests (`tests/cases/qualifier_gaps_*.br`,
+`tests/qualifier_gaps_errors.rs`, `tests/qualifier_params_targets.rs`, lexer tests). The rule did not
+change: only a written qualifier (or a declared default) is a proof, two proofs that disagree stay a
+conflict, there is no usage-based inference and no invisible generic.
+
+1. **Method-call arguments as expected type.** `obj.m(Board())` reads the parameter types of `m`
+   (`Decls::methods`, keyed `Owner::method`, a name declared twice for one owner is ambiguous) when the
+   method is certain: the receiver has a *written* type (declared name, `self`, field), which names the
+   declaration. The receiver's own qualifier arguments are substituted into the parameter types
+   (`Game<cells'actor>.take(Board<elem'cells> b)` expects `Board<elem'actor>`), a bare receiver name uses
+   the defaults when every parameter has one, and a slot that still names a parameter of the declaration
+   is left without proof (never a guess, no error of its own). An unknown receiver gives no proof: the
+   construction keeps the ordinary `cannot infer ...` error. Methods with a qualifier parameter of their
+   own already had `push_fn_arg_types`.
+2. **`return` in a closure.** The parser forbids `return` in a closure (`no 'return' allowed in
+   closure`), so the live case was a *nested function*, whose `return` was read against the enclosing
+   function. `Ctx::inner_returns` marks every `return` inside a closure or nested `def` (by address,
+   outer scopes first so the innermost wins) with that function's own return type (`None` for a closure,
+   whose return type is never written: ignored, no expected type).
+3. **Enum constructors and patterns.** `Slot.Empty` (a payload-less variant is a field access, not a
+   call) is now visited, so the declared default and the expected type apply; `Slot.Full(p)` already took
+   a written qualifier of `p` and the expected type. A qualified pattern is resolved by
+   `Ctx::resolve_pattern`: explicit arguments in the pattern (`Slot<elem'inline>.Full(p)`, parsed to
+   `Slot<inline>::Full`, checked against the bound and against the subject's written type), else the
+   written type of the subject (declared name, or a call of a function that declares its return type,
+   `Decls::fn_rets`; a bare name is the default instance), and the pattern becomes the instance's name
+   (`Slot_inline::Full`, instance registered). A pattern the pass cannot settle is left as `Slot::Full`
+   and `emit_pattern` reads the instance of the match subject (`match_subject_enum`, checked to be an
+   instance of that enum) — this is what covers a match inside a qualifier-generic body, where the pass
+   only sees a pass-through. The interpreter strips the `<...>` of the name. A pattern takes concrete
+   arguments only (a pass-through there is a parse error).
+4. **Multi-line headers.** `tick_in_decl_header` and `tick_in_fn_header` try windows that start up to 24
+   lines before the tick (and, for functions, extend 24 lines after it to find the `>(`); the
+   statement-keyword/`=` prefix guards of the function rule are kept, so `x < 'a'` and wrapped
+   comparisons stay raw strings. `parse_ext_decl` skips line breaks inside its `<...>`; struct, enum and
+   function headers already did.
+5. **`--linux`.** `validator/kernel.rs` no longer rejects every qualifier parameter: `check_qual_params`
+   accepts a declaration whose whole bound is `'inline|owned` (struct, enum, `ext`, function, method) and
+   rejects any other naming the offending members (``qualifier parameters whose bound allows 'actor, ...
+   are not supported on the Rust-for-Linux Linux target``). `Transpiler::global_pre_scan` (extracted from
+   `emit_program`) and `transpiler::specialise_qualifier_params` run the std specialisation on the
+   program, and `emit_kernel_with_version` hands the result to `transpile_kernel`, so instances are named
+   as in the std path (`Board_owned`, `count_inline`). `'shared` is not in the kernel-safe set although
+   the kernel emitter maps it to `Arc`, to stay conservative: the idea of 4.7 asked for `inline|owned`.
+6. **`elem'cells'observed`.** The pass-through chain is `[Param(cells), Observed]`
+   (`OwnerQual::pass_through`/`with_suffix`): `substitute_type` appends the suffix to the instance's
+   value, `qual_infer` strips it when reading evidence off a written argument. The chain rules are
+   unchanged; they are checked **at the declaration** on every member of the enclosing bound
+   (`member + suffix` valid, and inside the receiving bound), so an unbounded enclosing parameter
+   (`'c` allows `'shared`/`'inline`) must be narrowed. Termination argument: a suffix lengthens the chain
+   and a chain is a base plus at most one suffix, so a cycle that adds a suffix can never type-check
+   (`grow<q'q'observed>` is rejected with the chain-validity error instead of the former "must be one of").
+   The *use* form `T'elem'observed` stays unsupported.
+
+### Not done: type-argument inference for a mixed `Cache<T, 'q>`
+
+Not built, on purpose. The existing monomorphizer has **no** type-argument inference at all: it
+specialises explicit turbofish sites whose arguments are already concrete (module doc of
+`monomorphize.rs`: "every other (inferred, no-turbofish) generic struct/fn use keeps flowing through the
+unmodified `impl<T: Clone> ...` emission", i.e. rustc infers `T`). A qualifier-generic declaration has no
+generic-Rust fallback, so a `Cache<T, 'q>` use must name `T` before it can be specialised, and nothing
+before specialisation knows the type of an argument expression: the passes see only *written* types
+(`Declared` in `qual_infer.rs`), no expression typing (`Cache(5)`, `Cache(f(x))`, `Cache(a + b)`).
+Extending the monomorphizer would mean building that expression typing (literals, calls, fields,
+generics of the callee, coercions...), i.e. a second mechanism, not an extension of the existing one;
+inferring `T` only from written names would cover little and silently differ from what rustc infers for
+the unspecialised path. What exists is kept: an expected type that names every argument
+(`let Cache<T = int, q'shared> c = Cache(1)`) resolves the mixed declaration, and the qualifier evidence
+of the arguments applies to declarations whose parameters are all qualifiers.

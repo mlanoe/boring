@@ -1,0 +1,47 @@
+# Declarations of a dependency for the qualifier gaps closed late: a method taking a
+# qualifier-generic argument, an enum with a declared default, a suffix added to a passed-on
+# parameter, and a header whose `<...>` list spans several lines.
+pub struct Point:
+    pub var int x = 0
+
+    pub def bump():
+        x += 1
+
+    pub req int get():
+        x
+
+pub struct Board<
+    'elem = 'inline
+>:
+    pub var [mut Point'elem] cells = []
+
+    pub req int size():
+        cells.len()
+
+pub struct Holder:
+    pub var int n = 0
+
+    pub def put(Board<elem'actor> b):
+        n += b.size() + 1
+
+pub enum Slot<'elem = 'inline>:
+    Empty
+    Full(Point'elem)
+
+pub struct Held<'q as 'actor'observed|'guard'observed>:
+    pub mut Point'q pt = Point()
+
+    pub def bump():
+        pt.bump()
+
+    pub req int get():
+        pt.get()
+
+pub struct Wrap<'c as 'actor|'guard = 'actor>:
+    pub var mut Held<q'c'observed> inner = Held<q'c'observed>()
+
+    pub def bump():
+        inner.bump()
+
+    pub req int get():
+        inner.get()

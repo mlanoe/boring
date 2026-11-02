@@ -1822,8 +1822,16 @@ impl Transpiler {
                 // Pre-qualified pattern `Enum::Variant` (written as `Enum.Variant` in Boring) —
                 // emit verbatim, skip all lookup / re-qualification logic.
                 if name.contains("::") {
+                    // `Slot.Full(p)` of a qualifier-generic enum that `qual_infer` left open: it
+                    // means the instance of the match subject.
+                    let mut name = name.clone();
+                    if let (Some((pre, var)), Some(subj)) = (name.split_once("::"), self.match_subject_enum.as_deref()) {
+                        let is_instance = self.global_instantiations.get(pre)
+                            .is_some_and(|v| v.iter().any(|i| i.is_enum && i.mangled == subj));
+                        if is_instance { name = format!("{subj}::{var}"); }
+                    }
                     return if fields.is_empty() {
-                        name.clone()
+                        name
                     } else {
                         let fs: Vec<String> = fields.iter().map(|p| self.emit_pattern(p)).collect();
                         format!("{}({})", name, fs.join(", "))

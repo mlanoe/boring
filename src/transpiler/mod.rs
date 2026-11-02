@@ -311,6 +311,19 @@ pub fn transpile_full(program: &Program) -> TranspileOutput {
     transpile_with_config(program, TranspileConfig::default())
 }
 
+/// Specialises every qualifier-generic declaration of `program` (`struct Board<'elem>`,
+/// `def f<'q>(..)`) into its concrete instances, with the instance names the std transpiler
+/// would emit, for a target whose emitter has no specialisation pass (the Linux kernel target).
+/// A program with no qualifier parameter is returned as is.
+pub fn specialise_qualifier_params(program: &Program) -> Program {
+    let mut t = Transpiler::new(TranspileConfig::default());
+    t.global_pre_scan(program);
+    if !t.has_qual_generics { return program.clone(); }
+    let mut cloned = program.clone();
+    t.monomorphize_program(&mut cloned);
+    cloned
+}
+
 pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
     let rewritten = external_closure_borrow::infer(program);
     let program = rewritten.as_ref().unwrap_or(program);
@@ -2300,6 +2313,59 @@ impl Transpiler {
 
     // ── Program ───────────────────────────────────────────────────────────────
 
+    /// The cross-file global setup of `emit_program` (exactly once, on the entry program): the
+    /// fact pass, the registration pre-scan and the instance maps monomorphization reads.
+    fn global_pre_scan(&mut self, program: &Program) {
+        // Fact pass first: which traits get the `'shared` representation (share_dyn_traits.rs)
+        // must be known before the real scan registers a single type.
+        {
+            let mut visited = std::collections::HashSet::new();
+            let prev_dir = self.source_dir.clone();
+            self.dyn_fact_pass = true;
+            self.deep_pre_scan(program, &mut visited);
+            self.run_pending_pre_infer();
+            self.dyn_fact_pass = false;
+            self.source_dir = prev_dir;
+            self.shared_dyn_traits = self.dyn_facts.targets();
+        }
+        let mut visited = std::collections::HashSet::new();
+        let prev_dir = self.source_dir.clone();
+        self.deep_pre_scan(program, &mut visited);
+        self.run_pending_pre_infer();
+        self.source_dir = prev_dir;
+        self.resolve_trait_borrow_params();
+        self.trait_borrow_resolved = true;
+        // Registrations made before inference saw every bare param as bare: by-value ones are
+        // `Trait'shared` for a shared trait (`share_dyn_traits.rs`).
+        let targets = self.shared_dyn_traits.clone();
+        for sig in self.fn_sigs.values_mut() {
+            for ty in sig.iter_mut() { *ty = share_dyn_traits::shared_if_bare(ty, &targets); }
+        }
+        let (instantiations, method_instantiations) = monomorphize::build_instantiation_map(
+            &self.pending_generic_call_candidates,
+            &self.pending_method_call_candidates,
+            &self.global_generic_structs,
+            &self.global_generic_fns,
+            &self.global_qual_enums,
+            &self.global_qual_exts,
+            &self.global_generic_methods,
+        );
+        self.global_instantiations = instantiations;
+        self.global_method_instantiations = method_instantiations;
+        // `rewrite_call_sites` turns a cross-file `f<T>(...)` into a call to the
+        // specialized name before the file declaring `f` is emitted. Register
+        // every such concrete signature globally now, so the ordinary call
+        // coercion path still sees borrowed and mutable parameters.
+        let specialized_fns = monomorphize::specialized_free_fn_decls(
+            &self.global_instantiations,
+            &self.global_generic_fns,
+        );
+        for f in &specialized_fns {
+            self.pre_register_fn(f);
+        }
+        self.pre_scan_qual_instances();
+    }
+
     fn emit_program(&mut self, program: &Program) {
         // Cross-file monomorphization global setup — runs exactly ONCE, on the very
         // first (outermost/entry) call to `emit_program`, BEFORE this file's own
@@ -2315,54 +2381,7 @@ impl Transpiler {
         // already rewritten to `Call`, and monomorphization never adds/removes the
         // `Item::Use` entries its recursion inspects.
         if !self.prelude_emitted {
-            // Fact pass first: which traits get the `'shared` representation (share_dyn_traits.rs)
-            // must be known before the real scan registers a single type.
-            {
-                let mut visited = std::collections::HashSet::new();
-                let prev_dir = self.source_dir.clone();
-                self.dyn_fact_pass = true;
-                self.deep_pre_scan(program, &mut visited);
-                self.run_pending_pre_infer();
-                self.dyn_fact_pass = false;
-                self.source_dir = prev_dir;
-                self.shared_dyn_traits = self.dyn_facts.targets();
-            }
-            let mut visited = std::collections::HashSet::new();
-            let prev_dir = self.source_dir.clone();
-            self.deep_pre_scan(program, &mut visited);
-            self.run_pending_pre_infer();
-            self.source_dir = prev_dir;
-            self.resolve_trait_borrow_params();
-            self.trait_borrow_resolved = true;
-            // Registrations made before inference saw every bare param as bare: by-value ones are
-            // `Trait'shared` for a shared trait (`share_dyn_traits.rs`).
-            let targets = self.shared_dyn_traits.clone();
-            for sig in self.fn_sigs.values_mut() {
-                for ty in sig.iter_mut() { *ty = share_dyn_traits::shared_if_bare(ty, &targets); }
-            }
-            let (instantiations, method_instantiations) = monomorphize::build_instantiation_map(
-                &self.pending_generic_call_candidates,
-                &self.pending_method_call_candidates,
-                &self.global_generic_structs,
-                &self.global_generic_fns,
-                &self.global_qual_enums,
-                &self.global_qual_exts,
-                &self.global_generic_methods,
-            );
-            self.global_instantiations = instantiations;
-            self.global_method_instantiations = method_instantiations;
-            // `rewrite_call_sites` turns a cross-file `f<T>(...)` into a call to the
-            // specialized name before the file declaring `f` is emitted. Register
-            // every such concrete signature globally now, so the ordinary call
-            // coercion path still sees borrowed and mutable parameters.
-            let specialized_fns = monomorphize::specialized_free_fn_decls(
-                &self.global_instantiations,
-                &self.global_generic_fns,
-            );
-            for f in &specialized_fns {
-                self.pre_register_fn(f);
-            }
-            self.pre_scan_qual_instances();
+            self.global_pre_scan(program);
         }
 
         // Boring-side monomorphization: specialize fully-concrete turbofish

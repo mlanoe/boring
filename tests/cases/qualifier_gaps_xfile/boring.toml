@@ -1,0 +1,7 @@
+[project]
+name = "qualifier_gaps_xfile"
+version = "0.1.0"
+main = "src/main.br"
+
+[deps]
+shapes = "../fixtures/qualifier_gaps_lib"

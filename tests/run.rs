@@ -989,6 +989,10 @@ interp_test!(qualifier_enclosing_chains);
 interp_test!(qualifier_fns);
 interp_test!(qualifier_fns_cascade);
 interp_test!(qualifier_fns_methods);
+interp_test!(qualifier_gaps_calls);
+interp_test!(qualifier_gaps_enums);
+interp_test!(qualifier_gaps_headers);
+interp_test!(qualifier_gaps_suffix);
 interp_test!(managed_owned_local_arg);
 
 // The project `transpile_project_test!(qualifier_defaults_xfile)` builds, run by the interpreter.
@@ -1043,6 +1047,24 @@ fn qualifier_fns_xfile() {
     );
     let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert_eq!(actual.trim_end(), "1 2 4\n3 6\n2\n3");
+}
+
+// The project `transpile_project_test!(qualifier_gaps_xfile)` builds, run by the interpreter.
+#[test]
+fn qualifier_gaps_xfile() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/qualifier_gaps_xfile/src/main.br");
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+    assert!(
+        output.status.success(),
+        "qualifier_gaps_xfile exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "holder 1\na empty\nb full 4\nwrap 1 2\n13");
 }
 
 // The project `transpile_project_test!(qualifier_params_xfile)` builds, run by the interpreter.

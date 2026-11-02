@@ -392,8 +392,24 @@ fn tick_is_qualifier(chars: &[char], i: usize) -> bool {
 /// list is a qualifier-parameter tick (docs/design-notes/qualifier-generic-params.md). Only
 /// the text of the current line before the tick is looked at.
 fn tick_in_decl_header(chars: &[char], i: usize) -> bool {
-    let start = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
-    let line: String = chars[start..i].iter().collect();
+    // The list may span several lines: try the line the header starts on, up to `HEADER_LINES`
+    // lines before the tick (the first window whose text starts with a header keyword decides).
+    let mut start = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    for _ in 0..=HEADER_LINES {
+        if decl_header_open(&chars[start..i]) { return true; }
+        let Some(prev) = start.checked_sub(1) else { break };
+        start = chars[..prev].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    }
+    false
+}
+
+/// How many lines before a tick a declaration header (struct/enum/trait/ext/function) may start.
+const HEADER_LINES: usize = 24;
+
+/// Does `text` (starting at a line start, ending at the tick) begin with a header whose `<...>`
+/// list is still open at its end?
+fn decl_header_open(text: &[char]) -> bool {
+    let line: String = text.iter().collect();
     let mut rest = line.trim_start();
     if let Some(r) = rest.strip_prefix("pub ") { rest = r.trim_start(); }
     let Some(kw_end) = rest.find(|c: char| !c.is_alphanumeric() && c != '_') else { return false };
@@ -419,10 +435,26 @@ fn tick_in_decl_header(chars: &[char], i: usize) -> bool {
 /// strings): every tick in such a list is a qualifier-parameter tick
 /// (docs/design-notes/qualifier-generic-params.md, section 12).
 fn tick_in_fn_header(chars: &[char], i: usize) -> bool {
-    let start = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
-    let end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
-    let line = &chars[start..end];
-    let tick = i - start;
+    // The list may span several lines: windows from the tick's own line back to `HEADER_LINES`
+    // earlier, extended forward to the line that closes the list.
+    let mut start = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    for _ in 0..=HEADER_LINES {
+        let mut end = i;
+        let mut ends = 0;
+        // Up to `HEADER_LINES` lines after the tick's line.
+        while end < chars.len() && ends <= HEADER_LINES {
+            if chars[end] == '\n' { ends += 1; }
+            end += 1;
+        }
+        if fn_header_open(&chars[start..end], i - start) { return true; }
+        let Some(prev) = start.checked_sub(1) else { break };
+        start = chars[..prev].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    }
+    false
+}
+
+/// `window` holds whole lines (it starts at a line start); `tick` is the offset of the tick in it.
+fn fn_header_open(line: &[char], tick: usize) -> bool {
     // The innermost `<` still open before the tick.
     let mut open: Vec<usize> = Vec::new();
     for (k, &c) in line[..tick].iter().enumerate() {
@@ -438,8 +470,10 @@ fn tick_in_fn_header(chars: &[char], i: usize) -> bool {
     let mut name_start = name_end;
     while name_start > 0 && (line[name_start - 1].is_alphanumeric() || line[name_start - 1] == '_') { name_start -= 1; }
     if name_start == name_end { return false; }
-    // What precedes the name is `def`/`req`/modifiers and an optional return type: never a statement.
-    let prefix: String = line[..name_start].iter().collect();
+    // What precedes the name on its line is `def`/`req`/modifiers and an optional return type:
+    // never a statement.
+    let line_start = line[..name_start].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+    let prefix: String = line[line_start..name_start].iter().collect();
     if prefix.contains('=') { return false; }
     let first = prefix.trim_start().split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("");
     if matches!(first, "let" | "var" | "return" | "if" | "elif" | "while" | "for" | "print" | "match"
@@ -2019,6 +2053,35 @@ mod raw_apostrophe_strings {
             let ks = kinds(src);
             assert!(ks.iter().any(|k| matches!(k, TokenKind::Tick)), "{src}");
             assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+    }
+
+    // A `<...>` list that spans several lines is still a header: every tick in it is a qualifier tick.
+    #[test]
+    fn ticks_in_a_multi_line_header_are_qualifier_ticks() {
+        for src in [
+            "struct Pair<\n    'a as 'actor|guard,\n    'b\n>:\n    int x",
+            "pub enum Slot<\n    'elem = 'inline\n>:\n    Empty",
+            "ext Pair<\n    'a,\n    'b\n>:\n    int x",
+            "int pick<\n    'q as 'inline|owned = 'inline,\n    'r\n>(Pair<a'actor, b'q> p):\n    1",
+            "def merge<\n    'q\n>(Board<elem'q> other):\n    1",
+        ] {
+            let ks = kinds(src);
+            assert!(ks.iter().any(|k| matches!(k, TokenKind::Tick)), "{src}");
+            assert!(!ks.iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
+        }
+    }
+
+    // Raw strings after a closed multi-line header, or on lines that merely follow a comparison, stay strings.
+    #[test]
+    fn raw_strings_after_a_multi_line_header_stay_strings() {
+        for src in [
+            "struct Pair<\n    'a,\n    'b\n>:\n    int x\nlet s = 'raw'",
+            "def f<\n    'q\n>(Board<elem'q> b):\n    let s = 'raw'",
+            "let x = a <\n    'b'",
+            "if a <\n    b:\n    print 'x'",
+        ] {
+            assert!(kinds(src).iter().any(|k| matches!(k, TokenKind::Str(_))), "{src}");
         }
     }
 

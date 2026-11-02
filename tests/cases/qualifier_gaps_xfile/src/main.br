@@ -1,0 +1,28 @@
+# The qualifier gaps closed late, across files: a method-call argument takes the parameter type of a
+# dependency's method, a bare enum constructor and a qualified pattern read the dependency's enum, a
+# suffix is added to a passed-on parameter, and a header may span several lines.
+# Registered by tests/run.rs and tests/transpile.rs (`qualifier_gaps_xfile`).
+use shapes.shapes.*
+use local
+
+def main():
+    mut Holder h = Holder()
+    h.put(Board())
+    print "holder {h.n}"
+
+    let a = Slot.Empty
+    let b = Slot.Full(Point(4))
+    match a:
+        Slot.Empty: print "a empty"
+        Slot.Full(z): print "a full"
+    match b:
+        Slot.Empty: print "b empty"
+        Slot<elem'inline>.Full(z): print "b full {z.x}"
+
+    mut Wrap w = Wrap()
+    w.bump()
+    mut Wrap<c'guard> g = Wrap()
+    g.bump()
+    g.bump()
+    print "wrap {w.get()} {g.get()}"
+    print sibling_total()

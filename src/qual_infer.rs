@@ -91,6 +91,11 @@ struct Decls {
     /// How many methods (of any owner, generic or not) carry each name: a receiver whose type is
     /// unknown can only be resolved when the name is unique.
     method_names: HashMap<String, usize>,
+    /// Parameters of the methods that declare no qualifier parameter of their own, by
+    /// `"Owner::method"`; `None` when the name is declared twice for one owner (ambiguous).
+    methods: HashMap<String, Option<Params>>,
+    /// Written return types of the free functions, `None` when ambiguous or unwritten.
+    fn_rets: HashMap<String, Option<Type>>,
 }
 
 /// The qualifier-generic view of a function or method; `None` when it has no qualifier parameter
@@ -140,6 +145,10 @@ impl Decls {
                     // A parameter without a type would shift positions: treat as unknown.
                     let complete = f.params.iter().all(|p| p.ty.is_some());
                     if complete { add_unique(&mut self.fns, &f.name, params); } else { self.fns.insert(f.name.clone(), None); }
+                    match (self.fn_rets.contains_key(&f.name), &f.return_ty) {
+                        (false, Some(t)) => { self.fn_rets.insert(f.name.clone(), Some(t.clone())); }
+                        _ => { self.fn_rets.insert(f.name.clone(), None); }
+                    }
                     if f.qualifier.is_none() {
                         match qfn_of(f) {
                             Some(qf) => add_unique(&mut self.qfns, &f.name, qf),
@@ -158,7 +167,14 @@ impl Decls {
     fn add_methods(&mut self, owner: &str, methods: &[FnDecl]) {
         for m in methods {
             *self.method_names.entry(m.name.clone()).or_default() += 1;
-            if let Some(qf) = qfn_of(m) { self.qmethods.entry(m.name.clone()).or_default().push((owner.to_string(), qf)); }
+            if let Some(qf) = qfn_of(m) { self.qmethods.entry(m.name.clone()).or_default().push((owner.to_string(), qf)); continue; }
+            // A parameter without a written type would shift positions: the method is unknown.
+            if m.params.iter().all(|p| p.ty.is_some()) {
+                let params = m.params.iter().filter_map(|p| p.ty.clone().map(|t| (Some(p.name.clone()), t))).collect::<Params>();
+                add_unique(&mut self.methods, &format!("{owner}::{}", m.name), params);
+            } else {
+                self.methods.insert(format!("{owner}::{}", m.name), None);
+            }
         }
     }
 
@@ -287,8 +303,13 @@ fn from_ty_in(decl: &Type, arg: &Type, desc: &str, pass: bool, out: &mut Evidenc
         (Type::Generic(db, dargs), Type::Generic(ab, aargs)) if db == ab && dargs.len() == aargs.len() => {
             for (x, y) in dargs.iter().zip(aargs) {
                 if let (Type::QualArg(dq), Type::QualArg(aq)) = (x, y) {
-                    if let [OwnerQual::Param(p)] = dq.as_slice() {
-                        if pass || !matches!(aq.as_slice(), [OwnerQual::Param(_)]) { out.push((p.clone(), aq.clone(), desc.to_string())); }
+                    if let Some((p, suffix)) = OwnerQual::pass_through(dq) {
+                        // The written argument is the value of `p` plus the suffix added on the way.
+                        let value: Option<QualChain> = if suffix.is_empty() { Some(aq.clone()) }
+                            else { aq.strip_suffix(suffix).filter(|v| !v.is_empty()).map(<[OwnerQual]>::to_vec) };
+                        if let Some(value) = value {
+                            if pass || OwnerQual::pass_through(&value).is_none() { out.push((p.to_string(), value, desc.to_string())); }
+                        }
                     }
                 }
             }
@@ -425,6 +446,22 @@ struct Ctx<'a> {
     out: RefCell<Out>,
     /// The struct, enum or `ext` target whose methods are being walked (the type of `self`).
     owner: RefCell<Option<String>>,
+    /// `return` statements that belong to a closure or a nested function of the body being
+    /// walked, with the return type that one declares (`None`: unknown, so no expected type).
+    /// Keyed by the statement's address; a `return` absent from the table returns from the
+    /// function itself.
+    inner_returns: RefCell<HashMap<*const Stmt, Option<Type>>>,
+}
+
+fn has_param(t: &Type) -> bool {
+    match t {
+        Type::QualArg(q) => q.iter().any(|o| matches!(o, OwnerQual::Param(_))),
+        Type::Qualified(i, q) => matches!(q, OwnerQual::Param(_)) || has_param(i),
+        Type::Generic(_, args) | Type::Tuple(args) => args.iter().any(has_param),
+        Type::Array(i) | Type::Set(i) | Type::Optional(i) | Type::Mut(i) => has_param(i),
+        Type::Dict(k, v) => has_param(k) || has_param(v),
+        _ => false,
+    }
 }
 
 fn qual_args_of(ty: &Type) -> Option<(&str, &[Type])> {
@@ -438,7 +475,7 @@ fn qual_args_of(ty: &Type) -> Option<(&str, &[Type])> {
 
 /// `elem'cells` of a declaration of `'cells`: an enclosing parameter passed on, not yet resolved.
 fn is_pass_through(t: &Type) -> bool {
-    matches!(t, Type::QualArg(q) if matches!(q.as_slice(), [OwnerQual::Param(_)]))
+    matches!(t, Type::QualArg(q) if OwnerQual::pass_through(q).is_some())
 }
 
 /// The substitution `parameter name -> its argument` of a resolved instance of `qd`.
@@ -454,9 +491,9 @@ fn inst_subst(qd: &QualDecl, args: &[Type]) -> HashMap<String, QualChain> {
 fn subst_pass(t: &Type, subst: &HashMap<String, QualChain>) -> Type {
     let go = |x: &Type| Box::new(subst_pass(x, subst));
     match t {
-        Type::QualArg(q) => match q.as_slice() {
-            [OwnerQual::Param(p)] => subst.get(p).map_or_else(|| t.clone(), |c| Type::QualArg(c.clone())),
-            _ => t.clone(),
+        Type::QualArg(q) => match OwnerQual::pass_through(q) {
+            Some((p, suffix)) => subst.get(p).map_or_else(|| t.clone(), |c| Type::QualArg(OwnerQual::with_suffix(c, suffix))),
+            None => t.clone(),
         },
         Type::Qualified(inner, OwnerQual::Param(p)) => match subst.get(p) {
             Some(c) => OwnerQual::apply_chain(subst_pass(inner, subst), c),
@@ -613,16 +650,28 @@ impl Ctx<'_> {
     fn run_body(&self, declared: &Declared, ret: Option<&Type>, body: &mut [Stmt]) {
         // A tail expression takes the function's return type.
         if let (Some(ret), Some(Stmt::Expr(e))) = (ret, body.last_mut()) { self.resolve_expected(e, ret, declared); }
-        let mut on_stmt = |s: &mut Stmt| match s {
-            Stmt::Let(l) => {
-                if let (Some(t), Some(v)) = (&l.ty, &mut l.value) { self.resolve_expected(v, t, declared); }
+        self.inner_returns.borrow_mut().clear();
+        self.collect_inner_returns(body);
+        let mut on_stmt = |s: &mut Stmt| {
+            let key = s as *const Stmt;
+            match s {
+                Stmt::Let(l) => {
+                    if let (Some(t), Some(v)) = (&l.ty, &mut l.value) { self.resolve_expected(v, t, declared); }
+                }
+                Stmt::Match(m) => self.resolve_patterns(m, declared),
+                Stmt::Return(r) => {
+                    // A `return` in a closure or a nested function is read against that one's own
+                    // return type, never the enclosing function's.
+                    let want = match self.inner_returns.borrow().get(&key) { Some(t) => t.clone(), None => ret.cloned() };
+                    if let (Some(t), Some(v)) = (want, &mut r.value) { self.resolve_expected(v, &t, declared); }
+                }
+                _ => {}
             }
-            Stmt::Return(r) => {
-                if let (Some(t), Some(v)) = (ret, &mut r.value) { self.resolve_expected(v, t, declared); }
-            }
-            _ => {}
         };
         let mut on_expr = |e: &mut Expr| match &mut e.kind {
+            ExprKind::Match(m) => self.resolve_patterns(m, declared),
+            // `Slot.Empty`: a bare construction of an enum variant with no payload.
+            ExprKind::Field(..) => self.resolve_site(e, None, declared),
             ExprKind::Assign(l, r) => {
                 if let Some(t) = declared.of_expr(l) { let t = t.clone(); self.resolve_expected(r, &t, declared); }
             }
@@ -649,12 +698,14 @@ impl Ctx<'_> {
                 let bound: Vec<(usize, Type)> = {
                     let params = match &e.kind {
                         ExprKind::Call(c, args) => match &c.kind {
-                            ExprKind::Var(n) => self.callee_params(n, args),
+                            ExprKind::Var(n) => self.callee_params(n, args).cloned(),
                             _ => None,
-                        }.or_else(|| view(e).and_then(|(b, _, sh)| ctor_params(self.decls, b, &sh))),
-                        _ => view(e).and_then(|(b, _, sh)| ctor_params(self.decls, b, &sh)),
+                        }.or_else(|| view(e).and_then(|(b, _, sh)| ctor_params(self.decls, b, &sh).cloned())),
+                        ExprKind::MethodCall(recv, m, _) => view(e).and_then(|(b, _, sh)| ctor_params(self.decls, b, &sh).cloned())
+                            .or_else(|| self.method_params(recv, m, declared)),
+                        _ => view(e).and_then(|(b, _, sh)| ctor_params(self.decls, b, &sh).cloned()),
                     };
-                    match (params, shape_args_of(e)) {
+                    match (params.as_ref(), shape_args_of(e)) {
                         (Some(ps), Some(args)) => {
                             bind_args(args, ps).into_iter()
                                 .filter_map(|(a, t)| args.iter().position(|x| std::ptr::eq(x, a)).map(|i| (i, t.clone())))
@@ -673,6 +724,126 @@ impl Ctx<'_> {
                 }
             }
             _ => {}
+        };
+        let mut w = Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+        w.stmts(body);
+    }
+
+    /// The written type of a match subject: a declared name or a call of a function that declares
+    /// its return type.
+    fn subject_type(&self, e: &Expr, declared: &Declared) -> Option<Type> {
+        if let Some(t) = declared.of_expr(e) { return Some(t.clone()); }
+        match &e.kind {
+            ExprKind::Call(c, _) => match &c.kind {
+                ExprKind::Var(n) => self.decls.fn_rets.get(n.as_str()).cloned().flatten(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Qualified variant patterns of a qualifier-generic enum (`Slot.Full(p)`, `Slot<elem'actor>.Full(p)`)
+    /// name the instance they match: the arguments written in the pattern, else the written type
+    /// of the subject (its arguments, or the defaults of a bare name). The pattern becomes the
+    /// instance's name. A pattern that nothing here determines is left alone: the emitter reads
+    /// the instance of the match subject then.
+    fn resolve_patterns(&self, m: &mut MatchStmt, declared: &Declared) {
+        let subject = self.subject_type(&m.subject, declared);
+        let (sline, scol) = (m.subject.line, m.subject.col);
+        for arm in &mut m.arms {
+            let pos = (arm.line, arm.col);
+            for p in &mut arm.patterns { self.resolve_pattern(p, subject.as_ref(), pos, (sline, scol)); }
+        }
+    }
+
+    fn resolve_pattern(&self, p: &mut Pattern, subject: Option<&Type>, pos: (usize, usize), spos: (usize, usize)) {
+        let diag = |msg: String| { self.out.borrow_mut().diags.insert(pos, msg); };
+        match p {
+            Pattern::Some(inner) => self.resolve_pattern(inner, None, pos, spos),
+            Pattern::Tuple(subs) => { for x in subs { self.resolve_pattern(x, None, pos, spos); } }
+            Pattern::Variant(name, subs) => {
+                for x in subs.iter_mut() { self.resolve_pattern(x, None, pos, spos); }
+                let owned = name.clone();
+                let Some((prefix, variant)) = owned.split_once("::") else { return };
+                let (base, explicit) = match prefix.split_once('<') {
+                    Some((b, rest)) => (b, Some(rest.trim_end_matches('>'))),
+                    None => (prefix, None),
+                };
+                let Some(qd) = self.decls.quals.get(base) else { return };
+                if !matches!(self.decls.ctors.get(base), Some(Some(Ctor::Enum(_)))) { return; }
+                // What the subject's written type says, when it is concrete.
+                let from_subject: Option<Vec<Type>> = match subject.map(peel_all) {
+                    Some(Type::Generic(b, a)) if b == base && a.len() == qd.params.len()
+                        && a.iter().all(|x| matches!(x, Type::QualArg(q) if !q.iter().any(|o| matches!(o, OwnerQual::Param(_))))) => Some(a.clone()),
+                    Some(Type::Named(b)) if b == base => qd.params.iter()
+                        .map(|p| p.as_ref().and_then(|p| p.default.clone()).map(Type::QualArg)).collect(),
+                    _ => None,
+                };
+                let args: Vec<Type> = match explicit {
+                    Some(list) => {
+                        let chains: Vec<Option<QualChain>> = list.split(',').map(OwnerQual::chain_from_name).collect();
+                        if chains.len() != qd.params.len() || chains.iter().any(Option::is_none) {
+                            diag(format!("the pattern gives {} qualifier argument(s) to `{base}`, which declares {}", chains.len(), qd.params.len()));
+                            return;
+                        }
+                        let args: Vec<Type> = chains.into_iter().flatten().map(Type::QualArg).collect();
+                        for (a, q) in args.iter().zip(&qd.params) {
+                            let (Type::QualArg(c), Some(q)) = (a, q) else { continue };
+                            if !q.bound.contains(c) {
+                                let allowed: Vec<String> = q.bound.iter().filter_map(|c| OwnerQual::chain_name(c)).collect();
+                                diag(format!("qualifier `'{}` is outside the bound of `{}` in `{base}` (allowed: {})",
+                                    OwnerQual::chain_name(c).unwrap_or_default(), q.name, allowed.join(", ")));
+                                return;
+                            }
+                        }
+                        if let Some(subj) = &from_subject {
+                            if *subj != args {
+                                let show = |v: &[Type]| v.iter().filter_map(|t| match t { Type::QualArg(c) => OwnerQual::chain_name(c).map(|n| format!("'{n}")), _ => None }).collect::<Vec<_>>().join(", ");
+                                self.out.borrow_mut().diags.insert(spos, format!(
+                                    "the pattern names the instance `{base}<{}>` but the subject is declared `{base}<{}>`", show(&args), show(subj)));
+                                return;
+                            }
+                        }
+                        args
+                    }
+                    None => match from_subject { Some(a) => a, None => return },
+                };
+                if let Some(m) = crate::transpiler::monomorphize::mangled_name(base, &args) {
+                    *name = format!("{m}::{variant}");
+                    self.out.borrow_mut().resolved.push((base.to_string(), args));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Records which `return` statements of `body` sit inside a closure or a nested function.
+    fn collect_inner_returns(&self, body: &mut [Stmt]) {
+        fn mark(table: &RefCell<HashMap<*const Stmt, Option<Type>>>, stmts: &mut [Stmt], ty: Option<Type>) {
+            let mut on_expr = |_: &mut Expr| {};
+            let mut on_stmt = |s: &mut Stmt| {
+                if matches!(s, Stmt::Return(_)) { table.borrow_mut().insert(s as *const Stmt, ty.clone()); }
+            };
+            let mut w = Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+            w.stmts(stmts);
+        }
+        // Outer scopes are visited first, so an inner closure's own entries replace theirs.
+        let table = &self.inner_returns;
+        let mut on_expr = |e: &mut Expr| {
+            if let ExprKind::Closure(_, ret, body, _, _) = &mut e.kind {
+                match body {
+                    ClosureBody::Block(b) => mark(table, b, ret.clone()),
+                    ClosureBody::Expr(x) => {
+                        let mut stmt = [Stmt::Expr(std::mem::replace(&mut **x, Expr { kind: ExprKind::Void, line: 0, col: 0, len: 0 }))];
+                        mark(table, &mut stmt, ret.clone());
+                        let [Stmt::Expr(back)] = stmt else { unreachable!() };
+                        **x = back;
+                    }
+                }
+            }
+        };
+        let mut on_stmt = |s: &mut Stmt| {
+            if let Stmt::Fn(f) = s { let ret = f.return_ty.clone(); mark(table, &mut f.body, ret); }
         };
         let mut w = Walker { expr: &mut on_expr, stmt: &mut on_stmt };
         w.stmts(body);
@@ -713,7 +884,7 @@ impl Ctx<'_> {
             match chosen {
                 Some((c, desc)) => {
                     // A parameter of the enclosing function is checked where it is declared.
-                    if !matches!(c.as_slice(), [OwnerQual::Param(_)]) && !bound.contains(&c) {
+                    if OwnerQual::pass_through(&c).is_none() && !bound.contains(&c) {
                         let allowed: Vec<String> = bound.iter().map(&shown).collect();
                         return fail(format!(
                             "qualifier `'{}` ({desc}) is outside the bound of `{q}` in `{name}` (allowed: {})",
@@ -815,6 +986,33 @@ impl Ctx<'_> {
         for (i, t) in pushed { if let Some(a) = args.get_mut(i) { self.resolve_expected(&mut a.value, &t, declared); } }
     }
 
+    /// The parameters of the method `recv.m(..)` when the method is certain: the written type of
+    /// the receiver (or `self`) names its declaration, which declares exactly one method of that
+    /// name. The qualifier arguments of the receiver's type are substituted into the parameter
+    /// types (`Game<cells'actor>` makes a `Board<elem'cells>` parameter a `Board<elem'actor>`); a
+    /// slot that still names a parameter of the declaration is left out, it proves nothing.
+    fn method_params(&self, recv: &Expr, m: &str, declared: &Declared) -> Option<Params> {
+        let base = self.receiver_base(recv, declared)?;
+        let Some(Some(params)) = self.decls.methods.get(&format!("{base}::{m}")) else { return None };
+        let mut subst = HashMap::new();
+        if let Some(qd) = self.decls.quals.get(&base) {
+            let written = if matches!(&recv.kind, ExprKind::Var(n) if n == "self") { None } else { declared.of_expr(recv) };
+            let args: Option<Vec<Type>> = match written.map(peel_all) {
+                Some(Type::Generic(_, a)) => Some(a.clone()),
+                // A bare name is its default instance, when every parameter has one.
+                Some(Type::Named(_)) => qd.params.iter()
+                    .map(|p| p.as_ref().and_then(|p| p.default.clone()).map(Type::QualArg)).collect(),
+                _ => None,
+            };
+            if let Some(args) = args { subst = inst_subst(qd, &args); }
+        }
+        // Positions must not shift: an unresolved slot becomes a type that names no instance.
+        Some(params.iter().map(|(n, t)| {
+            let t = subst_pass(t, &subst);
+            (n.clone(), if has_param(&t) { Type::Named("_".into()) } else { t })
+        }).collect())
+    }
+
     fn callee_params(&self, name: &str, args: &[Arg]) -> Option<&Params> {
         match self.decls.fns.get(name) {
             Some(Some(p)) => Some(p),
@@ -909,7 +1107,7 @@ pub(crate) fn infer_qual_ctors(program: &mut Program) -> (Resolved, Diags) {
     for it in &program.items {
         if let Item::Let(l) = it { globals.declare(&l.name, l.ty.as_ref()); }
     }
-    let ctx = Ctx { decls: &decls, out: RefCell::new(Out::default()), owner: RefCell::new(None) };
+    let ctx = Ctx { decls: &decls, out: RefCell::new(Out::default()), owner: RefCell::new(None), inner_returns: RefCell::new(HashMap::new()) };
     ctx.run_items(&mut program.items, &globals);
     let out = ctx.out.into_inner();
     (out.resolved, out.diags)

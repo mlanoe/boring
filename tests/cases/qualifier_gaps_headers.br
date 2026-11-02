@@ -1,0 +1,51 @@
+# A declaration header whose `<...>` list spans several lines: struct, enum, ext, function and
+# method. Every tick in the list is a qualifier tick, and a raw string after it is still a string.
+struct Point:
+    var int x = 0
+
+struct Pair<
+    'a as 'actor|guard = 'actor,
+    'b
+>:
+    var Point'a first = Point()
+    var Point'b second = Point()
+
+    req int sum():
+        first.x + second.x
+
+    # A method with its own parameter, spread over lines.
+    req int with<
+        'q as 'inline|owned
+    >(Pair<a'actor, b'q> other):
+        self.sum() + other.sum()
+
+enum Slot<
+    'elem = 'inline
+>:
+    Empty
+    Full(Point'elem)
+
+ext Pair<
+    'a,
+    'b
+>:
+    req int twice():
+        self.sum() * 2
+
+int pick<
+    'q as 'inline|owned = 'inline,
+    'r
+>(Pair<a'actor, b'q> p, Pair<a'actor, b'r> r):
+    p.sum() + r.sum()
+
+def main():
+    let Pair<a'actor, b'inline> p = Pair()
+    let Pair<a'actor, b'owned> r = Pair()
+    let Pair<a'actor, b'inline> q = Pair()
+    print "{p.sum()} {p.twice()} {pick(p, r)} {p.with(q)}"
+    let x = Slot.Empty
+    match x:
+        Slot.Empty: print "empty"
+        Slot.Full(z): print "full"
+    let s = 'raw string'
+    print s

@@ -1,0 +1,62 @@
+# Qualifier-parameter inference, the call-site gaps: an argument of a *method* call takes the
+# parameter type of that method as its expected type (the receiver's type is written), and a
+# `return` is read against the function it belongs to (a nested function), not the enclosing one.
+struct Point:
+    var int x = 0
+
+struct Board<'elem>:
+    var [mut Point'elem] cells = []
+
+    req int size():
+        cells.len()
+
+struct Game<'cells = 'inline>:
+    var Board<elem'cells> board = Board<elem'cells>()
+
+    def take(Board<elem'cells> b, int n):
+        board = b
+
+struct Holder:
+    var int n = 0
+
+    def put(Board<elem'actor> b):
+        n += b.size()
+
+    def put2(int k, Board<elem'inline> b):
+        n += b.size() + k
+
+    # `self.m(..)` resolves the method of the enclosing type.
+    def both():
+        self.put(Board())
+        self.put2(1, Board())
+
+ext Holder:
+    def put3(Board<elem'inline> b):
+        n += b.size() + 100
+
+Board<elem'actor> outer():
+    # The nested function returns an inline board, the enclosing one an actor board.
+    def Board<elem'inline> helper():
+        return Board()
+    let h = helper()
+    return Board()
+
+def main():
+    mut Holder h = Holder()
+    h.put(Board())
+    h.put2(3, Board())
+    h.put(b = Board())
+    h.put3(Board())
+    h.both()
+    print "holder {h.n}"
+
+    # The receiver's qualifier arguments reach the parameter type: `Game<cells'actor>.take`.
+    mut Game<cells'actor> g = Game()
+    g.take(Board(), 1)
+    mut Game g2 = Game()
+    g2.take(Board(), 2)
+    print "game {g.board.size()} {g2.board.size()}"
+
+    def Board<elem'inline> inner():
+        return Board()
+    print "nested {inner().size()} {outer().size()}"

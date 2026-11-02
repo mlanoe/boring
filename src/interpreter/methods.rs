@@ -3410,6 +3410,9 @@ impl Interpreter {
                         // Qualified pattern `TypeName::Variant` (from `TypeName.Variant` in source)
                         // or bare `Variant` — both must match the enum variant.
                         let name_matches = if let Some((enum_ty, var_name)) = name.split_once("::") {
+                            // `Slot<actor>::Full`: the qualifier arguments of a qualifier-generic enum
+                            // are erased at run time.
+                            let enum_ty = enum_ty.split('<').next().unwrap_or(enum_ty);
                             type_name == enum_ty && variant == var_name
                         } else {
                             variant == name

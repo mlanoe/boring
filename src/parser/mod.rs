@@ -2433,6 +2433,7 @@ impl Parser {
         let mut ext_args: Vec<generic_args::GArg> = Vec::new();
         let mut labelled = false;
         if self.eat(&TokenKind::Lt) {
+            self.skip_newlines_and_indent();
             loop {
                 let is_type_param = matches!(self.peek(), TokenKind::Ident(n) if {
                     let first = n.chars().next().unwrap_or('a');
@@ -2469,7 +2470,9 @@ impl Parser {
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
+                self.skip_newlines_and_indent();
             }
+            self.skip_newlines_and_indent();
             self.expect(&TokenKind::Gt)?;
             if labelled {
                 // `ext Pair<K = int, V = string>:` — the header names an instance of `type_name`.

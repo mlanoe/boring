@@ -1591,6 +1591,16 @@ transpile_project_test!(qualifier_params_xfile);
 // type, then the written qualifier of the arguments; see tests/cases/qualifier_infer.br and, with
 // the declarations in a `[deps]` project, tests/cases/qualifier_infer_xfile.
 transpile_test!(qualifier_infer);
+// Method-call arguments and nested-function returns as expected types (see qualifier_gaps_calls.br).
+transpile_test!(qualifier_gaps_calls);
+// Bare enum constructors and qualified patterns with a proof (see qualifier_gaps_enums.br).
+transpile_test!(qualifier_gaps_enums);
+// Declaration headers whose `<...>` list spans several lines (see qualifier_gaps_headers.br).
+transpile_test!(qualifier_gaps_headers);
+// A suffix added to a passed-on qualifier parameter (see qualifier_gaps_suffix.br).
+transpile_test!(qualifier_gaps_suffix);
+// The same gaps across files and a `[deps]` project (see tests/cases/qualifier_gaps_xfile).
+transpile_project_test!(qualifier_gaps_xfile);
 transpile_project_test!(qualifier_infer_xfile);
 
 // Default values (`'elem = 'inline`) and chained qualifiers (`elem'actor'observed`) of qualifier

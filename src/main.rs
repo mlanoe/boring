@@ -3651,6 +3651,9 @@ fn emit_kernel_with_version(path: &str, version: &str) {
         process::exit(1);
     }
 
+    // Qualifier parameters bounded to `'inline|owned` (the only ones `validate_kernel` lets
+    // through) become one declaration per instance, as in the std transpiler.
+    let program = transpiler::specialise_qualifier_params(&program);
     let kernel_out = transpiler::kernel::transpile_kernel(&program);
     if !kernel_out.errors.is_empty() {
         report_transpile_errors(&path, &source, &kernel_out.errors);

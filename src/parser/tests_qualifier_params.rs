@@ -247,3 +247,34 @@ fn a_declared_default_or_bound_is_checked_at_the_function() {
         assert!(err.msg().contains(fragment), "{sig}: {}", err.msg());
     }
 }
+
+// ── Gaps closed late: a suffix on a passed parameter, qualified patterns ─────────────
+
+const HELD: &str = "struct Point:\n    var int x = 0\n\n\
+    struct Held<'q as 'actor'observed|'guard'observed>:\n    mut Point'q pt = Point()\n\n\
+    enum Slot<'elem = 'inline>:\n    Empty\n    Full(Point'elem)\n\n";
+
+#[test]
+fn a_passed_parameter_may_carry_a_suffix() {
+    let p = parse(&format!("{HELD}struct Wrap<'c as 'actor|'guard>:\n    var Held<q'c'observed> inner = Held<q'c'observed>()\n\ndef main():\n    print \"x\"\n")).unwrap();
+    let field = &struct_named(&p, "Wrap").fields[0];
+    let chain = vec![OwnerQual::Param("c".into()), OwnerQual::Observed];
+    assert_eq!(field.ty, Type::Generic("Held".into(), vec![Type::QualArg(chain.clone())]));
+    assert_eq!(OwnerQual::pass_through(&chain), Some(("c", &[OwnerQual::Observed][..])));
+    // The bound is checked member by member, suffix included.
+    let msg = parse(&format!("{HELD}struct Bad<'c>:\n    var Held<q'c'observed> inner = Held<q'c'observed>()\n\ndef main():\n    print \"x\"\n")).err().map(|e| e.msg()).unwrap();
+    assert!(msg.contains("`'inline'observed` once `'observed` is added is outside it"), "{msg}");
+}
+
+#[test]
+fn a_qualified_pattern_may_name_the_instance() {
+    let src = format!("{HELD}def main():\n    let Slot<elem'inline> s = Slot.Empty\n    match s:\n        Slot<elem'inline>.Full(z): print \"f\"\n        Slot.Empty: print \"e\"\n");
+    let p = parse(&src).unwrap();
+    let Some(Item::Fn(main)) = p.items.iter().find(|i| matches!(i, Item::Fn(f) if f.name == "main")) else { panic!() };
+    let Some(Stmt::Match(m)) = main.body.iter().find(|s| matches!(s, Stmt::Match(_))) else { panic!() };
+    // The pass leaves the qualified spelling to `qual_infer`, which names the instance; the first arm
+    // keeps its explicit arguments in the name until then.
+    let names: Vec<&str> = m.arms.iter().flat_map(|a| a.patterns.iter()).filter_map(|p| match p { Pattern::Variant(n, _) => Some(n.as_str()), _ => None }).collect();
+    assert!(names.iter().any(|n| n.ends_with("::Full")), "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with("::Empty")), "{names:?}");
+}

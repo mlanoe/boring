@@ -1048,6 +1048,45 @@ impl Parser {
                     }
                 } else if s == "none" || s == "None" {
                     Ok(Pattern::None)
+                } else if s.starts_with(|c: char| c.is_uppercase())
+                    && self.check(&TokenKind::Lt)
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(l)) if l.starts_with(|c: char| c.is_lowercase()))
+                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Tick))
+                {
+                    // Qualified variant pattern naming the instance of a qualifier-generic enum:
+                    // `Slot<elem'actor>.Full(p)`. The arguments are kept in the name,
+                    // `Slot<actor>::Full`, until `qual_infer` turns it into the instance's name.
+                    let (lt_line, lt_col) = (self.line(), self.col());
+                    self.advance(); // `<`
+                    let args = self.parse_generic_arg_list(ArgTarget::Type(&s), |p| p.parse_generic_type_arg())?;
+                    let mut shown = Vec::new();
+                    // The lenient first parse (declarations only) keeps the arguments unresolved.
+                    let lenient = self.generic_decls.is_none();
+                    for a in &args {
+                        match a {
+                            _ if lenient => {}
+                            Type::QualArg(c) if OwnerQual::chain_name(c).is_some() => shown.push(OwnerQual::chain_name(c).unwrap()),
+                            _ => return Err(ParseError::Generic {
+                                line: lt_line, col: lt_col, len: 1,
+                                msg: "a pattern takes concrete qualifier arguments only (`Slot<elem'actor>.Full(p)`)".to_string(),
+                            }),
+                        }
+                    }
+                    self.expect(&TokenKind::Dot)?;
+                    let variant = self.expect_ident()?;
+                    let mut sp = Vec::new();
+                    if self.check(&TokenKind::LParen) {
+                        self.advance();
+                        self.skip_newlines_and_indent();
+                        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                            sp.push(self.parse_pattern()?);
+                            if !self.eat(&TokenKind::Comma) { break; }
+                            self.skip_newlines_and_indent();
+                        }
+                        self.skip_newlines_and_indent();
+                        self.expect(&TokenKind::RParen)?;
+                    }
+                    Ok(Pattern::Variant(format!("{}<{}>::{}", s, shown.join(","), variant), sp))
                 } else if self.check(&TokenKind::LParen) {
                     // Generic variant with payload fields
                     self.advance();

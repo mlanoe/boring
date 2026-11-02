@@ -57,9 +57,12 @@ pub struct KernelValidator {
 /// stack-budget rationale.
 const MAX_CHECK_DEPTH: usize = 200;
 
-/// Qualifier parameters need the std transpiler's specialisation pass (`monomorphize.rs`).
-const QUAL_PARAMS_UNSUPPORTED: &str = "qualifier parameters (`struct Board<'elem>`, `Board<elem'actor>`, `def f<'q>(..)`) are not supported on the Rust-for-Linux Linux target — \
-     they are specialised by the std transpiler; declare the element qualifier in a plain struct instead (`'inline` or `'owned`)";
+/// The qualifiers the Linux target can specialise a qualifier parameter to: the ones with no
+/// lock and no reference count (`'actor`/`'guard` have no lock-aware element access here, and a
+/// chain adds a runtime this target does not have).
+fn kernel_safe_qualifier(chain: &[OwnerQual]) -> bool {
+    matches!(chain, [OwnerQual::Inline] | [OwnerQual::Owned])
+}
 
 impl Default for KernelValidator {
     fn default() -> Self {
@@ -127,14 +130,11 @@ impl KernelValidator {
             Type::Named(n) if matches!(n.as_str(), "float" | "float64" | "f64") => {
                 self.error(line, "float64 is not allowed in kernel context — FPU is disabled");
             }
-            // Qualifier parameters (`Board<elem'actor>`) are specialised by the std transpiler;
-            // this target's emitter has no such pass.
-            Type::QualArg(_) | Type::Qualified(_, OwnerQual::Param(_)) => {
-                self.error(line, QUAL_PARAMS_UNSUPPORTED);
-            }
-            Type::Generic(_, args) if args.iter().any(|a| matches!(a, Type::QualArg(_))) => {
-                self.error(line, QUAL_PARAMS_UNSUPPORTED);
-            }
+            // A qualifier parameter use (`Board<elem'actor>`, `Point'elem`) is specialised before this
+            // validator sees the instances (`specialise_qualifier_params`); the declarations are
+            // checked by `check_qual_params`.
+            Type::QualArg(_) | Type::Qualified(_, OwnerQual::Param(_)) => {}
+            Type::Generic(_, args) if args.iter().any(|a| matches!(a, Type::QualArg(_))) => {}
             // Rule 6 — T'shared in kernel context always maps to Arc<T> (no Rc in kernel)
             Type::Qualified(inner, OwnerQual::Shared) => {
                 self.warn(
@@ -763,13 +763,31 @@ impl KernelValidator {
         }
     }
 
+    /// A qualifier parameter is accepted on the Linux target when its whole bound is kernel-safe
+    /// (`as 'inline|owned`): the declarations are specialised per instance before emission. A bound
+    /// that also allows `'actor`, `'guard`, `'shared` or a chain stays rejected, naming them.
+    fn check_qual_params(&mut self, line: usize, owner: &str, type_params: &[String]) {
+        for p in type_params {
+            let Some((name, bound)) = crate::ast::qual_param_decl(p) else { continue };
+            let unsafe_members: Vec<String> = bound.iter()
+                .filter(|c| !kernel_safe_qualifier(c))
+                .filter_map(|c| OwnerQual::chain_name(c).map(|n| format!("'{n}")))
+                .collect();
+            if unsafe_members.is_empty() { continue; }
+            self.error(line, format!(
+                "qualifier parameters whose bound allows {} (`{name}` of `{owner}`) are not supported on the Rust-for-Linux Linux target — \
+                 only `'inline` and `'owned` can be specialised there; bound it with `as 'inline|owned`",
+                unsafe_members.join(", ")));
+        }
+    }
+
     // ── Function / method checking ───────────────────────────────────────────
 
     fn check_fn(&mut self, fn_decl: &FnDecl) {
         let line = fn_decl.line;
         // A function or method that declares a qualifier parameter (explicitly or by writing it in
         // its signature) needs the specialisation pass this target's emitter does not have.
-        if fn_decl.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
+        self.check_qual_params(line, &fn_decl.name, &fn_decl.type_params);
 
         // `@inject`/`@provide`/`@singleton` (docs/book.md §33) assume a
         // full std runtime — dynamic dispatch (`Box<dyn Trait>`/`Arc<dyn Trait>`) and a
@@ -872,7 +890,7 @@ impl KernelValidator {
 
     fn check_struct(&mut self, s: &StructDecl) {
         let line = s.line;
-        if s.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
+        self.check_qual_params(line, &s.name, &s.type_params);
         for field in &s.fields {
             self.check_type(&field.ty, field.line);
             if let Some(def) = &field.default {
@@ -933,7 +951,7 @@ impl KernelValidator {
 
     fn check_enum(&mut self, e: &EnumDecl) {
         let line = e.line;
-        if e.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
+        self.check_qual_params(line, &e.name, &e.type_params);
         for variant in &e.variants {
             for field in &variant.fields {
                 self.check_type(&field.ty, line);
@@ -977,7 +995,7 @@ impl KernelValidator {
 
     fn check_ext(&mut self, ext: &ExtDecl) {
         let line = ext.line;
-        if ext.type_params.iter().any(|p| crate::ast::qual_param_name(p).is_some()) { self.error(line, QUAL_PARAMS_UNSUPPORTED); }
+        self.check_qual_params(line, &ext.type_name, &ext.type_params);
         for ty in &ext.type_args {
             self.check_type(ty, line);
         }

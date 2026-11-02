@@ -380,3 +380,146 @@ fn linux_target_rejects_qualifier_generic_functions() {
     assert!(!out.status.success(), "--linux must reject a declared qualifier parameter");
     assert!(String::from_utf8_lossy(&out.stderr).contains("qualifier parameters"));
 }
+
+/// `--linux` accepts a qualifier parameter whose whole bound is kernel-safe (`as 'inline|owned`) and
+/// specialises it in the kernel emitter: one declaration per instance, with the std transpiler's names.
+const LINUX_SAFE_PROGRAM: &str = r#"
+struct Point:
+    var int x = 0
+
+struct Board<'elem as 'inline|owned = 'inline>:
+    var [mut Point'elem] cells = []
+
+    req int size():
+        cells.len()
+
+    def int fill<'q as 'inline|owned>(Board<elem'q> other):
+        cells.len() + other.size()
+
+enum Slot<'elem as 'inline|owned>:
+    Empty
+    Full(Point'elem)
+
+struct Game<'cells as 'inline|owned = 'inline>:
+    var Board<elem'cells> board = Board<elem'cells>()
+
+int count<'q as 'inline|owned>(Board<elem'q> b):
+    b.size()
+
+def main():
+    let Board<elem'owned> a = Board()
+    let Board<elem'inline> b = Board()
+    let Slot<elem'owned> s = Slot.Empty
+    let Game<cells'owned> g = Game()
+    let n = count(a) + count(b)
+"#;
+
+#[test]
+fn linux_target_specialises_kernel_safe_parameters() {
+    let dir = scratch("linux_safe");
+    let br = dir.join("test.br");
+    fs::write(&br, LINUX_SAFE_PROGRAM).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--linux"]).arg(&br).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let rs = fs::read_to_string(dir.join("test_linux/src/lib.rs")).unwrap();
+    for decl in ["struct Board_owned", "struct Board_inline", "enum Slot_owned", "struct Game_owned", "fn count_owned", "fn count_inline"] {
+        assert!(rs.contains(decl), "missing `{decl}`:\n{rs}");
+    }
+    // The element qualifier reaches the storage: a boxed point for `owned`, a plain one for `inline`.
+    assert!(rs.contains("Box<Point, kernel::alloc::KVmalloc>"), "{rs}");
+    for leftover in ["struct Board ", "Board<", "^elem", "compile_error!", "count("] {
+        assert!(!rs.contains(leftover), "leftover `{leftover}`:\n{rs}");
+    }
+}
+
+#[test]
+fn linux_target_rejects_unsafe_bounds_naming_the_members() {
+    let dir = scratch("linux_unsafe");
+    let br = dir.join("test.br");
+    let head = "struct Point:\n    var int x = 0\n\n";
+    // (declaration, members the message must name)
+    for (decl, named) in [
+        ("struct Bad<'q as 'inline|actor>:\n    var Point'q p = Point()\n", "'actor"),
+        ("struct Bad<'q as 'owned'observed>:\n    var Point'q p = Point()\n", "'owned'observed"),
+        ("struct Bad<'q>:\n    var Point'q p = Point()\n", "'shared, 'actor, 'guard"),
+        ("int f<'q as 'inline|shared>(Point'q p):\n    1\n", "'shared"),
+        ("enum Bad<'q as 'guard>:\n    One(Point'q)\n", "'guard"),
+    ] {
+        fs::write(&br, format!("{head}{decl}\ndef main():\n    print \"x\"\n")).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_boring")).args(["build", "--linux"]).arg(&br).output().unwrap();
+        assert!(!out.status.success(), "{decl}: --linux must reject an unsafe bound");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("qualifier parameters") && stderr.contains("not supported on the Rust-for-Linux Linux target") && stderr.contains(named), "{decl}: {stderr}");
+    }
+}
+
+/// The gaps closed late (design note, "Known gaps closed"): a method-call argument that takes the
+/// parameter type of its method, a bare enum constructor with a qualified pattern, a header spanning
+/// several lines and a suffix added to a passed-on parameter, in a kernel-file program.
+const GAPS_PROGRAM: &str = r#"
+struct Point:
+    var int x = 0
+
+struct Board<
+    'elem = 'inline
+>:
+    var [mut Point'elem] cells = []
+
+    req int size():
+        cells.len()
+
+struct Holder:
+    var int n = 0
+
+    def put(Board<elem'actor> b):
+        n += b.size()
+
+enum Slot<'elem = 'inline>:
+    Empty
+    Full(Point'elem)
+
+struct Held<'q as 'actor'observed|'guard'observed>:
+    mut Point'q pt = Point()
+
+struct Wrap<'c as 'actor|'guard = 'actor>:
+    var mut Held<q'c'observed> inner = Held<q'c'observed>()
+
+kernel Scale:
+    let [float32]'global src
+    mut [float32]'unified out
+    init([float32]'global s):
+        src = s
+        out = [0.0 for ..<4]
+    def ():
+        let i = .thread.x
+        out[i] = src[i] * 2.0
+
+pub req [float32]'kernel'unified scale([float32]'global x) throws:
+    mut k = Scale(x)
+    k.out
+
+def main():
+    mut Holder h = Holder()
+    h.put(Board())
+    let s = Slot.Empty
+    match s:
+        Slot.Empty: print "empty"
+        Slot.Full(z): print "full"
+    mut Wrap<c'guard> w = Wrap()
+    print "{h.n}"
+"#;
+
+fn check_gaps_host(target: &str) {
+    let rs = host_rs(target, GAPS_PROGRAM, "_gaps");
+    for decl in ["struct Board_actor", "enum Slot_inline", "struct Wrap_guard", "struct Held_guard_observed"] {
+        assert!(rs.contains(decl), "[{target}] missing `{decl}`:\n{rs}");
+    }
+    assert!(rs.contains("Slot_inline::Empty"), "[{target}] the qualified pattern names the instance:\n{rs}");
+    for leftover in ["struct Board ", "struct Board<", "Slot::", "compile_error!", "^elem"] {
+        assert!(!rs.contains(leftover), "[{target}] leftover `{leftover}`:\n{rs}");
+    }
+}
+
+#[test] fn metal_host_gets_the_closed_gaps() { check_gaps_host("metal"); }
+#[test] fn cuda_host_gets_the_closed_gaps() { check_gaps_host("cuda"); }
+#[test] fn rocm_host_gets_the_closed_gaps() { check_gaps_host("rocm"); }
