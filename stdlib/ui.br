@@ -522,6 +522,31 @@ pub view Popover:
     [View] children
     body(): native
 
+# Drag and drop (the runtime owns the gesture: a press inside a `DragSource` that then moves a few points starts a drag carrying `payload`; the
+# pointer's release over an `OnDrop` delivers it). Layout- and paint-transparent wrappers.
+#   DragSource   `value` is true while its child is being dragged; `preview` (default: the payload) is the chip drawn at the pointer
+#   OnDragOver   `value` is true while a drag is over its child
+#   OnDrop       a drop over its child writes the payload into `value` and then calls `onActivate`; with `accepts` set it only takes payloads whose
+#                kind (the part before the first ':') equals it
+pub view DragSource:
+    bind bool value
+    string payload
+    string preview = ""
+    [View] children
+    body(): native
+
+pub view OnDragOver:
+    bind bool value
+    [View] children
+    body(): native
+
+pub view OnDrop:
+    bind string value
+    UIAction onActivate
+    string accepts = ""
+    [View] children
+    body(): native
+
 # OnHover: writes into the bound `value` whether the pointer is over a control inside its child (the runtime's hover target is the deepest
 # enabled Button, Toggle, TextField or Slider under the pointer). With `delay` > 0 (milliseconds) `value` turns true only once the pointer has
 # stayed that long (the host ticks the runtime's clock); it turns false at once. Layout-transparent; `Tooltip` (boring-ui) is built on it.
