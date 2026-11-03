@@ -797,6 +797,19 @@ impl Parser {
     /// Returns true when `pos` is at `task` and the token after looks like the
     /// start of a return type (not `def`/`req`), indicating the shorthand form
     /// `task RetType name(` instead of the explicit `task def RetType name(`.
+    /// For a `stream` token at the cursor in a type body: whether the method is
+    /// mutating (`stream def`, or the `stream RetType name()` shorthand) rather than
+    /// `stream req`. Skips the optional `<N>` capacity.
+    fn stream_method_mutating(&self) -> bool {
+        let next1 = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+        let look = if matches!(next1, Some(TokenKind::Lt)) {
+            self.tokens.get(self.pos + 4).map(|t| &t.kind)
+        } else {
+            next1
+        };
+        !matches!(look, Some(TokenKind::Req))
+    }
+
     fn is_task_fn_shorthand(&self) -> bool {
         if !matches!(self.peek(), TokenKind::Task) {
             return false;
@@ -2296,6 +2309,10 @@ impl Parser {
                     let m = self.parse_fn_decl(false, false)?;
                     methods.push(m);
                 }
+                TokenKind::Stream => {
+                    let m = self.stream_method_mutating();
+                    methods.push(self.parse_fn_decl(false, m)?);
+                }
                 TokenKind::Task => {
                     match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
                         Some(TokenKind::Def) => methods.push(self.parse_fn_decl(false, true)?),
@@ -2348,6 +2365,10 @@ impl Parser {
                     } else if matches!(next, Some(TokenKind::Req)) {
                         self.advance();
                         methods.push(self.parse_fn_decl(true, false)?);
+                    } else if matches!(next, Some(TokenKind::Stream)) {
+                        self.advance(); // consume `pub`
+                        let m = self.stream_method_mutating();
+                        methods.push(self.parse_fn_decl(true, m)?);
                     } else if matches!(next, Some(TokenKind::Task)) {
                         self.advance(); // consume `pub`
                         match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
@@ -2513,6 +2534,10 @@ impl Parser {
             match self.peek().clone() {
                 TokenKind::Def => methods.push(self.parse_fn_decl(false, true)?),
                 TokenKind::Req => methods.push(self.parse_fn_decl(false, false)?),
+                TokenKind::Stream => {
+                    let m = self.stream_method_mutating();
+                    methods.push(self.parse_fn_decl(false, m)?);
+                }
                 TokenKind::Task => match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
                     Some(TokenKind::Def) => methods.push(self.parse_fn_decl(false, true)?),
                     Some(TokenKind::Req) => methods.push(self.parse_fn_decl(false, false)?),
@@ -2561,6 +2586,10 @@ impl Parser {
                     } else if matches!(next, Some(TokenKind::Req)) {
                         self.advance();
                         methods.push(self.parse_fn_decl(true, false)?);
+                    } else if matches!(next, Some(TokenKind::Stream)) {
+                        self.advance(); // consume `pub`
+                        let m = self.stream_method_mutating();
+                        methods.push(self.parse_fn_decl(true, m)?);
                     } else if matches!(next, Some(TokenKind::Task)) {
                         self.advance(); // consume `pub`
                         match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
@@ -2694,6 +2723,10 @@ impl Parser {
                 TokenKind::Req => {
                     methods.push(self.parse_fn_decl(false, false)?);
                 }
+                TokenKind::Stream => {
+                    let m = self.stream_method_mutating();
+                    methods.push(self.parse_fn_decl(false, m)?);
+                }
                 TokenKind::Task => {
                     match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
                         Some(TokenKind::Def) => methods.push(self.parse_fn_decl(false, true)?),
@@ -2733,6 +2766,10 @@ impl Parser {
                     } else if matches!(next, Some(TokenKind::Req)) {
                         self.advance(); // consume `pub`
                         methods.push(self.parse_fn_decl(true, false)?);
+                    } else if matches!(next, Some(TokenKind::Stream)) {
+                        self.advance(); // consume `pub`
+                        let m = self.stream_method_mutating();
+                        methods.push(self.parse_fn_decl(true, m)?);
                     } else if matches!(next, Some(TokenKind::Task)) {
                         self.advance(); // consume `pub`
                         match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
@@ -2883,6 +2920,14 @@ impl Parser {
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
                 break;
+            }
+            if self.check(&TokenKind::Stream) {
+                return Err(ParseError::Generic {
+                    line: self.line(),
+                    col: self.col(),
+                    len: 6,
+                    msg: "`stream` methods cannot be declared in a trait yet — declare the method on the struct or enum itself".into(),
+                });
             }
             if self.check(&TokenKind::Def)
                 || self.check(&TokenKind::Req)

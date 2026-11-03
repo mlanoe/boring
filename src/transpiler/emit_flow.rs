@@ -167,7 +167,10 @@ impl Transpiler {
         //
         // Fix: when inside an async try body, add `as Box<dyn std::error::Error + Send + Sync>` INSIDE the
         // `Err(...)` argument so the async block return type is forced to `Result<_, Box<dyn Error>>`.
-        let dyn_cast = if self.in_try_body && self.in_async {
+        // Inside a `try_stream!` body `return Err(..)` is invalid (the macro's block returns `()`):
+        // the error goes out through `?` instead.
+        let in_try_stream = self.in_try_stream && !self.in_try_body;
+        let dyn_cast = if (self.in_try_body && self.in_async) || in_try_stream {
             " as Box<dyn std::error::Error + Send + Sync>"
         } else {
             ""
@@ -176,7 +179,11 @@ impl Transpiler {
         // The dyn_cast (` as Box<dyn std::error::Error + Send + Sync>`) goes after the Box::new(...) call
         // so Rust unifies the async block return type as Result<_, Box<dyn Error>>.
         let make_err = |box_expr: &str| -> String {
-            format!("return Err({}{});", box_expr, dyn_cast)
+            if in_try_stream {
+                format!("Err::<(), Box<dyn std::error::Error + Send + Sync>>({}{})?;", box_expr, dyn_cast)
+            } else {
+                format!("return Err({}{});", box_expr, dyn_cast)
+            }
         };
         // If not in a throws function, generate panic! instead of Err — the function
         // signature is `-> T` not `-> Result<T, _>`, so Err would be a type error.

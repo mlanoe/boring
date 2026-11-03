@@ -1,0 +1,15 @@
+stream int ticks(int n):
+    for i in 0..<n:
+        wait .fromMillis(1)
+        yield i
+
+struct Sum:
+    var int total = 0
+
+    def sumTicks(int n):
+        for x in ticks(n):
+            total += x
+
+def main():
+    mut s = Sum(0)
+    s.sumTicks(3)

@@ -1693,7 +1693,7 @@ impl Transpiler {
             matches!(resolved, Some(Type::Fn(_, _, _, true, _)))
         });
         let implicit_async = !f.task && self_ty.is_none()
-            && (body_has_stream_for(&f.body, &self.stream_fns)
+            && (body_has_stream_for(&f.body, &self.stream_fns, &self.stream_async_method_names)
                 || body_has_channel_or_task(&f.body)
                 || has_task_fn_param);
         // For `main` specifically: also promote to async when the body calls any
@@ -1705,6 +1705,17 @@ impl Transpiler {
             && self_ty.is_none()
             && body_calls_task_fn(&f.body, &self.task_fns);
         let is_async = f.task || implicit_async || main_needs_async;
+        // A method is never implicitly async (its callers would need `.await` too, which is
+        // resolved from the declaration alone), so a `for` over an async stream inside a
+        // non-`task` method would emit `.await` in a plain `fn` — rustc E0728, invisible from
+        // the Boring source. Name the fix instead.
+        if self_ty.is_some() && !f.task && !f.stream
+            && body_has_stream_for(&f.body, &self.stream_fns, &self.stream_async_method_names)
+        {
+            self.push_error(f.line, f.col, format!(
+                "method '{}' iterates an async stream (`for x in ...:`) so it must be declared `task` — \
+                 write `task def {}(...)` (or `task req`)", f.name, f.name));
+        }
         // Register implicitly-async functions in task_fns so callers can add .await.
         if (implicit_async || main_needs_async) && self_ty.is_none() {
             self.task_fns.insert(f.name.clone());
@@ -1823,10 +1834,14 @@ impl Transpiler {
 
         // ── Stream functions: iterator (sequential) or async_stream (async) ──
         if f.stream {
-            if self.stream_iter_fns.contains(&f.name) {
-                return self.emit_iter_stream_fn(f, &type_params, &all_params);
+            let is_iter = match self_ty {
+                Some(t) => self.stream_iter_methods.contains(&format!("{}::{}", t, f.name)),
+                None => self.stream_iter_fns.contains(&f.name),
+            };
+            if is_iter {
+                return self.emit_iter_stream_fn(f, &type_params, &all_params, self_ty.is_some());
             }
-            return self.emit_stream_fn(f, &type_params, &all_params);
+            return self.emit_stream_fn(f, &type_params, &all_params, self_ty.is_some());
         }
 
         let ret_ty = self.compute_fn_return_type(f);
@@ -2191,15 +2206,18 @@ impl Transpiler {
 
     /// Emit a purely-sequential `stream` function as `impl Iterator<Item = T>`.
     /// `yield expr` → `__items.push(expr)`, body runs eagerly, returns `vec.into_iter()`.
-    pub(crate) fn emit_iter_stream_fn(&mut self, f: &FnDecl, type_params: &str, all_params: &str) {
+    pub(crate) fn emit_iter_stream_fn(&mut self, f: &FnDecl, type_params: &str, all_params: &str, is_method: bool) {
         let vis = if f.is_pub { "pub " } else { "" };
         let item_ty = f.return_ty.as_ref()
             .map(|t| self.emit_stream_item_type(t))
             .unwrap_or_else(|| "()".to_string());
 
+        // A method's stream borrows `self` (and any reference parameter): Rust 2021 does not
+        // capture those lifetimes in `impl Trait` implicitly.
+        let capture = if is_method { " + '_" } else { "" };
         let sig = format!(
-            "{}fn {}{}({}) -> impl Iterator<Item = {}>",
-            vis, f.name, type_params, all_params, item_ty
+            "{}fn {}{}({}) -> impl Iterator<Item = {}>{}",
+            vis, escape_rust_keyword(&f.name), type_params, all_params, item_ty, capture
         );
         self.line(&format!("{} {{", sig));
         self.indent += 1;
@@ -2229,7 +2247,7 @@ impl Transpiler {
 
     /// Emit a `stream` function: returns `impl Stream<Item = T>` and wraps the body
     /// in `async_stream::stream! { ... }` (or `try_stream!` when `throws` is set).
-    pub(crate) fn emit_stream_fn(&mut self, f: &FnDecl, type_params: &str, all_params: &str) {
+    pub(crate) fn emit_stream_fn(&mut self, f: &FnDecl, type_params: &str, all_params: &str, is_method: bool) {
         let vis = if f.is_pub { "pub " } else { "" };
         // Stream items are owned values — map `string`/`str` → `String` (not Arc<str>/&str).
         let base_item_ty = f.return_ty.as_ref()
@@ -2251,9 +2269,10 @@ impl Transpiler {
             ("stream", base_item_ty.clone())
         };
 
+        let capture = if is_method { " + '_" } else { "" };
         let sig = format!(
-            "{}fn {}{}({}) -> impl futures_core::Stream<Item = {}>",
-            vis, f.name, type_params, all_params, item_ty
+            "{}fn {}{}({}) -> impl futures_core::Stream<Item = {}>{}",
+            vis, escape_rust_keyword(&f.name), type_params, all_params, item_ty, capture
         );
         self.line(&format!("{} {{", sig));
         self.indent += 1;
@@ -2267,6 +2286,8 @@ impl Transpiler {
         let prev_fn_return_ty = self.fn_return_ty.clone();
         let prev_known  = std::mem::take(&mut self.known_local_vars);
         self.fn_handle_vars.clear();
+        let prev_try_stream = self.in_try_stream;
+        self.in_try_stream = f.throws;
         self.in_throws = f.throws;
         self.in_async  = true; // stream bodies are implicitly async (macros support .await)
         self.fn_returns_void = true; // yield is not a return
@@ -2275,6 +2296,7 @@ impl Transpiler {
 
         self.emit_body(&f.body);
 
+        self.in_try_stream     = prev_try_stream;
         self.in_throws         = prev_throws;
         self.in_async          = prev_async;
         self.fn_returns_void   = prev_fn_returns_void;
@@ -2952,7 +2974,8 @@ impl Transpiler {
             // add implicit `Ok(())` so the function satisfies `Result<(), E>`.
             // Skip when suppress_ok_wrap is set — we're emitting a branch of an if/match expression,
             // not a function body, so the last value is already correct without a sentinel.
-            if self.in_throws && !self.suppress_ok_wrap {
+            // `try_stream!` bodies end by simply finishing the stream: no `Ok(())` / sentinel.
+            if self.in_throws && !self.suppress_ok_wrap && !self.in_try_stream {
                 let last_stmt = non_defers.last();
                 let needs_ok = match last_stmt {
                     Some(Stmt::Expr(_)) | Some(Stmt::Return(_)) | Some(Stmt::Throw(_)) => false,

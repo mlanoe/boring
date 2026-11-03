@@ -178,6 +178,7 @@ itest!(protocols);
 itest!(optionals);
 itest!(enums);
 itest!(streams);
+itest!(stream_methods);
 itest!(newtypes);
 itest!(guard);
 itest!(with_stmt);

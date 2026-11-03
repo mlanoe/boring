@@ -3555,7 +3555,7 @@ Calling `request`/`modify`/`call` on an `isCallable: false` `Method` throws a cl
 
 > **`throws` methods are genuinely callable, not just visible.** `request`/`modify` on a `throws`-backed `Method` actually calls the underlying method and propagates any thrown error as a real error from `request`/`modify` itself — catchable with `try`/`try?`, same as calling the method directly would be. (Under `boring run`, an `isCallable: false` call is a hard interpreter error instead, not a language-level `throw` — see the callout further below.)
 
-> **Note** — struct/enum method bodies can't be declared `stream` in Boring today (only top-level functions can) — a pre-existing, Introspect-unrelated parser gap. `MethodKind.Stream` exists and is wired end-to-end on both backends, ready for whenever that gap closes; in practice every `Method` you see today reports `kind: Plain` or `kind: Task`.
+> **Note** — a struct/enum/`ext` method can be declared `stream` (see [§17](#17-streams-stream--yield)), and `MethodKind.Stream` is wired end-to-end on both backends: such a `Method` reports `kind: Stream`. (A `stream` signature in a `trait` is still rejected.)
 
 > **Limitation — literal `FieldValue` arguments.** Building `request`/`modify`/`set` call arguments (`FieldValue.Str("hi")`) with a string LITERAL directly runs into an auto-promotion mismatch: a literal argument to any Boring-declared-type call is auto-promoted to `Arc<str>`/`Rc<str>`, which doesn't always line up cleanly with what the receiving parameter expects. Route the value through a variable first when in doubt.
 >
@@ -5785,7 +5785,7 @@ for x in count_up(5):
 
 | Aspect | Behaviour |
 |--------|-----------|
-| Execution | Lazy — the body runs only as the consumer pulls values |
+| Execution | Lazy under `boring build` — the body runs only as the consumer pulls values. `boring run` (the interpreter) runs the body to completion at the call and then iterates the collected values, so side effects, a mid-stream `throw`, or an endless `while true: yield` behave differently there (the latter never returns) |
 | Concurrency | Stream bodies are implicitly async; `await` is allowed inside them |
 | Consumption | `for item in stream_fn(args):` — no `await` needed at the call site |
 | Error handling | Add `throws ErrorType` to propagate errors; consumed with `try`/`catch` |
@@ -5825,6 +5825,49 @@ for line in read_lines("/etc/hosts"):
     let text = try line else continue
     print text
 ```
+
+### Stream methods
+
+A method of a struct, enum or `ext` block can be a stream too: write `stream` (optionally `stream<N>`) before the method, with the same `def`/`req` rules as any method — `stream req int ro(int n)` borrows `self` read-only, a bare `stream int m()` (like `def`) needs a content-mutable binding. `pub stream` makes it public. Fields are read bare, as in any method body, and `throws` works.
+
+```boring
+struct Counter:
+    var int base = 10
+
+    stream req int upTo(int n):
+        for i in 0..<n:
+            yield base + i
+
+enum Shape:
+    Sq(int)
+    Ci(int)
+
+    stream req int sides():
+        match self:
+            Sq(a):
+                yield a
+                yield a
+            Ci(r):
+                yield r
+
+let c = Counter(5)
+for x in c.upTo(3):
+    print x          # 5  6  7
+for s in Shape.Sq(7).sides():
+    print s          # 7  7
+```
+
+`for x in obj.m(args):` consumes it exactly like a free stream function. A method and a free function (or methods of two types) may share a name — they are tracked per type. The stream borrows `self` for as long as it is consumed, so the receiver cannot be mutated meanwhile; hold no lock across a `yield` on a `'actor`/`'guard` receiver. A `stream` method with `throws` always uses the async (`try_stream!`) form and `throw` inside it ends the stream with the error.
+
+**Rust equivalent** (`stream req int upTo`, sequential body)
+```rust
+fn upTo(&self, n: isize) -> impl Iterator<Item = isize> + '_ { … }
+```
+The `+ '_` is emitted on every method stream (Rust 2021 does not capture `&self` implicitly), for both the `impl Iterator` and `impl Stream` forms.
+
+Not supported yet: `stream` in a `trait` signature (a clear parse error).
+
+A method that itself contains `for x in <async stream>:` (a stream with `wait` or `task` calls) must be declared `task` (`task def sum(...)`): methods are never implicitly async, and `boring build` rejects the plain form with a diagnostic naming the fix. Free functions are promoted to `async` automatically.
 
 ### Transpilation
 

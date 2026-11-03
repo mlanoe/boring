@@ -1,0 +1,5 @@
+trait Source:
+    stream req int items()
+
+def main():
+    print "unreachable"

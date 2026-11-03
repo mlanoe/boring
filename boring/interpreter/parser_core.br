@@ -1157,6 +1157,8 @@ def StructDecl parse_struct_decl(mut Parser p, bool is_pub) throws:
                     while p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
                         p.advance()
                     p.eat(TokenKind.Newline)
+            TokenKind.Stream:
+                methods.push(parse_stream_method(p))
             TokenKind.Pass:
                 # no-op placeholder, allows `struct Foo:\n    pass` for an empty body
                 p.advance()
@@ -1270,6 +1272,8 @@ def EnumDecl parse_enum_decl(mut Parser p, bool is_pub) throws:
                 methods.push(parse_fn_decl(p, false, true))
             TokenKind.Req:
                 methods.push(parse_fn_decl(p, false, false))
+            TokenKind.Stream:
+                methods.push(parse_stream_method(p))
             TokenKind.Pub:
                 p.advance()
                 if parser_check(p, "Def"):
@@ -1383,6 +1387,8 @@ def Item parse_item(mut Parser p) throws:
                     ext_methods.push(parse_fn_decl(p, false, true))
                 elif parser_check(p, "Req"):
                     ext_methods.push(parse_fn_decl(p, false, false))
+                elif parser_check(p, "Stream"):
+                    ext_methods.push(parse_stream_method(p))
                 elif parser_check(p, "Pub"):
                     p.advance()
                     if parser_check(p, "Def"):
@@ -1685,6 +1691,23 @@ def Item parse_item(mut Parser p) throws:
                 Item.Fn(parse_fn_shorthand(p))
             else:
                 Item.Stmt(parse_stmt(p))
+
+# `stream [<N>] def|req ...` or `stream [<N>] RetType name(params): body` inside a struct/enum body.
+# The capacity `<N>` only matters to the transpiler's channel sizing, so it is skipped here.
+# Both underlying helpers hardcode `is_stream = false`, so the result is re-wrapped.
+def FnDecl parse_stream_method(mut Parser p) throws:
+    p.advance()  # consume stream
+    if p.peek() == TokenKind.Lt:
+        p.advance()  # <
+        p.advance()  # N
+        p.advance()  # >
+    let sk = token_kind_name(p.peek())
+    var FnDecl d = FnDecl(name= "", params= [], return_ty= nil, can_throw= false, mutating= true, is_pub= false, body= [], line= 0, qualifier= nil, is_task= false, is_stream= true, stream_capacity= nil, is_native= false, throws_ty= nil, type_params= [], where_clause= [], attrs= [])
+    if sk == "Def" or sk == "Req":
+        d = parse_fn_decl(p, false, sk == "Def")
+    else:
+        d = parse_fn_decl_shorthand(p)
+    FnDecl(name= d.name, qualifier= d.qualifier, params= d.params, return_ty= d.return_ty, body= d.body, is_pub= d.is_pub, can_throw= d.can_throw, is_task= false, is_stream= true, stream_capacity= d.stream_capacity, mutating= d.mutating, is_native= d.is_native, throws_ty= d.throws_ty, type_params= d.type_params, where_clause= d.where_clause, attrs= d.attrs, line= d.line)
 
 def FnDecl parse_fn_decl_auto(mut Parser p, bool is_pub, bool is_def) throws:
     # Like parse_fn_decl but supports inline body (e.g. `def int f(): expr`)

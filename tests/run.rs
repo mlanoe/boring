@@ -175,6 +175,8 @@ interp_test!(optionals);
 interp_test!(enums);
 interp_test!(for_scenarios);
 interp_test!(streams);
+interp_test!(stream_methods);
+interp_test!(stream_throws_free);
 interp_test!(newtypes);
 interp_test!(guard);
 interp_test!(with_stmt);

@@ -523,6 +523,11 @@ impl Transpiler {
                     } else { None }
                 } else { None }
             }
+            ExprKind::MethodCall(recv, method, _) => self.stream_method_key(recv, method)
+                .map(|key| {
+                    let is_iter = self.stream_iter_methods.contains(&key);
+                    (key, is_iter)
+                }),
             _ => None,
         };
         if let Some((ref fn_name, is_iter)) = stream_fn_name {
@@ -902,6 +907,27 @@ impl Transpiler {
         found.get()
     }
 
+    /// The `Type::method` key of the `stream` method that `recv.method(..)` calls, or `None` when
+    /// it is not one. The receiver's type is resolved first; if that fails, the method name alone
+    /// decides, but only when every `stream` method of that name agrees on being a stream.
+    pub(crate) fn stream_method_key(&self, recv: &Expr, method: &str) -> Option<String> {
+        if self.stream_methods.is_empty() { return None; }
+        let ty = match self.resolve_expr_type(recv) {
+            Some(Type::Named(n)) => Some(n),
+            Some(Type::Qualified(inner, _)) => match *inner { Type::Named(n) => Some(n), _ => None },
+            _ => None,
+        };
+        if let Some(t) = ty {
+            let key = format!("{}::{}", t, method);
+            return self.stream_methods.contains(&key).then_some(key);
+        }
+        let suffix = format!("::{}", method);
+        let mut hits = self.stream_methods.iter().filter(|k| k.ends_with(&suffix));
+        let first = hits.next()?.clone();
+        let all_iter = self.stream_iter_methods.contains(&first);
+        hits.all(|k| self.stream_iter_methods.contains(k) == all_iter).then_some(first)
+    }
+
     /// Emit a `for item in iter_stream_fn(args):` as a plain Rust `for` loop.
     /// The callee returns `impl Iterator<Item = T>` — no `.await`, no pinning.
     pub(crate) fn emit_for_iter_stream(&mut self, s: &ForStmt) {
@@ -930,7 +956,8 @@ impl Transpiler {
     /// For `throws` streams the item is `Result<T, E>`; we unwrap with `?`.
     pub(crate) fn emit_for_stream(&mut self, s: &ForStmt, fn_name: &str) {
         let stream_expr = self.emit_expr(&s.iterable);
-        let throws = self.stream_throws_fns.contains(fn_name);
+        let throws = self.stream_throws_fns.contains(fn_name)
+            || self.stream_throws_methods.contains(fn_name);
         let vars = if s.vars.is_empty() {
             "_".into()
         } else {

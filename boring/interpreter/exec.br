@@ -685,6 +685,9 @@ def Signal? exec_while(mut Interpreter interp, WhileStmt s):
 
 def Signal? exec_for(mut Interpreter interp, ForStmt s):
     let iterable = eval_expr(interp, s.iterable)
+    # A throwing call as the iterable (e.g. a `throws` stream method) ends the loop with its error.
+    if interp.has_pending_throw:
+        return ThrowSignal(interp.take_pending_throw())
     let items = collect_iterable_with_interp(interp, iterable)
     var Signal? result = nil
     var idx = 0
@@ -1134,6 +1137,23 @@ def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? 
 # Instance methods already have their self/field/parameter scope installed.
 def Value exec_method_body(mut Interpreter interp, FnDecl decl):
     push_return_ty(interp, decl.return_ty)
+    if decl.is_stream:
+        # Stream method: run the body to completion, collecting every `yield` (same eager
+        # model as a stream function in call_fn); a `throw` ends the stream with that error.
+        let prev_in_stream = interp.in_stream_fn
+        let prev_yields = interp.stream_yields
+        interp.in_stream_fn = true
+        interp.stream_yields = []
+        let stream_sig = exec_block_fn(interp, decl.body)
+        interp.in_stream_fn = prev_in_stream
+        let collected = interp.stream_yields
+        interp.stream_yields = prev_yields
+        pop_return_ty(interp)
+        match stream_sig:
+            ThrowSignal(tv):
+                interp.set_pending_throw(tv)
+                return Value.Nil
+            _: return Value.Array(collected)
     let sig = exec_block_fn(interp, decl.body)
     pop_return_ty(interp)
     match sig:

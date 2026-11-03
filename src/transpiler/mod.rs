@@ -489,6 +489,8 @@ struct Transpiler {
     pub(crate) in_async: bool,
     /// Are we inside a sequential `stream` body? (`yield` → `__items.push(...)`)
     pub(crate) in_iter_stream: bool,
+    /// True while emitting the body of a `throws` stream (`try_stream!`).
+    pub(crate) in_try_stream: bool,
     /// Name of the type currently being impl'd (for self-aware emit).
     pub(crate) self_type: Option<String>,
     /// Variables known to hold a collection (Vec/HashMap/HashSet) — use {:?} when formatting.
@@ -1031,6 +1033,16 @@ struct Transpiler {
     pub(crate) stream_iter_fns: std::collections::HashSet<String>,
     /// Stream functions that also declare `throws` — use `try_stream!` and unwrap at consumer.
     pub(crate) stream_throws_fns: std::collections::HashSet<String>,
+    /// `stream` methods of structs/enums/ext blocks, keyed `Type::method` (a free function of the
+    /// same name lives in `stream_fns`/`stream_iter_fns`, so the two never collide).
+    pub(crate) stream_methods: std::collections::HashSet<String>,
+    /// Subset of `stream_methods` that are purely sequential — emit `impl Iterator`.
+    pub(crate) stream_iter_methods: std::collections::HashSet<String>,
+    /// Bare names of the non-iterator (async) `stream` methods: a name-based approximation
+    /// used only to decide that a caller containing `for x in o.m()` must be `async`.
+    pub(crate) stream_async_method_names: std::collections::HashSet<String>,
+    /// Subset of `stream_methods` that also declare `throws`.
+    pub(crate) stream_throws_methods: std::collections::HashSet<String>,
     /// True when the file contains at least one async stream function (adds async-stream deps).
     pub(crate) has_streams: bool,
     /// Variables that are `mpsc::Receiver<T>` — `for x in rx:` emits `rx.recv().await`.
@@ -1581,6 +1593,7 @@ impl Transpiler {
             in_struct_method: false,
             in_async: false,
             in_iter_stream: false,
+            in_try_stream: false,
             self_type: None,
             collection_vars: std::collections::HashSet::new(),
             vec_vars: std::collections::HashSet::new(),
@@ -1751,6 +1764,10 @@ impl Transpiler {
             stream_fns: std::collections::HashSet::new(),
             stream_iter_fns: std::collections::HashSet::new(),
             stream_throws_fns: std::collections::HashSet::new(),
+            stream_methods: std::collections::HashSet::new(),
+            stream_iter_methods: std::collections::HashSet::new(),
+            stream_throws_methods: std::collections::HashSet::new(),
+            stream_async_method_names: std::collections::HashSet::new(),
             has_streams: false,
             channel_receivers: std::collections::HashSet::new(),
             string_channel_receivers: std::collections::HashSet::new(),
@@ -3135,7 +3152,7 @@ impl Transpiler {
             self.infer_qualifiers(&main_infer_stmts);
             self.scan_atomic_promotions(&main_infer_stmts);
             let needs_async = items_have_task(&stmts)
-                || body_has_stream_for(&top_stmts, &self.stream_fns)
+                || body_has_stream_for(&top_stmts, &self.stream_fns, &self.stream_async_method_names)
                 || items_have_task_call(&stmts, &self.task_fns);
             // Use fully-qualified types when the user defines `Box` or `Result` to avoid
             // shadowing std::boxed::Box and std::result::Result in the main signature.
@@ -3345,7 +3362,7 @@ impl Transpiler {
             if let Item::Stmt(s) = i { Some((*s).clone()) } else { None }
         }).collect();
         let needs_async = items_have_task(stmts)
-            || body_has_stream_for(&top_stmts, &self.stream_fns)
+            || body_has_stream_for(&top_stmts, &self.stream_fns, &self.stream_async_method_names)
             || items_have_task_call(stmts, &self.task_fns);
         if needs_async {
             let (line, col) = match stmts.first() {
@@ -4255,7 +4272,7 @@ impl Transpiler {
         // `set` setter methods (property write, emit as set_X call).
         for m in &s.methods {
             // `req` methods without params that return a value are getters.
-            if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
+            if !m.mutating && !m.task && !m.stream && m.params.is_empty() && m.return_ty.is_some() {
                 let key = format!("{}::{}", s.name, m.name);
                 self.struct_getters.insert(key);
             }
@@ -4268,8 +4285,9 @@ impl Transpiler {
         self.struct_method_names.insert(
             s.name.clone(), s.methods.iter().map(|m| m.name.clone()).collect());
         for m in &s.methods {
+            self.register_stream_method(&s.name, m);
             if m.task { self.instance_task_methods.insert(m.name.clone()); }
-            if m.throws {
+            if m.throws && !m.stream {
                 // Qualified key (checked first at call sites when the receiver's
                 // struct type is known) avoids a same-named-but-non-throwing
                 // method on a different struct picking up a stray `?` -- e.g.
@@ -4458,11 +4476,12 @@ impl Transpiler {
         ];
         let tname = &e.type_name;
         for m in &e.methods {
+            self.register_stream_method(tname, m);
             if OPERATOR_METHOD_NAMES.contains(&m.name.as_str()) {
                 self.struct_operator_methods.insert(format!("{}::{}", tname, m.name));
             }
             // Register `req` (getter) methods from ext blocks in struct_getters.
-            if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
+            if !m.mutating && !m.task && !m.stream && m.params.is_empty() && m.return_ty.is_some() {
                 self.struct_getters.insert(format!("{}::{}", tname, m.name));
             }
             // Track req (non-mutating) ext methods too — `s.methods`'s own loop
@@ -4478,7 +4497,7 @@ impl Transpiler {
                 self.struct_method_return_types.insert(
                     format!("{}::{}", tname, m.name), ret_ty.clone());
             }
-            if m.throws {
+            if m.throws && !m.stream {
                 // Qualified key (checked first at call sites when the receiver's
                 // struct type is known) avoids a same-named-but-non-throwing
                 // method on a different struct picking up a stray `?` -- see the
@@ -4904,7 +4923,8 @@ impl Transpiler {
                     }
                     // Register enum getter methods (req methods without params) in struct_getters.
                     for m in &e.methods {
-                        if !m.mutating && !m.task && m.params.is_empty() && m.return_ty.is_some() {
+                        self.register_stream_method(&e.name, m);
+                        if !m.mutating && !m.task && !m.stream && m.params.is_empty() && m.return_ty.is_some() {
                             let key = format!("{}::{}", e.name, m.name);
                             self.struct_getters.insert(key);
                         }
@@ -5246,6 +5266,22 @@ impl Transpiler {
         }
     }
 
+    /// Records a `stream` method under its `Type::method` key (see `stream_methods`).
+    fn register_stream_method(&mut self, ty: &str, m: &FnDecl) {
+        if !m.stream { return; }
+        let key = format!("{}::{}", ty, m.name);
+        // A `throws` stream needs `try_stream!` to propagate the error, which the eager
+        // iterator form cannot express, so it always takes the async path.
+        if !m.throws && crate::transpiler::helpers::body_is_sequential(&m.body, &self.task_fns) {
+            self.stream_iter_methods.insert(key.clone());
+        } else {
+            self.has_streams = true;
+            self.stream_async_method_names.insert(m.name.clone());
+            if m.throws { self.stream_throws_methods.insert(key.clone()); }
+        }
+        self.stream_methods.insert(key);
+    }
+
     fn pre_register_fn(&mut self, f: &FnDecl) {
         // Track overloads: if this name was already registered with a DIFFERENT mangled
         // signature, it's a genuine overload. Same mangled name = redefinition (ignore).
@@ -5329,7 +5365,9 @@ impl Transpiler {
                 }
             }
         }
-        if f.throws {
+        // A `throws` stream returns the stream itself; the error comes out per item, so the
+        // call must not get a `?` (see `register_stream_method`).
+        if f.throws && !f.stream {
             self.fn_throws.insert(f.name.clone());
         }
         // Track enum names used as typed error types so emit_enum can add Error impls.
@@ -5340,7 +5378,8 @@ impl Transpiler {
             self.task_fns.insert(f.name.clone());
         }
         if f.stream {
-            let sequential = crate::transpiler::helpers::body_is_sequential(&f.body, &self.task_fns);
+            // A `throws` stream needs `try_stream!` to propagate its error (see `register_stream_method`).
+            let sequential = !f.throws && crate::transpiler::helpers::body_is_sequential(&f.body, &self.task_fns);
             if sequential {
                 self.stream_iter_fns.insert(f.name.clone());
             } else {

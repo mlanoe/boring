@@ -1,0 +1,16 @@
+# A sequential `throws` stream function must propagate its error through the stream
+# (`try_stream!`), not become an eager iterator whose `throw` is a `panic!`.
+stream int checked(int n) throws:
+    if n > 3:
+        throw "boom"
+    for i in 0..<n:
+        yield i
+
+def main() throws:
+    for x in checked(2):
+        print "ok {x}"
+    try:
+        for x in checked(9):
+            print "never {x}"
+    catch String:
+        print "caught {error}"

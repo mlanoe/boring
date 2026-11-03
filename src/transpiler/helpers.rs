@@ -1570,7 +1570,7 @@ pub(crate) fn collect_const_let_usage(
 /// `emit_program` to decide whether the auto-generated `main` needs to be `async`.
 /// Returns true if any `for item in stream_fn():` appears in `stmts`
 /// (direct call to a known stream function as the for-loop iterable).
-pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections::HashSet<String>) -> bool {
+pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections::HashSet<String>, stream_methods: &std::collections::HashSet<String>) -> bool {
     for stmt in stmts {
         match stmt {
             Stmt::For(f) => {
@@ -1579,14 +1579,17 @@ pub(crate) fn body_has_stream_for(stmts: &[Stmt], stream_fns: &std::collections:
                         if stream_fns.contains(name.as_str()) { return true; }
                     }
                 }
-                if body_has_stream_for(&f.body, stream_fns) { return true; }
+                if let ExprKind::MethodCall(_, m, _) = &f.iterable.kind {
+                    if stream_methods.contains(m.as_str()) { return true; }
+                }
+                if body_has_stream_for(&f.body, stream_fns, stream_methods) { return true; }
             }
             Stmt::If(i)
-                if (i.branches.iter().any(|(_, body)| body_has_stream_for(body, stream_fns))
-                    || i.else_body.as_deref().is_some_and(|b| body_has_stream_for(b, stream_fns)))
+                if (i.branches.iter().any(|(_, body)| body_has_stream_for(body, stream_fns, stream_methods))
+                    || i.else_body.as_deref().is_some_and(|b| body_has_stream_for(b, stream_fns, stream_methods)))
                 => { return true; }
-            Stmt::While(w) if body_has_stream_for(&w.body, stream_fns)  => { return true; }
-            Stmt::Defer(b) if body_has_stream_for(b,        stream_fns)  => { return true; }
+            Stmt::While(w) if body_has_stream_for(&w.body, stream_fns, stream_methods)  => { return true; }
+            Stmt::Defer(b) if body_has_stream_for(b, stream_fns, stream_methods)  => { return true; }
             _ => {}
         }
     }

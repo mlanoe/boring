@@ -509,6 +509,8 @@ transpile_test!(ownership);
 transpile_test!(tasks);
 transpile_test!(channels);
 transpile_test!(streams);
+transpile_test!(stream_methods);
+transpile_test!(stream_throws_free);
 transpile_test!(let_pattern);
 transpile_test!(environment_builtin);
 transpile_test!(result_compat);

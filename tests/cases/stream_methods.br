@@ -1,0 +1,78 @@
+# `stream` / `stream<N>` on struct and enum methods: field reads, `req`, `throws`, enum
+# `match self`, and `for` consumption — plus a free `stream` fn of the same name.
+struct Counter:
+    var int base = 10
+
+    stream int upTo(int n):
+        for i in 0..<n:
+            yield base + i
+
+    stream<4> int evens(int n):
+        for i in 0..<n:
+            if i % 2 == 0:
+                yield base + i
+
+    # `wait` makes it non-sequential: an `async_stream` rather than an eager iterator.
+    stream int slow(int n):
+        for i in 0..<n:
+            wait .fromMillis(1)
+            yield base + i * 100
+
+    stream req int ro(int n):
+        for i in 0..<n:
+            yield i * 2
+
+    # Throws before the first yield: `boring run` collects a stream eagerly, `boring build`
+    # produces it lazily, so a mid-stream throw would print different prefixes.
+    stream int checked(int n) throws:
+        if n > 3:
+            throw "boom"
+        for i in 0..<n:
+            yield base + i
+
+enum Shape:
+    Sq(int)
+    Ci(int)
+
+    stream req int sides():
+        match self:
+            Sq(a):
+                yield a
+                yield a
+            Ci(r):
+                yield r
+
+ext Counter:
+    stream req int tail(int n):
+        for i in 0..<n:
+            yield base * 10 + i
+
+stream int upTo(int n):
+    for i in 0..<n:
+        yield 100 + i
+
+def main() throws:
+    mut c = Counter(5)
+    for x in c.upTo(3):
+        print "upTo {x}"
+    for x in c.evens(5):
+        print "even {x}"
+    for x in c.slow(2):
+        print "slow {x}"
+    for x in c.ro(3):
+        print "ro {x}"
+    for x in Shape.Sq(7).sides():
+        print "sq {x}"
+    for x in Shape.Ci(9).sides():
+        print "ci {x}"
+    for x in c.tail(2):
+        print "ext {x}"
+    for x in upTo(2):
+        print "free {x}"
+    for x in c.checked(2):
+        print "checked {x}"
+    try:
+        for x in c.checked(5):
+            print "checked {x}"
+    catch String:
+        print "caught {error}"
