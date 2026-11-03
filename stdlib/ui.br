@@ -563,6 +563,33 @@ pub view OnContext:
     [View] children
     body(): native
 
+# Pointer gestures (boring-ui `events.br`). All three are layout-transparent and leave the press to the controls inside them.
+#   OnTap        runs `onActivate` when a press and release stay within a few points of each other; `count` > 1 wants that many quick taps in a
+#                row at one place (400 ms apart at most). It fires on the tap that reaches `count`, with no wait to rule out a longer series.
+#   OnLongPress  runs `onActivate` once the pointer has been held still for `minMs` milliseconds (the host ticks the clock, see `tickHover`); the
+#                press is then spent: its release neither taps nor activates the control under it.
+#   OnSwipe      on release after a move of at least `minDistance` points, writes the dominant direction ("left", "right", "up", "down") into the
+#                bound `value` and runs `onActivate`; with `direction` set, only that direction counts.
+pub view OnTap:
+    UIAction onActivate
+    int count = 1
+    [View] children
+    body(): native
+
+pub view OnLongPress:
+    UIAction onActivate
+    int minMs = 500
+    [View] children
+    body(): native
+
+pub view OnSwipe:
+    bind string value
+    UIAction onActivate
+    string direction = ""
+    int minDistance = 40
+    [View] children
+    body(): native
+
 pub view DefaultFocus:
     bool enabled = true
     [View] children
