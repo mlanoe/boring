@@ -1,0 +1,46 @@
+enum V:
+    S(string s)
+    P(string a, int n)
+    N
+
+string pickFor(V attr, [string] items):
+    var string out = ""
+    for it in items:
+        match attr:
+            S(path): out = "{out}{it}{path}"
+            _: out = "{out}{it}"
+    out
+
+string pickWhile(V attr, int count):
+    var string out = ""
+    var int i = 0
+    while i < count:
+        match attr:
+            S(path): out = "{out}{path}"
+            _: out = "{out}-"
+        i += 1
+    out
+
+string pickLet([string] items):
+    let v = V.S("?")
+    var string out = ""
+    for it in items:
+        match v:
+            S(path): out = "{out}{it}{path}"
+            _: out = "{out}{it}"
+    out
+
+string pickTuple(V attr, [string] items):
+    var string out = ""
+    for it in items:
+        match attr:
+            P(a, n): out = "{out}{it}{a}{n}"
+            _: out = "{out}{it}"
+    out
+
+def main():
+    print pickFor(V.S("!"), ["a", "b"])
+    print pickWhile(V.S("x"), 3)
+    print pickLet(["a", "b"])
+    print pickTuple(V.P("t", 7), ["a", "b"])
+    print pickTuple(V.N, ["a", "b"])

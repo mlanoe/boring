@@ -1113,6 +1113,7 @@ transpile_test!(collection_interp);
 // tests/run.rs -- the interpreter's output is the semantic baseline this pins
 // the compiled output against.
 transpile_test!(self_field_loop_match_borrow);
+transpile_test!(match_outer_subject_in_loop);
 
 // Follow-up to e0247ff ("assigning a plain value to a T? struct field misses Some()
 // wrap"): that fix's `target_field_ty` resolution (`emit_expr_assign` in
@@ -1560,6 +1561,7 @@ transpile_test!(len_int_return);
 transpile_test!(inline_ctor_field_method_call);
 transpile_test!(width_scenarios);
 transpile_test!(cast_scenarios_2);
+transpile_test!(string_call_cast_parse);
 transpile_test!(index_scenarios);
 transpile_test!(trait_downcast);
 transpile_test!(trait_downcast_build);

@@ -1,0 +1,15 @@
+string trim_it(string s):
+    s.trim()
+
+def main():
+    let x = " 1.5 "
+    let pf = (trim_it(x) as float)
+    if let f = pf:
+        print "{f}"
+    else:
+        print "none"
+    let pi = (trim_it(" 42 ") as int)
+    if let i = pi:
+        print "{i}"
+    else:
+        print "none"

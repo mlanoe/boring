@@ -113,22 +113,30 @@ impl Transpiler {
             Stmt::Match(s)          => self.emit_match(s, is_last),
             Stmt::While(s)          => {
                 let prev = self.while_let_break_sync.take();
+                self.loop_entry_locals.push(self.known_local_vars.clone());
                 self.emit_while(s);
+                self.loop_entry_locals.pop();
                 self.while_let_break_sync = prev;
             }
             Stmt::WhileLet(s)       => {
                 let prev = self.while_let_break_sync.take();
+                self.loop_entry_locals.push(self.known_local_vars.clone());
                 self.emit_while_let(s);
+                self.loop_entry_locals.pop();
                 self.while_let_break_sync = prev;
             }
             Stmt::DoWhile(s)        => {
                 let prev = self.while_let_break_sync.take();
+                self.loop_entry_locals.push(self.known_local_vars.clone());
                 self.emit_do_while(s);
+                self.loop_entry_locals.pop();
                 self.while_let_break_sync = prev;
             }
             Stmt::Loop(s)           => {
                 let prev = self.while_let_break_sync.take();
+                self.loop_entry_locals.push(self.known_local_vars.clone());
                 self.emit_loop(s);
+                self.loop_entry_locals.pop();
                 self.while_let_break_sync = prev;
             }
             Stmt::Wait(dur, _)      => {
@@ -156,7 +164,9 @@ impl Transpiler {
                 // mistaken for exiting an enclosing while-let-shorthand loop —
                 // see the `Stmt::Break` arm above.
                 let prev_break_sync = self.while_let_break_sync.take();
+                self.loop_entry_locals.push(self.known_local_vars.clone());
                 self.emit_for(s);
+                self.loop_entry_locals.pop();
                 self.while_let_break_sync = prev_break_sync;
             }
             Stmt::Guard(s)          => self.emit_guard(s),
@@ -213,6 +223,15 @@ impl Transpiler {
                 }
             }
             Stmt::Expr(e)           => {
+                // Discarded `arr.pop()` statement: emit the raw `Option<T>` (`arr.pop();`)
+                // so element types without `Default` (enums, plain structs) still compile.
+                if is_bare_pop_call(e) && (!is_last || self.fn_declared_void) {
+                    self.want_raw_option_pop.set(true);
+                    let raw = self.emit_expr_owned(e);
+                    self.want_raw_option_pop.set(false);
+                    self.line(&format!("{raw};"));
+                    return;
+                }
                 // Tail literal of a fixed-point-returning function: `fixed16_16 one(): 1.0`.
                 if is_last && !self.fn_declared_void {
                     if let Some(lit) = self.fn_return_ty.as_ref().and_then(Self::fixed_fmt_of_type)
@@ -223,15 +242,6 @@ impl Transpiler {
                     }
                 }
                 if is_last && self.in_throws && !self.suppress_ok_wrap && self.fn_declared_void {
-                // Discarded `arr.pop()` statement: emit the raw `Option<T>` (`arr.pop();`)
-                // so element types without `Default` (enums, plain structs) still compile.
-                if is_bare_pop_call(e) && (!is_last || self.fn_declared_void) {
-                    self.want_raw_option_pop.set(true);
-                    let raw = self.emit_expr_owned(e);
-                    self.want_raw_option_pop.set(false);
-                    self.line(&format!("{raw};"));
-                    return;
-                }
                     // Void throws function: emit the expression as a statement (for side-effects/?)
                     // then Ok(()). Skip nil entirely (no side-effect).
                     if !matches!(&e.kind, ExprKind::Nil) {

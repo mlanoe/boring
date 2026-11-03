@@ -826,6 +826,10 @@ struct Transpiler {
     /// All local variable names in the current function scope.
     /// Used to distinguish module/type paths (use `::`) from instance variable access (use `.`).
     pub(crate) known_local_vars: std::collections::HashSet<String>,
+    /// Snapshots of `known_local_vars` taken on entry to each enclosing loop (innermost last).
+    /// A `match` subject absent from the innermost snapshot's complement (i.e. declared before
+    /// the loop, or a parameter) is re-evaluated every iteration, so it must not be moved.
+    pub(crate) loop_entry_locals: Vec<std::collections::HashSet<String>>,
     /// Locals bound to a function-typed struct field's *handle* (`let f = r.onCommand`): they hold
     /// the `Rc<RefCell<dyn FnMut..>>`/`Arc<Mutex<..>>`/`Rc<dyn Fn..>` itself, so calling one must
     /// lock/borrow first (see `emit_fn_handle_call`). Cleared at each function start.
@@ -1663,6 +1667,7 @@ impl Transpiler {
             with_open_names: std::collections::HashSet::new(),
             iterable_structs: std::collections::HashSet::new(),
             known_local_vars: std::collections::HashSet::new(),
+            loop_entry_locals: Vec::new(),
             fn_handle_vars: std::collections::HashMap::new(),
             while_let_redirect: std::collections::HashMap::new(),
             while_let_break_sync: None,

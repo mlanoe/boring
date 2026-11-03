@@ -1462,8 +1462,13 @@ impl Transpiler {
             "lower", "toLower", "toLowerCase", "lowercased",
             "replace",
         ];
+        // A call (user function or method) whose resolved static type is `string` is a
+        // string-parse source too, not a numeric computation.
         let is_string_returning_method_call = matches!(&e.kind,
-            ExprKind::MethodCall(_, m, _) if STRING_RETURNING_METHODS.contains(&m.as_str()));
+            ExprKind::MethodCall(_, m, _) if STRING_RETURNING_METHODS.contains(&m.as_str()))
+            || (matches!(&e.kind, ExprKind::Call(..) | ExprKind::MethodCall(..))
+                && self.resolve_expr_type(e).is_some_and(|t| matches!(t.without_mut(), Type::Str)
+                    || matches!(t.without_mut(), Type::Named(n) if n == "string" || n == "str")));
         let src_is_expr = !is_string_returning_method_call && matches!(&e.kind,
             ExprKind::BinOp(_, _, _) | ExprKind::Call(_, _) | ExprKind::UnaryOp(_, _)
             | ExprKind::MethodCall(_, _, _));

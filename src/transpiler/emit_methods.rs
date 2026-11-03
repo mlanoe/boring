@@ -7423,6 +7423,7 @@ impl Transpiler {
             with_open_names: self.with_open_names.clone(),
             iterable_structs: self.iterable_structs.clone(),
             known_local_vars: self.known_local_vars.clone(),
+            loop_entry_locals: self.loop_entry_locals.clone(),
             fn_handle_vars: self.fn_handle_vars.clone(),
             while_let_redirect: self.while_let_redirect.clone(),
             // A nested fn/closure body is its own Rust item — a bare `break` inside

@@ -1141,7 +1141,13 @@ impl Transpiler {
             // E0382 (`return v` in the fallthrough of `match v { V.Obj(inner): ... }`).
             let reused_in_arms = !is_optional_var && has_binding_arm && subj == *vname
                 && !is_smart_ptr && !is_arc_str && Self::match_arms_mention_var(arms_ref, vname);
-            if (is_optional_var && has_binding_arm) || reused_in_arms {
+            // A subject declared outside an enclosing loop is matched again on every
+            // iteration: a by-value binding arm would move the payload out on the first.
+            let outer_in_loop = !is_optional_var && has_binding_arm && subj == *vname
+                && !is_smart_ptr && !is_arc_str
+                && self.loop_entry_locals.last().is_some_and(|entry|
+                    entry.contains(vname.as_str()) || !self.known_local_vars.contains(vname.as_str()));
+            if (is_optional_var && has_binding_arm) || reused_in_arms || outer_in_loop {
                 format!("{}.clone()", vname)
             } else {
                 subj

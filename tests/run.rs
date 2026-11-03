@@ -563,6 +563,7 @@ interp_test!(json_scenarios);
 // worked dynamically). Registered here too since the interpreter's output is the
 // semantic baseline `transpile_test!` below is pinned against.
 interp_test!(self_field_loop_match_borrow);
+interp_test!(match_outer_subject_in_loop);
 
 // Regression: named qualifier groups ('one/'many/'mut/'req) on a function
 // parameter -- see tests/cases/qualifier_group_param.br's doc comment and the
@@ -931,6 +932,7 @@ interp_test!(closure_scenarios);
 interp_test!(len_int_return);
 interp_test!(width_scenarios);
 interp_test!(cast_scenarios_2);
+interp_test!(string_call_cast_parse);
 interp_test!(index_scenarios);
 interp_test!(trait_downcast);
 interp_test!(trait_downcast_build);
