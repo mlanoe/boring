@@ -4516,7 +4516,7 @@ impl Transpiler {
         // An ext block with no traits overrides plain struct methods of the same name.
         if e.traits.is_empty() {
             for m in &e.methods {
-                self.struct_ext_method_overrides.insert(format!("{}::{}", tname, m.name));
+                self.struct_ext_method_overrides.insert(format!("{}::{}", tname, mangle_overload_name(&m.name, &m.params)));
             }
         }
     }

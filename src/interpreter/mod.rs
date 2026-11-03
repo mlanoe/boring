@@ -3219,6 +3219,39 @@ impl Interpreter {
     /// already parsed the module's `Program` and executed its items into
     /// `module_env` by this point; only the export step differs by nothing,
     /// which is why it's factored out here instead of duplicated.
+    /// Bind `val` as `name` in `env`. A function bound where another function of that name is
+    /// already visible (from a different imported file or the importer itself) becomes an overload
+    /// set, exactly like two same-file `def`s; the same function arriving twice (a module reached
+    /// both directly and through another module) is kept once. An ambiguous pair exits with the
+    /// usual overload error rather than letting one file's version win silently.
+    fn bind_imported_value(env: &EnvRef, name: &str, val: Value) {
+        let existing = env.borrow().vars.get(name).cloned();
+        let variants_of = |v: &Value| -> Option<Vec<(FnDecl, EnvRef)>> {
+            match v {
+                Value::Fn { decl, captured } => Some(vec![((**decl).clone(), Rc::clone(captured))]),
+                Value::OverloadedFn { variants, .. } => Some(variants.clone()),
+                _ => None,
+            }
+        };
+        let (Some(old), Some(new)) = (existing.as_ref().and_then(variants_of), variants_of(&val)) else {
+            env.borrow_mut().define(name, val);
+            return;
+        };
+        let mut merged = old;
+        for (d, cap) in new {
+            if merged.iter().any(|(e, c)| Rc::ptr_eq(c, &cap) && e.line == d.line && e.col == d.col && e.name == d.name) { continue; }
+            for (e, _) in &merged { check_overload_conflict_or_exit(e, &d, 0); }
+            merged.push((d, cap));
+        }
+        let value = if merged.len() == 1 {
+            let (decl, captured) = merged.remove(0);
+            Value::Fn { decl: Box::new(decl), captured }
+        } else {
+            Value::OverloadedFn { name: name.to_string(), variants: merged }
+        };
+        env.borrow_mut().define(name, value);
+    }
+
     fn bind_module_items(
         program: &Program,
         decl: &UseDecl,
@@ -3239,7 +3272,7 @@ impl Interpreter {
                                 env.borrow_mut().define(variant_name, variant_val.clone());
                             }
                         }
-                        env.borrow_mut().define(name, val);
+                        Self::bind_imported_value(&env, name, val);
                     }
                 }
             }
@@ -3257,7 +3290,7 @@ impl Interpreter {
                     ));
                 }
                 if let Some(val) = module_env.borrow().get(item_name) {
-                    env.borrow_mut().define(item_name, val);
+                    Self::bind_imported_value(&env, item_name, val);
                 }
             }
         }
@@ -3719,6 +3752,13 @@ impl Interpreter {
                     )),
                 };
 
+                // An `ext` of the same struct in another imported file already extended the global
+                // registration; start from it so the extensions of several files accumulate.
+                let existing = match (&existing, self.global.borrow().get(&decl.type_name)) {
+                    (Value::Struct { .. }, Some(g @ Value::Struct { .. })) if !Rc::ptr_eq(&env, &self.global) => g,
+                    _ => existing,
+                };
+
                 // Handle enum ext
                 if let Value::EnumNamespace { name, variants, mut methods, setters: mut enum_setters, mut conversions, mut protocols, type_methods: enum_type_methods, captured: enum_captured } = existing {
                     for m in &decl.methods {
@@ -3820,6 +3860,11 @@ impl Interpreter {
 
                 // Re-register the updated struct
                 let updated = Value::Struct { decl: struct_decl, captured };
+                // An `ext` in an imported file extends the type for every file: method dispatch
+                // finds the struct through the global registry (see the `Item::Struct` arm).
+                if !Rc::ptr_eq(&env, &self.global) && matches!(self.global.borrow().get(&decl.type_name), Some(Value::Struct { .. })) {
+                    self.global.borrow_mut().define(&decl.type_name, updated.clone());
+                }
                 env.borrow_mut().define(&decl.type_name, updated);
                 Ok(())
             }

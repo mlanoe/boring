@@ -609,15 +609,110 @@ impl Checker {
                     }
                 }
                 Item::Enum(e) => { self.imported_types.insert(e.name.clone()); }
+                // `ext T:` methods are overloads of `T`'s own (possibly in another file).
+                Item::Ext(e) => {
+                    for m in &e.methods {
+                        self.generic_names.extend(m.type_params.iter().cloned());
+                        let key = (e.type_name.clone(), m.name.clone());
+                        let dup = self.imported_methods.contains_key(&key);
+                        self.imported_methods.insert(key, if dup { None } else { sig(&m.params) });
+                    }
+                }
                 _ => {}
+            }
+        }
+        // A local `ext T:` method named like an imported one is an overload the argument
+        // check can't pick by name alone.
+        for it in &program.items {
+            if let Item::Ext(e) = it {
+                for m in &e.methods {
+                    if let Some(v) = self.imported_methods.get_mut(&(e.type_name.clone(), m.name.clone())) { *v = None; }
+                }
             }
         }
         // A name the entry file declares itself always wins over an imported one.
         for n in local.user_types.iter().chain(local.fn_arity.keys()) {
             self.imported_types.remove(n);
-            self.imported_fns.remove(n);
+        }
+        self.check_cross_file_overload_conflicts(program, imported);
+        self.check_cross_file_method_conflicts(program, imported);
+        // Same-named fns in the entry file and an imported file are overloads
+        // (resolved by parameter type, like same-file ones): the call-argument
+        // check can't pick the callee by name alone, so skip it for that name.
+        for n in local.fn_arity.keys() {
+            if self.imported_fns.remove(n).is_some() { self.fn_overloaded.insert(n.clone()); }
         }
         self.imported_methods.retain(|(s, _), _| !local.user_types.contains(s));
+    }
+
+    /// Overloads of one free function declared in different files must stay unambiguous, exactly
+    /// like same-file ones: two declarations that both match some call (same parameter types, or
+    /// a default parameter that makes a shorter call match both) are an error, never a silent
+    /// pick of one file's version. Reported at the entry file's declaration when it is one of
+    /// the pair, else at the first `use` line.
+    fn check_cross_file_overload_conflicts(&mut self, program: &Program, imported: &[Item]) {
+        fn fns<'a>(items: &'a [Item], out: &mut Vec<&'a FnDecl>) {
+            for it in items {
+                match it {
+                    Item::Fn(f) if f.qualifier.is_none() && !f.is_native => out.push(f),
+                    Item::Mod(m) => fns(&m.items, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut local = Vec::new();
+        fns(&program.items, &mut local);
+        let mut imp = Vec::new();
+        fns(imported, &mut imp);
+        let first_use = program.items.iter().find_map(|i| match i { Item::Use(u) => Some(u.line), _ => None }).unwrap_or(1);
+        let fmt = |f: &FnDecl| format!("{}({})", f.name, f.params.iter().map(|p| {
+            let ty = p.ty.as_ref().map(crate::transpiler::helpers::mangle_type_name).unwrap_or_else(|| "_".into());
+            if p.default.is_some() { format!("{ty}=default") } else { ty }
+        }).collect::<Vec<_>>().join(", "));
+        for (i, b) in imp.iter().enumerate() {
+            let others = local.iter().map(|f| (*f, true)).chain(imp[..i].iter().map(|f| (*f, false)));
+            for (a, is_local) in others {
+                if a.name != b.name { continue; }
+                let Some(n) = crate::transpiler::helpers::overloads_conflict(a, b) else { continue };
+                let (line, col) = if is_local { (a.line, a.col) } else { (first_use, 0) };
+                self.errors.push(CheckError::at(format!(
+                    "ambiguous overload for '{}' across files — '{}' and '{}' both match a call with {} argument(s)",
+                    a.name, fmt(a), fmt(b), n,
+                ), line, col));
+            }
+        }
+    }
+
+    /// Method counterpart of `check_cross_file_overload_conflicts`: `T`'s methods declared in
+    /// `T`'s own `struct` and in `ext T:` blocks of different files must not be ambiguous.
+    fn check_cross_file_method_conflicts(&mut self, program: &Program, imported: &[Item]) {
+        fn methods<'a>(items: &'a [Item], out: &mut Vec<(&'a str, &'a FnDecl)>) {
+            for it in items {
+                match it {
+                    Item::Struct(s) => out.extend(s.methods.iter().map(|m| (s.name.as_str(), m))),
+                    Item::Ext(e) => out.extend(e.methods.iter().map(|m| (e.type_name.as_str(), m))),
+                    Item::Mod(m) => methods(&m.items, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut local = Vec::new();
+        methods(&program.items, &mut local);
+        let mut imp = Vec::new();
+        methods(imported, &mut imp);
+        let first_use = program.items.iter().find_map(|i| match i { Item::Use(u) => Some(u.line), _ => None }).unwrap_or(1);
+        for (i, (bt, b)) in imp.iter().enumerate() {
+            let others = local.iter().map(|x| (*x, true)).chain(imp[..i].iter().map(|x| (*x, false)));
+            for ((at, a), is_local) in others {
+                if at != *bt || a.name != b.name { continue; }
+                let Some(n) = crate::transpiler::helpers::overloads_conflict(a, b) else { continue };
+                let (line, col) = if is_local { (a.line, a.col) } else { (first_use, 0) };
+                self.errors.push(CheckError::at(format!(
+                    "ambiguous overload for method '{}::{}' across files — both match a call with {} argument(s)",
+                    at, a.name, n,
+                ), line, col));
+            }
+        }
     }
 
     fn collect_signatures(&mut self, program: &Program) {
@@ -632,6 +727,12 @@ impl Checker {
             Item::Kernel(k) => { self.kernel_decls.insert(k.name.clone(), k.clone()); }
             Item::Enum(e)   => { self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); self.enum_variant_types.insert(e.name.clone(), e.variants.iter().map(|v| (v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect())).collect()); }
             Item::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
+            // `ext T:` methods are overloads of `T`'s own methods.
+            Item::Ext(e)    => {
+                for m in &e.methods {
+                    self.struct_methods.entry((e.type_name.clone(), m.name.clone())).or_default().push(m.params.clone());
+                }
+            }
             Item::Stmt(s)   => self.collect_stmt_signatures(s),
             _ => {}
         }
@@ -1889,6 +1990,8 @@ impl Checker {
         let Some((ArgClass::User(s), _)) = self.arg_class(recv) else { return };
         let key = (s.clone(), method.to_string());
         let params: Vec<(String, Option<Type>)> = if let Some(overloads) = self.struct_methods.get(&key) {
+            // Also declared in an imported file (`ext T:` here, `struct T` there, or the reverse): overloaded.
+            if self.imported_methods.contains_key(&key) { return; }
             if overloads.len() != 1 || overloads[0].iter().any(|p| p.variadic) { return; }
             overloads[0].iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
         } else if let Some(Some(ps)) = self.imported_methods.get(&key) {

@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Function and method overloads can now be declared in different files.** `a.br` declaring `string describe(int n)` and `main.br` (with `use a`) declaring `string describe(string s)` failed under both `boring run` and `boring build` with "argument 1 of describe (parameter 's') expects string, got int": the checker let the entry file's declaration hide the imported one. Free functions and `ext` methods split across sibling files, `[deps]` projects, or struct body + `ext` in another file now resolve by argument type like same-file overloads. Several imported files overloading one name no longer overwrite each other in the interpreter, and an `ext` in an imported file now extends the type for every file. An ambiguous pair across files (same parameter types, or a default parameter making a call match both) is a clear error in both modes, never a silent pick. Fixed along the way: a struct method was dropped from the emitted Rust when an `ext` block declared a same-named method with different parameters (same file included), and the checker rejected calls to either overload of a same-file struct + `ext` pair. `docs/book.md` "Limitations" updated. Regression tests: `tests/overload_across_files.rs`.
+
 ### Fixed
 
 - **A discarded `arr.pop()` statement no longer requires `T: Default`.** `parts.pop()` used as a bare statement (result unused) printed the right output under `boring run` but was emitted as `parts.pop().unwrap_or_default();`, failing `cargo build` with E0277 for any element type without `Default` (an enum, a plain struct). It now emits `parts.pop();`; a used `pop()` keeps its existing forms (`let T x = arr.pop()`, a tail expression), and `remove` as a statement was already fine. Regression test: `tests/cases/discard_pop_statement.br` (`transpile_test!(discard_pop_statement)`).

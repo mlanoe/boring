@@ -888,7 +888,7 @@ pub fn collect_imported_items(
         for it in items {
             match it {
                 Item::Mod(m) => flatten(&m.items, out),
-                Item::Fn(_) | Item::Struct(_) | Item::Enum(_) => out.push(it.clone()),
+                Item::Fn(_) | Item::Struct(_) | Item::Enum(_) | Item::Ext(_) => out.push(it.clone()),
                 _ => {}
             }
         }

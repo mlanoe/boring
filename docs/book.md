@@ -1633,9 +1633,10 @@ error: ambiguous overload for 'fn' — 'fn(int, string=default)' and 'fn(int)'
 | Free functions in the same file | ✅ fully supported |
 | Struct methods declared inline in `struct` | ✅ fully supported |
 | Struct methods in `ext` blocks (same file) | ✅ fully supported |
-| Functions / methods across separate files or modules | ❌ not supported |
+| Free functions across the files of a project (`use <file>`, `[deps]` `use <name>.<file>.*`) | ✅ fully supported |
+| Struct methods split between a `struct` body and `ext` blocks in other files | ✅ fully supported |
 
-For cross-file scenarios, declare all overloads in the same file. If the overloads must live in separate files, use different function names.
+Overloads declared in different files of one project resolve by argument type exactly like same-file ones, under `boring run` and `boring build`. The same ambiguity rules apply across files: two declarations whose parameter types match (or where a default parameter makes a shorter call match both) are an error — `ambiguous overload for 'describe' across files` — reported at the entry file's declaration, never a silent choice of one file's version. (Within one file, an `ext` method with exactly the signature of a `struct` method still replaces it; across files that pair is the ambiguity error.)
 
 ---
 

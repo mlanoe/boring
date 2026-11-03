@@ -573,7 +573,7 @@ impl Transpiler {
         for f in &s.methods {
             // Skip methods overridden by an ext block — the ext block's version takes precedence.
             let overridden = self.struct_ext_method_overrides
-                .contains(&format!("{}::{}", s.name, f.name));
+                .contains(&format!("{}::{}", s.name, mangle_overload_name(&f.name, &f.params)));
             if overridden { continue; }
             if !has_protocols || !trait_method_set.contains(&f.name) {
                 self.emit_fn(f, Some(&s.name));
