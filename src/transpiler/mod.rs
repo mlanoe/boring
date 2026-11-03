@@ -6319,10 +6319,15 @@ pub(crate) fn compute_gpu_borrow_params(
         let mut changed = false;
         for f in &all_fns {
             for (i, p) in f.params.iter().enumerate() {
+    // The shared entry has only one overload's arity, so skip every overload when iterating.
+    let overloaded: std::collections::HashSet<&str> = all_fns.iter()
+        .filter(|f| all_fns.iter().filter(|g| g.name == f.name).count() > 1)
+        .map(|f| f.name.as_str()).collect();
                 if !flags[f.name.as_str()][i] { continue; }
                 let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
                     if let Some(decl) = kernel_decls.get(fn_name) {
                         let Some(init) = decl.inits.first() else { return false };
+            if overloaded.contains(f.name.as_str()) { continue; }
                         let Some(init_param) = init.params.get(arg_idx) else { return false };
                         let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
                         let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };

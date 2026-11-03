@@ -1,0 +1,12 @@
+req int scale(int a, int b, int c): a + b + c
+
+req int pick(): scale(1, 2, 3)
+
+req [float32]'kernel'unified scale([float32]'kernel'global x) throws:
+    let int n = x.length
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0
+        out
