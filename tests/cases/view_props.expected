@@ -1,5 +1,5 @@
 bold=false content=hi font=Body italic=false 
 insets=10 
 minHeight=5 width=80 
-alignment=Leading 
+alignment=Leading equal=false 
 

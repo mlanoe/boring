@@ -288,9 +288,7 @@ fn pass_chain(ty: &Type) -> Option<QualChain> {
     }
 }
 
-/// The declared type of an argument against the parameter slot type `decl`.
-
-/// `from_ty`; with `pass`, a parameter of the enclosing function is evidence too (a call from the
+/// The declared type of an argument against the parameter slot type `decl`: `from_ty`; with `pass`, a parameter of the enclosing function is evidence too (a call from the
 /// body of a qualifier-generic function to another one).
 fn from_ty_in(decl: &Type, arg: &Type, desc: &str, pass: bool, out: &mut Evidence) {
     let (d, a) = (peel(decl), peel(arg));

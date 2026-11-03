@@ -1283,6 +1283,13 @@ primitive_type  ::= "int" | "uint" | "float" | "bool" | "string" | "nil" | "neve
 numeric_type    ::= "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
                   | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
                   | "f16" | "f32" | "f64" | "float16" | "float32" | "float64"
+                  | fixed_type
+
+# Binary fixed-point types: `fixedN_M` / `ufixedN_M` (aliases `iN_M` / `uN_M`). `N` integer bits
+# (sign included for the signed form) + `M` fractional bits; storage width `N + M` is 8, 16, 32,
+# 64 or 128; value = raw / 2^M. Same-format arithmetic only; mixing with `int`/`float` needs an
+# explicit `as`. See docs/fixed-point-types.md. The names are reserved: they cannot be declared.
+fixed_type      ::= ("fixed" | "ufixed" | "i" | "u") [0-9]+ "_" [0-9]+
 
 type_list       ::= type ("," type)*
 
@@ -1472,6 +1479,11 @@ STRING_INTERP   ::= '"' (char | "{" expr (":" fmt_spec)? "}" | "{{" | "}}")* '"'
 # rules as `"""`). Lexed as a STRING. Three consecutive `'` never occur elsewhere
 # (an ownership qualifier is `'` followed by an IDENT), so this needs no context.
 RAW_STRING      ::= "'''" (any char except the sequence "'''")* "'''"
+# Single-line raw string: `'...'`, no interpolation, no escapes (`''` is the empty string). A `'`
+# is the ownership-qualifier tick only when glued to the end of a type or name (preceded by a
+# letter, digit, `_`, `]`, `}`, `)`, `>`, `?` or `&` — not `&&`, `->`, `=>`); anywhere else it
+# opens a string. Inside a declaration header's `<...>` every `'` is a qualifier tick.
+RAW_STRING_1    ::= "'" (any char except "'" and newline)* "'"
 # `$`-interpolated string: `$"..."` or `$"""..."""`. Holes are `$IDENT` or `"${" expr
 # (":" fmt_spec)? "}"`; `$$` is a literal `$`; `{` and `}` are literal. Otherwise lexed like
 # `"..."` (single line, escapes processed) / `"""..."""` (multiline, backslashes literal).

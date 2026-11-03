@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Mickaël LANOË
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
+#![allow(clippy::approx_constant, clippy::useless_format)]
 // wgpu codegen snapshot tests.
 //
 // These tests verify the text emitted by `boring build --target wgpu` without

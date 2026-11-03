@@ -5,6 +5,8 @@
   "fileTypes": ["br"],
   "patterns": [
     { "include": "#comment" },
+    { "include": "#raw-triple-string" },
+    { "include": "#dollar-string" },
     { "include": "#triple-string" },
     { "include": "#string" },
     { "include": "#number" },
@@ -18,6 +20,8 @@
     { "include": "#declaration-keywords" },
     { "include": "#operator-keywords" },
     { "include": "#builtin-types" },
+    { "include": "#fixed-point-types" },
+    { "include": "#raw-string" },
     { "include": "#ownership-qualifier" },
     { "include": "#impl-shorthand" },
     { "include": "#type-name" },
@@ -30,6 +34,29 @@
     "comment": {
       "name": "comment.line.hash.boring",
       "match": "#.*$"
+    },
+
+    "raw-triple-string": {
+      "name": "string.quoted.raw.triple.boring",
+      "begin": "'''",
+      "end": "'''"
+    },
+
+    "dollar-string": {
+      "name": "string.quoted.double.dollar.boring",
+      "begin": "\\$(\"\"\")?\"",
+      "end": "\"(?<=\"\"\")|\"",
+      "patterns": [
+        { "include": "#escape" },
+        { "match": "\\$\\$", "name": "constant.character.escape.boring" },
+        { "match": "\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[^}]*\\}", "name": "meta.interpolation.boring" }
+      ]
+    },
+
+    "raw-string": {
+      "comment": "single-line raw string '...': a tick is a qualifier only when glued to a type/name end (or opening a declared qualifier param); otherwise it opens a string",
+      "name": "string.quoted.raw.boring",
+      "match": "(?<![A-Za-z0-9_\\]})>?&])'(?![a-z_][A-Za-z0-9_]*(?:\\s+as\\b|\\s*[,>|=]))[^'\\n]*'"
     },
 
     "triple-string": {
@@ -184,7 +211,7 @@
 
     "control-keywords": {
       "name": "keyword.control.boring",
-      "match": "\\b(if|elif|else|while|do|loop|for|in|break|continue|guard|match|return|throw|try|catch|defer|yield|wait)\\b"
+      "match": "\\b(if|elif|else|while|do|loop|for|in|break|continue|guard|match|return|throw|try|catch|defer|yield|wait|dispatch)\\b"
     },
 
     "declaration-keywords": {
@@ -200,6 +227,11 @@
     "builtin-types": {
       "name": "storage.type.boring",
       "match": "\\b(int|uint|float|float16|float32|float64|bool|string|str|never|int8|int16|int32|int64|int128|uint8|uint16|uint32|uint64|uint128|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f16|f32|f64)\\b"
+    },
+
+    "fixed-point-types": {
+      "name": "storage.type.fixed.boring",
+      "match": "\\bu?fixed[0-9]+_[0-9]+\\b|\\b[iu][0-9]+_[0-9]+\\b"
     },
 
     "ownership-qualifier": {

@@ -216,7 +216,7 @@ impl Parser {
                 TokenKind::Colon if depth <= 0 => break,
                 TokenKind::Tick => {
                     let Some(TokenKind::Ident(n)) = self.tokens.get(k + 1).map(|t| t.kind.clone()) else { k += 1; continue };
-                    if QUALIFIER_WORDS.contains(&n.as_str()) || in_scope.iter().any(|e| *e == n) { k += 1; continue; }
+                    if QUALIFIER_WORDS.contains(&n.as_str()) || in_scope.contains(&n) { k += 1; continue; }
                     let declaring = k > 0 && matches!(self.tokens[k - 1].kind, TokenKind::Lt | TokenKind::Comma);
                     let decl = if declaring {
                         self.pos = k;

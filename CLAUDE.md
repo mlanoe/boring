@@ -179,7 +179,7 @@ print "Hello, {name}!"
 - `{expr:fmt}` → formatted interpolation with a **static** format specifier (e.g. `{n:.2f}`, `{n:x}` for hex); the format part is a raw string, not an expression — `{n:{fmt}}` does **not** interpolate `fmt`, it produces the literal `{:{fmt}}`
 - `{:x}` (empty expr, non-empty fmt) → literal `{:x}`, nothing is formatted
 - A lone `{` inside a string is **always** treated as the start of an interpolation hole — it is **not** a literal brace. `"{"` is a lexer error (unterminated string). Use `"{{"` instead.
-- Two alternatives for brace-heavy text (JSON, CSS): `$"..."` / `$"""..."""` interpolate with `$name` / `${expr}` and treat `{`/`}` as literal (`$$` = literal `$`); `'''...'''` is **raw** — no interpolation, no escapes, everything literal. See [book.md](docs/book.md) ("`$` interpolation" and "Raw strings").
+- Two alternatives for brace-heavy text (JSON, CSS): `$"..."` / `$"""..."""` interpolate with `$name` / `${expr}` and treat `{`/`}` as literal (`$$` = literal `$`); `'''...'''` is **raw** — no interpolation, no escapes, everything literal. `'...'` is the single-line raw form (`''` is empty): a `'` is the ownership-qualifier tick only when glued to the end of a type or name (after a letter, digit, `_`, `]`, `}`, `)`, `>`, `?`, `&`), anywhere else it opens a string. See [book.md](docs/book.md) ("`$` interpolation" and "Raw strings").
 
 ## Common types
 
@@ -250,6 +250,13 @@ Column:
 desugars to `Column([Text(...), ...])` (no `if`/`for`) or an imperative `Vec` builder (`if`/`for` present). Nesting works (a line that's itself another `Foo:` call resolves independently). No chaining after the block — pass modifiers as labeled args before the colon: `Column(spacing = 8): ...`.
 
 This shares its exact `Ident ":"` token shape with the pre-existing no-paren closure shorthand (`n: n * 2`) and, in its parenthesized form, with the pre-existing zero-arg trailing-body sugar (`timeout(...): body`) — disambiguated **by resolving the callee** against this file's own declarations, not by casing: last param `[dyn Trait]` → this sugar (a concrete `[T]` last param is a compile error, never silently misapplied); last param `Fn(...)`, or not a known callable at all *with* an explicit `(...)` argument list → the ordinary trailing-closure sugar (tail semantics); not a known callable and *no* parentheses at all → the closure-literal shorthand, unchanged. See [book.md](docs/book.md#trailing-array-block-sugar) for the full decision table.
+
+## Fixed-point, generic labels, qualifier parameters, `dispatch`
+
+- **Fixed-point**: `fixedN_M` / `ufixedN_M` (aliases `iN_M` / `uN_M`), `N` integer bits + `M` fractional, storage 8/16/32/64/128; same-format arithmetic only, `as fixedN_M` to convert from `int`/`float` (a non-literal never converts implicitly). Members: `.raw`, `fromRaw`, `epsilon/min/max`, `floor/ceil/round/trunc/fract`, `wrapping*/saturating*/checked*`, `mulRound/divRound`, `sqrt/sin/cos/tan/exp/ln` (bit-identical across interpreter, generated Rust, GPU targets). See [docs/fixed-point-types.md](docs/fixed-point-types.md).
+- **Labelled generic arguments**: `Pair<K = int, V = string>`, `obj.m<T = int>()`, `Grid<N = 4>` — positional first, then labelled in any order.
+- **Qualifier parameters**: `struct Board<'elem = 'inline>`, `Board<elem'actor>`; also on functions/methods (`int count<'q>(Board<elem'q> b)`, specialised per instance) and passed to an enclosing struct (`Game<'cells>` holding `Board<elem'cells>`). Inferred at construction from explicit args, expected type, written qualifiers of the arguments, then the default. See [docs/qualifiers.md](docs/qualifiers.md).
+- **`dispatch NAME in [v1, v2]:`** — compile-time ladder for const-generic kernels: the body is cloned per integer literal with `NAME` substituted (`K<NAME>(...)`), chained as `if/elif/else`. Contextual keyword.
 
 ## Dependency injection
 

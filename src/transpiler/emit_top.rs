@@ -4217,12 +4217,10 @@ fn param_moved_in_body(name: &str, body: &[Stmt]) -> bool {
         if let crate::ast::WalkNode::Expr(e) = n {
             match &e.kind {
                 ExprKind::Call(_, args) | ExprKind::MethodCall(_, _, args)
-                | ExprKind::GenericCall(_, _, args) | ExprKind::Pipe(_, _, args) => {
-                    if args.iter().any(|a| is_var(&a.value)) { found = true; }
-                }
-                ExprKind::Array(es) | ExprKind::Tuple(es) => {
-                    if es.iter().any(|x| is_var(x)) { found = true; }
-                }
+                | ExprKind::GenericCall(_, _, args) | ExprKind::Pipe(_, _, args)
+                    if args.iter().any(|a| is_var(&a.value)) => { found = true; }
+                ExprKind::Array(es) | ExprKind::Tuple(es)
+                    if es.iter().any(is_var) => { found = true; }
                 _ => {}
             }
         }

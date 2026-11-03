@@ -197,7 +197,7 @@ fn a_function_parameter_does_not_leak_into_the_next_declaration() {
     assert_eq!(fn_named(&p, "a").type_params, ["^q"]);
     assert_eq!(fn_named(&p, "b").type_params, ["^q"]);
     assert!(fn_named(&p, "main").type_params.is_empty());
-    let err = parse(&format!("{FN_PRELUDE}int a<'q>(Point'q p):\n    1\n\nstruct Bad:\n    var Point'q p = Point()\n")).err().expect("error");
+    let err = parse(&format!("{FN_PRELUDE}int a<'q>(Point'q p):\n    1\n\nstruct Bad:\n    var Point'q p = Point()\n")).expect_err("error");
     assert!(err.msg().contains("unknown qualifier parameter `q`"), "{}", err.msg());
 }
 
@@ -224,15 +224,15 @@ fn qualifier_words_are_never_introduced_as_parameters() {
 
 #[test]
 fn a_function_cannot_shadow_a_parameter_of_its_struct_and_a_body_cannot_introduce_one() {
-    let err = parse(&format!("{FN_PRELUDE}struct Game<'q>:\n    var Point'q p = Point()\n\n    def m<'q>(Point'q x):\n        pass\n")).err().expect("error");
+    let err = parse(&format!("{FN_PRELUDE}struct Game<'q>:\n    var Point'q p = Point()\n\n    def m<'q>(Point'q x):\n        pass\n")).expect_err("error");
     assert!(err.msg().contains("qualifier parameter `q` of `m` has the same name as one of the enclosing declaration"), "{}", err.msg());
-    let err = parse(&format!("{FN_PRELUDE}def f(int x):\n    let Point'r p = Point()\n")).err().expect("error");
+    let err = parse(&format!("{FN_PRELUDE}def f(int x):\n    let Point'r p = Point()\n")).expect_err("error");
     assert!(err.msg().contains("unknown qualifier parameter `r`"), "{}", err.msg());
 }
 
 #[test]
 fn trait_methods_do_not_take_qualifier_parameters() {
-    let err = parse(&format!("{FN_PRELUDE}trait Sized:\n    req int size<'q>(Board<elem'q> b)\n")).err().expect("error");
+    let err = parse(&format!("{FN_PRELUDE}trait Sized:\n    req int size<'q>(Board<elem'q> b)\n")).expect_err("error");
     assert!(err.msg().contains("trait method `size` cannot declare a qualifier parameter"), "{}", err.msg());
 }
 
@@ -243,7 +243,7 @@ fn a_declared_default_or_bound_is_checked_at_the_function() {
         ("def f<'actor>(int x):", "`'actor` is a qualifier, it cannot name a qualifier parameter"),
         ("def f<'q as 'weak>(Point'q p):", "`'weak` cannot bound a qualifier parameter"),
     ] {
-        let err = parse(&format!("{FN_PRELUDE}{sig}\n    pass\n")).err().expect("error");
+        let err = parse(&format!("{FN_PRELUDE}{sig}\n    pass\n")).expect_err("error");
         assert!(err.msg().contains(fragment), "{sig}: {}", err.msg());
     }
 }

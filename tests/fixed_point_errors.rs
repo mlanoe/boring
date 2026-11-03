@@ -80,7 +80,7 @@ fn math_domain_and_overflow_errors() {
 fn float_and_int_variables_need_as_at_every_binding_site() {
     let hint = "convert explicitly with `as fixed16_16`";
     let head = "struct P:\n    var fixed16_16 v = 0.0\n    def set(fixed16_16 x):\n        v = x\n";
-    fails_run("arg", &format!("fixed16_16 id(fixed16_16 a):\n    a\nlet float64 f = 1.5\nprint \"{{id(f)}}\"\n"), hint);
+    fails_run("arg", "fixed16_16 id(fixed16_16 a):\n    a\nlet float64 f = 1.5\nprint \"{id(f)}\"\n", hint);
     fails_run("ctor", &format!("{head}let float64 f = 1.5\nprint \"{{P(v = f).v}}\"\n"), hint);
     fails_run("method", &format!("{head}mut p = P()\nlet int n = 2\np.set(n)\n"), hint);
     fails_run("field", &format!("{head}mut p = P()\nlet float64 f = 1.5\np.v = f\n"), hint);

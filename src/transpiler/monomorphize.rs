@@ -1962,7 +1962,7 @@ impl Transpiler {
             }
         }
         if specialised.iter().any(|_| true) || program.items.iter().any(is_qual_generic_item) {
-            program.items.retain(|it| !(is_qual_generic_item(it) && !matches!(it, Item::Struct(_))));
+            program.items.retain(|it| !is_qual_generic_item(it) || matches!(it, Item::Struct(_)));
             program.items.retain(|it| !matches!(it, Item::Struct(s) if has_qual_params(&s.type_params)));
             program.items.extend(specialised);
         }
