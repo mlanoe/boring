@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **GPU targets: reading a `[T]'kernel'unified` / `'kernel'global` struct field by value now clones it** instead of moving out of the struct. `w = h.b` (a `mut` local assigned from a `BoringKernelArg<T>` field) emitted a bare `h.b`, so rustc failed with `E0507` (move out of a shared reference) or `E0382` (field read again later), while the same read of a host array emitted `h.a.clone()`. `field_read_needs_clone` now sees through the GPU qualifiers; tuple fields and array elements of such type already cloned. Test: `resident_struct_field_read_by_value_is_cloned` in `tests/metal_codegen.rs`.
+
 - **metal: `x.length` of a captured GPU array inside an inline kernel body** no longer emits `Buffer.len()` (E0599) in the kernel constructor; it now reads `x.length() / size_of::<T>()`.
 
 - **`'kernel'global`/`'kernel'unified` array parameters are passed by borrow (`&BoringKernelArg<T>`), not by value, on every GPU target.** A parameter that the body only reads or forwards to a kernel constructor / another GPU function's array parameter is emitted `x: &BoringKernelArg<f32>` and called as `f(&h.a)` (was `f((h.a).clone())`, a full `Vec` copy for the `Host` variant). The qualifier describes residency, not ownership, so the borrow is orthogonal to it; a parameter that is returned, stored, captured, `mut` or `var` stays by value. No source change.

@@ -3705,6 +3705,11 @@ impl Transpiler {
                 Type::Optional(inner) => needs(t, inner),
                 // `Rc`/`Arc`: an owned read is a (cheap) pointer clone, never a move out of the struct.
                 Type::Qualified(_, OwnerQual::Shared) => true,
+                // Host-side GPU buffer (`[float32]'kernel'unified` → `BoringKernelArg<f32>`): not
+                // `Copy`, but `Clone` (a cheap handle/Vec clone) — a by-value read must clone like
+                // the plain array it wraps, else it moves out of the struct (E0507/E0382).
+                Type::Qualified(inner, OwnerQual::GpuUnified | OwnerQual::GpuGlobal
+                    | OwnerQual::GpuActorGlobal | OwnerQual::GpuActorUnified) => needs(t, inner),
                 _ => false,
             }
         }

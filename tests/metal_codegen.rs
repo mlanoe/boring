@@ -5124,6 +5124,61 @@ fn host_built_array_is_readable_after_resident_call() {
     assert!(!rs.contains("xs: BoringKernelArg"), "{rs}");
 }
 
+/// Reading a `[T]'kernel'unified` struct field by value into a `mut` local used to emit a bare
+/// `h.b` (a move out of the struct: E0507, or E0382 when the field is read again), while the
+/// same read of a host array cloned. Tuple fields and array elements must clone too.
+#[test]
+fn resident_struct_field_read_by_value_is_cloned() {
+    let src = r#"
+struct Holder:
+    [float32]'kernel'unified a
+    [float32]'kernel'unified b
+
+pub req [float32]'kernel'unified double([float32]'kernel'global x) throws:
+    let int n = x.length
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0
+        out
+
+req [float32]'kernel'unified pick(Holder h, bool flag) throws:
+    mut [float32]'kernel'unified w = []
+    if flag:
+        w = double(h.a)
+    else:
+        w = h.b
+    let again = double(h.b)
+    let _ = w
+    again
+
+req [float32]'kernel'unified pick2([Holder] hs, ([float32]'kernel'unified, int) t) throws:
+    let x = hs[0].a
+    let y = t.0
+    let _ = x
+    y
+
+def main() throws:
+    let h = Holder([1.0, 2.0], [3.0, 4.0])
+    let r = pick(h, true)
+    print "done"
+"#;
+    let (_, rs) = metal_codegen("resident_field_read_cloned", src);
+    assert!(rs.contains("w = h.b.clone();"), "{rs}");
+    assert!(rs.contains("let x = hs[(0) as usize].a.clone();"), "{rs}");
+    assert!(rs.contains("let y = t.0.clone();"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join("resident_field_read_cloned").join("test_metal").join("Cargo.toml");
+    let check = common::SharedCargo::new("metal_codegen")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(check.status.success(), "generated Rust must type-check:\n{}\n{rs}", String::from_utf8_lossy(&check.stderr));
+}
+
 const RESIDENT_SCALE_KERNEL: &str = r#"
 kernel Saxpy:
     let TY alpha
