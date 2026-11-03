@@ -476,6 +476,7 @@ transpile_test!(view_state_array_methods);
 transpile_test!(view_state_empty_set);
 transpile_test!(view_state_set_dict_mutation);
 transpile_test!(view_bind_env);
+transpile_test!(view_state_string_split);
 transpile_test!(view_scenarios);
 transpile_test!(fn_scenarios_2);
 transpile_test!(misc_scenarios_6);

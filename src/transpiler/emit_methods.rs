@@ -2121,6 +2121,28 @@ impl Transpiler {
                     // `insert`/`remove` return a value; the statement form discards it.
                     return Some(format!("{{ {}; }}", call));
                 }
+                // A string held in the cell (`state string`): `split`/`contains`/`startsWith`/`endsWith`
+                // take a `&str` pattern (`Arc<str>` is not a `Pattern`), as on a plain string receiver.
+                if !is_known && matches!(method, "split" | "contains" | "startsWith" | "hasPrefix" | "endsWith" | "hasSuffix")
+                    && args.len() == 1
+                    && sub_ty.as_ref().is_some_and(|t| matches!(t.without_mut(), Type::Str)
+                        || matches!(t.without_mut(), Type::Named(n) if n == "string" || n == "str"))
+                {
+                    let needs_coerce = Self::string_pattern_needs_as_ref(&args[0].value);
+                    let mut pat = self.emit_expr(&args[0].value);
+                    if needs_coerce { pat = format!("{}.as_ref()", pat); }
+                    let guard = self.lock_field_write(&r);
+                    let recv = format!("{}.{}", guard, sub);
+                    return Some(match method {
+                        "split" => {
+                            let str_ty = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) { "Rc::<str>" } else { "Arc::<str>" };
+                            format!("{}.split({}).map(|p| {}::from(p.to_string())).collect::<Vec<_>>()", recv, pat, str_ty)
+                        }
+                        "contains" => format!("{}.contains({})", recv, pat),
+                        "startsWith" | "hasPrefix" => format!("{}.starts_with({})", recv, pat),
+                        _ => format!("{}.ends_with({})", recv, pat),
+                    });
+                }
                 let (rust_method, extra_wrap) = if is_known {
                     (method.to_string(), None)
                 } else {

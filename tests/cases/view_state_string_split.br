@@ -1,0 +1,22 @@
+# `.split(",")` on a `state string` field inside a view method: the literal separator must
+# stay a `&str` pattern (not an `Arc<str>`), like on a plain local string.
+use boring.ui.*
+
+view Tags:
+    state string got = "a,b,c"
+
+    req int count():
+        let parts = got.split(",")
+        parts.len()
+
+    req bool hasB():
+        got.contains("b")
+
+    body():
+        Text("{got}")
+
+def main():
+    let t = Tags()
+    mut st = Tags__State()
+    print t.count(st)
+    print t.hasB(st)
