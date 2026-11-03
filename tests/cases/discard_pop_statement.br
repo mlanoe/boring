@@ -1,0 +1,22 @@
+enum V:
+    A(int n)
+    B
+
+struct Area:
+    int x
+
+int popped(mut [int] xs):
+    xs.pop()
+
+def main():
+    mut [V] parts = [V.A(1), V.B]
+    if parts.length > 0:
+        parts.pop()
+    print "{parts.length}"
+    mut [Area] clips = [Area(x = 1), Area(x = 2)]
+    clips.pop()
+    print "{clips.length}"
+    mut [int] nums = [1, 2, 3]
+    let int last = nums.pop()
+    print "{last}"
+    print "{popped(nums)}"

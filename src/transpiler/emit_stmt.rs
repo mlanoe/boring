@@ -223,6 +223,15 @@ impl Transpiler {
                     }
                 }
                 if is_last && self.in_throws && !self.suppress_ok_wrap && self.fn_declared_void {
+                // Discarded `arr.pop()` statement: emit the raw `Option<T>` (`arr.pop();`)
+                // so element types without `Default` (enums, plain structs) still compile.
+                if is_bare_pop_call(e) && (!is_last || self.fn_declared_void) {
+                    self.want_raw_option_pop.set(true);
+                    let raw = self.emit_expr_owned(e);
+                    self.want_raw_option_pop.set(false);
+                    self.line(&format!("{raw};"));
+                    return;
+                }
                     // Void throws function: emit the expression as a statement (for side-effects/?)
                     // then Ok(()). Skip nil entirely (no side-effect).
                     if !matches!(&e.kind, ExprKind::Nil) {
