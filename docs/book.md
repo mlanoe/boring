@@ -1554,7 +1554,7 @@ def main():
 
 `var [T] b` lets the callee *rebind* the caller's array (`b = [...]`) but, like any bare `var`, not mutate its content — `b.push(..)` / `b[i] = x` on a `var` (or plain) collection parameter is a checker error; write `var mut [T] b` for "both" (the checker tells `var` and `var mut` apart: `Param.var_mut`).
 
-**Known gap (struct parameters):** for a struct-typed `T&` parameter the "mutate content" column above is not yet enforced independently of the "rebind" column — `mut T&` and `var T&` both transpile to the same Rust `&mut T`, so a `var`-parameter callee can still call a `def` method on its parameter today, even though the table says it shouldn't be able to. Only the "rebind caller" column is actually checked (a `mut`-parameter callee reseating `a` is correctly rejected, in both `boring run` and `boring build`). Closing this — introducing `var mut T& m` as a real, checker-distinguished form — is a separate, self-contained follow-up.
+**The two permissions are enforced independently** in `boring run` and `boring build`. A bare `var Point p` parameter can be rebound (`p = Point(0, 0)`, visible to the caller) and read, but `p.x = 5` and `p.move_to(1, 1)` are errors — write `var mut Point p` for both, or `mut Point p` to mutate without rebinding (rebinding a `mut` parameter is rejected too).
 
 > For variadic parameters (`values...`), see [Advanced — Variadic parameters](#advanced--variadic-parameters).
 
@@ -8651,7 +8651,7 @@ Borrows are written with `&` directly after the type name. The binding keyword d
 |---|---|---|
 | `T& m` / `let T& m` | `&T` | read-only — callee cannot modify content or binding |
 | `mut T& m` | `&mut T` | callee can modify the content of the caller's instance |
-| `var T m` | `&mut T` | callee can modify the caller's variable — equivalent to `mut T& m` without the explicit borrow syntax |
+| `var T m` | `&mut T` | callee can rebind the caller's variable, not mutate its content (`var mut T m` for both; `mut T m` ≡ `mut T& m` without the explicit borrow syntax) |
 
 | Form          | Rust type     | Notes                                                  |
 |---------------|---------------|--------------------------------------------------------|

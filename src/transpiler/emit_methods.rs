@@ -4484,7 +4484,7 @@ impl Transpiler {
         if let ExprKind::Var(v) = &obj.kind {
             if v != "self"
                 && self.fn_current_params.contains_key(v.as_str())
-                && !self.fn_current_params_mut.contains(v.as_str())
+                && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
                 && !self.var_mutex_types.contains(v.as_str())
                 && !self.var_mutex_task_types.contains(v.as_str())
                 && !self.var_rwlock_types.contains(v.as_str())
@@ -4502,12 +4502,12 @@ impl Transpiler {
                         if !is_req {
                             let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
                             let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
-                            self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, method, sn, v));
+                            self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}` or `var mut {} {}`", v, method, sn, v, sn, v));
                         }
                     } else if self.enum_has_mut_field(sn.as_str()) && !self.method_is_req_or_task(sn.as_str(), method) {
                         let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
                         let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
-                        self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, method, sn, v));
+                        self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}` or `var mut {} {}`", v, method, sn, v, sn, v));
                     }
                 }
             } else if v != "self"
@@ -7531,6 +7531,7 @@ impl Transpiler {
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
+            fn_current_params_rebind_only: std::collections::HashSet::new(),
             fn_current_params_lent: std::collections::HashSet::new(),
             last_use_sites: self.last_use_sites.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),

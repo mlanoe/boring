@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bare `var` struct parameter no longer grants content mutation.** Per the "`mut` vs `var` on a struct parameter" table in `docs/book.md`, the "rebind caller" and "mutate content" permissions are independent, but `def reseat(var Point p): p.bump()` / `p.x = 5` was accepted by `boring run` and `boring build` alike (`mut` and `var` parameters were treated the same). It is now an error naming the fix (`mut Point p` or `var mut Point p`); `var` still rebinds the caller's variable and reads the value, `mut` still mutates without rebinding, `var mut` does both. Regression tests: `tests/var_param_content_mut.rs`.
+
 ## [0.9.12] — 2026-11-03 *(cargo test: 4381/4381 passing across 147 suites, 14 ignored · clippy: clean · self-hosted interpreter functional: 183/183)*
 
 ### Added

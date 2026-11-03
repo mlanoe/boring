@@ -976,6 +976,10 @@ struct Transpiler {
     /// Used by qualifier inference to determine auto-ref mutability and to detect
     /// def calls on immutable parameters.
     pub(crate) fn_current_params_mut: std::collections::HashSet<String>,
+    /// The subset of `fn_current_params_mut` declared with a bare `var` (rebindable, not
+    /// content-mutable — docs/book.md's "`mut` vs `var` on a struct parameter"): they keep the
+    /// `&mut` borrow a rebind needs, but a field write / `def` call on them is rejected.
+    pub(crate) fn_current_params_rebind_only: std::collections::HashSet<String>,
     /// The subset of `fn_current_params_mut` that is a `mut` (non-`var`) array/dict/set
     /// parameter (`helpers::is_lent_collection_param`): always `BorrowMut` (`&mut Vec<T>`),
     /// whatever the body does.
@@ -1729,6 +1733,7 @@ impl Transpiler {
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
             fn_current_params_mut: std::collections::HashSet::new(),
+            fn_current_params_rebind_only: std::collections::HashSet::new(),
             fn_current_params_lent: std::collections::HashSet::new(),
             last_use_sites: std::collections::HashSet::new(),
             immutable_local_vars: std::collections::HashSet::new(),
@@ -6314,20 +6319,20 @@ pub(crate) fn compute_gpu_borrow_params(
         }
     }
     let by_name: std::collections::HashMap<&str, &FnDecl> = all_fns.iter().map(|g| (g.name.as_str(), *g)).collect();
-    // Greatest fixed point: start optimistic, drop a position as soon as a use disqualifies it.
-    loop {
-        let mut changed = false;
-        for f in &all_fns {
-            for (i, p) in f.params.iter().enumerate() {
     // The shared entry has only one overload's arity, so skip every overload when iterating.
     let overloaded: std::collections::HashSet<&str> = all_fns.iter()
         .filter(|f| all_fns.iter().filter(|g| g.name == f.name).count() > 1)
         .map(|f| f.name.as_str()).collect();
+    // Greatest fixed point: start optimistic, drop a position as soon as a use disqualifies it.
+    loop {
+        let mut changed = false;
+        for f in &all_fns {
+            if overloaded.contains(f.name.as_str()) { continue; }
+            for (i, p) in f.params.iter().enumerate() {
                 if !flags[f.name.as_str()][i] { continue; }
                 let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
                     if let Some(decl) = kernel_decls.get(fn_name) {
                         let Some(init) = decl.inits.first() else { return false };
-            if overloaded.contains(f.name.as_str()) { continue; }
                         let Some(init_param) = init.params.get(arg_idx) else { return false };
                         let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
                         let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };

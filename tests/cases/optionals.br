@@ -217,7 +217,7 @@ print "{ocast_get_int(ocastNil)}"
 struct OptDirect:
     var float? size
 
-def set_opt_direct(var OptDirect f):
+def set_opt_direct(var mut OptDirect f):
     f.size = 3.5
 
 var OptDirect od = OptDirect(size = nil)

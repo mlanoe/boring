@@ -143,6 +143,17 @@ pub struct Param {
     pub col: usize,
 }
 
+impl Param {
+    /// Does this parameter grant *content* mutation (field writes, `def` calls, structural
+    /// collection mutation)? `mutable` is `true` for a bare `var` too, so the two permissions
+    /// of docs/book.md's "`mut` vs `var` on a struct parameter" table must be told apart via
+    /// `rebindable`/`var_mut`: `mut T p` and `var mut T p` mutate content, a bare `var T p` only
+    /// rebinds.
+    pub fn grants_content_mut(&self) -> bool {
+        (self.mutable && !self.rebindable) || self.var_mut || self.ty.as_ref().is_some_and(|t| t.grants_mut())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SetDecl {
     pub name: String,

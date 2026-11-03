@@ -3705,7 +3705,7 @@ impl Transpiler {
             if let ExprKind::Var(v) = &obj.kind {
                 if v != "self"
                     && self.fn_current_params.contains_key(v.as_str())
-                    && !self.fn_current_params_mut.contains(v.as_str())
+                    && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
                     && !self.var_mutex_types.contains(v.as_str())
                     && !self.var_mutex_task_types.contains(v.as_str())
                     && !self.var_rwlock_types.contains(v.as_str())
@@ -3716,7 +3716,7 @@ impl Transpiler {
                         if self.struct_fields.contains_key(sn.as_str()) {
                             let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
                             let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
-                            self.push_error(line, col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding; fix: declare the parameter as `mut {} {}`", v, field, sn, v));
+                            self.push_error(line, col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding; fix: declare the parameter as `mut {} {}` or `var mut {} {}`", v, field, sn, v, sn, v));
                         }
                     }
                 } else if v != "self"

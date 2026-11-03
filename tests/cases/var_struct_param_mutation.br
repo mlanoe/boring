@@ -23,7 +23,7 @@ struct Vars:
     def set(int id, int v):
         table[id] = v
 
-def bump(var Vars vars, int id):
+def bump(var mut Vars vars, int id):
     vars.set(id, 99)
 
 def main():

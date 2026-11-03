@@ -1789,6 +1789,10 @@ impl Transpiler {
                 .filter(|p| p.mutable)
                 .map(|p| p.name.clone())
                 .collect();
+            let prev_rebind_only = std::mem::replace(&mut self.fn_current_params_rebind_only, f.params.iter()
+                .filter(|p| p.mutable && !p.grants_content_mut())
+                .map(|p| p.name.clone())
+                .collect());
             let prev_in_struct_method = self.in_struct_method;
             let forced_borrows = self.method_borrow_positions(f, self_ty);
             // A method whose parameters were resolved to `&T` is inferred like a free function.
@@ -1812,6 +1816,7 @@ impl Transpiler {
             self.fn_current_param_lines = prev_param_lines;
             self.fn_current_param_cols = prev_param_cols;
             self.fn_current_params_mut = prev_mut;
+            self.fn_current_params_rebind_only = prev_rebind_only;
             self.fn_current_params_lent = prev_lent;
         }
         let all_params = self.compute_fn_all_params(f, self_ty, is_cancellable);
@@ -1993,6 +1998,10 @@ impl Transpiler {
             .filter(|p| p.mutable)
             .map(|p| p.name.clone())
             .collect();
+        let prev_fn_current_params_rebind_only = std::mem::replace(&mut self.fn_current_params_rebind_only, f.params.iter()
+            .filter(|p| p.mutable && !p.grants_content_mut())
+            .map(|p| p.name.clone())
+            .collect());
         let prev_immutable_local_vars = std::mem::take(&mut self.immutable_local_vars);
         // Plain params (neither `mut` nor `var`) are immutable.
         self.immutable_local_vars = f.params.iter()
@@ -2141,6 +2150,7 @@ impl Transpiler {
         self.fn_current_param_lines = prev_fn_current_param_lines;
         self.fn_current_param_cols  = prev_fn_current_param_cols;
         self.fn_current_params_mut  = prev_fn_current_params_mut;
+        self.fn_current_params_rebind_only = prev_fn_current_params_rebind_only;
         self.fn_current_params_lent = prev_fn_current_params_lent;
         self.immutable_local_vars   = prev_immutable_local_vars;
         self.mut_local_vars         = prev_mut_local_vars;
@@ -3206,7 +3216,7 @@ impl Transpiler {
             return false;
         }
         if self.fn_current_params.contains_key(v) {
-            return !self.fn_current_params_mut.contains(v);
+            return !self.fn_current_params_mut.contains(v) || self.fn_current_params_rebind_only.contains(v);
         }
         self.known_local_vars.contains(v)
             && !self.content_mutable_local_vars.contains(v)

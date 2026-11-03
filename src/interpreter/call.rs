@@ -81,12 +81,12 @@ impl Interpreter {
 
             if param.mutable {
                 fn_env.borrow_mut().define_mut(&param.name, val);
-                // Parameter `mut`/`var` still both grant full access (rebind +
-                // content mutation) — the parameter model's own four-way split
-                // (docs/book.md's "`mut` vs `var` on a struct parameter") is
-                // specified but not enforced yet, deliberately out of scope
-                // here; this just keeps that existing, unchanged behavior.
-                fn_env.borrow_mut().mark_content_mutable(&param.name);
+                // The rebind and content-mutation permissions are independent
+                // (docs/book.md's "`mut` vs `var` on a struct parameter"): a bare
+                // `var T p` only rebinds, `mut T p` / `var mut T p` mutate content.
+                if param.grants_content_mut() {
+                    fn_env.borrow_mut().mark_content_mutable(&param.name);
+                }
             } else {
                 fn_env.borrow_mut().define(&param.name, val);
             }
@@ -483,10 +483,12 @@ impl Interpreter {
         for (i, param) in method.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(Value::Nil);
             if param.mutable {
-                // Same as `call_function`'s parameter binding: `mut`/`var` both bind a
-                // mutable, content-mutable parameter.
+                // Same as `call_function`'s parameter binding: a bare `var` is rebindable
+                // only, `mut` / `var mut` are content-mutable.
                 fn_env.borrow_mut().define_mut(&param.name, val);
-                fn_env.borrow_mut().mark_content_mutable(&param.name);
+                if param.grants_content_mut() {
+                    fn_env.borrow_mut().mark_content_mutable(&param.name);
+                }
             } else {
                 fn_env.borrow_mut().define(&param.name, val);
             }

@@ -64,7 +64,7 @@ enum Slot<'elem>:
     Full(Point'elem)
 
 # The argument says how `Board` stores its elements; it imposes nothing on the function.
-def int fill(var Board<elem'actor> b):
+def int fill(var mut Board<elem'actor> b):
     for i in 0..<3:
         let p = Point(i + 1)
         b.add(p)
