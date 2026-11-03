@@ -590,6 +590,15 @@ pub view OnSwipe:
     [View] children
     body(): native
 
+# OnPan: a continuous drag. A press inside its child (not on a control: a Button, Toggle, TextField or Slider keeps its own press) that then moves
+# writes every movement into the bound `value` as the text "dx,dy" (points since the previous report) and runs `onActivate`, until the release.
+# `Desktop` (boring-ui) moves its windows by their title bars with it. Layout-transparent.
+pub view OnPan:
+    bind string value
+    UIAction onActivate
+    [View] children
+    body(): native
+
 pub view DefaultFocus:
     bool enabled = true
     [View] children
