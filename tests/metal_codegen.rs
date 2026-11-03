@@ -191,10 +191,10 @@ fn resident_tuple_call_keeps_args_and_unannotated_slots_resident() {
     let main = &rs[main_start..];
     let main = &main[..main.find("\nfn main()").unwrap_or(main.len())];
 
-    assert!(main.contains("let (s, d) = pair(x.clone(), y.clone(), n)?;"),
+    assert!(main.contains("let (s, d) = pair(&x, &y, n)?;"),
         "resident arguments must be cloned handles, not downloaded, and unannotated \
          slots used only as resident arguments must bind the returned buffers directly:\n{main}");
-    assert!(main.contains("pair(s.clone(), d.clone(), n)?"),
+    assert!(main.contains("pair(&s, &d, n)?"),
         "the second call must forward the first call's slots resident:\n{main}");
     assert!(!main.contains("BoringKernelArg::Host(s") && !main.contains("BoringKernelArg::Host(d"),
         "destructured slots must not be re-uploaded as host values:\n{main}");
@@ -206,10 +206,10 @@ fn resident_tuple_call_keeps_args_and_unannotated_slots_resident() {
     assert!(main.contains(", d2) = pair("), "unused slot must bind the resident value directly:\n{main}");
 
     // Tuple req called from another req, tail tuple built from resident locals.
-    assert!(rs.contains("pub fn twice(a: BoringKernelArg<f32>, b: BoringKernelArg<f32>, n: isize) -> Result<(BoringKernelArg<f32>, BoringKernelArg<f32>),"), "{rs}");
+    assert!(rs.contains("pub fn twice(a: &BoringKernelArg<f32>, b: &BoringKernelArg<f32>, n: isize) -> Result<(BoringKernelArg<f32>, BoringKernelArg<f32>),"), "{rs}");
     assert!(rs.contains("Ok((s2.clone(), d2.clone()))"),
         "a tuple tail of resident locals must pass them through:\n{rs}");
-    assert!(rs.contains("twice(d.clone(), s.clone(), n.clone())?"), "{rs}");
+    assert!(rs.contains("twice(&d, &s, n.clone())?"), "{rs}");
 }
 
 #[test]
@@ -228,7 +228,7 @@ def main() throws:
     let main = &rs[rs.find("fn boring_main()").unwrap()..];
     assert!(main.contains("let s = match __resid_tmp_0") && main.contains("let d = match __resid_tmp_1"),
         "host-indexed slots must be downloaded once at the binding:\n{main}");
-    assert!(main.contains("pair(x.clone(), y.clone(), n)?"),
+    assert!(main.contains("pair(&x, &y, n)?"),
         "its resident arguments still must not be downloaded:\n{main}");
 }
 
@@ -1616,7 +1616,7 @@ def main() throws:
     let result = passthrough(stage2)
     print "{result[0]}"
 "#);
-    assert!(rs.contains("add_one_gpu(stage1.clone(), 4)"),
+    assert!(rs.contains("add_one_gpu(&stage1, 4)"),
         "expected the resident GPU argument to remain resident across the chained call;\ngot:\n{rs}");
     assert!(rs.contains("passthrough(&(match &stage2 {"),
         "expected materialization only at the ordinary host-function boundary;\ngot:\n{rs}");
@@ -1674,13 +1674,13 @@ def main() throws:
 "#);
     assert!(rs.contains("let z = y.clone();"),
         "a plain alias of a resident local must be a resident clone;\ngot:\n{rs}");
-    assert!(rs.contains("add2(y.clone(), z.clone(), n)"),
+    assert!(rs.contains("add2(&y, &z, n)"),
         "the alias must be passed exactly like the original (resident), not Host-wrapped;\ngot:\n{rs}");
     assert!(!rs.contains("BoringKernelArg::Host(z.clone())"),
         "the alias must never be re-wrapped as a host array;\ngot:\n{rs}");
     assert!(rs.contains("let mut v = x.clone();") && rs.contains("v = y.clone();"),
         "`var` aliases and reassignment from a resident local must stay resident;\ngot:\n{rs}");
-    assert!(rs.contains("add2(v.clone(), w.clone(), n)"),
+    assert!(rs.contains("add2(&v, &w, n)"),
         "an alias of an alias must stay resident;\ngot:\n{rs}");
     assert!(rs.contains("let h = match &z {"),
         "an explicit non-resident annotation must materialize the alias by reference;\ngot:\n{rs}");
@@ -2595,11 +2595,11 @@ def main() throws:
 "#);
     assert!(rs.contains("struct Layer"));
     assert!(rs.contains("w: BoringKernelArg<f32>"), "resident field must retain its wrapper:\n{rs}");
-    assert!(rs.contains("mul_gpu((layer.w).clone()"),
+    assert!(rs.contains("mul_gpu(&layer.w"),
         "aliased array element's resident field must pass through:\n{rs}");
-    assert!(rs.contains("mul_gpu((m.layers[(0) as usize].w).clone()"),
+    assert!(rs.contains("mul_gpu(&m.layers[(0) as usize].w"),
         "direct array-element resident field must pass through without cloning the element:\n{rs}");
-    assert!(rs.contains("mul_gpu((outer.model.layers[(0) as usize].w).clone()"),
+    assert!(rs.contains("mul_gpu(&outer.model.layers[(0) as usize].w"),
         "nested field/index chain must retain resident field type:\n{rs}");
     assert!(!rs.contains("m.layers[(0) as usize].clone().w"),
         "reading one resident field must not deep-clone the complete array element:\n{rs}");
@@ -4659,7 +4659,7 @@ run([1.0 as float32, 2.0 as float32], true)
     let run_fn = rs.split("fn run(").nth(1).and_then(|s| s.split("\nfn ").next()).expect("run fn");
     assert!(run_fn.contains("let mut v = BoringKernelArg::Host(vec![]);"), "{run_fn}");
     assert!(!rs.contains("let mut v: Vec<f32>"), "{rs}");
-    assert!(run_fn.contains("v = scale_gpu(v.clone(), (4.0 as f32))?;") || run_fn.contains("v = scale_gpu(v.clone(), (4.0 as f32))"), "{run_fn}");
+    assert!(run_fn.contains("v = scale_gpu(&v, (4.0 as f32))?;") || run_fn.contains("v = scale_gpu(&v, (4.0 as f32))"), "{run_fn}");
     assert_eq!(run_fn.matches("__boring_gpu_copy_d2h").count(), 1,
         "only the explicit `with b:` may read back, not the assignments to `v`:\n{run_fn}");
 }
@@ -5095,7 +5095,7 @@ def main() throws:
 fn assert_host_built_array_compiles(test_name: &str, src: &str) -> String {
     let (_, rs) = metal_codegen(test_name, src);
     assert!(rs.contains("let mut xs: Vec<f32> = vec![];"), "xs must stay a host Vec:\n{rs}");
-    assert!(rs.contains("scale(BoringKernelArg::Host(xs.clone()), 8)"), "host array converted at the call:\n{rs}");
+    assert!(rs.contains("scale(&BoringKernelArg::Host(xs.clone()), 8)"), "host array converted at the call:\n{rs}");
     let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
     let check = common::SharedCargo::new("metal_codegen")
@@ -5199,4 +5199,91 @@ run([1.0 as TY, 2.0 as TY], true)
     assert_eq!(run_fn.matches("__boring_gpu_copy_d2h").count(), 1,
         "only the explicit `with b:` may read back:\n{run_fn}");
     assert!(!run_fn.contains("BoringKernelArg::Host(y"), "{run_fn}");
+}
+
+/// `'kernel'global`/`'kernel'unified` is residency, not ownership: a parameter that is only read or
+/// forwarded to a kernel / another GPU function is `&BoringKernelArg<T>` and its call sites lend
+/// (`f(&h.a)`) instead of deep-copying the `Host` variant; one that is returned stays by value.
+#[test]
+fn gpu_array_params_are_borrowed_not_cloned() {
+    let src = r#"
+struct Holder:
+    [float32]'kernel'unified a
+    [float32]'kernel'unified b
+
+pub req [float32]'kernel'unified double([float32]'kernel'global x) throws:
+    let int n = x.length
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0
+        out
+
+pub req [float32]'kernel'unified twice([float32]'kernel'global x) throws:
+    let y = double(x)
+    double(y)
+
+pub req [float32]'kernel'unified same([float32]'kernel'global x) throws:
+    x
+
+def main() throws:
+    let h = Holder([1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0])
+    let r1 = double(h.a)
+    let r2 = double(h.a)
+    let r3 = twice(h.b)
+    let r4 = same(h.a)
+    print "done"
+"#;
+    let (_, rs) = metal_codegen("gpu_array_params_are_borrowed_not_cloned", src);
+    assert!(rs.contains("pub fn double(x: &BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("pub fn twice(x: &BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("pub fn same(x: BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("double(&h.a)?"), "{rs}");
+    assert!(rs.contains("twice(&h.b)?"), "{rs}");
+    assert!(rs.contains("let y = double(x)?;"), "{rs}");
+    assert!(rs.contains("double(&y)?"), "{rs}");
+    assert!(rs.contains("same((h.a).clone())?"), "{rs}");
+    assert!(!rs.contains("double((h.a).clone())"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join("gpu_array_params_are_borrowed_not_cloned").join("test_metal").join("Cargo.toml");
+    let check = common::SharedCargo::new("metal_codegen")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(check.status.success(), "generated Rust must type-check:\n{}\n{rs}", String::from_utf8_lossy(&check.stderr));
+}
+
+/// `x.length` inside an inline kernel body is emitted in the kernel constructor, where the
+/// captured `x` is a Metal `Buffer` (no `.len()`): it must read `length()` / element size.
+#[test]
+fn inline_kernel_body_length_of_captured_buffer_type_checks() {
+    let src = r#"
+pub req [float32]'kernel'unified dbl([float32]'kernel'global x) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<x.length]
+        let i = .thread.x
+        if i < x.length:
+            out[i] = x[i] * 2.0
+        out
+
+def main() throws:
+    let r = dbl([1.0, 2.0, 3.0])
+    print "done"
+"#;
+    let name = "inline_kernel_body_length_of_captured_buffer_type_checks";
+    let (_, rs) = metal_codegen(name, src);
+    assert!(rs.contains("(x.length() as usize / mem::size_of::<f32>()) as isize"), "{rs}");
+    assert!(!rs.contains("x.len() as isize as usize"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let check = common::SharedCargo::new("metal_codegen")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(check.status.success(), "generated Rust must type-check:\n{}\n{rs}", String::from_utf8_lossy(&check.stderr));
 }

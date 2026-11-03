@@ -1459,10 +1459,10 @@ def main() throws:
 "#);
     let (_wgsl, rs) = wgpu_codegen("with_gpu_resident_param_annotated_dispatch_size", &src);
 
-    assert!(rs.contains("fn scale_gpu(x: BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
+    assert!(rs.contains("fn scale_gpu(x: &BoringKernelArg<f64>, factor: f64) -> BoringKernelArg<f64>"),
         "an explicit 'kernel'unified annotation on the param should collapse to BoringKernelArg<T>, not a plain Vec:\n{rs}");
     assert!(rs.contains("match &x {"), "constructor argument for `x` should branch on BoringKernelArg:\n{rs}");
-    assert!(rs.contains("scale_gpu(fc.clone()"), "already-resident argument should pass straight through:\n{rs}");
+    assert!(rs.contains("scale_gpu(&fc"), "already-resident argument should pass straight through:\n{rs}");
 }
 
 #[test]
@@ -5956,4 +5956,59 @@ def main() throws:
     let (out, wgsl, _rs) = run_wgpu_program("generic_kernel_array_sizes", src);
     assert_eq!(out, "32 32 64 64");
     assert!(wgsl.contains("array<f32, 2>") && wgsl.contains("array<f32, 4>"), "{wgsl}");
+}
+
+/// `'kernel'global`/`'kernel'unified` is residency, not ownership: a parameter that is only read or
+/// forwarded to a kernel / another GPU function is `&BoringKernelArg<T>` and its call sites lend
+/// (`f(&h.a)`) instead of deep-copying the `Host` variant; one that is returned stays by value.
+#[test]
+fn gpu_array_params_are_borrowed_not_cloned() {
+    let src = r#"
+struct Holder:
+    [float32]'kernel'unified a
+    [float32]'kernel'unified b
+
+pub req [float32]'kernel'unified double([float32]'kernel'global x) throws:
+    let int n = x.length
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0
+        out
+
+pub req [float32]'kernel'unified twice([float32]'kernel'global x) throws:
+    let y = double(x)
+    double(y)
+
+pub req [float32]'kernel'unified same([float32]'kernel'global x) throws:
+    x
+
+def main() throws:
+    let h = Holder([1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0])
+    let r1 = double(h.a)
+    let r2 = double(h.a)
+    let r3 = twice(h.b)
+    let r4 = same(h.a)
+    print "done"
+"#;
+    let (_, rs) = wgpu_codegen("gpu_array_params_are_borrowed_not_cloned", src);
+    assert!(rs.contains("pub fn double(x: &BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("pub fn twice(x: &BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("pub fn same(x: BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("double(&h.a)?"), "{rs}");
+    assert!(rs.contains("twice(&h.b)?"), "{rs}");
+    assert!(rs.contains("let y = double(x)?;"), "{rs}");
+    assert!(rs.contains("double(&y)?"), "{rs}");
+    assert!(rs.contains("same((h.a).clone())?"), "{rs}");
+    assert!(!rs.contains("double((h.a).clone())"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wgpu_codegen").join("gpu_array_params_are_borrowed_not_cloned").join("test_wgpu").join("Cargo.toml");
+    let check = common::SharedCargo::new("wgpu_codegen")
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    assert!(check.status.success(), "generated Rust must type-check:\n{}\n{rs}", String::from_utf8_lossy(&check.stderr));
 }

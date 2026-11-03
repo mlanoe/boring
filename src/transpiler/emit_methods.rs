@@ -5354,6 +5354,30 @@ impl Transpiler {
                 // value as `BoringKernelArg::Host(...)` for upload as today. Caller keeps
                 // ownership either way (`.clone()` on a bare variable), matching
                 // Boring's normal by-value argument semantics.
+                let borrowed_pos = self.fn_gpu_borrow_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false);
+                if borrowed_pos {
+                    // `&BoringKernelArg<T>` position (`compute_gpu_borrow_params`): lend the
+                    // caller's value — a reborrow of the enclosing function's own borrowed
+                    // parameter, `&local`, `&obj.field`, or a temporary for a host array.
+                    let lent = if let ExprKind::Var(vname) = &a.value.kind {
+                        if self.current_fn_gpu_borrow_param_names.contains(vname.as_str()) {
+                            vname.clone()
+                        } else if self.resident_call_vars.contains_key(vname.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(vname.as_str())
+                        {
+                            format!("&{}", vname)
+                        } else {
+                            format!("&BoringKernelArg::Host({}.clone())", vname)
+                        }
+                    } else if self.expr_is_gpu_resident_field(&a.value) {
+                        format!("&{}", self.emit_expr(&a.value))
+                    } else {
+                        format!("&BoringKernelArg::Host(({}).clone())", self.emit_expr(&a.value))
+                    };
+                    result.push(lent);
+                    i += 1;
+                    continue;
+                }
                 if self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false) {
                     let wrapped = if let ExprKind::Var(vname) = &a.value.kind {
                         // Already a `BoringKernelArg<T>`-typed Rust binding either way:
@@ -7525,6 +7549,8 @@ impl Transpiler {
             gpu_resident_vars: self.gpu_resident_vars.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
             fn_gpu_arg_params: self.fn_gpu_arg_params.clone(),
+            fn_gpu_borrow_params: self.fn_gpu_borrow_params.clone(),
+            current_fn_gpu_borrow_param_names: self.current_fn_gpu_borrow_param_names.clone(),
             fn_returns_resident_tuple: self.fn_returns_resident_tuple.clone(),
             resident_call_vars: self.resident_call_vars.clone(),
             current_fn_returns_resident: self.current_fn_returns_resident.clone(),

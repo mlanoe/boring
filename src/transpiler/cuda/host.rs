@@ -151,6 +151,10 @@ struct HostEmitter {
     /// handling for where this is populated, and the kernel-constructor
     /// branch of `expr()`'s `Call` case for where it's consumed.
     resident_locals: std::collections::HashSet<String>,
+    /// Free function name -> `&BoringKernelArg<T>` parameter flags (`transpiler::compute_gpu_borrow_params`).
+    fn_gpu_borrow_params: std::collections::HashMap<String, Vec<bool>>,
+    /// The function being emitted's own borrowed GPU array parameters (already references).
+    borrowed_gpu_params: std::collections::HashSet<String>,
     /// One-shot flag: `Stmt::Let` sets this to `true` immediately before
     /// calling `self.expr(val)` for a call it has determined should stay
     /// `BoringKernelArg`-typed (see `resident_locals`'s doc). The `Call` arm of
@@ -245,6 +249,8 @@ impl HostEmitter {
             fn_returns_resident: std::collections::HashMap::new(),
             fn_gpu_array_params: std::collections::HashMap::new(),
             resident_locals: std::collections::HashSet::new(),
+            fn_gpu_borrow_params: std::collections::HashMap::new(),
+            borrowed_gpu_params: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
             top_level_scalars: std::collections::HashMap::new(),
             global_statics: std::collections::HashMap::new(),
@@ -520,6 +526,8 @@ impl HostEmitter {
                 }
             }
         }
+        self.fn_gpu_borrow_params = crate::transpiler::compute_gpu_borrow_params(program, &self.kernel_decls);
+
         // Pre-pass: collect top-level scalar lets so they can be inlined inside
         // kernel new() functions (emitted before main(), where these vars live).
         // See `top_level_scalars`'s doc.
@@ -2323,12 +2331,13 @@ impl HostEmitter {
         self.fn_locals = f.params.iter().map(|p| p.name.clone()).collect();
         crate::transpiler::helpers::collect_local_decl_names(&f.body, &mut self.fn_locals);
         let vis = if f.is_pub { "pub " } else { "" };
-        let params: Vec<String> = f.params.iter().map(|p| {
+        let borrow_flags = if self_ty.is_none() { self.fn_gpu_borrow_params.get(&f.name).cloned().unwrap_or_default() } else { Vec::new() };
+        let params: Vec<String> = f.params.iter().enumerate().map(|(pi, p)| {
             let name = if p.mutable { format!("mut {}", crate::transpiler::helpers::escape_rust_keyword(&p.name)) } else { crate::transpiler::helpers::escape_rust_keyword(&p.name) };
             match &p.ty {
                 Some(ty) => {
                     let base = if is_gpu_array_param(ty) {
-                        format!("BoringKernelArg<{}>", elem_rust_type(ty))
+                        format!("{}BoringKernelArg<{}>", if borrow_flags.get(pi).copied().unwrap_or(false) { "&" } else { "" }, elem_rust_type(ty))
                     } else { rust_type(ty) };
                     // Boring's by-ref contract (CLAUDE.md: "Structs, enums, arrays,
                     // dicts, sets — always passed by reference") — this backend
@@ -2403,10 +2412,12 @@ impl HostEmitter {
         self.in_resident_return = resident_elem.is_some();
         let outer_ref_params = std::mem::take(&mut self.ref_params);
         let outer_resident_locals = std::mem::take(&mut self.resident_locals);
-        for p in &f.params {
+        let outer_borrowed_gpu_params = std::mem::take(&mut self.borrowed_gpu_params);
+        for (pi, p) in f.params.iter().enumerate() {
             if let Some(ty) = &p.ty {
                 if is_gpu_array_param(ty) {
                     self.resident_locals.insert(p.name.clone());
+                    if borrow_flags.get(pi).copied().unwrap_or(false) { self.borrowed_gpu_params.insert(p.name.clone()); }
                 } else if is_ref_worthy_type(ty, &self.struct_names) {
                     self.ref_params.insert(p.name.clone());
                 }
@@ -2455,6 +2466,7 @@ impl HostEmitter {
         self.in_resident_return = outer_in_resident_return;
         self.ref_params = outer_ref_params;
         self.resident_locals = outer_resident_locals;
+        self.borrowed_gpu_params = outer_borrowed_gpu_params;
         self.indent -= 1;
         self.line("}");
     }
@@ -2926,6 +2938,8 @@ impl HostEmitter {
             fn_returns_resident: self.fn_returns_resident.clone(),
             fn_gpu_array_params: self.fn_gpu_array_params.clone(),
             resident_locals: self.resident_locals.clone(),
+            fn_gpu_borrow_params: self.fn_gpu_borrow_params.clone(),
+            borrowed_gpu_params: self.borrowed_gpu_params.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
             top_level_scalars: self.top_level_scalars.clone(),
             global_statics: self.global_statics.clone(),
@@ -3353,13 +3367,17 @@ impl HostEmitter {
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
                 let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
+                let borrow_flags = callee_name.and_then(|n| self.fn_gpu_borrow_params.get(n)).cloned();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
                     if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
+                        let lend = borrow_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                         if let ExprKind::Var(name) = &a.value.kind {
                             if self.resident_locals.contains(name.as_str()) {
+                                if lend { return if self.borrowed_gpu_params.contains(name.as_str()) { name.clone() } else { format!("&{}", name) }; }
                                 return format!("{}.clone()", name);
                             }
                         }
+                        if lend { return format!("&BoringKernelArg::Host(({}).clone())", self.expr(&a.value)); }
                         return format!("BoringKernelArg::Host(({}).clone())", self.expr(&a.value));
                     }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);

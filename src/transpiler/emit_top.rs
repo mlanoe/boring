@@ -1252,7 +1252,9 @@ impl Transpiler {
                     .map(super::emit_kernel::array_inner_type)
                     .unwrap_or(Type::Float64);
                 let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
-                format!("{}: BoringKernelArg<{}>", p.name, host_ty)
+                let borrowed = self_ty.is_none()
+                    && self.fn_gpu_borrow_params.get(&f.name).and_then(|fl| fl.get(i)).copied().unwrap_or(false);
+                format!("{}: {}BoringKernelArg<{}>", p.name, if borrowed { "&" } else { "" }, host_ty)
             } else {
                 self.emit_param(p, self_ty.is_some())
             }
@@ -1867,6 +1869,7 @@ impl Transpiler {
         let prev_current_fn_body = std::mem::take(&mut self.current_fn_body);
         let prev_current_fn_gpu_arg_params = std::mem::take(&mut self.current_fn_gpu_arg_params);
         let prev_current_fn_gpu_arg_param_names = std::mem::take(&mut self.current_fn_gpu_arg_param_names);
+        let prev_current_fn_gpu_borrow_param_names = std::mem::take(&mut self.current_fn_gpu_borrow_param_names);
         // `resident_call_vars` is genuinely per-function/method local state (a local
         // `let`/`var` name -> its resident Type), not signature-derived like the maps
         // above -- so it must be reset to empty (not repopulated from any lookup) at
@@ -1886,6 +1889,11 @@ impl Transpiler {
                 self.current_fn_body = f.body.clone();
             }
             self.current_fn_gpu_arg_params = self.fn_gpu_arg_params.get(&f.name).cloned().unwrap_or_default();
+            let borrow_flags = self.fn_gpu_borrow_params.get(&f.name).cloned().unwrap_or_default();
+            self.current_fn_gpu_borrow_param_names = f.params.iter().enumerate()
+                .filter(|(i, _)| borrow_flags.get(*i).copied().unwrap_or(false))
+                .map(|(_, p)| p.name.clone())
+                .collect();
             self.current_fn_gpu_arg_param_names = f.params.iter().enumerate()
                 .filter(|(i, _)| self.current_fn_gpu_arg_params.get(*i).copied().unwrap_or(false))
                 .map(|(_, p)| p.name.clone())
@@ -2128,6 +2136,7 @@ impl Transpiler {
         self.resident_call_vars = prev_resident_call_vars;
         self.current_fn_gpu_arg_params = prev_current_fn_gpu_arg_params;
         self.current_fn_gpu_arg_param_names = prev_current_fn_gpu_arg_param_names;
+        self.current_fn_gpu_borrow_param_names = prev_current_fn_gpu_borrow_param_names;
         self.fn_current_params      = prev_fn_current_params;
         self.fn_current_param_lines = prev_fn_current_param_lines;
         self.fn_current_param_cols  = prev_fn_current_param_cols;

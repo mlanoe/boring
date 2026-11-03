@@ -1445,6 +1445,11 @@ struct Transpiler {
     /// kernel-construction codegen that consumes it branches on the enum instead of
     /// always uploading (`emit_kernel::emit_kernel_construction`).
     pub(crate) fn_gpu_arg_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Free function name -> per-position flags: the `'kernel'global`/`'kernel'unified` array
+    /// parameters passed as `&BoringKernelArg<T>` (see `compute_gpu_borrow_params`).
+    pub(crate) fn_gpu_borrow_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Names of the enclosing function's own borrowed GPU array parameters (already `&BoringKernelArg<T>`).
+    pub(crate) current_fn_gpu_borrow_param_names: std::collections::HashSet<String>,
     /// Free function name -> per-position flags, for a function whose return type is
     /// a `Type::Tuple` with at least one `'kernel'unified`/`'kernel'global`-qualified
     /// element (mirrors the checker's own `fn_returns_resident_tuple`). The tuple
@@ -1849,6 +1854,8 @@ impl Transpiler {
             gpu_resident_vars: std::collections::HashMap::new(),
             fn_returns_resident: std::collections::HashMap::new(),
             fn_gpu_arg_params: std::collections::HashMap::new(),
+            fn_gpu_borrow_params: std::collections::HashMap::new(),
+            current_fn_gpu_borrow_param_names: std::collections::HashSet::new(),
             fn_returns_resident_tuple: std::collections::HashMap::new(),
             resident_call_vars: std::collections::HashMap::new(),
             current_fn_returns_resident: None,
@@ -2410,6 +2417,9 @@ impl Transpiler {
         // fixed point, so it runs once here rather than folding into `pre_scan`,
         // which recurses per-module-scope on a series of smaller pseudo-programs.
         self.compute_gpu_arg_params(program);
+        if self.is_gpu_target {
+            self.fn_gpu_borrow_params = compute_gpu_borrow_params(program, &self.kernel_decls);
+        }
         let owned_program3;
         let program: &Program = match self.unqualify_host_only_gpu_array_params(program) {
             Some(p) => { owned_program3 = p; &owned_program3 }
@@ -6245,11 +6255,78 @@ fn first_kernel_decl(items: &[Item]) -> Option<&KernelDecl> {
 
 /// A parameter typed as a `'kernel'global`/`'kernel'unified` array (emitted by the host
 /// emitter as a `BoringKernelArg<T>` parameter).
-fn is_gpu_array_param(p: &Param) -> bool {
+pub(crate) fn is_gpu_array_param(p: &Param) -> bool {
     p.ty.as_ref().is_some_and(|ty| {
         matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
             if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
     })
+}
+
+/// Free function name -> per-position flags: `true` for a `'kernel'global`/`'kernel'unified`
+/// array parameter that every GPU backend passes as `&BoringKernelArg<T>` instead of by value.
+/// `'kernel'global`/`'kernel'unified` describes memory residency, not ownership, so the borrow is
+/// orthogonal to it: a by-value `BoringKernelArg<T>` would deep-copy the whole `Vec` (the `Host`
+/// variant) at every call site for nothing. A parameter qualifies when it is not `mut`/`var`/variadic
+/// and the body only reads it or forwards it to a kernel constructor's `'unified`/`'global` array
+/// field or to another function's GPU array parameter (a size query is neutral) — returning,
+/// storing, capturing or otherwise consuming it keeps it by value. Whole-program fixed point (a
+/// forwarded parameter qualifies only when its use sites do), shared by the general pipeline and the
+/// cuda/metal/rocm/wgpu host emitters so both sides of a call agree on the signature.
+pub(crate) fn compute_gpu_borrow_params(
+    program: &Program,
+    kernel_decls: &std::collections::HashMap<String, crate::ast::KernelDecl>,
+) -> std::collections::HashMap<String, Vec<bool>> {
+    // The cuda/metal/rocm general pass has an empty `gpu_kernels`, so also take the kernels the
+    // program itself declares (inline `kernel(...)` blocks are lowered to ones).
+    let mut kernel_decls = kernel_decls.clone();
+    for item in &program.items {
+        if let Item::Kernel(k) = item { kernel_decls.entry(k.name.clone()).or_insert_with(|| k.clone()); }
+    }
+    let mut all_fns: Vec<&FnDecl> = Vec::new();
+    for item in &program.items { Transpiler::gather_gpu_arg_fns_item(item, &mut all_fns); }
+    let candidate = |p: &Param| !p.mutable && !p.rebindable && !p.variadic && p.default.is_none() && is_gpu_array_param(p);
+    let mut flags: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
+        .map(|f| (f.name.as_str(), f.params.iter().map(candidate).collect()))
+        .collect();
+    // Overloaded names would alias one entry: leave them by value.
+    for f in &all_fns {
+        if all_fns.iter().filter(|g| g.name == f.name).count() > 1 {
+            if let Some(v) = flags.get_mut(f.name.as_str()) { v.iter_mut().for_each(|b| *b = false); }
+        }
+    }
+    let by_name: std::collections::HashMap<&str, &FnDecl> = all_fns.iter().map(|g| (g.name.as_str(), *g)).collect();
+    // Greatest fixed point: start optimistic, drop a position as soon as a use disqualifies it.
+    loop {
+        let mut changed = false;
+        for f in &all_fns {
+            for (i, p) in f.params.iter().enumerate() {
+                if !flags[f.name.as_str()][i] { continue; }
+                let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
+                    if let Some(decl) = kernel_decls.get(fn_name) {
+                        let Some(init) = decl.inits.first() else { return false };
+                        let Some(init_param) = init.params.get(arg_idx) else { return false };
+                        let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
+                        let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
+                        return matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
+                            && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+                    }
+                    // A forwarded argument is read-only whether the callee borrows it or takes
+                    // it by value (`x.clone()` of a reference is the handle clone).
+                    by_name.get(fn_name).is_some_and(|g| g.params.get(arg_idx).is_some_and(is_gpu_array_param))
+                };
+                let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, true);
+                if !any || !only {
+                    flags.get_mut(f.name.as_str()).unwrap()[i] = false;
+                    changed = true;
+                }
+            }
+        }
+        if !changed { break; }
+    }
+    flags.into_iter()
+        .filter(|(_, v)| v.iter().any(|b| *b))
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
 }
 
 fn fn_returns_resident(g: &FnDecl) -> bool {

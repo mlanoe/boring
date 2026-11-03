@@ -123,6 +123,11 @@ struct HostEmitter {
     /// `self.count()` against a real declared member before falling back to
     /// the `.len() as isize` builtin. See `cuda::host`'s identical field.
     self_type: Option<String>,
+    /// While emitting a kernel constructor's init body: name → element Rust
+    /// type of every local that is a Metal `Buffer` there (buffer-passthrough
+    /// params and array fields). `.length`/`.count` on one must read the
+    /// buffer's byte length / element size, not `Buffer.len()` (no such method).
+    init_buffer_elems: std::collections::HashMap<String, String>,
     /// Receiver-type resolution for the `.count`/`.length` guard (see `host_types`).
     tenv: crate::transpiler::host_types::HostTypeEnv,
     /// Declared types of every named binding in the program (flat by name) and the initializers
@@ -186,6 +191,10 @@ struct HostEmitter {
     /// constructor branch of `expr()`'s `Call` case, and `Stmt::Let`'s own
     /// handling for where this set is populated.
     resident_locals: std::collections::HashSet<String>,
+    /// Free function name -> `&BoringKernelArg<T>` parameter flags (`transpiler::compute_gpu_borrow_params`).
+    fn_gpu_borrow_params: std::collections::HashMap<String, Vec<bool>>,
+    /// The function being emitted's own borrowed GPU array parameters (already references).
+    borrowed_gpu_params: std::collections::HashSet<String>,
     /// One-shot flag: `Stmt::Let` sets this to `true` immediately before
     /// calling `self.expr(val)` for a call it has determined should stay
     /// `BoringKernelArg`-typed (see `resident_locals`'s doc). The `Call` arm of
@@ -280,6 +289,7 @@ impl HostEmitter {
             general_code_text: String::new(),
             event_vars: Vec::new(),
             struct_names: std::collections::HashSet::new(),
+            init_buffer_elems: std::collections::HashMap::new(),
             struct_field_names: std::collections::HashMap::new(),
             struct_method_names: std::collections::HashMap::new(),
             self_type: None,
@@ -297,6 +307,8 @@ impl HostEmitter {
             mut_gpu_params: std::collections::HashSet::new(),
             f64_array_locals: std::collections::HashSet::new(),
             resident_locals: std::collections::HashSet::new(),
+            fn_gpu_borrow_params: std::collections::HashMap::new(),
+            borrowed_gpu_params: std::collections::HashSet::new(),
             suppress_resident_materialize: false,
             last_use_sites: std::collections::HashSet::new(),
         }
@@ -604,6 +616,8 @@ impl HostEmitter {
                 }
             }
         }
+
+        self.fn_gpu_borrow_params = crate::transpiler::compute_gpu_borrow_params(program, &self.kernel_decls);
 
         // Pre-pass: collect top-level scalar lets so they can be inlined inside
         // kernel new() functions (emitted before main(), where these vars live).
@@ -1953,9 +1967,26 @@ impl HostEmitter {
                 _ => None,
             }).collect();
 
+        let prev_init_buffers = std::mem::take(&mut self.init_buffer_elems);
+        for field in fields {
+            if matches!(field.qual, GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Const | GpuQual::Surface)
+                && matches!(unqualified_ty(&field.ty), Type::Array(_) | Type::ArrayN(..) | Type::ArrayNExpr(..))
+            {
+                let elem = if field.qual == GpuQual::Surface { "u32".to_string() } else { elem_rust_type(&field.ty) };
+                self.init_buffer_elems.insert(field.name.clone(), elem);
+            }
+        }
+        for (i, p) in init.params.iter().enumerate() {
+            if buffer_flags.get(i).copied().unwrap_or(false) {
+                if let Some(ty) = &p.ty {
+                    self.init_buffer_elems.insert(p.name.clone(), elem_rust_type(ty));
+                }
+            }
+        }
         for stmt in &init.body {
             self.emit_init_stmt(stmt, fields);
         }
+        self.init_buffer_elems = prev_init_buffers;
 
         for field in fields {
             if !assigned.contains(&field.name) {
@@ -2367,10 +2398,12 @@ impl HostEmitter {
         self.fn_locals = f.params.iter().map(|p| p.name.clone()).collect();
         crate::transpiler::helpers::collect_local_decl_names(&f.body, &mut self.fn_locals);
         let vis = if f.is_pub { "pub " } else { "" };
+        let borrow_flags = if self_ty.is_none() { self.fn_gpu_borrow_params.get(&f.name).cloned().unwrap_or_default() } else { Vec::new() };
         let params: Vec<String> = f
             .params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(pi, p)| {
                 let mut_gpu =
                     p.mutable && p.ty.as_ref().is_some_and(is_gpu_array_param) && self_ty.is_none();
                 let name = if p.mutable && !mut_gpu {
@@ -2390,7 +2423,7 @@ impl HostEmitter {
                         // rationale (confirmed necessary for cross-calls between
                         // this emitter and the general-pipeline splice to type-check).
                         let base = if is_gpu_array_param(ty) {
-                            format!("BoringKernelArg<{}>", general_host_elem_type(ty))
+                            format!("{}BoringKernelArg<{}>", if borrow_flags.get(pi).copied().unwrap_or(false) { "&" } else { "" }, general_host_elem_type(ty))
                         } else if is_float_array_param(ty) {
                             "Vec<f64>".to_string()
                         } else {
@@ -2487,10 +2520,12 @@ impl HostEmitter {
             crate::transpiler::last_use::last_use_sites(&f.params, &f.body),
         );
         let outer_mut_gpu_params = std::mem::take(&mut self.mut_gpu_params);
-        for p in &f.params {
+        let outer_borrowed_gpu_params = std::mem::take(&mut self.borrowed_gpu_params);
+        for (pi, p) in f.params.iter().enumerate() {
             if let Some(ty) = &p.ty {
                 if is_gpu_array_param(ty) {
                     self.resident_locals.insert(p.name.clone());
+                    if borrow_flags.get(pi).copied().unwrap_or(false) { self.borrowed_gpu_params.insert(p.name.clone()); }
                     if p.mutable && self_ty.is_none() { self.mut_gpu_params.insert(p.name.clone()); }
                     continue;
                 }
@@ -2579,6 +2614,7 @@ impl HostEmitter {
         self.f64_array_locals = outer_f64_array_locals;
         self.resident_locals = outer_resident_locals;
         self.mut_gpu_params = outer_mut_gpu_params;
+        self.borrowed_gpu_params = outer_borrowed_gpu_params;
         self.last_use_sites = outer_last_use_sites;
         self.indent -= 1;
         self.line("}");
@@ -3234,6 +3270,7 @@ impl HostEmitter {
             general_code_text: self.general_code_text.clone(),
             event_vars: self.event_vars.clone(),
             struct_names: self.struct_names.clone(),
+            init_buffer_elems: self.init_buffer_elems.clone(),
             struct_field_names: self.struct_field_names.clone(),
             struct_method_names: self.struct_method_names.clone(),
             self_type: self.self_type.clone(),
@@ -3251,6 +3288,8 @@ impl HostEmitter {
             mut_gpu_params: self.mut_gpu_params.clone(),
             f64_array_locals: self.f64_array_locals.clone(),
             resident_locals: self.resident_locals.clone(),
+            fn_gpu_borrow_params: self.fn_gpu_borrow_params.clone(),
+            borrowed_gpu_params: self.borrowed_gpu_params.clone(),
             suppress_resident_materialize: self.suppress_resident_materialize,
             last_use_sites: self.last_use_sites.clone(),
         };
@@ -3480,6 +3519,13 @@ impl HostEmitter {
                     }
                 }
                 let o = self.expr(obj);
+                if field == "length" || field == "count" {
+                    if let ExprKind::Var(v) = &obj.kind {
+                        if let Some(elem) = self.init_buffer_elems.get(v) {
+                            return format!("({o}.length() as usize / mem::size_of::<{elem}>()) as isize");
+                        }
+                    }
+                }
                 // `.length` as a field (Boring style) → Rust `.len() as isize`,
                 // unless `self` declares a real field by that name (see
                 // `struct_field_names`'s doc — mirrors the general/std
@@ -3680,6 +3726,7 @@ impl HostEmitter {
                 let mut_gpu_flags = callee_name
                     .and_then(|n| self.fn_gpu_array_mut_params.get(n))
                     .cloned();
+                let borrow_gpu_flags = callee_name.and_then(|n| self.fn_gpu_borrow_params.get(n)).cloned();
                 // `mut` GPU array arguments passed by `&mut`, with the callee's write
                 // back into a host-array local copied back after the call:
                 // (temp name, local name, device buffer element type).
@@ -3688,9 +3735,11 @@ impl HostEmitter {
                     if let Some(elem) = gpu_flags.as_ref().and_then(|f| f.get(i)).and_then(|e| e.as_deref()) {
                         let mut_dev_elem = mut_gpu_flags.as_ref().and_then(|f| f.get(i)).and_then(|e| e.clone());
                         let is_mut_pos = mut_dev_elem.is_some();
+                        let lend = !is_mut_pos && borrow_gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                         if let ExprKind::Var(name) = &a.value.kind {
                             if self.resident_locals.contains(name.as_str()) {
                                 if is_mut_pos { return if self.mut_gpu_params.contains(name.as_str()) { name.clone() } else { format!("&mut {}", name) }; }
+                                if lend { return if self.borrowed_gpu_params.contains(name.as_str()) { name.clone() } else { format!("&{}", name) }; }
                                 return format!("{}.clone()", name);
                             }
                             if is_mut_pos {
@@ -3700,7 +3749,8 @@ impl HostEmitter {
                             }
                         }
                         if matches!(&a.value.kind, ExprKind::Field(_, field) if self.gpu_fields.contains(field.as_str())) {
-                            return self.expr(&a.value);
+                            let value = self.expr(&a.value);
+                            return if lend { format!("&{}", value) } else { value };
                         }
                         if is_mut_pos {
                             let value = self.expr(&a.value);
@@ -3710,6 +3760,7 @@ impl HostEmitter {
                         // (not a fixed `f64`): a `[float32]` param is
                         // `BoringKernelArg<f32>`.
                         let value = self.expr(&a.value);
+                        if lend { return format!("&BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", value); }
                         return format!("BoringKernelArg::Host(({}).iter().map(|&x| x as {elem}).collect::<Vec<{elem}>>())", value);
                     }
                     // A `[float]` position on the callee expects `&Vec<f64>` (see
@@ -4473,6 +4524,13 @@ fn host_param_type(ty: &Type) -> String {
         }
         Type::Array(inner) => format!("Vec<{}>", rust_type(inner)),
         _ => rust_type(ty),
+    }
+}
+
+fn unqualified_ty(ty: &Type) -> &Type {
+    match ty {
+        Type::Qualified(inner, _) => unqualified_ty(inner),
+        _ => ty,
     }
 }
 
