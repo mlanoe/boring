@@ -3790,7 +3790,7 @@ def main() throws:
 
 Type-level methods use `call(args)` — no `request`/`modify` split, since there's no caller-privilege boundary to gate on instance mutability (there's no instance) the way `request`/`modify` gate on `Introspect instance` vs `mut Introspect instance`.
 
-> **Scope** — type-level reflection covers **structs only**, and only `type let` (read-only) fields, not `type var` (a mutable type-level field lowers to a module-level lock, and wiring `set` through that lock isn't implemented yet). Enums have no `type_vars` at all in Boring today, and the transpiler doesn't yet emit `type_methods` for enums regardless of `Introspect` — both pre-existing, Introspect-unrelated gaps.
+> **Scope** — instance-level reflection (`introspect()`, `Field`, `Method`) covers **structs and enums**. Only the *type-level* part described here (`type_fields`, `type_methods`, `call`) is limited to **structs**, and within them to `type let` (read-only) fields, not `type var` (a mutable type-level field lowers to a module-level lock, and wiring `set` through that lock isn't implemented yet). Enums have no `type_vars` at all in Boring today, and the transpiler doesn't yet emit `type_methods` for enums regardless of `Introspect` — both are language gaps that predate `Introspect` and are not specific to it. Once enums support type-level methods, reflecting on them is expected to follow with little extra work; this is not a 1.0 requirement.
 
 #### Dynamic dispatch
 
