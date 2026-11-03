@@ -253,6 +253,12 @@ impl Transpiler {
             // particular this lets an unannotated `[1.0 as float32, ...]`
             // literal retain its element width when bound to a local.
             ExprKind::Cast(_, ty) => Some(ty.clone()),
+            // A string literal / interpolation is a `string` (so `["a", "b"]` is `[string]`).
+            ExprKind::Str(_) | ExprKind::StringInterp(_) => Some(Type::Named("string".to_string())),
+            ExprKind::Dict(pairs) => {
+                let (k, v) = pairs.first()?;
+                Some(Type::Dict(Box::new(self.resolve_expr_type(k)?), Box::new(self.resolve_expr_type(v)?)))
+            }
             ExprKind::Array(items) => items.first()
                 .and_then(|item| self.resolve_expr_type(item))
                 .map(|ty| Type::Array(Box::new(ty))),

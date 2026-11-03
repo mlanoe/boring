@@ -1,0 +1,12 @@
+def main():
+    let months = ["January", "February"]
+    let m = 1
+    let t = months[0]
+    print t.slice(0, 3)
+    print months[0].slice(0, 3)
+    let u = months[m - 1].slice(0, 3)
+    print u
+    let out = "{months[m - 1].slice(0, 3)}"
+    print out
+    let d = {"a"="Alpha"}
+    print d["a"].slice(0, 3)
