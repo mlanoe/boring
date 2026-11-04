@@ -1559,17 +1559,19 @@ impl<'a> HostEmitter<'a> {
         self.line("                    winit::event::MouseScrollDelta::PixelDelta(p) => self.__input.scroll(p.x as f32, p.y as f32),");
         self.line("                }");
         self.line("            }");
-        // Window pixels -> pixel-buffer coordinates (the window may be HiDPI-scaled or resized).
+        // Window pixels -> pixel-buffer coordinates (the window may be HiDPI-scaled or resized). The window size is the
+        // one the surface was last sized to (`Resized`), not `inner_size()`: on iOS that is the safe area, smaller than the
+        // view the touches are located in.
         self.line("            WindowEvent::CursorMoved { position, .. } => {");
-        self.line("                if let Some(w) = &self.window {");
-        self.line("                    let ws = w.inner_size();");
+        self.line("                if self.window.is_some() {");
+        self.line("                    let ws = winit::dpi::PhysicalSize::new(self.__win_w.max(1) as u32, self.__win_h.max(1) as u32);");
         self.line("                    self.__mouse_x = (position.x * self.__buf_w / (ws.width.max(1) as f64)).floor() as isize;");
         self.line("                    self.__mouse_y = (position.y * self.__buf_h / (ws.height.max(1) as f64)).floor() as isize;");
         self.line("                }");
         self.line("            }");
         self.line("            WindowEvent::Touch(__boring_t) => {");
-        self.line("                if let Some(w) = &self.window {");
-        self.line("                    let ws = w.inner_size();");
+        self.line("                if self.window.is_some() {");
+        self.line("                    let ws = winit::dpi::PhysicalSize::new(self.__win_w.max(1) as u32, self.__win_h.max(1) as u32);");
         for l in crate::transpiler::screen_input::touch_arm_body("self.__input",
             "__boring_t.location.x * self.__buf_w / (ws.width.max(1) as f64)",
             "__boring_t.location.y * self.__buf_h / (ws.height.max(1) as f64)") { self.line(&format!("                    {l}")); }
@@ -2056,7 +2058,7 @@ impl<'a> HostEmitter<'a> {
         if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
         let a: Vec<String> = args.iter().map(|a| self.host_expr(&a.value)).collect();
         Some(format!(
-            "if let Some(w) = &self.window {{ let ws = w.inner_size(); let (sx, sy) = (ws.width.max(1) as f64 / self.__buf_w, ws.height.max(1) as f64 / self.__buf_h); w.set_ime_cursor_area(winit::dpi::PhysicalPosition::new(({}) as f64 * sx, ({}) as f64 * sy), winit::dpi::PhysicalSize::new(({}) as f64 * sx, ({}) as f64 * sy)); }}",
+            "if let Some(w) = &self.window {{ let ws = winit::dpi::PhysicalSize::new(self.__win_w.max(1) as u32, self.__win_h.max(1) as u32); let (sx, sy) = (ws.width.max(1) as f64 / self.__buf_w, ws.height.max(1) as f64 / self.__buf_h); w.set_ime_cursor_area(winit::dpi::PhysicalPosition::new(({}) as f64 * sx, ({}) as f64 * sy), winit::dpi::PhysicalSize::new(({}) as f64 * sx, ({}) as f64 * sy)); }}",
             a[0], a[1], a[2], a[3]))
     }
 

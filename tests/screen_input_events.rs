@@ -730,6 +730,10 @@ fn wgpu_touch_members() {
     let (project, rs) = build("wgpu", "touch", &events(TOUCH_LOOP));
     assert!(rs.contains("WindowEvent::Touch(__boring_t) =>"), "{rs}");
     assert!(rs.contains("self.__input.touch_event(__boring_ph, __boring_t.id, (__boring_t.location.x * self.__buf_w / (ws.width.max(1) as f64)).floor() as isize,"), "buffer-scaled like the cursor:\n{rs}");
+    // The scale divisor is the size the surface was last sized to, not `inner_size()` (the safe area on iOS, smaller than
+    // the view the touch is located in).
+    assert!(rs.contains("let ws = winit::dpi::PhysicalSize::new(self.__win_w.max(1) as u32, self.__win_h.max(1) as u32);"), "{rs}");
+    assert!(!rs.contains("let ws = w.inner_size();"), "touches and the cursor must not be scaled by inner_size():\n{rs}");
     assert!(rs.contains("(!self.__input.touches.is_empty())"), "{rs}");
     assert!(rs.contains("(self.__input.touches.len() as isize)"), "{rs}");
     assert!(rs.contains("self.__input.touch_started"), "{rs}");
