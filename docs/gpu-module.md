@@ -474,7 +474,7 @@ k(block = N, grid = M)     # explicit grid of M blocks
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block |
 | `grid` | `int` or tuple | see below | blocks per grid |
-| `after` | kernel var or `[k1, k2, ...]` | no | ordering: this dispatch starts after the listed ones complete (GPU-side on CUDA, submission-ordered on wgpu, sequential on Metal and `boring run`) |
+| `after` | kernel var or `[k1, k2, ...]` | no | ordering: this dispatch starts after the listed ones complete (GPU-side stream wait on CUDA/ROCm; submission-ordered on wgpu, Metal and the CPU backends; sequential in `boring run`) |
 | `priority` | `"high"` / `"normal"` / `"low"` | no | scheduling priority — CUDA only; ignored on all other backends |
 
 `grid` can be omitted only when it's auto-inferable at transpile time:
@@ -500,7 +500,9 @@ Whenever the field holds more elements than one `block=` worth, pass
 
 ### Multi-pass with `after =`
 
-`after =` declares that a dispatch must start after the listed kernels have completed. The ordering guarantee is always observed; the implementation varies by backend (see each backend's reference for details).
+`after =` declares that a dispatch must start after the listed kernels have completed. This is an **ordering guarantee, not a promise of concurrency**: the dispatch observes the listed kernels' writes on every target, but nothing says independent dispatches overlap, and on wgpu and Metal they never do. The implementation varies by backend (see each backend's reference for details). A dispatch without `after =` is still submitted in program order; `after =` is what you write to state the dependency (and, on CUDA/ROCm, what makes the stream wait).
+
+Kernel structs own their buffers, so the data a dispatch reads from an earlier one is its own instance's (`k(...)` then `k(..., after = k)`).
 
 ```boring
 kernel:

@@ -315,7 +315,7 @@ doesn't inherit any WGSL `atomic<T>` + direct-mapping risk: the `atomic<i32>`/
 
 wgpu uses a single command queue per device. Command buffers submitted to the same queue execute in order. The transpiler maps `after =` to submission ordering — kernels with `after =` dependencies are submitted in a separate `submit` call after the dependency's `submit` has been flushed.
 
-This is not GPU-side pipelining (unlike CUDA streams), but it preserves the ordering semantics with no CPU round-trip within a `kernel:` block.
+This is not GPU-side pipelining (unlike CUDA streams): `after =` is an ordering guarantee only, and dispatches never overlap (a single queue cannot overlap them). Ordering is preserved with no CPU round-trip within a `kernel:` block. A `kernel:` block may list several dispatches; each is emitted in statement order.
 
 ---
 

@@ -428,9 +428,13 @@ impl Transpiler {
                 }
                 self.line("// kernel: block");
                 let mut body = s.body.clone();
-                if self.config.is_simd_target {
+                if self.config.is_simd_target || !self.kernel_decls.is_empty() {
                     // A render `loop:` inside a `kernel:` block dispatches kernels with
                     // bare `k(block = ..)` statements; give each its own dispatch block.
+                    // Also the plain multi-dispatch block (`ka(..)` then
+                    // `kb(.., after = ka)`) on wgpu, whose host reaches this emitter: each
+                    // dispatch is submitted in statement order on the device's single
+                    // queue, which is what `after =` guarantees.
                     self.wrap_simd_kernel_dispatches(&mut body);
                 }
                 let last = body.len().saturating_sub(1);

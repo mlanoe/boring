@@ -165,7 +165,7 @@ All dispatch parameters are passed inside a `kernel:` block as labeled args to t
 |---|---|---|---|
 | `block` | `int` or `(int, int)` or `(int, int, int)` | yes | threads per block — 1D, 2D, or 3D |
 | `grid` | `int` or tuple | no | blocks per grid — inferred from kernel shape if omitted |
-| `after` | kernel var or `[k1, k2]` | no | GPU-side ordering — kernel starts after listed ones complete |
+| `after` | kernel var or `[k1, k2]` | no | ordering — the kernel's stream waits (GPU-side, via an event) for the listed ones to complete; an ordering guarantee, not a promise that anything else overlaps |
 | `priority` | `"high"` / `"normal"` / `"low"` | no | stream scheduling priority — CUDA only, default `"normal"` |
 
 **Grid inference rules (current implementation):**

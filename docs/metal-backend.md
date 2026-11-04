@@ -144,7 +144,7 @@ A `mut` kernel field initialized from a constructor argument always takes the in
 | `print` in kernel | `printf` | silent no-op — no device-side printf in MSL |
 | Float atomics | all GPUs | A13 / M1 and later only |
 | Warp intrinsics | full support | SIMD-group operations (different API) |
-| `after =` ordering | CUDA streams | synchronous dispatch — `after` is a no-op |
+| `after =` ordering | CUDA streams + events (GPU-side wait; independent launches may overlap) | in-order encoding on one serial queue — the order holds, but launches never overlap |
 | Windows / Linux | yes | macOS only |
 | Fixed-point types (`fixedN_M` / `ufixedN_M`) | `W ≤ 64` | `W ≤ 32` (raw `char`/`short`/`int`, `int64_t` intermediate for `*` `/`); 64-bit formats, math functions and overflow-policy members are compile errors — see [fixed-point types](fixed-point-types.html#gpu-backends) |
 | Tensor operations (`kernel.tensors.*`) | portable and selected native paths | portable scalar/tiled paths plus `simdgroup_matrix` for eligible float operations and selected native quantized schedules — see [tensor operations](tensor-operations.html) |
@@ -196,7 +196,7 @@ transpiler to handle.
 
 - **Host crate**: `metal` v0.29 — simpler API, still maintained.
 - **Buffer index ordering**: unified/global/actor arrays → const fields → local scalars → dynamic shared (`threadgroup`). Device and host use the same fixed order.
-- **Dispatch**: deferred — launches are batched into shared command buffers and waited on at the next host read (see Error handling). `after =` is accepted syntactically but has no effect.
+- **Dispatch**: deferred — launches are batched into shared command buffers and waited on at the next host read (see Error handling). `after =` is accepted but needs no code of its own: ordering comes from the launches being encoded in program order on one serial command queue, and each launch gets its own compute encoder, so Metal's hazard tracking orders any launch that touches a buffer an earlier one wrote. That also holds with `BORING_METAL_BATCH=N` (several launches in one command buffer; checked at N = 1, 3 and 64 by `tests/after_ordering.rs`). There is **no overlap** between launches, `after =` or not; running independent launches concurrently (concurrent encoders plus `MTLFence`/`MTLEvent`) is not implemented. The guarantee rests on every buffer being hazard-tracked, as the generated code makes them (default `MTLResourceOptions` plus `StorageModeShared`, no `MTLHeap`, no untracked resources), and on all launches coming from one thread: the queue is per host thread, so two threads launching kernels are not ordered against each other except through a host read.
 - **Atomics**: `atomicSub` has no MSL equivalent — emitted as `atomic_fetch_add_explicit` with a negated value, `memory_order_relaxed`.
 
 ## Generic kernels

@@ -51,6 +51,8 @@ kernel:
 | `@only(.cpu)` | always the CPU, even with `BORING_BACKEND` |
 | `@only(.gpu)` | a GPU backend must run it: the launch fails with an error otherwise (no GPU adapter, a launch the adapter cannot run, `BORING_BACKEND=simd`) |
 
+`after =` keeps its meaning when the launches are placed on different backends: launches run in program order and each one sees the previous launch's writes, wherever it ran (an instance's buffers follow it when its placement changes; covered by `after_orders_launches_placed_on_different_backends`). It is an ordering guarantee, not a promise of concurrency.
+
 A launch's `prefer =` wins over the kernel's `@prefer`. `BORING_BACKEND=a,b` overrides a `prefer`
 (the user knows this machine) but never an `@only`. `@only` is a requirement a single-target
 build must also meet: `boring build --target simd` rejects an `@only(.gpu)` kernel, and a GPU

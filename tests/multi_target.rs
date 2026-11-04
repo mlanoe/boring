@@ -1279,3 +1279,44 @@ fn a_kernel_a_backend_rejects_runs_elsewhere() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `after =` between launches the router places on different backends: each dispatch must see the
+/// previous one's writes, whichever backend ran it. Kernel structs own their buffers, so the only
+/// data that can flow from one launch to the next is the same instance's, which is exactly what has
+/// to move when `prefer =` alternates its placement.
+#[test]
+fn after_orders_launches_placed_on_different_backends() {
+    let dir = project("after_placement");
+    let program = r#"
+kernel Step:
+    mut [float32]'unified out
+    init([float32]'unified d):
+        out = d
+    def ():
+        let i = .thread.x
+        out[i] = out[i] * 2.0 + (i as float32) + 1.0
+
+mut ka = Step([0.0 as float32, 0.0, 0.0, 0.0])
+mut kb = Step([0.0 as float32, 0.0, 0.0, 0.0])
+kernel:
+    ka(block = 4, grid = 1, prefer = .cpu)
+    kb(block = 4, grid = 1, prefer = .gpu)
+    ka(block = 4, grid = 1, prefer = .gpu, after = ka)
+    ka(block = 4, grid = 1, prefer = .cpu, after = [ka, kb])
+    kb(block = 4, grid = 1, prefer = .cpu, after = ka)
+    ka(block = 4, grid = 1, prefer = .gpu, after = [ka, kb])
+print "{ka.out[0]} {ka.out[3]} {kb.out[0]} {kb.out[3]}"
+"#;
+    std::fs::write(source(&dir), program).unwrap();
+    let out = build(&dir, "wgpu,simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let cache = dir.join("cache");
+    // ka: four steps, out[i] = 15 * (i + 1) at i = 0 -> 15, i = 3 -> 60; kb: two steps -> 3, 12.
+    for forced in [None, Some("simd"), Some("wgpu")] {
+        let envs: Vec<(&str, &str)> = [("BORING_BENCH", "off")].into_iter()
+            .chain(forced.map(|b| ("BORING_BACKEND", b))).collect();
+        let (stdout, stderr) = run_crate(&dir, &cache, &envs);
+        assert_eq!(stdout.trim(), "15 60 3 12", "BORING_BACKEND={forced:?}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
