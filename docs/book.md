@@ -8280,6 +8280,29 @@ Two escape hatches exist for when a JSON key still doesn't match:
       int assetIndex
   ```
 
+#### Enums: tagged representations
+
+An enum under `@derive(Serialize, Deserialize)` follows serde's representations, identically
+under `boring run` and `boring build` (`json` and `fromJson<T>` alike):
+
+| attribute | `Circle(1.5)` | `Rect(2.0, 3.0)` | field-less `Dot` |
+|-----------|---------------|------------------|------------------|
+| none (external, default) | `{"Circle":1.5}` | `{"Rect":[2.0,3.0]}` | `"Dot"` |
+| `@serde(untagged)` | `1.5` | `[2.0,3.0]` | `null` |
+| `@serde(tag = "t", content = "c")` (adjacent) | `{"t":"Circle","c":1.5}` | `{"t":"Rect","c":[2.0,3.0]}` | `{"t":"Dot"}` |
+| `@serde(tag = "t")` (internal) | not representable | not representable | `{"t":"Dot"}` |
+
+- **Adjacent**: the content is the value itself for one field, an array for N fields, and absent
+  for a field-less variant (reading also accepts `"c": null` there, and a missing `c` for a
+  `T?` payload gives `nil`). Key order and unknown extra keys are ignored on read.
+- **Internal**: the tag is written inside the payload's own object, so a variant must be
+  field-less or hold exactly one struct (`{"kind":"point","x":3,"y":4}`) or `{string=T}` dict.
+  A variant with several fields, or one field of any other type (a number, string, array,
+  optional, enum), is a compile-time error in both modes (`@serde(tag = "..", content = "..")`
+  is the form to use); serde itself would reject it with an obscure derive error or only
+  at runtime.
+- `rename` / `rename_all` apply to the variant names (the tag values) in every form.
+
 #### `fromJson` in a `throws` context
 
 In a function declared with `throws`, `fromJson` propagates the parse error automatically:

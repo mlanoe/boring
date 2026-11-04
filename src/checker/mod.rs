@@ -1524,7 +1524,50 @@ impl Checker {
         for conv in &s.conversions { self.check_as_decl(conv); }
     }
 
+    /// serde's internally-tagged form (`@serde(tag = "t")`, no `content`, not `untagged`)
+    /// writes the tag inside the payload's own JSON object, so only a field-less variant
+    /// or a one-field variant holding a struct or a `{string=T}` dict can be represented.
+    /// `cargo` rejects a multi-field variant with an obscure derive error and a
+    /// primitive/array/optional/enum payload only fails at runtime, so both backends get
+    /// the same clear diagnostic here instead.
+    fn check_serde_internal_tag(&mut self, e: &EnumDecl) {
+        let serde_args = || e.attrs.iter().filter(|a| a.name == "serde").flat_map(|a| a.args.iter());
+        let key = |arg: &str| arg.split('=').next().unwrap_or("").trim().to_string();
+        let has_tag = serde_args().any(|a| key(a) == "tag");
+        let has_content = serde_args().any(|a| key(a) == "content");
+        let untagged = serde_args().any(|a| key(a) == "untagged");
+        if !has_tag || has_content || untagged { return; }
+        for v in &e.variants {
+            let why = match v.fields.as_slice() {
+                [] => continue,
+                [f] => {
+                    let mut ty = &f.ty;
+                    while let Type::Qualified(inner, _) | Type::Mut(inner) = ty { ty = inner; }
+                    let ok = match ty {
+                        Type::Dict(..) => true,
+                        Type::Named(n) => !self.enums.contains_key(n)
+                            && !matches!(n.as_str(), "string" | "int" | "uint" | "float" | "bool"
+                                | "int8" | "int16" | "int32" | "int64" | "int128"
+                                | "uint8" | "uint16" | "uint32" | "uint64" | "uint128"
+                                | "float16" | "float32" | "float64"),
+                        _ => false,
+                    };
+                    if ok { continue; }
+                    "its single field is not a struct or a `{string=T}` dict"
+                }
+                _ => "it has more than one field",
+            };
+            self.error(
+                format!(
+                    "enum `{}`: variant `{}` cannot use the internally tagged form \
+                     `@serde(tag = \"..\")`: {}; use `@serde(tag = \"..\", content = \"..\")` instead",
+                    e.name, v.name, why),
+                v.line, v.col);
+        }
+    }
+
     fn check_enum(&mut self, e: &EnumDecl) {
+        self.check_serde_internal_tag(e);
         for v in &e.variants {
             for f in &v.fields {
                 self.check_scalar_mut_in_type(&f.ty, "field", v.line, v.col);

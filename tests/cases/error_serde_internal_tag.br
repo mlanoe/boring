@@ -1,0 +1,9 @@
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(tag = "t")
+enum ErrSerdeInternalTagShape:
+    Dot
+    Rect(float, float)
+    Circle(float)
+
+def main():
+    print "unreachable"

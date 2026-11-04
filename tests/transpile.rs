@@ -1074,6 +1074,9 @@ transpile_test!(misc_scenarios_7);
 // tests/run.rs too -- both `fromJson` and `json(v)` are real on the interpreter side
 // (src/interpreter/json.rs), so this case's second line agrees between backends too.
 transpile_test!(json_scenarios);
+// `@serde(tag = "t")` / `@serde(tag = "t", content = "c")` enums: `json(v)` / `fromJson<T>` must
+// match real serde. Also registered in tests/run.rs against the same .expected file.
+transpile_test!(json_serde_tagged_enums);
 
 // docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins
 // (`fromJson<T>(s)`, `fs.read`/`fs.readLines`/`fs.readBytes`) that already do their own

@@ -339,13 +339,13 @@ impl Interpreter {
     ) -> Option<Value> {
         if has_serde_flag(&decl.attrs, "untagged") {
             self.json_to_enum_untagged(json, decl, env, line)
-        } else if serde_str_arg(&decl.attrs, "tag").is_some() {
-            // TODO: serde's internally-tagged (`@serde(tag = "t")`) and adjacently-tagged
-            // (`tag` + `content`) enum representations aren't implemented. Refuse rather
-            // than fall through to the externally-tagged reader, which would happily
-            // materialize the *wrong* variant and re-create the very interpreter/compiled
-            // divergence docs/interpreter-untagged-enum-fromjson-mismatch.md is about.
-            None
+        } else if let Some(tag_key) = serde_str_arg(&decl.attrs, "tag") {
+            match serde_str_arg(&decl.attrs, "content") {
+                Some(content_key) => {
+                    self.json_to_enum_adjacent(json, decl, &tag_key, &content_key, env, line)
+                }
+                None => self.json_to_enum_internal(json, decl, &tag_key, env, line),
+            }
         } else {
             self.json_to_enum_external(json, decl, env, line)
         }
@@ -372,6 +372,68 @@ impl Interpreter {
             }
         }
         None
+    }
+
+    /// serde's adjacently-tagged representation (`@serde(tag = "t", content = "c")`):
+    /// `{"t": "Variant", "c": payload}`, key order irrelevant. The payload is the value
+    /// itself for one field, an N-element array for N > 1, and absent (or `null`) for a
+    /// field-less variant. A missing content reads as `null`, so a `T?` payload
+    /// becomes `nil`, as in serde. Unknown extra keys are ignored.
+    fn json_to_enum_adjacent(
+        &mut self,
+        json: &Json,
+        decl: &EnumDecl,
+        tag_key: &str,
+        content_key: &str,
+        env: &EnvRef,
+        line: usize,
+    ) -> Option<Value> {
+        let obj = json.as_object()?;
+        let tag = obj.get(tag_key)?.as_str()?;
+        let v = decl.variants.iter()
+            .find(|v| json_key(&v.name, &v.attrs, &decl.attrs) == tag)?
+            .clone();
+        let content = obj.get(content_key).unwrap_or(&Json::Null);
+        let fields = self.try_variant_payload(content, &v.fields, env, line)?;
+        Some(Value::EnumVariant {
+            type_name: decl.name.clone(),
+            variant: v.name.clone(),
+            fields,
+        })
+    }
+
+    /// serde's internally-tagged representation (`@serde(tag = "t")`): the tag sits
+    /// inside the payload's own object, `{"t": "Variant", ...payload keys}`. Only
+    /// field-less variants and one-field variants holding a struct or a `{string=T}`
+    /// dict are representable (the checker rejects the rest); the payload is the
+    /// object minus the tag key. Unknown extra keys are ignored on a field-less variant.
+    fn json_to_enum_internal(
+        &mut self,
+        json: &Json,
+        decl: &EnumDecl,
+        tag_key: &str,
+        env: &EnvRef,
+        line: usize,
+    ) -> Option<Value> {
+        let obj = json.as_object()?;
+        let tag = obj.get(tag_key)?.as_str()?;
+        let v = decl.variants.iter()
+            .find(|v| json_key(&v.name, &v.attrs, &decl.attrs) == tag)?
+            .clone();
+        let fields = match v.fields.len() {
+            0 => vec![],
+            1 => {
+                let mut rest = obj.clone();
+                rest.remove(tag_key);
+                vec![self.json_to_value(&Json::Object(rest), &v.fields[0].ty, env, line)?]
+            }
+            _ => return None,
+        };
+        Some(Value::EnumVariant {
+            type_name: decl.name.clone(),
+            variant: v.name.clone(),
+            fields,
+        })
     }
 
     /// serde's default (externally-tagged) representation:
@@ -579,6 +641,23 @@ impl Interpreter {
 
         if has_serde_flag(&decl.attrs, "untagged") {
             payload.unwrap_or(Json::Null)
+        } else if let Some(tag_key) = serde_str_arg(&decl.attrs, "tag") {
+            let mut obj = serde_json::Map::new();
+            obj.insert(tag_key, Json::String(tag));
+            match serde_str_arg(&decl.attrs, "content") {
+                // Adjacent: `{"t": tag, "c": payload}`; no `c` for a field-less variant.
+                Some(content_key) => {
+                    if let Some(p) = payload { obj.insert(content_key, p); }
+                }
+                // Internal: the payload object's keys are flattened next to the tag (the
+                // checker guarantees a one-field variant holds a struct or a dict).
+                None => {
+                    if let Some(Json::Object(inner)) = payload {
+                        for (k, v) in inner { obj.insert(k, v); }
+                    }
+                }
+            }
+            Json::Object(obj)
         } else if fields.is_empty() {
             Json::String(tag)
         } else {

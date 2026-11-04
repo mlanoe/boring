@@ -553,6 +553,9 @@ interp_test!(option_owned_methods);
 // eval_json in src/interpreter/json.rs). Now that `json(v)` really serializes, this
 // registers here too, against the same .expected file as tests/transpile.rs.
 interp_test!(json_scenarios);
+// Same case as the transpile_test of the same name: serde's internally / adjacently tagged
+// enum representations (`@serde(tag)`, `@serde(tag, content)`) must agree byte-for-byte.
+interp_test!(json_serde_tagged_enums);
 
 // docs/try-wrap-double-handling-bug.md -- transpiler-only until now, because its
 // `fromJson<Thing>` lines depended on the interpreter's stub. With a real `fromJson`

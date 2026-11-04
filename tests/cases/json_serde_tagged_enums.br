@@ -1,0 +1,89 @@
+# `json(v)` / `fromJson<T>(s)` on enums carrying serde's internally-tagged
+# (`@serde(tag = "t")`) and adjacently-tagged (`@serde(tag = "t", content = "c")`)
+# representations. `boring run` used to ignore `tag`/`content` when writing (it printed
+# the externally-tagged `{"Rect":[2.0,3.0]}`) and refused to read them (always `nil`),
+# while `boring build` emitted the real serde attributes. Registered in BOTH
+# tests/run.rs and tests/transpile.rs against this one .expected file.
+#
+# Adjacent: payload is the lone field's value, an N-element array for N fields, and
+# absent for a field-less variant. Internal: the tag is flattened into the payload's
+# object, so only field-less variants and one-field struct / dict variants exist (the
+# checker rejects the rest, see tests/serde_internal_tag_rejected.rs).
+# Variants are printed by `match` (not `{v}`): a struct payload prints differently under
+# Display and derived Debug, which is unrelated to this fixture.
+
+@derive(Debug, Clone, Serialize, Deserialize)
+struct JsonTaggedPt:
+    int x
+    int y
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(tag = "t", content = "c")
+enum JsonTaggedAdj:
+    Circle(float)
+    Rect(float, float)
+    Dot
+    Named(string)
+    Pt(JsonTaggedPt)
+    Maybe(int?)
+    List([int])
+    @serde(rename = "renamed")
+    Ren(int)
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(tag = "kind", rename_all = "snake_case")
+enum JsonTaggedInt:
+    UnitThing
+    Point(JsonTaggedPt)
+    Bag({string=int})
+
+string describeAdj(JsonTaggedAdj a):
+    match a:
+        Circle(r): return "Circle {r}"
+        Rect(w, h): return "Rect {w} {h}"
+        Dot: return "Dot"
+        Named(s): return "Named {s}"
+        Pt(p): return "Pt {p.x} {p.y}"
+        Maybe(m):
+            if let m:
+                return "Maybe {m}"
+            return "Maybe nil"
+        List(l): return "List {l}"
+        Ren(n): return "Ren {n}"
+
+string describeInt(JsonTaggedInt a):
+    match a:
+        UnitThing: return "UnitThing"
+        Point(p): return "Point {p.x} {p.y}"
+        Bag(d):
+            let a = d["a"] else -1
+            return "Bag {d.len()} {a}"
+
+def main():
+    let adj = [Circle(1.5), Rect(2.0, 3.0), Dot, Named("hi"), Pt(JsonTaggedPt(x = 1, y = 2)), Maybe(nil), List([1, 2]), Ren(9)]
+    for a in adj:
+        let s = json(a)
+        print s
+        if let back = fromJson<JsonTaggedAdj>(s):
+            print "  -> {describeAdj(back)}"
+        else:
+            print "  -> FAILED"
+    for s in ["{{\"t\":\"Dot\",\"c\":null}}", "{{\"c\":1.5,\"t\":\"Circle\"}}", "{{\"t\":\"Maybe\"}}", "{{\"t\":\"Maybe\",\"c\":7}}", "{{\"t\":\"Circle\",\"c\":1,\"z\":2}}", "{{\"t\":\"Rect\",\"c\":[1,2,3]}}", "{{\"t\":\"Circle\"}}", "{{\"t\":\"Nope\"}}", "\"Dot\"", "{{\"Circle\":1.5}}"]:
+        if let a = fromJson<JsonTaggedAdj>(s):
+            print "adj {s} -> {describeAdj(a)}"
+        else:
+            print "adj {s} -> none"
+
+    let ints = [UnitThing, Point(JsonTaggedPt(x = 3, y = 4)), Bag({"a" = 5})]
+    for a in ints:
+        let s = json(a)
+        print s
+        if let back = fromJson<JsonTaggedInt>(s):
+            print "  -> {describeInt(back)}"
+        else:
+            print "  -> FAILED"
+    for s in ["{{\"kind\":\"unit_thing\",\"z\":1}}", "{{\"x\":1,\"kind\":\"point\",\"y\":2}}", "{{\"kind\":\"point\",\"x\":1}}", "{{\"kind\":\"UnitThing\"}}", "{{\"kind\":\"bag\",\"a\":1}}", "{{\"x\":1}}"]:
+        if let a = fromJson<JsonTaggedInt>(s):
+            print "int {s} -> {describeInt(a)}"
+        else:
+            print "int {s} -> none"

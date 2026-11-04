@@ -1,0 +1,38 @@
+{"t":"Circle","c":1.5}
+  -> Circle 1.5
+{"t":"Rect","c":[2.0,3.0]}
+  -> Rect 2 3
+{"t":"Dot"}
+  -> Dot
+{"t":"Named","c":"hi"}
+  -> Named hi
+{"t":"Pt","c":{"x":1,"y":2}}
+  -> Pt 1 2
+{"t":"Maybe","c":null}
+  -> Maybe nil
+{"t":"List","c":[1,2]}
+  -> List [1, 2]
+{"t":"renamed","c":9}
+  -> Ren 9
+adj {"t":"Dot","c":null} -> Dot
+adj {"c":1.5,"t":"Circle"} -> Circle 1.5
+adj {"t":"Maybe"} -> Maybe nil
+adj {"t":"Maybe","c":7} -> Maybe 7
+adj {"t":"Circle","c":1,"z":2} -> Circle 1
+adj {"t":"Rect","c":[1,2,3]} -> none
+adj {"t":"Circle"} -> none
+adj {"t":"Nope"} -> none
+adj "Dot" -> none
+adj {"Circle":1.5} -> none
+{"kind":"unit_thing"}
+  -> UnitThing
+{"kind":"point","x":3,"y":4}
+  -> Point 3 4
+{"kind":"bag","a":5}
+  -> Bag 1 5
+int {"kind":"unit_thing","z":1} -> UnitThing
+int {"x":1,"kind":"point","y":2} -> Point 1 2
+int {"kind":"point","x":1} -> none
+int {"kind":"UnitThing"} -> none
+int {"kind":"bag","a":1} -> Bag 1 1
+int {"x":1} -> none
