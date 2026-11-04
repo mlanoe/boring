@@ -1305,6 +1305,7 @@ impl<'a> HostEmitter<'a> {
         self.line("    __win_w: isize,");
         self.line("    __win_h: isize,");
         self.line("    __resized: bool,");
+        self.line("    __ime_on: bool,");
         self.line("    __scale: f32,");
         self.line("    __buf_w: f64,");
         self.line("    __buf_h: f64,");
@@ -1372,9 +1373,16 @@ impl<'a> HostEmitter<'a> {
         let size_ty = if hidpi { "LogicalSize" } else { "PhysicalSize" };
         // AccessKit's adapter must exist before the window is first shown.
         let visible = if uses_ax { ".with_visible(false)" } else { "" };
+        // A phone's window is always the whole screen: a requested size would only make winit build a
+        // window of that size on top of it (wider than the screen, content cut off), so mobile targets skip it.
         self.line(&format!(
-            "        let window = std::sync::Arc::new(event_loop.create_window(WindowAttributes::default().with_title(\"{title}\"){visible}.with_inner_size(winit::dpi::{size_ty}::new({width}u32, {height}u32))).unwrap());"
+            "        let __attrs = WindowAttributes::default().with_title(\"{title}\"){visible};"
         ));
+        self.line("        #[cfg(not(any(target_os = \"ios\", target_os = \"android\")))]");
+        self.line(&format!(
+            "        let __attrs = __attrs.with_inner_size(winit::dpi::{size_ty}::new({width}u32, {height}u32));"
+        ));
+        self.line("        let window = std::sync::Arc::new(event_loop.create_window(__attrs).unwrap());");
         if uses_ax {
             self.line("        if let Some(p) = self.__ax_proxy.clone() { self.__ax = Some(accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, p)); }");
             self.line("        window.set_visible(true);");
@@ -1390,7 +1398,9 @@ impl<'a> HostEmitter<'a> {
         self.line("        let surface: wgpu::Surface<'static> = self.instance.create_surface(window.clone()).unwrap();");
         self.line("        let caps = surface.get_capabilities(&self.adapter);");
         self.line("        let fmt  = caps.formats.iter().find(|f| **f == wgpu::TextureFormat::Bgra8Unorm).copied().unwrap_or(caps.formats[0]);");
-        self.line("        window.set_ime_allowed(true);");
+        // On a phone `set_ime_allowed(true)` raises the soft keyboard, so it starts off there and follows
+        // `screen.setImeAllowed(...)`.
+        self.line("        window.set_ime_allowed(cfg!(not(any(target_os = \"ios\", target_os = \"android\"))));");
         self.line("        let cfg = wgpu::SurfaceConfiguration {");
         self.line("            usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt,");
         if hidpi {
@@ -1709,7 +1719,7 @@ impl<'a> HostEmitter<'a> {
         self.line("        __mouse_x: 0, __mouse_y: 0,");
         self.line("        __mouse_left: false, __mouse_right: false, __mouse_middle: false,");
         self.line("        __input: __BoringInput::new(),");
-        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false, __scale: 1.0,"));
+        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false, __ime_on: cfg!(not(any(target_os = \"ios\", target_os = \"android\"))), __scale: 1.0,"));
         self.line(&format!("        __buf_w: ({width}) as f64, __buf_h: ({height}) as f64, __surface_cfg: None,"));
         self.line("        __start_time: std::time::Instant::now(),");
         self.line("        __frame: 0, __redraw: false,");
@@ -1807,6 +1817,8 @@ impl<'a> HostEmitter<'a> {
         match stmt {
             Stmt::Expr(e) => {
                 if let Some(s) = self.try_emit_screen_present(e, width, height) {
+                    self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_ime_allowed(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_ime_area(e) {
                     self.line(&format!("{indent}{s}"));
@@ -2046,6 +2058,17 @@ impl<'a> HostEmitter<'a> {
         Some(format!(
             "if let Some(w) = &self.window {{ let ws = w.inner_size(); let (sx, sy) = (ws.width.max(1) as f64 / self.__buf_w, ws.height.max(1) as f64 / self.__buf_h); w.set_ime_cursor_area(winit::dpi::PhysicalPosition::new(({}) as f64 * sx, ({}) as f64 * sy), winit::dpi::PhysicalSize::new(({}) as f64 * sx, ({}) as f64 * sy)); }}",
             a[0], a[1], a[2], a[3]))
+    }
+
+    /// `screen.setImeAllowed(on)` -- whether the window takes input-method events; on a phone this is what
+    /// shows and hides the soft keyboard (a program calls it with "a text field has focus").
+    fn try_emit_ime_allowed(&self, e: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
+        if method != "setImeAllowed" || args.len() != 1 { return None; }
+        if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
+        Some(format!(
+            "if let Some(w) = &self.window {{ let on = {}; if on != self.__ime_on {{ self.__ime_on = on; w.set_ime_allowed(on); }} }}",
+            self.host_expr(&args[0].value)))
     }
 
     /// `screen.setClipboard(s)` -- write text to the system clipboard (failures ignored).

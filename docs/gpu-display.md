@@ -374,6 +374,7 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
 | `screen.last_key` | `string` | canonical name of the last key that went down or repeated this frame, `""` if none |
 | `for k in screen.key_events:` / `screen.key_up_events` | statement | every key-down (**including auto-repeats**) / key-up event of the frame as a canonical name, **in arrival order and with duplicates** — the event queue; nothing is lost when a frame is slow. `k` is a `string`; `break` inside is not supported |
 | `screen.setImeArea(x, y, w, h)` | statement | tell the input method where the text caret is (buffer coordinates, scaled like the mouse) so its candidate window opens next to it. winit 0.30 (wgpu) passes the rectangle; the winit 0.28 hosts pass the point just below it |
+| `screen.setImeAllowed(on)` | statement | wgpu only: whether the window takes input-method events (a program passes "a text field has focus"); on iOS/Android this is what shows and hides the soft keyboard, which starts hidden there (desktop windows start with it on) |
 | `screen.clipboard` | `string` | the system clipboard's text, `""` when it is empty, not text or unavailable. Read lazily: the clipboard is queried only when this expression is evaluated, not every frame |
 | `screen.setClipboard(s)` | statement | replace the system clipboard's text with `s` (a literal or a `string`). Failures are ignored |
 | `screen.mouse.x`, `.y` | `int` | cursor position in **pixel-buffer** coordinates (window pixels are rescaled to the buffer, so HiDPI and resized windows work; the last position is kept when the cursor leaves the window) |
@@ -394,7 +395,7 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
 
 - **Key names** are the canonical names under [Key strings](#key-strings): `screen.key(name)` works with any string
   expression, e.g. a key table read from data.
-- **IME.** The window opts in to input-method events at creation (`set_ime_allowed(true)`). While a composition is
+- **IME.** The window opts in to input-method events at creation (`set_ime_allowed(true)`; not on iOS/Android, where that would raise the soft keyboard: see `screen.setImeAllowed`). While a composition is
   active, what the input method consumes arrives as `marked`/`text` (winit does not report those key presses to the app). An
   input method reports the same characters through two channels; the runtime delivers them once. Candidate-window
   placement (a cursor-area hint) is not exposed yet.

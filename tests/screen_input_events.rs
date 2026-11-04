@@ -149,7 +149,7 @@ fn wgpu_input_events_and_resize_reallocation() {
     assert!(rs.contains("fn __boring_key_name(key: &str) -> String"), "{rs}");
     assert!(rs.contains("fn __boring_logical_key_name(key: &winit::keyboard::Key) -> String"), "{rs}");
     // Events reach it.
-    assert!(rs.contains("window.set_ime_allowed(true);"), "IME must be enabled:\n{rs}");
+    assert!(rs.contains("window.set_ime_allowed(cfg!(not(any(target_os = \"ios\", target_os = \"android\"))));"), "IME must be enabled on desktops:\n{rs}");
     assert!(rs.contains("WindowEvent::Ime(ime)"), "{rs}");
     assert!(rs.contains("self.__input.ime_commit(&s)"), "{rs}");
     assert!(rs.contains("WindowEvent::ModifiersChanged(m)"), "{rs}");
@@ -452,6 +452,27 @@ fn every_target_iterates_key_events_and_hands_strings_to_functions() {
             cargo_check(&project, target);
         }
     }
+}
+
+/// A phone's window is the whole screen and its soft keyboard follows `screen.setImeAllowed` (wgpu): iOS/Android get
+/// no requested window size and start with input methods off, desktops keep both.
+#[test]
+fn wgpu_mobile_window_fills_the_screen_and_keyboard_follows_setimeallowed() {
+    let src = events(r#"
+kernel:
+    loop:
+        screen.setImeAllowed(screen.mouse.left)
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#);
+    let (project, rs) = build("wgpu", "mobile_window", &src);
+    assert!(rs.contains("#[cfg(not(any(target_os = \"ios\", target_os = \"android\")))]\n        let __attrs = __attrs.with_inner_size("), "{rs}");
+    assert!(rs.contains("window.set_ime_allowed(cfg!(not(any(target_os = \"ios\", target_os = \"android\"))));"), "{rs}");
+    assert!(rs.contains("__ime_on: cfg!(not(any(target_os = \"ios\", target_os = \"android\")))"), "{rs}");
+    assert!(rs.contains("if on != self.__ime_on { self.__ime_on = on; w.set_ime_allowed(on); }"), "{rs}");
+    cargo_check(&project, "wgpu");
 }
 
 /// A kernel built by the program's setup code from real constructor arguments is rebuilt, for the

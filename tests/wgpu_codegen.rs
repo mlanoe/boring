@@ -1079,7 +1079,8 @@ kernel:
     assert!(rs.contains("use winit::window::{Window, WindowAttributes, WindowId}"), "missing WindowAttributes import");
     assert!(rs.contains("fn resumed(&mut self, event_loop: &ActiveEventLoop)"), "missing resumed method");
     assert!(rs.contains("fn window_event(&mut self, event_loop: &ActiveEventLoop"), "missing window_event method");
-    assert!(rs.contains("event_loop.create_window(WindowAttributes::default()"), "window created via create_window");
+    assert!(rs.contains("let __attrs = WindowAttributes::default()"), "window attributes built from the defaults");
+    assert!(rs.contains("event_loop.create_window(__attrs)"), "window created via create_window");
     assert!(rs.contains("fn __boring_present_buffer("), "missing present buffer helper");
     assert!(rs.contains("__boring_present_buffer(&self.device, &self.queue, self.surface.as_ref().unwrap()"), "present call");
     assert!(rs.contains("if self.__keys.contains(&__boring_key_name(\"\\\\x1B\")) { event_loop.exit(); }"), "Escape key exits");
