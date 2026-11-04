@@ -3238,19 +3238,31 @@ impl Interpreter {
                 self.call_fn(&decl, captured, args, line, in_throws_context)
             }
             Value::OverloadedFn { name, variants } => {
-                // Find the first variant whose parameter types match the given args.
-                let chosen = variants.iter().find(|(decl, _)| {
-                    if decl.params.len() != args.len() { return false; }
-                    decl.params.iter().zip(args.iter()).all(|(param, arg)| {
+                // Among the variants whose parameter types match the given args, prefer the one
+                // with the most exact nominal matches (an object whose own type name is the
+                // parameter's type) over a trait-conformance match: a trait with no required
+                // method is structurally satisfied by every struct, so `f(View v)` would otherwise
+                // shadow a later `f(Command c)` when called with a `Command`.
+                let mut best: Option<(usize, &(FnDecl, EnvRef))> = None;
+                for variant in variants.iter() {
+                    let decl = &variant.0;
+                    if decl.params.len() != args.len() { continue; }
+                    let mut exact = 0usize;
+                    let ok = decl.params.iter().zip(args.iter()).all(|(param, arg)| {
                         match &param.ty {
                             None => true,
                             Some(ty) => {
                                 let resolved = self.resolve_type(ty);
+                                if let (Value::Object(o), Type::Named(n)) = (arg, strip_qualified(&resolved)) {
+                                    if o.borrow().type_name == *n { exact += 1; }
+                                }
                                 self.value_matches_type_simple(arg, &resolved)
                             }
                         }
-                    })
-                });
+                    });
+                    if ok && best.map_or(true, |(b, _)| exact > b) { best = Some((exact, variant)); }
+                }
+                let chosen = best.map(|(_, v)| v);
                 match chosen {
                     Some((decl, captured)) => {
                         let decl = decl.clone();
@@ -3412,4 +3424,8 @@ impl Interpreter {
         Ok(())
     }
 
+}
+
+fn strip_qualified(t: &Type) -> &Type {
+    match t { Type::Qualified(inner, _) => strip_qualified(inner), other => other }
 }

@@ -187,3 +187,16 @@ fn overloads_across_a_deps_project() {
     let rs = text(&out.stdout);
     assert!(rs.contains("fn describe__int(") && rs.contains("fn describe__string("), "{rs}");
 }
+
+/// A trait whose methods all have defaults has no required method, so every struct satisfies it
+/// structurally. An overload set `f(Shape)` + `f(Point)` must still pick `f(Point)` for a `Point`
+/// (and the trait variant for a real implementor), not whichever variant was bound first.
+#[test]
+fn trait_overload_does_not_swallow_unrelated_struct() {
+    let dir = project("trait_overload", &[
+        ("shape.br", "pub trait Shape:\n    req string kind(): \"shape\"\n\npub struct Circle as Shape:\n    float r\n\npub string describe(Shape s):\n    \"shape \" + s.kind()\n"),
+        ("point.br", "pub struct Point:\n    int x\n\npub string describe(Point p):\n    \"point {p.x}\"\n"),
+        ("main.br", "use shape\nuse point\n\nprint describe(Circle(r = 1.0))\nprint describe(Point(x = 3))\n"),
+    ]);
+    assert_eq!(run_ok(&dir), "shape shape\npoint 3\n");
+}
