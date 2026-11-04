@@ -517,6 +517,41 @@ kernel:
     cargo_check(&project, "wgpu");
 }
 
+/// `screen.safeTop/.safeLeft/.safeBottom/.safeRight` and `screen.setImeAllowed(on)` exist on every host, so a program that uses them
+/// (the wgpu host reads the safe area on iOS, see `wgpu_safe_area_members`) builds everywhere: the other hosts have a desktop window,
+/// so the insets are 0 and the call is accepted and ignored.
+#[test]
+fn other_targets_accept_safe_area_members_and_ime_allowed() {
+    let src = events(r#"
+kernel:
+    loop:
+        screen.setImeAllowed(screen.safeTop > 0)
+        k.tick = screen.safeTop + screen.safeLeft + screen.safeBottom + screen.safeRight
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#);
+    for target in ["simd", "metal", "cuda", "rocm"] {
+        let (project, rs) = build(target, "safe_other", &src);
+        match target {
+            "simd" => {
+                assert!(rs.contains("fn set_ime_allowed(&self, _on: bool) {}"), "{rs}");
+                assert!(rs.contains("screen.set_ime_allowed("), "{rs}");
+                assert!(rs.contains("screen.safeTop"), "{rs}");
+            }
+            _ => {
+                assert!(rs.contains("0isize"), "[{target}] the insets are 0:\n{rs}");
+                assert!(!rs.contains("boring_screen_safeTop"), "[{target}] {rs}");
+                assert!(rs.contains("let _ = "), "[{target}] setImeAllowed is evaluated and ignored:\n{rs}");
+            }
+        }
+        if target != "metal" || cfg!(target_os = "macos") {
+            cargo_check(&project, target);
+        }
+    }
+}
+
 /// A kernel built by the program's setup code from real constructor arguments is rebuilt, for the
 /// new window size, by a generated function (wgpu).
 #[test]

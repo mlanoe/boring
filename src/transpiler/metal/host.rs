@@ -1559,6 +1559,16 @@ impl HostEmitter {
                         self.line(&crate::transpiler::screen_input::set_clipboard_stmt(&s));
                         return;
                     }
+                    // `screen.setImeAllowed(on)`: whether the window takes input-method events. This host's window is a desktop one whose
+                    // input method is always on (the soft keyboard of a phone belongs to the wgpu host), so the call is accepted and ignored.
+                    if method == "setImeAllowed"
+                        && margs.len() == 1
+                        && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
+                    {
+                        let on = self.expr(&margs[0].value);
+                        self.line(&format!("let _ = {on};"));
+                        return;
+                    }
                     if method == "requestRedraw"
                         && margs.is_empty()
                         && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
@@ -3503,6 +3513,8 @@ impl HostEmitter {
                             "closed"    => "boring_screen_closed".into(),
                             "resized"   => "boring_screen_resized".into(),
                             "scale"     => "1.0f32".into(),
+                            // no safe area on a desktop window (the wgpu host reads it on iOS)
+                            "safeTop" | "safeLeft" | "safeBottom" | "safeRight" => "0isize".into(),
                             "width"     => "boring_screen_width".into(),
                             "height"    => "boring_screen_height".into(),
                             "dimension" => "Dimension(boring_screen_width as u32, boring_screen_height as u32)".into(),

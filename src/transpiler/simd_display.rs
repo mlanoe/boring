@@ -128,6 +128,11 @@ struct Screen {
     resized: bool,
     /// Always 1.0: the SIMD window has no scale factor (portability member).
     scale: f32,
+    /// Always 0: a desktop window has no safe area (portability members; the wgpu host reads it on iOS).
+    safeTop: isize,
+    safeLeft: isize,
+    safeBottom: isize,
+    safeRight: isize,
     closed: bool,
     frame: isize,
     time: f64,
@@ -174,6 +179,10 @@ impl Screen {
             height: dimension.height,
             resized: false,
             scale: 1.0,
+            safeTop: 0,
+            safeLeft: 0,
+            safeBottom: 0,
+            safeRight: 0,
             closed: false,
             frame: 0,
             time: 0.0,
@@ -190,6 +199,9 @@ impl Screen {
     fn set_ime_area(&self, x: isize, y: isize, w: isize, h: isize) {
         __boring_send(__BoringCmd::ImeArea { x: x as i32, y: y as i32, w: w.max(0) as u32, h: h.max(0) as u32 });
     }
+    // `screen.setImeAllowed(on)`: accepted and ignored (this window's input method is always on; the soft keyboard of a phone
+    // belongs to the wgpu host).
+    fn set_ime_allowed(&self, _on: bool) {}
     // `"\x1B"` reaches here either as the ESC character or as its 4-character escape text.
     fn key<T: AsRef<str>>(&self, key: T) -> bool {
         __boring_display().keys.lock().unwrap().contains(&__boring_key_name(key.as_ref()))
