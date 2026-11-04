@@ -127,7 +127,8 @@ fn wgpu_hidpi_uses_logical_window_and_exposes_scale() {
         .replace("let enc = encode(screen.frame)", "let sc = screen.scale\n        let enc = encode(screen.frame)");
     let (project, rs) = build("wgpu", "hidpi", &src);
     assert!(rs.contains("winit::dpi::LogicalSize::new("), "{rs}");
-    assert!(!rs.contains("winit::dpi::PhysicalSize::new(") || rs.contains("set_ime_cursor_area"), "{rs}");
+    // The window is requested in logical points (the cursor / touch scaling builds a `PhysicalSize` of its own, hence the narrower check).
+    assert!(!rs.contains("with_inner_size(winit::dpi::PhysicalSize::new("), "{rs}");
     assert!(rs.contains("WindowEvent::ScaleFactorChanged { scale_factor, .. }"), "{rs}");
     assert!(rs.contains("self.__scale = window.scale_factor() as f32;"), "{rs}");
     assert!(rs.contains("let sc = self.__scale"), "{rs}");

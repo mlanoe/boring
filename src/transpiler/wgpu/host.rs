@@ -1306,6 +1306,7 @@ impl<'a> HostEmitter<'a> {
         self.line("    __win_h: isize,");
         self.line("    __resized: bool,");
         self.line("    __ime_on: bool,");
+        self.line("    __safe: [isize; 4],");
         self.line("    __scale: f32,");
         self.line("    __buf_w: f64,");
         self.line("    __buf_h: f64,");
@@ -1341,6 +1342,18 @@ impl<'a> HostEmitter<'a> {
             self.line("        self.__ax_last = Some((nodes, scale));");
             self.line("    }");
         }
+        // The safe area's insets in physical pixels, [top, left, bottom, right]: on iOS winit reports the safe area as the
+        // window's inner rectangle (`inner_position` / `inner_size`) inside the whole screen (`outer_size`); other targets have none.
+        self.line("    fn __update_safe(&mut self) {");
+        self.line("        #[cfg(target_os = \"ios\")]");
+        self.line("        if let Some(w) = &self.window {");
+        self.line("            if let Ok(p) = w.inner_position() {");
+        self.line("                let (is, os) = (w.inner_size(), w.outer_size());");
+        self.line("                let (l, t) = (p.x as isize, p.y as isize);");
+        self.line("                self.__safe = [t, l, (os.height as isize - is.height as isize - t).max(0), (os.width as isize - is.width as isize - l).max(0)];");
+        self.line("            }");
+        self.line("        }");
+        self.line("    }");
         self.line("    fn __reblit(&mut self) {");
         self.line("        let (w, h) = (self.__win_w.max(1) as u32, self.__win_h.max(1) as u32);");
         self.line("        self.__buf_w = w as f64;");
@@ -1587,6 +1600,7 @@ impl<'a> HostEmitter<'a> {
         self.line("                }");
         self.line("            }");
         self.line("            WindowEvent::RedrawRequested => {");
+        self.line("                self.__update_safe();");
         // Render loop body with self. prefix
         self.in_method = true;
         let w = width.clone();
@@ -1721,7 +1735,7 @@ impl<'a> HostEmitter<'a> {
         self.line("        __mouse_x: 0, __mouse_y: 0,");
         self.line("        __mouse_left: false, __mouse_right: false, __mouse_middle: false,");
         self.line("        __input: __BoringInput::new(),");
-        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false, __ime_on: cfg!(not(any(target_os = \"ios\", target_os = \"android\"))), __scale: 1.0,"));
+        self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false, __ime_on: cfg!(not(any(target_os = \"ios\", target_os = \"android\"))), __safe: [0; 4], __scale: 1.0,"));
         self.line(&format!("        __buf_w: ({width}) as f64, __buf_h: ({height}) as f64, __surface_cfg: None,"));
         self.line("        __start_time: std::time::Instant::now(),");
         self.line("        __frame: 0, __redraw: false,");
@@ -2338,13 +2352,17 @@ impl<'a> HostEmitter<'a> {
             }
             // `screen.width` / `.height` (live window size in pixels) / `.resized` (this frame follows a resize)
             ExprKind::Field(obj, field)
-                if matches!(field.as_str(), "width" | "height" | "resized" | "scale")
+                if matches!(field.as_str(), "width" | "height" | "resized" | "scale" | "safeTop" | "safeLeft" | "safeBottom" | "safeRight")
                     && matches!(&obj.kind, ExprKind::Var(n) if n == "screen") =>
             {
                 match field.as_str() {
                     "width" => format!("{pfx}__win_w"),
                     "height" => format!("{pfx}__win_h"),
                     "scale" => format!("{pfx}__scale"),
+                    "safeTop" => format!("{pfx}__safe[0]"),
+                    "safeLeft" => format!("{pfx}__safe[1]"),
+                    "safeBottom" => format!("{pfx}__safe[2]"),
+                    "safeRight" => format!("{pfx}__safe[3]"),
                     _ => format!("{pfx}__resized"),
                 }
             }

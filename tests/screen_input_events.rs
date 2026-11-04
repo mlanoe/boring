@@ -475,6 +475,28 @@ kernel:
     cargo_check(&project, "wgpu");
 }
 
+/// The safe area's insets are readable members of `screen` (wgpu): read from winit's inner rectangle on iOS, 0 elsewhere.
+#[test]
+fn wgpu_safe_area_members() {
+    let src = events(r#"
+kernel:
+    loop:
+        k.tick = screen.safeTop + screen.safeLeft + screen.safeBottom + screen.safeRight
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#);
+    let (project, rs) = build("wgpu", "safe_area", &src);
+    for (i, member) in ["safeTop", "safeLeft", "safeBottom", "safeRight"].iter().enumerate() {
+        assert!(rs.contains(&format!("self.__safe[{i}]")), "screen.{member} -> self.__safe[{i}]:\n{rs}");
+    }
+    assert!(rs.contains("fn __update_safe(&mut self) {"), "{rs}");
+    assert!(rs.contains("w.inner_position()"), "the insets come from winit's inner rectangle:\n{rs}");
+    assert!(rs.contains("self.__update_safe();"), "refreshed every frame:\n{rs}");
+    cargo_check(&project, "wgpu");
+}
+
 /// A kernel built by the program's setup code from real constructor arguments is rebuilt, for the
 /// new window size, by a generated function (wgpu).
 #[test]
