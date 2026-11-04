@@ -9635,17 +9635,22 @@ The same rule applies to generic parameters: `T c` without signals infers `&T`; 
 
 ### Cross-function propagation
 
-After a function body is processed, `fn_sigs` is updated with the inferred parameter qualifiers. Functions defined later in the same file that call this function will see the qualified signature and propagate the constraint to their own variables.
+Before any body is emitted, a pre-pass infers every function's parameter qualifiers and writes them into the signatures callers see, then repeats until nothing changes (bounded by the number of functions and methods). A caller therefore learns its callee's qualifier whatever the declaration order, a chain declared in reverse order resolves, and mutually recursive functions or methods are covered.
 
 ```boring
+def relay(Counter c):     # declared before its callee: still inferred 'actor
+    process(c)
+
 def process(Counter c):   # inferred 'actor from body
     spawn_actor(c)
 
 let c = Counter(0)
-process(c)                # fn_sigs now shows Counter'actor → c infers 'actor
+relay(c)                  # c infers 'actor
 ```
 
-**Limitation:** propagation is a single forward pass. If a caller is defined before the callee in the file, no propagation occurs. Mutual recursion is not covered.
+The same pre-pass covers the methods of structs, enums and `ext` blocks: `first(Counter c): self.second(c)` declared *before* `second(Counter c): spawn_actor(c)` takes the same `Counter'actor` handle as `second`, as does a method forwarding to a free function and a free function forwarding to a method, within a file or across files (`use`).
+
+A qualifier written by the user is never overwritten; only parameters left bare are refined. For methods, propagation reaches a call only when the receiver's type is statically known where the call is read: `self`, a local of known type (including a `let t = s` alias), a constructor call `Type(..)`, or a `self.field` / `local.field` chain over declared fields. A call on a receiver whose type the pass cannot see (a method's return value, an element of an array, a generic value) is not propagated, and neither is a method name overloaded within one type (a single declaration is needed to know which signature applies); the callee's own signature is still correct, but the caller keeps its plain parameter. Annotate the caller's parameter explicitly (`Counter'actor c`) in those cases.
 
 ### Struct field inference
 

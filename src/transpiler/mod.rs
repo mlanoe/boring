@@ -4938,6 +4938,16 @@ impl Transpiler {
                     // the same non-mut-binding `def`-call diagnostic as a struct — see
                     // `enum_has_mut_field`'s callers — and that diagnostic needs to tell
                     // a real `req` getter apart from a mutating `def` on such an enum.
+                    // Enum methods' declarations too: a call site reads their parameter types
+                    // (and the qualifier pre-pass refines them), like a struct's.
+                    for m in &e.methods {
+                        let variants = self.struct_method_overload_decls
+                            .entry(format!("{}::{}", e.name, m.name)).or_default();
+                        let this_mangled = mangle_overload_name(&m.name, &m.params);
+                        if !variants.iter().any(|v| mangle_overload_name(&v.name, &v.params) == this_mangled) {
+                            variants.push(m.clone());
+                        }
+                    }
                     for m in &e.methods {
                         if !m.mutating {
                             self.struct_req_methods.insert(format!("{}::{}", e.name, m.name));

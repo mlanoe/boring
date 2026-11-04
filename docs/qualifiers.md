@@ -1342,7 +1342,7 @@ The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables d
 | Universal borrow — field-destructuring suppression | ✅ implemented |
 | Universal borrow — disabled for struct/enum method params | ✅ implemented |
 | Universal borrow — task capture suppresses auto-ref | ✅ implemented |
-| Cross-function propagation | ✅ implemented (single forward pass) |
+| Cross-function propagation | ✅ implemented (pre-pass to a fixed point; free functions and struct/enum/`ext` methods) |
 | Struct field inference (all fields, single-file) | ✅ implemented |
 | Optional (`T?`, `T'?`) inner-type inference | ✅ implemented |
 | `'actor'task`/`'guard'task` vs `'actor`/`'guard` disambiguation (task-method-call signal) | ✅ implemented |
@@ -1352,7 +1352,7 @@ The interpreter's `Env` tracks `actor_bindings: HashSet<String>` — variables d
 | `'atomic` — compare-and-swap pattern detection | not implemented |
 | `'atomic` — cross-function whole-program promotion | not implemented |
 | Cross-file inference | not implemented |
-| Fixed-point propagation (mutual recursion) | not implemented |
+| Fixed-point propagation (mutual recursion) | ✅ implemented (free functions and methods) |
 
 > **Note on `'actor'task` / `'guard'task`:** inference picks the `'task` variant when a `task`-declared method is called on the captured variable/field (see "Inferring `'actor'task` / `'guard'task` from task-method calls" above); otherwise it falls back to the plain sync variant. A task body that needs the async lock without calling a `task` method on the captured value itself still requires an explicit annotation.
 

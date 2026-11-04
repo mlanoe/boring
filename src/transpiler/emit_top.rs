@@ -661,12 +661,29 @@ impl Transpiler {
         // point (bounded by the function count). `applied` remembers what this pass wrote into
         // each signature slot, so a later round may refine it but never overrides a qualifier
         // the user wrote.
-        let fn_count = program.items.iter().filter(|i| matches!(i, crate::ast::Item::Fn(_))).count();
+        let fn_count = Self::qualifier_inference_targets(program).len();
         let mut applied: std::collections::HashMap<(String, usize), crate::ast::OwnerQual> =
             std::collections::HashMap::new();
         for _round in 0..=fn_count {
             if !self.pre_infer_fn_qualifiers_round(program, &mut applied) { break; }
         }
+    }
+
+    /// Every function body the pre-pass infers: free functions (`None`) and the methods of
+    /// structs, enums and `ext` blocks (`Some(type name)`).
+    fn qualifier_inference_targets(program: &crate::ast::Program) -> Vec<(Option<&str>, &crate::ast::FnDecl)> {
+        use crate::ast::Item;
+        let mut out = Vec::new();
+        for item in &program.items {
+            match item {
+                Item::Fn(f) if f.qualifier.is_none() => out.push((None, f)),
+                Item::Struct(s) => out.extend(s.methods.iter().map(|m| (Some(s.name.as_str()), m))),
+                Item::Enum(e) => out.extend(e.methods.iter().map(|m| (Some(e.name.as_str()), m))),
+                Item::Ext(e) => out.extend(e.methods.iter().map(|m| (Some(e.type_name.as_str()), m))),
+                _ => {}
+            }
+        }
+        out
     }
 
     /// One pass of `pre_infer_fn_qualifiers`; `true` when it changed any signature.
@@ -676,9 +693,13 @@ impl Transpiler {
         applied: &mut std::collections::HashMap<(String, usize), crate::ast::OwnerQual>,
     ) -> bool {
         let mut changed = false;
-        for item in &program.items {
-            let crate::ast::Item::Fn(f) = item else { continue };
-            if f.qualifier.is_some() || f.is_native { continue; }
+        for (self_ty, f) in Self::qualifier_inference_targets(program) {
+            if f.is_native { continue; }
+            // A method's parameter types live in `struct_method_overload_decls`, not `fn_sigs`.
+            // Methods whose borrowed parameters were already resolved by trait-borrow
+            // inference keep the signature the call sites were given.
+            if self_ty.is_some() && !self.method_borrow_positions(f, self_ty).is_empty() { continue; }
+            if self_ty.is_none() && f.attrs.iter().any(|a| a.name == "singleton") { continue; }
 
             // Run the inference on a throwaway clone (make_sub), never on `self` directly.
             // infer_qualifiers is normally only ever run as part of a function's real emission,
@@ -698,9 +719,10 @@ impl Transpiler {
                 .filter(|p| p.mutable)
                 .map(|p| p.name.clone())
                 .collect();
-            sub.fn_current_params_lent = sub.fn_lent_param_names(f, false);
+            sub.fn_current_params_lent = sub.fn_lent_param_names(f, self_ty.is_some());
             sub.fn_return_ty = f.return_ty.clone();
-            sub.in_struct_method = false;
+            sub.self_type = self_ty.map(str::to_string);
+            sub.in_struct_method = self_ty.is_some();
 
             sub.infer_qualifiers(&f.body);
             sub.scan_atomic_promotions(&f.body);
@@ -717,30 +739,54 @@ impl Transpiler {
             // per file before moving to the next), so a same-named overload declared in a
             // not-yet-visited file wouldn't be known about yet, and this update would silently
             // skip the mangled entry the real overloaded call site actually looks up.
-            let keys = [f.name.clone(), mangle_overload_name(&f.name, &f.params)];
-            for key in keys {
-                let Some(sig) = self.fn_sigs.get_mut(&key) else { continue };
-                for (i, param) in f.params.iter().enumerate() {
-                    let Some(inferred_qual) = pre_inferred.get(&param.name).cloned() else { continue };
-                    // Do not propagate 'inline: it's the default fallback, not a real signal
-                    // (see the identical exclusion in emit_fn's post-emit_body propagation).
-                    if matches!(inferred_qual, crate::ast::OwnerQual::Inline) { continue; }
-                    let Some(param_ty) = sig.get_mut(i) else { continue };
-                    let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
-                        && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
-                        && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_)));
-                    // Written by an earlier round of this pass (not by the user): may be refined.
-                    let ours = match (applied.get(&(key.clone(), i)), &*param_ty) {
-                        (Some(prev), crate::ast::Type::Qualified(_, q)) => q == prev,
-                        (Some(prev), crate::ast::Type::Optional(inner)) =>
-                            matches!(inner.as_ref(), crate::ast::Type::Qualified(_, q) if q == prev),
-                        _ => false,
-                    };
-                    if !already_qualified || ours {
-                        let new_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(param_ty, inferred_qual.clone());
-                        if new_ty != *param_ty { changed = true; }
-                        *param_ty = new_ty;
-                        applied.insert((key.clone(), i), inferred_qual);
+            let mangled = mangle_overload_name(&f.name, &f.params);
+            let mut apply_to = |param_ty: &mut crate::ast::Type, i: usize, key: String, changed: &mut bool| {
+                let Some(param) = f.params.get(i) else { return };
+                let Some(inferred_qual) = pre_inferred.get(&param.name).cloned() else { return };
+                // Do not propagate 'inline: it's the default fallback, not a real signal
+                // (see the identical exclusion in emit_fn's post-emit_body propagation).
+                if matches!(inferred_qual, crate::ast::OwnerQual::Inline) { return; }
+                // A method's by-reference passing (`&T`, `&mut T`, lent `mut` parameters) is
+                // decided by its own call-site machinery, which reads the declared parameter
+                // type: only a shared-handle demand is a signal callers must learn here.
+                if self_ty.is_some()
+                    && !matches!(inferred_qual, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::Guard)
+                { return; }
+                let already_qualified = matches!(param_ty, crate::ast::Type::Qualified(..))
+                    && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Owned))
+                    && !matches!(param_ty, crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Union(_)));
+                // Written by an earlier round of this pass (not by the user): may be refined.
+                let ours = match (applied.get(&(key.clone(), i)), &*param_ty) {
+                    (Some(prev), crate::ast::Type::Qualified(_, q)) => q == prev,
+                    (Some(prev), crate::ast::Type::Optional(inner)) =>
+                        matches!(inner.as_ref(), crate::ast::Type::Qualified(_, q) if q == prev),
+                    _ => false,
+                };
+                if !already_qualified || ours {
+                    let new_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(param_ty, inferred_qual.clone());
+                    if new_ty != *param_ty { *changed = true; }
+                    *param_ty = new_ty;
+                    applied.insert((key, i), inferred_qual);
+                }
+            };
+            if let Some(ty_name) = self_ty {
+                let method_key = format!("{}::{}", ty_name, f.name);
+                let Some(decls) = self.struct_method_overload_decls.get_mut(&method_key) else { continue };
+                for decl in decls.iter_mut().filter(|d| mangle_overload_name(&d.name, &d.params) == mangled) {
+                    let key = format!("{}#{}", method_key, mangled);
+                    for i in 0..decl.params.len() {
+                        if let Some(ty) = decl.params[i].ty.as_mut() {
+                            apply_to(ty, i, key.clone(), &mut changed);
+                        }
+                    }
+                }
+            } else {
+                for key in [f.name.clone(), mangled.clone()] {
+                    let Some(sig) = self.fn_sigs.get_mut(&key) else { continue };
+                    for i in 0..f.params.len() {
+                        if let Some(param_ty) = sig.get_mut(i) {
+                            apply_to(param_ty, i, key.clone(), &mut changed);
+                        }
                     }
                 }
             }

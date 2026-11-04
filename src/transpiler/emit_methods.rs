@@ -4691,7 +4691,9 @@ impl Transpiler {
         let mut struct_method_param_shared_gpu: Vec<bool> = Vec::new();
         let (rust_method, extra_wrap) = if is_user_struct_receiver {
             // Check for overloaded struct methods — pick the best-matching overload.
-            let struct_type_opt = self.resolve_expr_struct_type(obj);
+            // An enum-typed local is not a struct: its type name comes from `var_types`.
+            let struct_type_opt = self.resolve_expr_struct_type(obj)
+                .or_else(|| self.resolve_expr_type(obj).as_ref().and_then(receiver_type_name));
             let chosen_decl = struct_type_opt.as_ref().and_then(|type_name| {
                 let key = format!("{}::{}", type_name, method);
                 let overloads = self.struct_method_overload_decls.get(&key)?;

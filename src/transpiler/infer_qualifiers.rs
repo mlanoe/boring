@@ -832,8 +832,9 @@ impl Transpiler {
                 // A parameter of a method declared `'actor`/`'guard` (explicitly, or inferred by
                 // `infer_actor_params` for a stored `mut` parameter) takes the caller's value as
                 // a shared handle: like for a free function, the argument variable is promoted.
-                if let ExprKind::Var(recv) = &obj.kind {
-                    let decl = var_struct_types.get(recv.as_str())
+                {
+                    let recv_ty = self.method_receiver_type(obj, var_struct_types, alias_of);
+                    let decl = recv_ty
                         .and_then(|t| self.struct_method_overload_decls.get(&format!("{}::{}", t, method)))
                         .filter(|ds| ds.len() == 1)
                         .map(|ds| ds[0].clone());
@@ -2667,5 +2668,45 @@ impl Transpiler {
         }
         out.sort_by_key(|d| (d.line, d.col));
         CPU_DECISIONS.with(|d| d.borrow_mut().extend(out));
+    }
+}
+
+impl Transpiler {
+    /// The user type a method call's receiver evaluates to, as far as the qualifier walk can
+    /// tell without the emission-time state: a local of known struct type (through `let t = s`
+    /// aliases), `self` inside a method, a constructor call `Type(..)`, and `self.field` /
+    /// `local.field` chains over declared struct fields.
+    fn method_receiver_type(
+        &self,
+        obj: &Expr,
+        var_struct_types: &std::collections::HashMap<String, String>,
+        alias_of: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        match &obj.kind {
+            ExprKind::Var(recv) => {
+                let mut root = recv.as_str();
+                for _ in 0..8 {
+                    if var_struct_types.contains_key(root) { break; }
+                    match alias_of.get(root) { Some(next) => root = next.as_str(), None => break }
+                }
+                var_struct_types.get(root).cloned()
+                    .or_else(|| (recv == "self").then(|| self.self_type.clone()).flatten())
+            }
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(n) if n.chars().next().is_some_and(char::is_uppercase)
+                    && (self.all_struct_types.contains(n.as_str()) || self.type_sizes.contains_key(n.as_str())) =>
+                    Some(n.clone()),
+                _ => None,
+            },
+            ExprKind::Field(inner, field) => {
+                let owner = self.method_receiver_type(inner, var_struct_types, alias_of)?;
+                match &self.struct_fields.get(&owner)?.iter().find(|(n, _)| n == field)?.1 {
+                    Type::Named(n) => Some(n.clone()),
+                    Type::Qualified(inner, _) => match inner.as_ref() { Type::Named(n) => Some(n.clone()), _ => None },
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 }
