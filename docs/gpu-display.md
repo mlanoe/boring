@@ -400,6 +400,13 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
   active, what the input method consumes arrives as `marked`/`text` (winit does not report those key presses to the app). An
   input method reports the same characters through two channels; the runtime delivers them once. Candidate-window
   placement (a cursor-area hint) is not exposed yet.
+- **iOS.** winit 0.30 creates its window without a scene, and an app linked against a recent SDK must use the UIScene life cycle
+  (iOS aborts it with "UIScene life cycle is required" otherwise). The generated host therefore registers a scene delegate class
+  `BoringSceneDelegate` before the event loop and attaches winit's window to the scene UIKit connects (an `objc2` dependency, iOS
+  only). The app's `Info.plist` has to name it: `UIApplicationSceneManifest` > `UISceneConfigurations` >
+  `UIWindowSceneSessionRoleApplication` > `UISceneDelegateClassName` = `BoringSceneDelegate`, plus an empty `UILaunchScreen` (without
+  one iOS runs the app in a 320x480 compatibility mode). `boring-ui`'s `examples/todo_window/ios_sim.sh` packages and launches an app
+  that way on the iOS Simulator. A device build is not exercised here.
 - **Strings.** `screen.text`, `.marked`, `.last_key` and the loop variable of `for k in screen.key_events:` can be
   passed to an ordinary Boring function taking a `string` on every target (on Metal/CUDA/ROCm, whose own string
   literals are `&str`, they and string literals are converted to the function's `string` type at the call; in a

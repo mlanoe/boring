@@ -1378,6 +1378,9 @@ impl<'a> HostEmitter<'a> {
         self.line("    }");
         self.line("}");
         self.blank();
+        // iOS: the UIScene life cycle (a no-op everywhere else).
+        for l in IOS_SCENE_RS.lines() { self.line(l); }
+        self.blank();
         // ── ApplicationHandler impl ───────────────────────────────────────────
         self.line(if uses_ax { "impl ApplicationHandler<__AxEvent> for __App {" } else { "impl ApplicationHandler for __App {" });
         // resumed(): create window + surface + blit pipeline
@@ -1396,6 +1399,8 @@ impl<'a> HostEmitter<'a> {
             "        let __attrs = __attrs.with_inner_size(winit::dpi::{size_ty}::new({width}u32, {height}u32));"
         ));
         self.line("        let window = std::sync::Arc::new(event_loop.create_window(__attrs).unwrap());");
+        self.line("        #[cfg(target_os = \"ios\")]");
+        self.line("        __boring_scene::window_created(&window);");
         if uses_ax {
             self.line("        if let Some(p) = self.__ax_proxy.clone() { self.__ax = Some(accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, p)); }");
             self.line("        window.set_visible(true);");
@@ -1631,6 +1636,8 @@ impl<'a> HostEmitter<'a> {
 
         // ── fn main() ─────────────────────────────────────────────────────────
         self.line("fn main() {");
+        self.line("    #[cfg(target_os = \"ios\")]");
+        self.line("    __boring_scene::register();");
         self.line("    let (instance, adapter, device, queue) = pollster::block_on(async {");
         self.line("        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());");
         self.line("        let adapter  = instance.request_adapter(&wgpu::RequestAdapterOptions::default())");
@@ -3228,3 +3235,54 @@ fn extract_dimension_args(arg: Option<&Arg>) -> Option<(String, String)> {
     }
     None
 }
+
+/// iOS: winit 0.30 creates its `UIWindow` without a scene, but an app linked against a recent SDK must use the UIScene life
+/// cycle (iOS refuses it otherwise: "UIScene life cycle is required"). The Info.plist names a scene delegate class
+/// (`UIApplicationSceneManifest` / `UISceneDelegateClassName` = `BoringSceneDelegate`); this registers it before the event loop
+/// starts and attaches winit's window to the scene UIKit connects, whichever of the two comes first. UIKit also requires the
+/// class to declare the scene protocols. Without a manifest no scene ever connects and nothing happens.
+const IOS_SCENE_RS: &str = r#"#[cfg(target_os = "ios")]
+mod __boring_scene {
+    use objc2::runtime::{AnyObject, AnyProtocol, ClassBuilder, NSObject, Sel};
+    use objc2::{msg_send, sel, ClassType};
+    use std::sync::Mutex;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // (scene, window) as raw pointers, set from the main thread only: whichever arrives second attaches the window.
+    static STATE: Mutex<(usize, usize)> = Mutex::new((0, 0));
+
+    fn attach() {
+        let (scene, window) = *STATE.lock().unwrap();
+        if scene == 0 || window == 0 { return; }
+        unsafe {
+            let (s, w) = (scene as *mut AnyObject, window as *mut AnyObject);
+            let _: () = msg_send![w, setWindowScene: s];
+            let _: () = msg_send![w, makeKeyAndVisible];
+        }
+    }
+
+    extern "C" fn will_connect(_this: &AnyObject, _cmd: Sel, scene: &AnyObject, _session: &AnyObject, _options: &AnyObject) {
+        STATE.lock().unwrap().0 = scene as *const AnyObject as usize;
+        attach();
+    }
+
+    pub fn register() {
+        let mut class = ClassBuilder::new(c"BoringSceneDelegate", NSObject::class()).expect("BoringSceneDelegate is already registered");
+        unsafe { class.add_method(sel!(scene:willConnectToSession:options:), will_connect as extern "C" fn(_, _, _, _, _)); }
+        for name in [c"UISceneDelegate", c"UIWindowSceneDelegate"] {
+            if let Some(protocol) = AnyProtocol::get(name) { class.add_protocol(protocol); }
+        }
+        class.register();
+    }
+
+    pub fn window_created(window: &winit::window::Window) {
+        if let Ok(handle) = window.window_handle() {
+            if let RawWindowHandle::UiKit(h) = handle.as_raw() {
+                let view = h.ui_view.as_ptr() as *mut AnyObject;
+                let ui_window: *mut AnyObject = unsafe { msg_send![view, window] };
+                STATE.lock().unwrap().1 = ui_window as usize;
+                attach();
+            }
+        }
+    }
+}"#;

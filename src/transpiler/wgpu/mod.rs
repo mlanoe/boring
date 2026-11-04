@@ -465,6 +465,13 @@ fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
     } else {
         ""
     };
+    // The iOS scene delegate (`host::IOS_SCENE_RS`) talks to the Objective-C runtime. Before `[dependencies]`, which stays the
+    // last section: `kernel_target_cargo_toml` appends the project's own dependencies to the end of the manifest.
+    let ios_deps = if has_screen {
+        "[target.'cfg(target_os = \"ios\")'.dependencies]\nobjc2 = \"0.6\"\n\n"
+    } else {
+        ""
+    };
     format!(
         r#"[package]
 name = "{stem}"
@@ -475,7 +482,7 @@ edition = "2024"
 name = "{stem}"
 path = "src/main.rs"
 
-[dependencies]
+{ios_deps}[dependencies]
 wgpu = "25"
 bytemuck = {{ version = "1", features = ["derive"] }}
 half = {{ version = "2", features = ["bytemuck", "serde"] }}

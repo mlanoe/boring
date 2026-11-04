@@ -475,6 +475,26 @@ kernel:
     cargo_check(&project, "wgpu");
 }
 
+/// On iOS the generated host adopts the UIScene life cycle (winit 0.30 does not): a scene delegate class is registered before the
+/// event loop, winit's window is attached to the scene UIKit connects, and `objc2` is an iOS-only dependency placed before
+/// `[dependencies]` (the project's own dependencies are appended to the end of the manifest).
+#[test]
+fn wgpu_ios_scene_delegate() {
+    let (project, rs) = build("wgpu", "ios_scene", &events(TOUCH_LOOP));
+    assert!(rs.contains("mod __boring_scene {"), "{rs}");
+    assert!(rs.contains("ClassBuilder::new(c\"BoringSceneDelegate\", NSObject::class())"), "{rs}");
+    assert!(rs.contains("sel!(scene:willConnectToSession:options:)"), "{rs}");
+    assert!(rs.contains("c\"UISceneDelegate\""), "UIKit refuses a delegate that does not declare the protocols:\n{rs}");
+    assert!(rs.contains("#[cfg(target_os = \"ios\")]\n    __boring_scene::register();"), "registered before the event loop:\n{rs}");
+    assert!(rs.contains("#[cfg(target_os = \"ios\")]\n        __boring_scene::window_created(&window);"), "{rs}");
+    let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    let ios = manifest.find("[target.'cfg(target_os = \"ios\")'.dependencies]").expect("the iOS dependency table");
+    let deps = manifest.find("\n[dependencies]\n").expect("[dependencies]");
+    assert!(ios < deps, "[dependencies] must stay the last section:\n{manifest}");
+    assert!(manifest[ios..deps].contains("objc2 = \"0.6\""), "{manifest}");
+    cargo_check(&project, "wgpu");
+}
+
 /// The safe area's insets are readable members of `screen` (wgpu): read from winit's inner rectangle on iOS, 0 elsewhere.
 #[test]
 fn wgpu_safe_area_members() {
