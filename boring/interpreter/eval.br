@@ -258,8 +258,35 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 ExprKind.Var(fixed_tname):
                     if let sfmt = fixed_fmt_of_name(fixed_tname):
                         return fixed_static_call(sfmt, method, eval_args_with_hints(interp, args, []))
+                    # `mem.swap(a, b)` / `mem.replace(dest, v)` / `mem.take(dest)`: `mem` is a
+                    # module path, never a variable — act on the argument places directly.
+                    if fixed_tname == "mem":
+                        if method == "swap" and args.length == 2:
+                            let mem_a = eval_expr(interp, args[0].value)
+                            let mem_b = eval_expr(interp, args[1].value)
+                            assign_target(interp, args[0].value, mem_b)
+                            assign_target(interp, args[1].value, mem_a)
+                            return Value.Void
+                        if method == "replace" and args.length == 2:
+                            let mem_old = eval_expr(interp, args[0].value)
+                            let mem_new = eval_expr(interp, args[1].value)
+                            assign_target(interp, args[0].value, mem_new)
+                            return mem_old
+                        if method == "take" and args.length == 1:
+                            let mem_old = eval_expr(interp, args[0].value)
+                            assign_target(interp, args[0].value, default_like_value(mem_old))
+                            return mem_old
                 _: nil
             let recv = eval_expr(interp, recv_expr)
+            # `'atomic` scalar `.swap(v)`: store `v`, return the previous value.
+            if method == "swap" and args.length == 1:
+                let swap_scalar = match recv:
+                    Value.Bool(_): true
+                    _: num_kind_of(recv) != nil
+                if swap_scalar:
+                    let swap_new = eval_expr(interp, args[0].value)
+                    assign_target(interp, recv_expr, swap_new)
+                    return recv
             check_mutating_method_call(interp, recv_expr, recv, method)
             let hints = method_hint_types(interp, recv, method, args.length)
             let arg_vals = eval_args_with_hints(interp, args, hints)
@@ -397,8 +424,13 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 # Slice: a[M..<N], a[..<N], a[M..], a[..]
                 ExprKind.SliceRange(start_expr, end_expr, inclusive):
                     let obj = eval_expr(interp, obj_expr)
+                    # A string slices by character (`s[1..<3]`), like an array of its chars.
+                    let src_is_str = match obj:
+                        Value.Str(_): true
+                        _: false
                     let items = match obj:
                         Value.Array(v): v
+                        Value.Str(sv): sv.chars().map((c): Value.Str(c))
                         _: throw "slice requires an array, got {obj.type_name()}"
                     let len = items.length
                     var lo = 0
@@ -417,14 +449,25 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                         let adj = if inclusive: i + 1 else i
                         hi = if adj < 0: (len + adj).max(0) else adj.min(len)
                     if lo >= len or lo >= hi:
-                        Value.Array([])
+                        if src_is_str:
+                            Value.Str("")
+                        else:
+                            Value.Array([])
                     else:
                         mut result = []
                         var k = lo
                         while k < hi:
                             result.push(items[k])
                             k += 1
-                        Value.Array(result)
+                        if src_is_str:
+                            var joined = ""
+                            for ch in result:
+                                match ch:
+                                    Value.Str(cs): joined = joined + cs
+                                    _: nil
+                            Value.Str(joined)
+                        else:
+                            Value.Array(result)
                 _:
                     let obj = eval_expr(interp, obj_expr)
                     let idx = eval_expr(interp, idx_expr)
@@ -2357,6 +2400,10 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
         Value.Str(s):
             if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(s.length)
+            elif field_name == "graphemeCount":
+                Value.Int(s.graphemeCount)
+            elif field_name == "displayWidth":
+                Value.Int(s.displayWidth)
             else:
                 throw "no field '{field_name}' on string"
         Value.Array(items):
@@ -3424,6 +3471,31 @@ def void write_back_fn_var_args(mut Interpreter interp, Value callee, [Arg] args
         _: nil
 
 # Assignment to a target expression
+# The `Default` of the value's own type (`mem.take`).
+def Value default_like_value(Value v):
+    match v:
+        Value.Int(_): Value.Int(0)
+        Value.Uint(_): Value.Uint(0)
+        Value.Uint8(_): Value.Uint8(0)
+        Value.Int8(_): Value.Int8(0)
+        Value.Int16(_): Value.Int16(0)
+        Value.Int32(_): Value.Int32(0)
+        Value.Int64(_): Value.Int64(0)
+        Value.Int128(_): Value.Int128(0)
+        Value.Uint16(_): Value.Uint16(0)
+        Value.Uint32(_): Value.Uint32(0)
+        Value.Uint64(_): Value.Uint64(0)
+        Value.Uint128(_): Value.Uint128(0)
+        Value.Float16(_): Value.Float16(0.0 as float16)
+        Value.Float32(_): Value.Float32(0.0 as float32)
+        Value.Float64(_): Value.Float64(0.0)
+        Value.Bool(_): Value.Bool(false)
+        Value.Str(_): Value.Str("")
+        Value.Array(_): Value.Array([])
+        Value.Dict(_): Value.Dict([])
+        Value.Set(_): Value.Set([])
+        _: Value.Nil
+
 def void assign_target(mut Interpreter interp, Expr target, Value val):
     match target.kind:
         ExprKind.Var(name):

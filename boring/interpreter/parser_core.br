@@ -3193,6 +3193,13 @@ def Value call_native(mut Interpreter interp, string name, Value func, [Value] a
                     Value.Int(v): v as float32
                     _: throw "atan2: expected two numbers"
                 return Value.Float32(y.atan2(x))
+            Value.Float64(y0):
+                match args[1]:
+                    Value.Float32(x32): return Value.Float32((y0 as float32).atan2(x32))
+                    _: nil
+                guard let y = value_as_float64_widened(args[0]) else: throw "atan2: expected two numbers"
+                guard let x = value_as_float64_widened(args[1]) else: throw "atan2: expected two numbers"
+                return Value.Float64(y.atan2(x))
             _:
                 guard let y = value_as_float64_widened(args[0]) else: throw "atan2: expected two numbers"
                 guard let x = value_as_float64_widened(args[1]) else: throw "atan2: expected two numbers"
@@ -3282,6 +3289,14 @@ def Value call_native(mut Interpreter interp, string name, Value func, [Value] a
         return Value.Set([])
     if name == "Vec":
         return Value.Array([])
+    if is_unary_float_math(name):
+        let v = args[0] else Value.Nil
+        match v:
+            Value.Float64(f): return Value.Float64(apply_unary_f64(name, f))
+            Value.Float32(f): return Value.Float32(apply_unary_f32(name, f))
+            Value.Float16(h): return Value.Float16(apply_unary_f32(name, h as float32) as float16)
+            Value.Int(n): return Value.Float64(apply_unary_f64(name, float(n)))
+            _: throw "{name}: expected number"
     if name == "sin":
         let v = args[0] else Value.Nil
         match v:
@@ -3344,6 +3359,8 @@ def Value call_native(mut Interpreter interp, string name, Value func, [Value] a
                 match exp:
                     Value.Float64(e): return Value.Float64(b.powf(e))
                     Value.Int(e): return Value.Float64(b.powf(float(e)))
+                    # literal-first form: the width comes from the second operand
+                    Value.Float32(e): return Value.Float32((b as float32).powf(e))
                     _: throw "pow: expected number"
             Value.Int(b):
                 match exp:
@@ -3420,6 +3437,33 @@ def ThrowsTask parse_closure_modifiers(mut Parser p) throws:
 
 def bool parser_allow_trailing_closure(mut Parser p):
     p.allow_trailing_closure
+
+# Unary float math (asin/acos/atan/sinh/cosh/tanh/asinh/acosh/atanh), one helper per width
+# so each uses that width's own libm function.
+float64 apply_unary_f64(string name, float64 f):
+    if name == "asin": return f.asin()
+    if name == "acos": return f.acos()
+    if name == "atan": return f.atan()
+    if name == "sinh": return f.sinh()
+    if name == "cosh": return f.cosh()
+    if name == "tanh": return f.tanh()
+    if name == "asinh": return f.asinh()
+    if name == "acosh": return f.acosh()
+    f.atanh()
+
+float32 apply_unary_f32(string name, float32 f):
+    if name == "asin": return f.asin()
+    if name == "acos": return f.acos()
+    if name == "atan": return f.atan()
+    if name == "sinh": return f.sinh()
+    if name == "cosh": return f.cosh()
+    if name == "tanh": return f.tanh()
+    if name == "asinh": return f.asinh()
+    if name == "acosh": return f.acosh()
+    f.atanh()
+
+bool is_unary_float_math(string name):
+    name == "asin" or name == "acos" or name == "atan" or name == "sinh" or name == "cosh" or name == "tanh" or name == "asinh" or name == "acosh" or name == "atanh"
 
 # One generic argument: a type, optionally labelled (`T = int`).
 def Type parse_generic_type_arg(mut Parser p) throws:

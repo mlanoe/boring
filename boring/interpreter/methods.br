@@ -1,3 +1,4 @@
+use std.time.SystemTime, UNIX_EPOCH
 # == BUILT-IN METHODS ==
 
 # Generalized instead of one hand-written match arm per numeric-kind pair —
@@ -338,12 +339,125 @@ def void view_sync(mut Interpreter interp, Value target, bool slotted_only, int 
                         interp.current_env.force_set(vf.0, shown)
         _: nil
 
+# `std.time` — `Duration` (an object with a `nanos` field) and `SystemTime`
+# (`unixNanos`), same representation as the Rust tree-walk interpreter.
+def Value duration_value(uint128 nanos):
+    Value.Object(ObjectInner(type_name= "Duration", fields= [("nanos", Value.Uint128(nanos))]))
+
+def uint128? duration_nanos_of(Value v):
+    match v:
+        Value.Object(inner):
+            if inner.type_name != "Duration":
+                return nil
+            for f in inner.fields:
+                if f.0 == "nanos":
+                    match f.1:
+                        Value.Uint128(n): return n
+                        _: nil
+            nil
+        _: nil
+
+def uint128? system_time_nanos_of(Value v):
+    match v:
+        Value.Object(inner):
+            if inner.type_name != "SystemTime":
+                return nil
+            for f in inner.fields:
+                if f.0 == "unixNanos":
+                    match f.1:
+                        Value.Uint128(n): return n
+                        _: nil
+            nil
+        _: nil
+
+def int128? std_time_int_arg([Value] args):
+    if args.length == 0:
+        return nil
+    let a = args[0]
+    match a:
+        Value.Int(n): n as int128
+        Value.Uint(n): n as int128
+        Value.Int64(n): n as int128
+        Value.Uint64(n): n as int128
+        Value.Int32(n): n as int128
+        Value.Uint32(n): n as int128
+        _: nil
+
+Value? std_time_method(Value recv, string method_name, [Value] args):
+    match recv:
+        Value.NativeFn(nname, _):
+            if nname == "Duration":
+                var unit = 0
+                if method_name == "from_secs" or method_name == "fromSecs":
+                    unit = 1000000000
+                elif method_name == "from_millis" or method_name == "fromMillis":
+                    unit = 1000000
+                elif method_name == "from_micros" or method_name == "fromMicros":
+                    unit = 1000
+                elif method_name == "from_nanos" or method_name == "fromNanos":
+                    unit = 1
+                if unit == 0:
+                    return nil
+                if args.length > 0:
+                    match args[0]:
+                        Value.Float64(f):
+                            return duration_value((f * (unit as float64)) as uint128)
+                        _: nil
+                guard let n = std_time_int_arg(args) else: return nil
+                if n < 0:
+                    throw "Duration: negative amount"
+                return duration_value((n * (unit as int128)) as uint128)
+            if nname == "SystemTime" and method_name == "now":
+                let since_opt = try? SystemTime.now().durationSince(UNIX_EPOCH)
+                guard let since = since_opt else: throw "SystemTime.now: clock before the Unix epoch"
+                return Value.Object(ObjectInner(type_name= "SystemTime", fields= [("unixNanos", Value.Uint128(since.asNanos() as uint128))]))
+            nil
+        Value.Object(inner):
+            if inner.type_name == "Duration":
+                guard let nanos = duration_nanos_of(recv) else: return nil
+                if method_name == "asSecs" or method_name == "as_secs":
+                    return Value.Uint64((nanos / 1000000000) as uint64)
+                if method_name == "asMillis" or method_name == "as_millis":
+                    return Value.Uint128(nanos / 1000000)
+                if method_name == "asMicros" or method_name == "as_micros":
+                    return Value.Uint128(nanos / 1000)
+                if method_name == "asNanos" or method_name == "as_nanos":
+                    return Value.Uint128(nanos)
+                return nil
+            if inner.type_name == "SystemTime" and method_name == "durationSince":
+                guard let current = system_time_nanos_of(recv) else: return nil
+                var earlier = 0
+                if args.length > 0:
+                    match args[0]:
+                        Value.NativeFn(en, _):
+                            if en != "UNIX_EPOCH":
+                                throw "durationSince expects a SystemTime"
+                        _:
+                            guard let other = system_time_nanos_of(args[0]) else: throw "durationSince expects a SystemTime"
+                            earlier = other as int
+                if (current as int) < earlier:
+                    throw "the second SystemTime is later than the first"
+                return duration_value((current as int128 - earlier as int128) as uint128)
+            nil
+        _: nil
+
 def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
     match recv:
         Value.Fixed(fraw, fsg, fn_, fm):
             if let fres = fixed_method(fraw, FixedFmt(signed = fsg, n = fn_, m = fm), method_name, args):
                 return fres
         _: nil
+    if let std_res = std_time_method(recv, method_name, args):
+        return std_res
+    # Optionals are transparent (`T?` is the value or nil): a Rust-style `Option::unwrap_or`
+    # on a present struct/enum value yields the value itself, unless the type declares its own.
+    if (method_name == "unwrap_or" or method_name == "unwrapOr") and args.length == 1:
+        match recv:
+            Value.Object(uo_inner):
+                let own = interp.find_best_method(uo_inner.type_name, method_name, args)
+                if not (own != nil):
+                    return recv
+            _: nil
     if method_name == "clone" and args.length == 0:
         return clone_value(interp, recv)
     let recv_type = recv.type_name()
@@ -471,6 +585,20 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Str(s.toLower())
                 "chars":
                     Value.Array(s.chars().map((c): Value.Str(c)))
+                "graphemes":
+                    Value.Array(s.graphemes().map((g): Value.Str(g)))
+                "graphemeSlice":
+                    let gn = s.graphemeCount
+                    let from_raw = match (args[0] else Value.Int(0)):
+                        Value.Int(n): n
+                        _: 0
+                    let to_raw = match (args[1] else Value.Int(gn)):
+                        Value.Int(n): n
+                        _: gn
+                    # Out-of-range bounds clamp to [0, graphemeCount]; an inverted range is "".
+                    let from_i = from_raw.max(0).min(gn)
+                    let to_i = to_raw.max(0).min(gn)
+                    Value.Str(s.graphemeSlice(from_i, to_i))
                 "lines":
                     Value.Array(s.split("\n").map((l): Value.Str(l)))
                 "slice":
