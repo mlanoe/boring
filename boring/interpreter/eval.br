@@ -1985,19 +1985,32 @@ Value? apply_binop_f32_mixed(BinOp op, Value l, Value r):
         BinOp.Rem: Value.Float32(lf % rf)
         _: nil
 
-# BitAnd/BitOr/BitXor — same-kind only (matches the existing, stricter policy:
-# unlike arithmetic, bitwise ops never mix with the bare Int/Uint kind either).
+# BitAnd/BitOr/BitXor — same kind, or a bare `int` adopting the other operand's kind.
 Value? apply_binop_bitwise_samekind(BinOp op, Value l, Value r):
     guard let ka = num_kind_of(l) else: return nil
     guard let kb = num_kind_of(r) else: return nil
+    # A bare `int` (what an unannotated literal / `let r = 3` is) adopts the
+    # other operand's width, as in arithmetic; two distinct sized kinds still mismatch.
+    var k = ka
     if ka != kb:
-        return nil
+        let l_bare = match ka:
+            NumKind.Int: true
+            _: false
+        let r_bare = match kb:
+            NumKind.Int: true
+            _: false
+        if l_bare:
+            k = kb
+        elif r_bare:
+            k = ka
+        else:
+            return nil
     guard let lv = value_as_i128(l) else: return nil
     guard let rv = value_as_i128(r) else: return nil
     match op:
-        BinOp.BitAnd: i128_to_kind(ka, lv & rv)
-        BinOp.BitOr: i128_to_kind(ka, lv | rv)
-        BinOp.BitXor: i128_to_kind(ka, lv ^ rv)
+        BinOp.BitAnd: i128_to_kind(k, lv & rv)
+        BinOp.BitOr: i128_to_kind(k, lv | rv)
+        BinOp.BitXor: i128_to_kind(k, lv ^ rv)
         _: nil
 
 # Shl/Shr — result kind always follows the *left* operand's own kind (shifting

@@ -38,8 +38,22 @@ def [Stmt] parse_inline_stmts_if_body(mut Parser p) throws:
 def string parser_peek_kind(mut Parser p):
     token_kind_name(p.peek())
 
+# `<<=` / `>>=` arrive as two tokens (`<` `<=`, `>` `>=`): the compound operator then
+# spans two tokens instead of one.
+def bool parser_at_shift_assign(mut Parser p):
+    (parser_check(p, "Lt") and parser_check2(p, "LtEq")) or (parser_check(p, "Gt") and parser_check2(p, "GtEq"))
+
+def int compound_op_width(string op):
+    if op == "Shl" or op == "Shr":
+        return 2
+    return 1
+
 def string? compound_op_from_peek(mut Parser p):
     let k = parser_peek_kind(p)
+    if parser_at_shift_assign(p):
+        if k == "Lt":
+            return "Shl"
+        return "Shr"
     match k:
         "PlusEq": "Plus"
         "MinusEq": "Minus"
@@ -53,6 +67,8 @@ def string? compound_op_from_peek(mut Parser p):
 
 def string? comparison_op_from_peek(mut Parser p):
     let k = parser_peek_kind(p)
+    if parser_at_shift_assign(p):
+        return nil
     match k:
         "Lt": "Lt"
         "Gt": "Gt"
@@ -113,6 +129,8 @@ def Stmt parse_inline_stmt_impl(mut Parser p, bool stop_at_else) throws:
     let op = compound_op_from_peek(p)
     if let op_val = op:
         parser_advance(p)
+        if compound_op_width(op_val) == 2:
+            parser_advance(p)
         let rhs = parse_or(p)
         let binop = make_binop(op_val, lhs.clone(), rhs, line)
         return stmt_expr(make_assign(lhs, binop, line), line)
@@ -534,9 +552,9 @@ def Expr parse_postfix_inner(mut Parser p, bool allow_chain) throws:
                 expr = make_optional_field(expr, field, line)
         elif parser_check(p, "Lt") and parser_peek_generic_args_at(p, 0):
             parser_advance(p)
-            mut type_args = [parse_type(p)]
+            mut type_args = [parse_generic_type_arg(p)]
             while parser_eat(p, "Comma"):
-                type_args.push(parse_type(p))
+                type_args.push(parse_generic_type_arg(p))
             parser_expect(p, "Gt")
             let args = parse_call_args(p)
             expr = make_generic_call(expr, type_args, args, line)
@@ -713,11 +731,11 @@ def Expr parse_primary(mut Parser p) throws:
         if parser_peek_is_generic_call(p):
             parser_advance(p)
             parser_advance(p)
-            mut type_args = [parse_type(p)]
+            mut type_args = [parse_generic_type_arg(p)]
             while parser_eat(p, "Comma"):
                 if parser_check(p, "Gt"):
                     break
-                type_args.push(parse_type(p))
+                type_args.push(parse_generic_type_arg(p))
             parser_expect(p, "Gt")
             let callee = make_var_expr(name, line)
             let args = if parser_check(p, "LParen"): parse_call_args(p) else: []
@@ -1425,6 +1443,8 @@ def Stmt parse_stmt(mut Parser p) throws:
     let compound_op = compound_op_from_peek(p)
     if let op = compound_op:
         parser_advance(p)
+        if compound_op_width(op) == 2:
+            parser_advance(p)
         let rhs = parse_else_expr(p)
         let binop = make_binop(op, lhs, rhs, line)
         parser_expect_newline(p)
