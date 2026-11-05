@@ -152,10 +152,54 @@ fn rewrite_items(items: &mut [Item], mods: &Modifiers, views: &HashSet<String>) 
     walk_bodies(items, &mut |body| rewrite_body(body, mods, views));
 }
 
-/// Rewrites every method-form modifier call in `program` (see the module doc).
-pub fn desugar_view_modifiers(items: &mut [Item]) {
+/// Collects the views of the files `items` `use`s (a sibling file, a `[deps]` project), transitively.
+fn collect_imported(
+    items: &[Item],
+    dir: &std::path::Path,
+    deps: &HashMap<String, std::path::PathBuf>,
+    visited: &mut HashSet<std::path::PathBuf>,
+    mods: &mut Modifiers,
+    views: &mut HashSet<String>,
+) {
+    for item in items {
+        let Item::Use(u) = item else {
+            if let Item::Mod(m) = item { collect_imported(&m.items, dir, deps, visited, mods, views); }
+            continue;
+        };
+        let Some(first) = u.path.first() else { continue };
+        if first == "boring" { continue; }
+        let path = if let Some(root) = deps.get(first.as_str()) {
+            let rel: std::path::PathBuf = u.path[1..].iter().collect();
+            root.join(rel).with_extension("br")
+        } else {
+            let rel: std::path::PathBuf = u.path.iter().collect();
+            dir.join(rel).with_extension("br")
+        };
+        let Ok(path) = path.canonicalize() else { continue };
+        if !visited.insert(path.clone()) { continue; }
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let Ok(tokens) = crate::lexer::lex_all(&src) else { continue };
+        let Ok(file) = crate::parser::parse(tokens) else { continue };
+        collect(&file.items, mods, views);
+        if let Some(file_dir) = path.parent() {
+            collect_imported(&file.items, file_dir, deps, visited, mods, views);
+        }
+    }
+}
+
+/// Rewrites every method-form modifier call in `program` (see the module doc). Views declared in
+/// files `use`d from `source_dir` (siblings, `[deps]` projects) count as modifiers too.
+pub fn desugar_view_modifiers(
+    items: &mut [Item],
+    source_dir: Option<&std::path::Path>,
+    deps: &HashMap<String, std::path::PathBuf>,
+) {
     let mut mods = Modifiers::new();
     let mut views = HashSet::new();
+    if let Some(dir) = source_dir {
+        collect_imported(items, dir, deps, &mut HashSet::new(), &mut mods, &mut views);
+    }
+    // Local declarations last, so they override an imported view of the same name.
     collect(items, &mut mods, &mut views);
     if mods.is_empty() { return; }
     rewrite_items(items, &mods, &views);

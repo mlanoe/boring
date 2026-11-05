@@ -1056,7 +1056,7 @@ pub fn lower_views_with_imports(
     if let Some(e) = crate::checker::check_view_declarations(&program).into_iter().next() {
         return Err(err(e.message, e.line, e.col));
     }
-    crate::desugar_view_modifiers::desugar_view_modifiers(&mut program.items);
+    crate::desugar_view_modifiers::desugar_view_modifiers(&mut program.items, source_dir, deps);
     if declares(&program.items, &|i| matches!(i, Item::Trait(t) if t.name == "View")) || has_ui_use(&program.items) {
         rewrite_seed_calls(&mut program.items);
     }
