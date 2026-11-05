@@ -441,6 +441,65 @@ Value? std_time_method(Value recv, string method_name, [Value] args):
             nil
         _: nil
 
+# `Introspect` (`x.introspect()`): `info.typeName`, `info.variantName`, `info.fields`, and
+# `Field.get(instance)` returning a `FieldValue`-wrapped value — what the transpiled program sees.
+def Value field_value_wrapped(Value v):
+    let tag = match v:
+        Value.Int(_): "Int"
+        Value.Float64(_): "Float"
+        Value.Float32(_): "Float"
+        Value.Bool(_): "Bool"
+        Value.Str(_): "Str"
+        _: "Other"
+    Value.EnumVariant("FieldValue", tag, [v])
+
+def Value introspect_field(string name, int index):
+    Value.Object(ObjectInner(type_name= "Field", fields= [("name", Value.Str(name)), ("index", Value.Int(index))]))
+
+Value? introspect_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
+    match recv:
+        Value.Object(inner):
+            if inner.type_name == "Field" and method_name == "get" and args.length == 1:
+                guard let fname_v = inner.get_field("name") else: return nil
+                let fname = match fname_v:
+                    Value.Str(n): n
+                    _: ""
+                match args[0]:
+                    Value.Object(target):
+                        guard let fv = target.get_field(fname) else: throw "Field.get: no such field"
+                        return field_value_wrapped(fv)
+                    Value.EnumVariant(_, _, evfields):
+                        guard let idx_v = inner.get_field("index") else: return nil
+                        match idx_v:
+                            Value.Int(i): return field_value_wrapped(evfields[i])
+                            _: return nil
+                    _: return nil
+            if method_name == "introspect" and args.length == 0:
+                guard let sd = interp.get_struct_decl(inner.type_name) else: return nil
+                mut flds = []
+                var i = 0
+                for f in sd.fields:
+                    flds.push(introspect_field(f.name, i))
+                    i += 1
+                return Value.Object(ObjectInner(type_name= "IntrospectInfo", fields= [("typeName", Value.Str(sd.name)), ("fields", Value.Array(flds))]))
+            nil
+        Value.EnumVariant(tname, vname, _):
+            if method_name == "introspect" and args.length == 0:
+                guard let ed = interp.get_enum_decl(tname) else: return nil
+                mut flds = []
+                for v in ed.variants:
+                    if v.name == vname:
+                        var j = 0
+                        for vf in v.fields:
+                            var fname = "{j}"
+                            if let vfn = vf.name:
+                                fname = vfn
+                            flds.push(introspect_field(fname, j))
+                            j += 1
+                return Value.Object(ObjectInner(type_name= "IntrospectInfo", fields= [("typeName", Value.Str(ed.name)), ("variantName", Value.Str(vname)), ("fields", Value.Array(flds))]))
+            nil
+        _: nil
+
 def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
     match recv:
         Value.Fixed(fraw, fsg, fn_, fm):
@@ -449,6 +508,9 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
         _: nil
     if let std_res = std_time_method(recv, method_name, args):
         return std_res
+    if method_name == "introspect" or method_name == "get":
+        if let intro = introspect_method(interp, recv, method_name, args):
+            return intro
     # Optionals are transparent (`T?` is the value or nil): a Rust-style `Option::unwrap_or`
     # on a present struct/enum value yields the value itself, unless the type declares its own.
     if (method_name == "unwrap_or" or method_name == "unwrapOr") and args.length == 1:
@@ -458,6 +520,21 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 if not (own != nil):
                     return recv
             _: nil
+    # Rust's `is_positive` / `is_negative` on signed integers.
+    if args.length == 0 and (method_name == "isPositive" or method_name == "is_positive" or method_name == "isNegative" or method_name == "is_negative"):
+        let signed = match recv:
+            Value.Int(_): true
+            Value.Int8(_): true
+            Value.Int16(_): true
+            Value.Int32(_): true
+            Value.Int64(_): true
+            Value.Int128(_): true
+            _: false
+        if signed:
+            if let sv = value_as_i128(recv):
+                if method_name == "isPositive" or method_name == "is_positive":
+                    return Value.Bool(sv > 0)
+                return Value.Bool(sv < 0)
     if method_name == "clone" and args.length == 0:
         return clone_value(interp, recv)
     let recv_type = recv.type_name()
@@ -585,6 +662,10 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     Value.Str(s.toLower())
                 "chars":
                     Value.Array(s.chars().map((c): Value.Str(c)))
+                "as_bytes":
+                    Value.Array(s.as_bytes().map((b): Value.Uint8(b)))
+                "asBytes":
+                    Value.Array(s.as_bytes().map((b): Value.Uint8(b)))
                 "graphemes":
                     Value.Array(s.graphemes().map((g): Value.Str(g)))
                 "graphemeSlice":

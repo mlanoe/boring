@@ -3289,6 +3289,29 @@ def Value call_native(mut Interpreter interp, string name, Value func, [Value] a
         return Value.Set([])
     if name == "Vec":
         return Value.Array([])
+    # `Box(v)`: an opaque deref cell whose `.pointee` is the boxed value.
+    if name == "Box":
+        var boxed = args[0] else Value.Nil
+        match boxed:
+            Value.Labeled(_, lv): boxed = lv
+            _: nil
+        return Value.Object(ObjectInner(type_name= "Box", fields= [("pointee", boxed)]))
+    # `Range(start = a, end = b)` / `Range(a, b)` — a std::ops::Range.
+    if name == "Range" and args.length == 2:
+        var r0 = args[0]
+        var r1 = args[1]
+        match r0:
+            Value.Labeled(_, lv): r0 = lv
+            _: nil
+        match r1:
+            Value.Labeled(_, lv): r1 = lv
+            _: nil
+        match r0:
+            Value.Int(ra):
+                match r1:
+                    Value.Int(rb): return Value.Range(ra, rb, false, 1)
+                    _: nil
+            _: nil
     if is_unary_float_math(name):
         let v = args[0] else Value.Nil
         match v:

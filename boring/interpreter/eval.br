@@ -2406,6 +2406,13 @@ def Value get_field(mut Interpreter interp, Value obj, string field_name):
                 Value.Int(s.displayWidth)
             else:
                 throw "no field '{field_name}' on string"
+        Value.Range(rs, re_, _, _):
+            if field_name == "start":
+                Value.Int(rs)
+            elif field_name == "end":
+                Value.Int(re_)
+            else:
+                throw "no field '{field_name}' on range"
         Value.Array(items):
             if field_name == "length" or field_name == "count" or field_name == "len":
                 Value.Int(items.length)
@@ -2965,7 +2972,10 @@ req string format_value(Interpreter interp, Value val, string spec):
             if flag_plus and fv >= 0.0:
                 raw = "+" + raw
         _:
-            raw = display_value(interp, val)
+            if type_char == "?":
+                raw = debug_value(interp, val)
+            else:
+                raw = display_value(interp, val)
     # Apply width padding
     if width > raw.length:
         let pad_count = width - raw.length
@@ -3073,6 +3083,36 @@ req string float_to_scientific(float f, int prec):
     "{mantissa}e{exp}"
 
 # Display a value as string for interpolation
+# Rust's `{:?}`: strings are quoted, floats keep their `.0`, containers recurse.
+req string debug_value(Interpreter interp, Value val):
+    match val:
+        Value.Str(sv):
+            let escaped = sv.replace("\\", "\\\\").replace("\"", "\\\"")
+            "\"{escaped}\""
+        Value.Float64(fv): float_debug_str(fv)
+        Value.EnumVariant(type_name, variant, fields):
+            if fields.length == 0:
+                display_value(interp, val)
+            else:
+                var result = "{variant}("
+                var i = 0
+                while i < fields.length:
+                    if i > 0:
+                        result = result + ", "
+                    result = result + debug_value(interp, fields[i])
+                    i = i + 1
+                result + ")"
+        Value.Array(items):
+            var result = "["
+            var i = 0
+            while i < items.length:
+                if i > 0:
+                    result = result + ", "
+                result = result + debug_value(interp, items[i])
+                i = i + 1
+            result + "]"
+        _: display_value(interp, val)
+
 req string display_value(Interpreter interp, Value val):
     match val:
         Value.Nil: "nil"

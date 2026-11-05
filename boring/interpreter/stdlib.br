@@ -685,7 +685,7 @@ def void register_stdlib(mut Interpreter interp):
     for math_fn in ["sin", "cos", "tan", "round", "floor", "ceil", "pow", "log", "ln", "log2", "log10", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh"]:
         env_define(env, math_fn, Value.NativeFn(math_fn, Value.Nil), false)
 
-    for time_name in ["Duration", "SystemTime", "UNIX_EPOCH"]:
+    for time_name in ["Duration", "SystemTime", "UNIX_EPOCH", "Box", "Range"]:
         env_define(env, time_name, Value.NativeFn(time_name, Value.Nil), false)
 
     let hashmap_fn = Value.NativeFn("HashMap", Value.Nil)
