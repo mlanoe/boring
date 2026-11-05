@@ -690,6 +690,17 @@ impl Transpiler {
         if is_split_or_chars && s.ty.is_none() {
             self.var_types.insert(s.name.clone(), Type::Array(Box::new(Type::Named("string".to_string()))));
         }
+        // `mut xs = [Decl]{}` (typed-empty idiom, see `emit_expr`'s `ExprKind::Array` arm): the
+        // local is a `[Decl]`, so a `for m in xs:` loop variable resolves to `Decl`.
+        if s.ty.is_none() {
+            if let ExprKind::Array(elems) = &s_value.kind {
+                if let [Expr { kind: ExprKind::Var(tn), .. }] = elems.as_slice() {
+                    if self.struct_fields.contains_key(tn.as_str()) && !self.var_types.contains_key(&s.name) {
+                        self.var_types.insert(s.name.clone(), Type::Array(Box::new(Type::Named(tn.clone()))));
+                    }
+                }
+            }
+        }
         // Track HashSet variables for `remove(&v)` and `add`→`insert` dispatch.
         if matches!(decl_ty, Some(Type::Set(_)))
             || val.starts_with("HashSet::")
@@ -2746,6 +2757,13 @@ impl Transpiler {
                         || self.bare_self_field_collection_needs_clone(v)
                         || (self.is_owned_collection_local(v) && !self.is_last_use_move(value)) => {
                         format!("{}.clone()", self.emit_expr(value))
+                    }
+                    // `m.names` of a local/param struct: a plain read is a partial move out of it
+                    // (E0507 when `m` is a borrowed loop element).
+                    ExprKind::Field(obj, _) if matches!(&obj.kind, ExprKind::Var(ov) if ov != "self")
+                        && self.field_read_needs_clone(value) => {
+                        let s = self.emit_expr(value);
+                        if s.ends_with(".clone()") { s } else { format!("{}.clone()", s) }
                     }
                     _ => self.emit_expr(value),
                 }

@@ -192,7 +192,7 @@ def string parser_expect_ident_or_keyword(mut Parser p) throws:
     if name == "Join":
         p.advance()
         return "join"
-    if name == "Ident" or name == "Let" or name == "Var" or name == "Def" or name == "Return" or name == "If" or name == "For" or name == "While" or name == "Match" or name == "Type" or name == "Set" or name == "Get" or name == "In" or name == "Is" or name == "As" or name == "Mod" or name == "Nil" or name == "Wait" or name == "Task" or name == "Use":
+    if name == "Ident" or name == "Let" or name == "Var" or name == "Def" or name == "Return" or name == "If" or name == "For" or name == "While" or name == "Match" or name == "Type" or name == "Set" or name == "Get" or name == "In" or name == "Is" or name == "As" or name == "Mod" or name == "Nil" or name == "Wait" or name == "Task" or name == "Use" or name == "With":
         return p.advance().text()
     throw "expected identifier or keyword, got {name}"
 
@@ -350,7 +350,7 @@ def bool parser_peek_generic_args_at(mut Parser p, int offset):
             depth += 1
         elif kind == "Gt":
             depth -= 1
-        elif kind != "Ident" and kind != "Void" and kind != "Comma" and kind != "Question" and kind != "LBracket" and kind != "RBracket" and kind != "LBrace" and kind != "RBrace" and kind != "Eq" and kind != "Int" and kind != "Tick" and kind != "Ampersand" and kind != "Mut" and kind != "Dot":
+        elif kind != "Ident" and kind != "Void" and kind != "Comma" and kind != "Question" and kind != "LBracket" and kind != "RBracket" and kind != "LBrace" and kind != "RBrace" and kind != "Eq" and kind != "Int" and kind != "Tick" and kind != "Ampersand" and kind != "Mut" and kind != "Dot" and kind != "Guard":
             return false
         i += 1
     token_kind_name(parser_peek_token_at(p, i).kind) == "LParen"
@@ -457,6 +457,25 @@ def void parser_depth_dec(mut Parser p) throws:
     let d = p.depth
     p.depth = d - 1
 
+# Offset just past the `<...>` that opens at `off` (type-ish tokens only), or -1.
+def int parser_skip_generics_at(mut Parser p, int off):
+    if not parser_token_at_offset_is(p, off, "Lt"):
+        return -1
+    var gi = off + 1
+    var gd = 1
+    while gd > 0 and gi < off + 60:
+        let gk = token_kind_name(parser_peek_token_at(p, gi).kind)
+        if gk == "Lt":
+            gd = gd + 1
+        elif gk == "Gt":
+            gd = gd - 1
+        elif gk != "Ident" and gk != "Void" and gk != "Comma" and gk != "Question" and gk != "LBracket" and gk != "RBracket" and gk != "LBrace" and gk != "RBrace" and gk != "Eq" and gk != "Int" and gk != "Tick" and gk != "Ampersand" and gk != "Mut" and gk != "Dot" and gk != "Guard" and gk != "As" and gk != "Pipe" and gk != "Newline" and gk != "Indent" and gk != "Dedent":
+            return -1
+        gi = gi + 1
+    if gd != 0:
+        return -1
+    gi
+
 def bool parser_is_type_start_before_ident(mut Parser p):
     # returns true when current tokens look like "Type Ident" (typed binding)
     let k0 = token_kind_name(parser_peek_token_at(p, 0).kind)
@@ -493,6 +512,24 @@ def bool parser_is_type_start_before_ident(mut Parser p):
     if k1 == "Question":
         let k2 = token_kind_name(parser_peek_token_at(p, 2).kind)
         return k2 == "Ident"
+    if k1 == "Lt":
+        # Generic type before the binding name: `Board<elem'inline> b`. Only a
+        # balanced `<...>` of type-ish tokens followed by an identifier counts.
+        var gi = 2
+        var gd = 1
+        while gd > 0 and gi < 60:
+            let gk = token_kind_name(parser_peek_token_at(p, gi).kind)
+            if gk == "Lt":
+                gd = gd + 1
+            elif gk == "Gt":
+                gd = gd - 1
+            elif gk != "Ident" and gk != "Void" and gk != "Comma" and gk != "Question" and gk != "LBracket" and gk != "RBracket" and gk != "LBrace" and gk != "RBrace" and gk != "Eq" and gk != "Int" and gk != "Tick" and gk != "Ampersand" and gk != "Mut" and gk != "Dot" and gk != "Guard":
+                return false
+            gi = gi + 1
+        if gd != 0:
+            return false
+        let ga = token_kind_name(parser_peek_token_at(p, gi).kind)
+        return ga == "Ident" or (ga == "Question" and parser_token_at_offset_is(p, gi + 1, "Ident"))
     if k1 == "Tick":
         # T'qual Ident or T'? Ident or T'qual? Ident or T'shared'weak Ident
         var scan = 2
@@ -617,7 +654,19 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
             # Optional qualified return: `Node'shared? pick(...)`.
             if parser_token_at_offset_is(p, name_off, "Question"):
                 name_off = name_off + 1
-        let lparen_off = name_off + 1
+        # Generic return type: `Board<elem'q> make()` / `Result<int, string>? f()`.
+        if parser_token_at_offset_is(p, 1, "Lt"):
+            let after_rt = parser_skip_generics_at(p, 1)
+            if after_rt > 0:
+                name_off = after_rt
+                if parser_token_at_offset_is(p, name_off, "Question"):
+                    name_off = name_off + 1
+        var lparen_off = name_off + 1
+        # Generic function: `int count<'q>(...)` — skip the `<...>` after the name.
+        if parser_token_at_offset_is(p, name_off, "Ident") and parser_token_at_offset_is(p, lparen_off, "Lt"):
+            let after_g = parser_skip_generics_at(p, lparen_off)
+            if after_g > 0:
+                lparen_off = after_g
         if parser_token_at_offset_is(p, name_off, "Ident") and parser_token_at_offset_is(p, lparen_off, "LParen"):
             let params_off = lparen_off + 1
             # Check inside parens: empty parens → might be decl if followed by colon
@@ -628,6 +677,9 @@ def bool parser_is_fn_shorthand(mut Parser p) throws:
             let p1 = token_kind_name(parser_peek_token_at(p, params_off + 1).kind)
             if p0 == "Ident" and p1 == "Ident": return true
             if p0 == "Ident" and p1 == "Question" and parser_token_at_offset_is(p, params_off + 2, "Ident"): return true
+            if p0 == "Ident" and p1 == "Lt":
+                let after_pg = parser_skip_generics_at(p, params_off + 1)
+                if after_pg > 0 and parser_token_at_offset_is(p, after_pg, "Ident"): return true
             # [type] param — p1 must be Ident (type name), not a literal
             if p0 == "LBracket" and p1 == "Ident": return true
             if p0 == "LBrace" and p1 == "Ident": return true
@@ -867,6 +919,14 @@ def FnDecl parse_fn_decl_shorthand(mut Parser p) throws:
     let line = p.current_line()
     let return_ty = parse_type(p)
     let name = parser_expect_ident_or_keyword(p)
+    if p.eat(TokenKind.Lt):
+        var gdepth = 1
+        while gdepth > 0 and p.peek() != TokenKind.Eof:
+            if p.peek() == TokenKind.Lt:
+                gdepth = gdepth + 1
+            elif p.peek() == TokenKind.Gt:
+                gdepth = gdepth - 1
+            p.advance()
     mut [Param] params = []
     p.expect(TokenKind.LParen)
     while p.peek() != TokenKind.RParen:
@@ -882,7 +942,7 @@ def FnDecl parse_fn_decl_shorthand(mut Parser p) throws:
     FnDecl(name= name, params= params, return_ty= return_ty, can_throw= can_throw, mutating= true, is_pub= false, body= body, line= line, qualifier= nil, is_task= false, is_stream= false, stream_capacity= nil, is_native= false, throws_ty= nil, type_params= [], where_clause= [], attrs= [])
 
 def bool token_is_fn_name_like(string n):
-    n == "Ident" or n == "Get" or n == "Set" or n == "In" or n == "Mod" or n == "Nil" or n == "Is" or n == "Tick"
+    n == "Ident" or n == "Get" or n == "Set" or n == "In" or n == "Mod" or n == "Nil" or n == "Is" or n == "Tick" or n == "With"
 
 def FnDecl parse_fn_decl(mut Parser p, bool is_pub, bool is_def) throws:
     let line = p.current_line()
@@ -1473,8 +1533,7 @@ def StructDecl parse_view_decl(mut Parser p, bool is_pub) throws:
                 tj = tj + 1
         ti = ti + 1
     mut [FnDecl] lowered = []
-    for m0 in methods:
-        let FnDecl m = m0
+    for m in methods:
         mut [Param] mparams = m.params
         if state_fields.length > 0:
             mparams.push(Param(name= "__st", ty= Type.Named(state_name), mutable= true, owned= false, variadic= false, default= nil, line= m.line))
@@ -2543,6 +2602,15 @@ def Pattern parse_pattern_inner(mut Parser p) throws:
         return Pattern.Some(Pattern.Wildcard)
     if name == "None" or name == "none":
         return Pattern.None
+    # Instance-qualified pattern: `Slot<elem'inline>.Full(p)` — the interpreter is
+    # qualifier-blind, so skip the `<...>`.
+    if parser_check(p, "Lt"):
+        let after_pg = parser_skip_generics_at(p, 0)
+        if after_pg > 0 and parser_token_at_offset_is(p, after_pg, "Dot"):
+            var skip_n = after_pg
+            while skip_n > 0:
+                p.advance()
+                skip_n = skip_n - 1
     # Qualified: Name.Variant or Name.Variant(fields)
     if parser_eat(p, "Dot"):
         let variant = parser_expect_ident(p)
@@ -3353,6 +3421,13 @@ def ThrowsTask parse_closure_modifiers(mut Parser p) throws:
 def bool parser_allow_trailing_closure(mut Parser p):
     p.allow_trailing_closure
 
+# One generic argument: a type, optionally labelled (`T = int`).
+def Type parse_generic_type_arg(mut Parser p) throws:
+    if parser_check(p, "Ident") and parser_token_at_offset_is(p, 1, "Eq"):
+        p.advance()
+        p.advance()
+    parse_type(p)
+
 def Type parse_type_qualifier(mut Parser p, Type base) throws:
     if not p.eat(TokenKind.Tick):
         return base
@@ -3386,7 +3461,20 @@ def Type parse_type_qualifier(mut Parser p, Type base) throws:
     # Only consume the ident if it's a known qualifier keyword
     let peeked_name = parser_peek_ident(p)
     if peeked_name != "actor" and peeked_name != "shared" and peeked_name != "guard" and peeked_name != "inline" and peeked_name != "owned" and peeked_name != "weak" and peeked_name != "new" and peeked_name != "one" and peeked_name != "many" and peeked_name != "observed":
-        return base
+        # A qualifier *parameter* (`Point'elem`, `Board<'q>`): the interpreter is
+        # qualifier-blind, so keep it as an opaque `Lifetime` marker.
+        let pname = parser_expect_ident(p)
+        var lq = Type.Qualified(base, OwnerQual.Lifetime(pname))
+        # Chained suffixes (`q'c'observed`) stay opaque too.
+        while parser_check(p, "Tick") and (token_kind_name(parser_peek_token_at(p, 1).kind) == "Ident" or token_kind_name(parser_peek_token_at(p, 1).kind) == "Guard"):
+            p.eat(TokenKind.Tick)
+            if p.eat(TokenKind.Guard):
+                lq = Type.Qualified(lq, OwnerQual.Guard)
+            else:
+                lq = Type.Qualified(lq, OwnerQual.Lifetime(parser_expect_ident(p)))
+        if p.eat(TokenKind.Question):
+            return Type.Optional(lq)
+        return lq
     let qual_name = parser_expect_ident(p)
     let qual = match qual_name:
         "actor": OwnerQual.Actor

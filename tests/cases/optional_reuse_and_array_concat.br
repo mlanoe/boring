@@ -1,0 +1,66 @@
+# Regressions found porting `view` support into the self-hosted interpreter:
+#  1. a `for` loop var over `mut xs = [Decl]{}` resolves its struct type (no extra `Some(...)`
+#     around an already-optional field),
+#  2. `if let x = opt_local:` doesn't consume `opt_local` when it is read again,
+#  3. `arr + [x]` on a `[T]` parameter,
+#  4. `match v:` with a binding arm doesn't partially move `v` when it is used afterwards.
+struct Decl:
+    string name
+    string? qualifier
+    [string] tps
+    int line
+
+enum Val:
+    Text(string)
+    Num(int)
+    Nil
+
+def [Decl] lower_all():
+    mut methods = [Decl]{}
+    methods.push(Decl(name= "a", qualifier= nil, tps= ["T"], line= 1))
+    methods.push(Decl(name= "b", qualifier= "q", tps= [], line= 2))
+    mut [Decl] lowered = []
+    for m in methods:
+        lowered.push(Decl(name= m.name, qualifier= m.qualifier, tps= m.tps, line= m.line))
+    lowered
+
+def [int] extend([int] args, int x):
+    args + [x]
+
+def [int] extend_assign([int] args, int x):
+    var [int] out = args
+    out = out + [x]
+    out
+
+def int twice(Val? o):
+    var r = 0
+    if let a = o:
+        r += 1
+    if let b = o:
+        r += 1
+    r
+
+def int len_of(Val v):
+    match v:
+        Val.Text(s): s.length
+        _: 0
+
+def main():
+    let ds = lower_all()
+    print(ds.length)
+    if let q = ds[1].qualifier:
+        print(q)
+    print(ds[0].qualifier == nil)
+    print(extend([1, 2], 3))
+    print(extend_assign([4], 5))
+    print(ds[0].tps)
+    print(twice(Val.Num(1)))
+    print(twice(nil))
+    let obj = Val.Text("hello")
+    var n = 0
+    match obj:
+        Val.Text(s):
+            n = s.length
+        _: nil
+    print(n)
+    print(len_of(obj))

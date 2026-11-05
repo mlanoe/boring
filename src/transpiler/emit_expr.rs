@@ -2155,6 +2155,16 @@ impl Transpiler {
             let fmt = parts.iter().map(|_| "{}").collect::<Vec<_>>().join("");
             return format!("{}::<str>::from(format!(\"{}\", {}))", self.str_ptr(), fmt, parts.join(", "));
         }
+        // Array concatenation `a + b`: Rust's `Vec` has no `Add`, and a `[T]` parameter is a
+        // `&Vec<T>`. Build a fresh Vec from both slices (works for owned and borrowed operands).
+        if matches!(op, BinOp::Add) {
+            let is_arr = |e: &Expr| matches!(&e.kind, ExprKind::Array(_))
+                || matches!(self.resolve_expr_type(e), Some(Type::Array(_)));
+            let lit = |e: &Expr| matches!(&e.kind, ExprKind::Array(_));
+            if (is_arr(l) && is_arr(r)) || lit(l) || lit(r) {
+                return format!("[({}).as_slice(), ({}).as_slice()].concat()", self.emit_expr(l), self.emit_expr(r));
+            }
+        }
         // Integer overflow: `boring run`'s interpreter wraps on `+`/`*` overflow
         // (two's-complement wraparound, via explicit `wrapping_add`/`wrapping_mul`
         // per integer type — see eval_expr.rs), and on `-` too but ONLY for signed
@@ -3861,6 +3871,21 @@ impl Transpiler {
                             let rhs_s = if rhs_ty.as_deref() == Some(int_ty.as_str()) { rhs_raw } else { format!("({} as {})", rhs_raw, int_ty) };
                             return format!("{} = {}.{}({})", target_s, recv_s, wrap_method, rhs_s);
                         }
+                    }
+                }
+                // `xs = xs + [y]` / `xs += [y]` on an array: `Vec` has no `AddAssign`.
+                if matches!(op, BinOp::Add)
+                    && (matches!(&rhs.kind, ExprKind::Array(_))
+                        || matches!(self.resolve_expr_type(lhs_copy), Some(Type::Array(_))))
+                    && matches!(self.resolve_expr_type(lhs_copy), Some(Type::Array(_)))
+                {
+                    self.in_lhs_assign.set(true);
+                    let target_s = self.emit_expr(target);
+                    let lhs_s    = self.emit_expr(lhs_copy);
+                    self.in_lhs_assign.set(false);
+                    if target_s == lhs_s {
+                        let rhs_s = self.emit_expr(rhs);
+                        return format!("{} = [{}.as_slice(), ({}).as_slice()].concat()", target_s, target_s, rhs_s);
                     }
                 }
                 let compound_op = match op {

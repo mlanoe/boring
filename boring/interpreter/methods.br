@@ -1717,15 +1717,13 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 let self_val = Value.Object(inner)
                 # `view` methods take the mounted state as a trailing `__st` parameter. A call
                 # that omits it (`self.touch()` inside the view) forwards the caller's own.
-                mut [Value] call_args = []
+                var [Value] call_args = args
                 var Value? forwarded_st = nil
-                for a0 in args:
-                    call_args.push(a0)
                 let last_pi = method_decl.params.length - 1
                 if last_pi >= 0 and method_decl.params[last_pi].name == "__st" and args.length < method_decl.params.length:
                     let fwd_st = interp.current_env.get("__st")
                     if let fwd = fwd_st:
-                        call_args.push(fwd.clone())
+                        call_args = call_args + [fwd.clone()]
                         view_sync(interp, fwd.clone(), false, 1)
                         view_sync(interp, self_val.clone(), true, 1)
                         forwarded_st = fwd
@@ -1751,7 +1749,7 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 if last_pi < 0 or method_decl.params[last_pi].name != "__st":
                     view_state_opt = nil
                 view_sync(interp, self_val.clone(), true, 0)
-                if let vs = view_state_opt.clone():
+                if let vs = view_state_opt:
                     view_sync(interp, vs, false, 0)
                 let result = exec_method_body(interp, method_decl)
                 let method_scope = interp.current_env
@@ -1759,6 +1757,8 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                 if mutating:
                     for field in inner.fields:
                         let updated = interp.current_env.get(field.0)
+                        if let v = updated:
+                            inner.set_field(field.0, v)
                 else:
                     # `req` method writing an `'actor`/`'guard` field (e.g. `memo[k] = w`).
                     let shared_fields = interior_mutable_fields(interp, type_name.clone())
@@ -1767,8 +1767,6 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                             let updated = interp.current_env.get(field.0)
                             if let v = updated:
                                 inner.set_field(field.0, v)
-                        if let v = updated:
-                            inner.set_field(field.0, v)
                 view_sync(interp, self_val.clone(), true, 1)
                 if let vs2 = view_state_opt:
                     view_sync(interp, vs2, false, 1)

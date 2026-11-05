@@ -439,6 +439,13 @@ impl Transpiler {
                         && !expr_s.starts_with("{ let __g"))
                 {
                     format!("{}.clone()", expr_s)
+                } else if matches!(&expr.kind, ExprKind::Var(_))
+                    && !expr_s.starts_with('&')
+                    && !expr_s.ends_with(".clone()")
+                    && self.is_reused_var(expr)
+                {
+                    // `if let x = opt_local:` would move `opt_local`; it is used again later.
+                    format!("{}.clone()", expr_s)
                 } else {
                     expr_s
                 };
@@ -1147,7 +1154,11 @@ impl Transpiler {
                 && !is_smart_ptr && !is_arc_str
                 && self.loop_entry_locals.last().is_some_and(|entry|
                     entry.contains(vname.as_str()) || !self.known_local_vars.contains(vname.as_str()));
-            if (is_optional_var && has_binding_arm) || reused_in_arms || outer_in_loop {
+            // Mentioned again after the match (`last_use.rs`): the binding arm's partial move
+            // would make that later read E0382.
+            let reused_later = has_binding_arm && subj == *vname
+                && !is_smart_ptr && !is_arc_str && self.is_reused_var(&s.subject);
+            if (is_optional_var && has_binding_arm) || reused_in_arms || outer_in_loop || reused_later {
                 format!("{}.clone()", vname)
             } else {
                 subj

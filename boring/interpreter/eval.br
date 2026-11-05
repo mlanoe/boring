@@ -357,7 +357,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
             match obj_expr.kind:
                 ExprKind.Var(self_nm):
                     if self_nm == "self":
-                        match obj.clone():
+                        match obj:
                             Value.Object(self_inner):
                                 if self_inner.get_field(field_name) == nil:
                                     let st_for_read = interp.current_env.get(field_name)
@@ -367,7 +367,7 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                 _: nil
             # A failed `throws` task: the throw surfaces at `.value`/`.wait`, not at the spawn.
             if task_obj_type_name(obj) == "__Task__" and (field_name == "value" or field_name == "wait"):
-                match obj.clone():
+                match obj:
                     Value.Object(tinner):
                         let failed_opt = tinner.get_field("__failed")
                         if let failed_val = failed_opt:

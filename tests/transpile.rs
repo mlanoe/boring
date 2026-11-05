@@ -1664,3 +1664,9 @@ mod managed_owned_local_arg {
 // tests/cases/qualifier_fns_xfile.
 transpile_project_test!(qualifier_fns_xfile);
 
+
+// Four codegen bugs found porting `view` into the self-hosted interpreter: a `for` var over
+// `mut xs = [Decl]{}` (optional field not re-wrapped), `if let`/`match` on a local read again
+// later (no move), and `arr + [x]` on a `[T]` parameter. Transpile-only: the Rust interpreter
+// doesn't evaluate the `[Decl]{}` idiom. See tests/cases/optional_reuse_and_array_concat.br.
+transpile_test!(optional_reuse_and_array_concat);

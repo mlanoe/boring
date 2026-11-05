@@ -37,6 +37,10 @@ use crate::ast::*;
 /// `(name, line, col)` of a `Var` occurrence that is the last use of its variable.
 pub(crate) type LastUseSites = HashSet<(String, usize, usize)>;
 
+/// Name prefix under which `finish` records a `Var` occurrence followed by a later mention of the
+/// same name (see `is_reused_var` in `emit_top.rs`).
+pub(crate) const REUSED_PREFIX: &str = "\u{1}reused:";
+
 struct Use {
     name: String,
     line: usize,
@@ -111,7 +115,15 @@ impl<'a> Walker<'a> {
             last_idx.insert(u.name.as_str(), i);
         }
         for (i, u) in self.uses.iter().enumerate() {
-            if last_idx.get(u.name.as_str()) != Some(&i) { continue; }
+            if last_idx.get(u.name.as_str()) != Some(&i) {
+                // Not the last mention of the name: a by-value consumer here (an `if let x = v:`
+                // on an optional local) must not move it. Recorded under a marked name,
+                // regardless of the eligibility filters below.
+                if u.line != 0 {
+                    out.insert((format!("{}{}", REUSED_PREFIX, u.name), u.line, u.col));
+                }
+                continue;
+            }
             if u.opaque || u.line == 0 || self.tainted.contains(&u.name) { continue; }
             let Some(decl_depths) = self.decls.get(&u.name) else { continue };
             // Declared in the same or an outer loop level than the use — never inside a

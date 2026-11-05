@@ -2622,6 +2622,13 @@ impl Transpiler {
     /// variable in the current function (`last_use.rs`) — a by-value read here may be a Rust
     /// *move* instead of a `.clone()`. Declines (→ clone, the always-correct default) for
     /// anything that might be a Rust reference or a shared pointer rather than an owned value.
+    /// `expr` is a bare local read that is mentioned again later in the function (`last_use.rs`):
+    /// a by-value consumer (e.g. `if let x = opt:`) must clone rather than move it.
+    pub(crate) fn is_reused_var(&self, expr: &Expr) -> bool {
+        let ExprKind::Var(v) = &expr.kind else { return false };
+        self.last_use_sites.contains(&(format!("{}{}", crate::transpiler::last_use::REUSED_PREFIX, v), expr.line, expr.col))
+    }
+
     pub(crate) fn is_last_use_move(&self, expr: &Expr) -> bool {
         let ExprKind::Var(v) = &expr.kind else { return false };
         self.last_use_sites.contains(&(v.clone(), expr.line, expr.col))
