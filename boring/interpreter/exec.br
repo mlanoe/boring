@@ -831,7 +831,7 @@ req [bool] enum_variant_field_mut_flags(EnumVariant? variant_decl):
 # consult `field_is_mut` and call `env.define_mut` instead of the always-immutable
 # `env.define` a bare recursive call would use — every other sub-pattern shape (nested
 # Variant, Tuple, literal, ...) falls through to the ordinary recursive match unchanged.
-def bool bind_variant_field(Value fval, Pattern fpat, Env'actor env, Interpreter interp, bool field_is_mut):
+def bool bind_variant_field(Value fval, Pattern fpat, mut Env'actor env, Interpreter interp, bool field_is_mut):
     match fpat:
         Pattern.Bind(bname):
             if field_is_mut:
@@ -842,7 +842,7 @@ def bool bind_variant_field(Value fval, Pattern fpat, Env'actor env, Interpreter
         _:
             match_pattern(fval, fpat, env, interp)
 
-def bool match_pattern(Value val, Pattern pattern, Env'actor env, Interpreter interp):
+def bool match_pattern(Value val, Pattern pattern, mut Env'actor env, Interpreter interp):
     match pattern:
         Pattern.Wildcard:
             true
@@ -1051,6 +1051,19 @@ def void capture_var_param_outs(mut Interpreter interp, [Param] params, Env'acto
     interp.last_var_params = outs
 
 def Value call_fn(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? captured):
+    # `@singleton`: the body runs at most once; every later call returns the cached value.
+    if decl.attrs.length > 0 and decl.attrs[0].name == "singleton":
+        let cached = interp.singletons.get(decl.name)
+        if let hit = cached:
+            return hit
+        let fresh = call_fn_body(interp, decl, args, captured)
+        mut {string=Value} sing = interp.singletons
+        sing.set(decl.name, fresh)
+        interp.singletons = sing
+        return fresh
+    call_fn_body(interp, decl, args, captured)
+
+def Value call_fn_body(mut Interpreter interp, FnDecl decl, [Value] args, Env'actor? captured):
     let base_env = captured else interp.global_env
     mut fn_env = new_env(base_env.clone())
     mut {string=Value} labeled = {}

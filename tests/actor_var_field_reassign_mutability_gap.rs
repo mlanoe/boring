@@ -69,7 +69,7 @@ struct Env:
 struct Interpreter:
     Env'actor current_env
 
-def swap(Interpreter'actor interp, Env'actor new_env):
+def swap(mut Interpreter'actor interp, Env'actor new_env):
     interp.current_env = new_env
 
 def main():
@@ -133,7 +133,7 @@ struct Env:
 struct Interpreter:
     var Env'actor current_env
 
-def swap(Interpreter'actor interp, Env'actor new_env):
+def swap(mut Interpreter'actor interp, Env'actor new_env):
     interp.current_env = new_env
 
 def main():

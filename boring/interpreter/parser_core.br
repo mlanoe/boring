@@ -8,6 +8,10 @@ struct Parser:
     var bool allow_noparen_closure = true
     var bool allow_trailing_closure = true
     var int depth = 0
+    # Extra top-level items produced while parsing one item (a `view` also yields `V__State`).
+    var [Item] pending = []
+    # `View.field` for every `bind` field of every view parsed so far (call-site `bind` detection).
+    var [string] bind_entries = []
 
     req TokenKind peek():
         self.tokens[self.pos].kind
@@ -1342,17 +1346,182 @@ def bool trait_method_has_body(mut Parser p) throws:
         i += 1
     false
 
+
+# ── `view` declarations (state-only slice) ───────────────────────────────────
+#
+# `view V:` lowers (like src/lower_view.rs) to a struct `V` holding the inputs and a struct
+# `V__State` holding the `state` fields. Every method — and `body()` — gets a trailing `__st`
+# parameter; the method-call path binds the state's fields as locals and writes them back (see
+# `call_method`), and `self.m()` forwards the caller's `__st`. `bind`/`env` and the `boring.ui`
+# runtime are not supported yet: `bind` fields become plain input fields.
+
+def FnDecl parse_view_body(mut Parser p) throws:
+    let line = p.current_line()
+    p.advance()
+    mut [Param] params = []
+    p.expect(TokenKind.LParen)
+    while p.peek() != TokenKind.RParen:
+        params.push(parse_param(p))
+        if p.peek() != TokenKind.RParen:
+            p.expect(TokenKind.Comma)
+    p.expect(TokenKind.RParen)
+    p.expect(TokenKind.Colon)
+    let body = parse_fn_body(p)
+    FnDecl(name= "body", params= params, return_ty= nil, can_throw= false, mutating= false, is_pub= false, body= body, line= line, qualifier= nil, is_task= false, is_stream= false, stream_capacity= nil, is_native= false, throws_ty= nil, type_params= [], where_clause= [], attrs= [])
+
+def StructDecl parse_view_decl(mut Parser p, bool is_pub) throws:
+    let line = p.current_line()
+    let view_start = p.pos
+    p.advance()
+    let name = parser_expect_ident(p)
+    mut [string] view_protocols = []
+    if p.eat(TokenKind.As):
+        while p.peek() != TokenKind.Colon and p.peek() != TokenKind.Newline and p.peek() != TokenKind.Eof:
+            if parser_check(p, "Ident"):
+                view_protocols.push(parser_expect_ident(p))
+            else:
+                p.advance()
+    p.expect(TokenKind.Colon)
+    p.expect(TokenKind.Newline)
+    p.expect(TokenKind.Indent)
+    mut fields = [FieldDecl]{}
+    mut state_fields = [FieldDecl]{}
+    mut [string] bind_names = []
+    mut methods = [FnDecl]{}
+    while p.peek() != TokenKind.Dedent:
+        if p.peek() == TokenKind.Eof:
+            break
+        while parser_check(p, "Newline") or parser_check(p, "Comment"):
+            p.advance()
+        if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
+            break
+        let word = parser_peek_ident(p)
+        if word == "state" or word == "bind" or word == "env":
+            let is_state2 = word == "state"
+            p.advance()
+            p.eat(TokenKind.Let)
+            p.eat(TokenKind.Var)
+            p.eat(TokenKind.Mut)
+            let fty2 = parse_type(p)
+            let fname2 = parser_expect_ident(p)
+            var Expr? fdefault2 = nil
+            if p.eat(TokenKind.Eq):
+                fdefault2 = parse_expr(p)
+            parser_expect_newline_soft(p)
+            let fld2 = FieldDecl(name= fname2, is_pub= true, ty= fty2, mutable= true, is_transient= false, default= fdefault2, line= line)
+            if is_state2:
+                state_fields.push(fld2)
+            else:
+                fields.push(fld2)
+                if word == "bind":
+                    bind_names.push(fname2)
+        elif word == "body" and parser_check2(p, "LParen"):
+            methods.push(parse_view_body(p))
+        else:
+            match p.peek():
+                TokenKind.Def:
+                    methods.push(parse_fn_decl(p, false, true))
+                TokenKind.Req:
+                    methods.push(parse_fn_decl(p, false, false))
+                TokenKind.Pub:
+                    p.advance()
+                    if parser_check(p, "Def"):
+                        methods.push(parse_fn_decl(p, true, true))
+                    elif parser_check(p, "Req"):
+                        methods.push(parse_fn_decl(p, true, false))
+                    elif parser_is_fn_shorthand(p):
+                        methods.push(parse_fn_decl_shorthand(p))
+                    else:
+                        fields.push(parse_field_decl(p))
+                _:
+                    if parser_is_fn_shorthand(p):
+                        methods.push(parse_fn_decl_shorthand(p))
+                    else:
+                        fields.push(parse_field_decl(p))
+    p.eat(TokenKind.Dedent)
+    for sf in state_fields:
+        if sf.default == nil:
+            throw "`state {sf.name}` needs an initializer: its seed is the only source of its first value (line {sf.line})"
+    let state_name = name + "__State"
+    let view_end = p.pos
+    for bn in bind_names:
+        p.bind_entries.push(name + "." + bn)
+    # A `state` handed to a child view's `bind` (`Child(label = stateName)`) lives in a `Slot`.
+    mut [string] state_names = []
+    for sf0 in state_fields:
+        state_names.push(sf0.name)
+    mut [string] bound_states = []
+    var ti = view_start
+    while ti + 3 < view_end:
+        if token_kind_name(p.tokens[ti].kind) == "Ident" and token_kind_name(p.tokens[ti + 1].kind) == "LParen":
+            let callee = p.tokens[ti].text()
+            var tj = ti + 2
+            var tdepth = 1
+            while tj + 3 < view_end and tdepth > 0:
+                let tk = token_kind_name(p.tokens[tj].kind)
+                if tk == "LParen":
+                    tdepth = tdepth + 1
+                elif tk == "RParen":
+                    tdepth = tdepth - 1
+                elif tk == "Ident" and tdepth == 1 and token_kind_name(p.tokens[tj + 1].kind) == "Eq" and token_kind_name(p.tokens[tj + 2].kind) == "Ident":
+                    let after = token_kind_name(p.tokens[tj + 3].kind)
+                    if after == "Comma" or after == "RParen":
+                        let blabel = p.tokens[tj].text()
+                        let bstate = p.tokens[tj + 2].text()
+                        if p.bind_entries.contains(callee + "." + blabel) and state_names.contains(bstate) and not bound_states.contains(bstate):
+                            bound_states.push(bstate)
+                tj = tj + 1
+        ti = ti + 1
+    mut [FnDecl] lowered = []
+    for m0 in methods:
+        let FnDecl m = m0
+        mut [Param] mparams = m.params
+        if state_fields.length > 0:
+            mparams.push(Param(name= "__st", ty= Type.Named(state_name), mutable= true, owned= false, variadic= false, default= nil, line= m.line))
+        # The description itself is never written (inputs are immutable; state lives in `__st`).
+        lowered.push(FnDecl(name= m.name, qualifier= m.qualifier, params= mparams, return_ty= m.return_ty, body= m.body, is_pub= m.is_pub, can_throw= m.can_throw, is_task= m.is_task, is_stream= m.is_stream, stream_capacity= m.stream_capacity, mutating= false, is_native= m.is_native, throws_ty= m.throws_ty, type_params= m.type_params, where_clause= m.where_clause, attrs= m.attrs, line= m.line))
+    if state_fields.length > 0:
+        mut [FieldDecl] sfields = []
+        for sf1 in state_fields:
+            if bound_states.contains(sf1.name):
+                let seed_src = sf1.default
+                if let seed = seed_src:
+                    let seed_call = Expr(kind= ExprKind.Call(Expr(kind= ExprKind.Var("Slot"), line= sf1.line), [Arg(label= "value", value= seed, spread= false, default_rest= false)]), line= sf1.line)
+                    sfields.push(FieldDecl(name= sf1.name, is_pub= true, ty= sf1.ty, mutable= true, is_transient= false, default= seed_call, line= sf1.line))
+                else:
+                    sfields.push(sf1)
+            else:
+                sfields.push(sf1)
+        p.pending.push(Item.Struct(StructDecl(name= state_name, fields= sfields, methods= [], inits= [], line= line, is_pub= is_pub, is_native= false, protocols= [], conversions= [], type_params= [], where_clause= [], setters= [], type_methods= [], type_vars= [], assoc_type_defs= [], attrs= [Attr(name= "slot", args= bound_states, line= line)])))
+    StructDecl(name= name, fields= fields, methods= lowered, inits= [], line= line, is_pub= is_pub, is_native= false, protocols= view_protocols, conversions= [], type_params= [], where_clause= [], setters= [], type_methods= [], type_vars= [], assoc_type_defs= [], attrs= [Attr(name= "bind", args= bind_names, line= line)])
+
 def Item parse_item(mut Parser p) throws:
+    if parser_peek_ident(p) == "view" and parser_check2(p, "Ident"):
+        return Item.Struct(parse_view_decl(p, false))
     match p.peek():
         TokenKind.At:
             # Attributes affect checking/code generation, not this dynamic
             # interpreter. Consume each complete attribute line and parse the
             # declaration it decorates.
+            # `@singleton` is the one attribute with runtime meaning here: it memoizes the
+            # function's result (see `call_fn`). Recorded as an `Attr` on the FnDecl.
+            var is_singleton = false
             while parser_check(p, "At"):
+                p.advance()
+                if parser_check(p, "Ident") and parser_peek_ident(p) == "singleton":
+                    is_singleton = true
                 while not parser_is_newline(p) and not parser_check(p, "Eof"):
                     p.advance()
                 parser_expect_newline_soft(p)
-            parse_item(p)
+            let decorated = parse_item(p)
+            if is_singleton:
+                match decorated:
+                    Item.Fn(d):
+                        Item.Fn(FnDecl(name= d.name, qualifier= d.qualifier, params= d.params, return_ty= d.return_ty, body= d.body, is_pub= d.is_pub, can_throw= d.can_throw, is_task= d.is_task, is_stream= d.is_stream, stream_capacity= d.stream_capacity, mutating= d.mutating, is_native= d.is_native, throws_ty= d.throws_ty, type_params= d.type_params, where_clause= d.where_clause, attrs= [Attr(name= "singleton", args= [], line= d.line)], line= d.line))
+                    _:
+                        decorated
+            else:
+                decorated
         TokenKind.Def:
             Item.Fn(parse_fn_decl_auto(p, false, true))
         TokenKind.Req:
@@ -1628,7 +1797,9 @@ def Item parse_item(mut Parser p) throws:
                 Item.Use(parse_use_import_decl(p))
         TokenKind.Pub:
             p.advance()
-            if parser_check(p, "Struct"):
+            if parser_peek_ident(p) == "view" and parser_check2(p, "Ident"):
+                Item.Struct(parse_view_decl(p, true))
+            elif parser_check(p, "Struct"):
                 Item.Struct(parse_struct_decl(p, true))
             elif parser_check(p, "Enum"):
                 Item.Enum(parse_enum_decl(p, true))
@@ -1778,6 +1949,9 @@ def Program parse_program(mut Parser p) throws:
         nil
     while p.peek() != TokenKind.Eof:
         items.push(parse_item(p))
+        for extra in p.pending:
+            items.push(extra)
+        p.pending = []
         while p.eat(TokenKind.Newline):
             nil
     Program(items= items)
@@ -1786,7 +1960,7 @@ def Program parse_program(mut Parser p) throws:
 
 def Program parse(string source) throws:
     let toks = lex(source)
-    mut p'actor = Parser(tokens= toks, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true, depth= 0)
+    mut p'actor = Parser(tokens= toks, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true, depth= 0, pending= [], bind_entries= [])
     parse_program(p)
 # ── AST builder helpers ────────────────────────────────────────────────────────
 
@@ -2288,7 +2462,7 @@ def SkipResult? peek_dot_after_newlines_and_indents(mut Parser p):
     result
 
 def Parser'actor make_parser([Token] tokens):
-    let p'actor = Parser(tokens= tokens, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true, depth= 0)
+    let p'actor = Parser(tokens= tokens, pos= 0, allow_noparen_closure= true, allow_trailing_closure= true, depth= 0, pending= [], bind_entries= [])
     p
 
 def LoopStmt parse_loop_stmt(mut Parser p) throws:
@@ -2453,6 +2627,9 @@ def ModDecl parse_mod_decl(mut Parser p, bool is_pub) throws:
         if p.peek() == TokenKind.Dedent or p.peek() == TokenKind.Eof:
             break
         items.push(parse_item(p))
+        for extra in p.pending:
+            items.push(extra)
+        p.pending = []
     p.eat(TokenKind.Dedent)
     ModDecl(name= name, items= items, line= line)
 
@@ -2786,7 +2963,7 @@ def Value resolve_overload(Interpreter interp, [Value] variants, [Value] args):
                 i = i + 1
             variants[0]
 
-def Value call_native(Interpreter interp, string name, Value func, [Value] args):
+def Value call_native(mut Interpreter interp, string name, Value func, [Value] args):
     if name == "write":
         var string output = ""
         var int i = 0

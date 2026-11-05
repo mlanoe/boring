@@ -261,6 +261,13 @@ struct Checker {
     /// not itself grant `mut`), so an unannotated `var v = make()` is known to bind a
     /// collection. Overloaded names are excluded (same reason as `fn_overloaded`).
     fn_returns_collection: std::collections::HashSet<String>,
+    /// Must-use bookkeeping: free fns / (struct, method) pairs declared with a non-void
+    /// (`nonvoid_*`) or void (`void_*`) return type. A bare non-tail call statement is an
+    /// error only when every declaration of the name is non-void.
+    nonvoid_fns: std::collections::HashSet<String>,
+    void_fns: std::collections::HashSet<String>,
+    nonvoid_methods: std::collections::HashSet<(String, String)>,
+    void_methods: std::collections::HashSet<(String, String)>,
     /// Names last bound by a `let`/`var` to a `task` / `task(dur)` expression (a task handle).
     /// Name-based and unscoped (a rebinding to anything else clears it): only used for the
     /// `try h.wait else <value>` diagnostic, where a stale entry just means a missed warning.
@@ -380,6 +387,10 @@ impl Checker {
             fn_arity: HashMap::new(),
             fn_overloaded: std::collections::HashSet::new(),
             fn_returns_collection: std::collections::HashSet::new(),
+            nonvoid_fns: std::collections::HashSet::new(),
+            void_fns: std::collections::HashSet::new(),
+            nonvoid_methods: std::collections::HashSet::new(),
+            void_methods: std::collections::HashSet::new(),
             task_handle_vars: std::collections::HashSet::new(),
             current_struct_fields: std::collections::HashSet::new(),
             in_qual_generic_decl: false,
@@ -759,7 +770,14 @@ impl Checker {
         }
     }
 
+    /// `true` when a call to `f` yields a value that a bare statement would discard.
+    fn returns_value(f: &FnDecl) -> bool {
+        !f.is_native && !f.task && !f.stream
+            && matches!(&f.return_ty, Some(t) if !matches!(t, Type::Void | Type::Never))
+    }
+
     fn collect_fn_signature(&mut self, f: &FnDecl) {
+        if Self::returns_value(f) { self.nonvoid_fns.insert(f.name.clone()); } else { self.void_fns.insert(f.name.clone()); }
         let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_var_params.insert(f.name.clone(), var_flags);
         self.fn_param_types.insert(f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect());
@@ -809,6 +827,8 @@ impl Checker {
             self.struct_transient_field.insert(s.name.clone(), f.name.clone());
         }
         for m in &s.methods {
+            let key = (s.name.clone(), m.name.clone());
+            if Self::returns_value(m) { self.nonvoid_methods.insert(key); } else { self.void_methods.insert(key); }
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
             self.struct_methods.entry((s.name.clone(), m.name.clone())).or_default().push(m.params.clone());
         }
@@ -1758,7 +1778,7 @@ impl Checker {
         // `'observed` qualifier in the first place.
         self.check_observed_compatibility(&f.return_ty, f.line, f.col);
         self.check_dead_code(&f.body);
-        for stmt in &f.body { self.check_stmt(stmt); }
+        self.check_stmts_must_use(&f.body);
         self.check_kernel_copy_writes(f);
         self.check_lent_param_stored(f);
         self.in_authorized_static_site = prev_static_site;
@@ -2592,13 +2612,53 @@ impl Checker {
     fn check_block(&mut self, stmts: &[Stmt]) {
         self.check_dead_code(stmts);
         self.push_scope();
-        for stmt in stmts { self.check_stmt(stmt); }
+        self.check_stmts_must_use(stmts);
         self.pop_scope();
     }
 
     fn check_block_in_current_scope(&mut self, stmts: &[Stmt]) {
         self.check_dead_code(stmts);
-        for stmt in stmts { self.check_stmt(stmt); }
+        self.check_stmts_must_use(stmts);
+    }
+
+    /// Checks each statement, flagging a bare call whose non-void result is discarded.
+    /// The block's last statement is exempt: it may be the tail value (`boring run`
+    /// treats it as the function's result), and without type inference a miss there is
+    /// only a false negative.
+    fn check_stmts_must_use(&mut self, stmts: &[Stmt]) {
+        for (i, stmt) in stmts.iter().enumerate() {
+            if i + 1 < stmts.len() {
+                if let Stmt::Expr(e) = stmt { self.check_discarded_call(e); }
+            }
+            self.check_stmt(stmt);
+        }
+    }
+
+    /// Must-use (CHANGELOG: bare non-void call results are a compile-time
+    /// error): same message as the interpreter. Only fires when the callee is known
+    /// statically (free fn, or method on a variable of a known user struct).
+    fn check_discarded_call(&mut self, e: &Expr) {
+        if self.kernel_dispatch_only { return; }
+        let hit = match &e.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Var(n) => self.lookup(n).is_none()
+                    && self.nonvoid_fns.contains(n.as_str()) && !self.void_fns.contains(n.as_str())
+                    && !self.imported_fns.contains_key(n.as_str()),
+                _ => false,
+            },
+            ExprKind::MethodCall(recv, m, _) => match self.arg_class(recv) {
+                Some((ArgClass::User(s), _)) => {
+                    let key = (s, m.clone());
+                    self.nonvoid_methods.contains(&key) && !self.void_methods.contains(&key)
+                        && !self.imported_methods.contains_key(&key)
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if hit {
+            self.error("return value discarded — bind it with `let`, discard with `_ = f()`", e.line, e.col);
+        }
     }
 
     // ── Dead / unreachable code ─────────────────────────────────────────────────
@@ -4398,6 +4458,21 @@ mod collection_content_mut_tests {
     fn function_return_type_infers_a_collection() {
         assert_rejected("[int] make():\n    return [1]\n\ndef main():\n    var v = make()\n    v.push(2)\n", "v");
         assert_ok("[int] make():\n    return [1]\n\ndef main():\n    var mut v = make()\n    v.push(2)\n");
+    }
+
+    #[test]
+    fn discarded_non_void_calls_are_must_use_errors() {
+        let free = errors_for("def int f(): 5\n\ndef main():\n    f()\n    print \"x\"\n");
+        assert!(free.iter().any(|m| m.contains("return value discarded")), "{free:?}");
+        let method = errors_for("struct C:\n    req int get(): 1\n\ndef main():\n    let c = C()\n    c.get()\n    print \"x\"\n");
+        assert!(method.iter().any(|m| m.contains("return value discarded")), "{method:?}");
+    }
+
+    #[test]
+    fn must_use_exempts_bound_discarded_void_and_tail_calls() {
+        let src = "def int f(): 5\ndef g(): print \"g\"\n\ndef main():\n    _ = f()\n    let x = f()\n    g()\n    f()\n";
+        let errs = errors_for(src);
+        assert!(!errs.iter().any(|m| m.contains("return value discarded")), "{errs:?}");
     }
 
     #[test]

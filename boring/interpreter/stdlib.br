@@ -20,6 +20,8 @@ struct Interpreter:
     var [Value] stream_yields = []
     var bool in_kernel_context = false
     var [string] cli_args = []
+    # `@singleton` fn results, keyed by fn name (see `call_fn`).
+    var {string=Value} singletons = {}
     # `use a.b.c` resolution state — a reduced-scope port of the real
     # compiler's `search_paths`/`loaded` (src/interpreter/mod.rs). See
     # `exec_use` below for exactly what's supported.
@@ -724,6 +726,7 @@ def Interpreter'actor new_interpreter():
         stream_yields = [],
         in_kernel_context = false,
         cli_args = [],
+        singletons = {},
         return_ty_stack = [],
         last_var_params = [],
         search_paths = [],

@@ -135,7 +135,7 @@ def void main() throws:
         while let ln = readLine():
             source = source + ln + "\n"
     let prog = parse(source)
-    var interp = new_interpreter()
+    mut interp = new_interpreter()
     mut [string] full_args = [program_name]
     for a in parsed.script_args:
         full_args.push(a)

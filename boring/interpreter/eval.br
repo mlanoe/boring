@@ -327,6 +327,12 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                             Value.Dict(_): assign_target(interp, recv_expr, result)
                             _: nil
                     _: nil
+            elif method == "clear":
+                match recv:
+                    Value.Array(_): assign_target(interp, recv_expr, result)
+                    Value.Dict(_): assign_target(interp, recv_expr, result)
+                    Value.Set(_): assign_target(interp, recv_expr, result)
+                    _: nil
             elif method == "add":
                 match recv:
                     Value.Set(_):
@@ -347,6 +353,18 @@ def Value eval_expr(mut Interpreter interp, Expr expr):
                         throw "{cfmt.name()} has no member '{field_name}'"
                 _: nil
             let obj = eval_expr(interp, obj_expr)
+            # `self.<state field>` inside a `view` method reads the mounted state (`__st`).
+            match obj_expr.kind:
+                ExprKind.Var(self_nm):
+                    if self_nm == "self":
+                        match obj.clone():
+                            Value.Object(self_inner):
+                                if self_inner.get_field(field_name) == nil:
+                                    let st_for_read = interp.current_env.get(field_name)
+                                    if let stv = st_for_read:
+                                        return stv
+                            _: nil
+                _: nil
             # A failed `throws` task: the throw surfaces at `.value`/`.wait`, not at the spawn.
             if task_obj_type_name(obj) == "__Task__" and (field_name == "value" or field_name == "wait"):
                 match obj.clone():

@@ -223,7 +223,13 @@ fn make_object(type_name: String, fields: Vec<(String, Value)>) -> Value {
 
 /// Reserved object type a `Future` wraps when its (eagerly-run) task body threw: the throw
 /// must surface at `.value`/`.wait`/`.join`, not at the spawn site.
+pub(crate) enum Socket { Listener(std::net::TcpListener), Stream(std::net::TcpStream) }
+
 const TASK_FAILURE: &str = "__TaskFailure";
+/// Reserved object types for `'observed` values: the wrapper (one field, `value`) and a live
+/// subscription handle (`id`, `target` = wrapper address).
+pub(crate) const OBSERVED: &str = "__Observed";
+pub(crate) const SUBSCRIPTION: &str = "__Subscription";
 
 /// Re-raise a failed task's exception, or pass the task's result through.
 fn rethrow_task_failure(v: Value) -> Eval {
@@ -2535,6 +2541,11 @@ pub struct Interpreter {
     /// `resolve_dot_ident_hint` — instead of eval_expr's ambiguous-scan fallback. `None`
     /// entries are untyped (`def` with no return annotation) and never provide a hint.
     pub(crate) return_ty_stack: Vec<Option<Type>>,
+    /// `'observed` subscribers, keyed by the wrapper object's `Rc` address: `(subscription id, callback)`.
+    pub(crate) observed_subs: HashMap<usize, Vec<(u64, Value)>>,
+    pub(crate) observed_next_id: u64,
+    /// `std.net` sockets, keyed by the `id` field of their `TcpListener`/`TcpStream` object.
+    pub(crate) sockets: HashMap<u64, Socket>,
     /// True if the currently executing method was declared as `def` (mutating).
     /// False if declared as `req` (non-mutating). Used to enforce transient-field write rules.
     pub(crate) current_method_mutating: bool,
@@ -2734,6 +2745,9 @@ impl Interpreter {
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
             return_ty_stack: Vec::new(),
+            observed_subs: HashMap::new(),
+            observed_next_id: 0,
+            sockets: HashMap::new(),
             current_method_mutating: true,  // default to mutating for top-level code
             in_init_body: false,
             in_content_writeback: false,
@@ -2785,6 +2799,9 @@ impl Interpreter {
             defer_stack: Vec::new(),
             type_param_stack: Vec::new(),
             return_ty_stack: Vec::new(),
+            observed_subs: HashMap::new(),
+            observed_next_id: 0,
+            sockets: HashMap::new(),
             current_method_mutating: true,
             in_init_body: false,
             in_content_writeback: false,

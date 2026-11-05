@@ -1341,6 +1341,10 @@ impl Transpiler {
                                 self.var_rwlock_types.insert(s.name.clone());
                             }
                             self.arc_vars.insert(s.name.clone());
+                            // Record the inferred qualified type so the `def`-call mut gate
+                            // (`try_emit_mutex_method`/`try_emit_rwlock_method`) can resolve
+                            // the receiver's struct — same rule as an explicit `let T'actor x`.
+                            self.var_types.entry(s.name.clone()).or_insert_with(|| ret_ty.clone());
                             if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                                 self.rc_vars.insert(s.name.clone());
                             }

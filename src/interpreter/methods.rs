@@ -9,6 +9,34 @@ impl Interpreter {
                 return res;
             }
         }
+        // `'atomic` scalar `.swap(v)`: store `v`, return the previous value. The new value is
+        // written back through `out_self`, like any mutating method on a value receiver.
+        if method == "swap" && args.len() == 1 && matches!(&obj,
+            Value::Int(_) | Value::Uint(_) | Value::Bool(_) | Value::Uint8(_) | Value::Int8(_)
+            | Value::Int16(_) | Value::Int32(_) | Value::Int64(_) | Value::Int128(_)
+            | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_))
+        {
+            let new = match (&obj, &args[0]) {
+                (Value::Uint(_), Value::Int(n)) if *n >= 0 => Value::Uint(*n as u64),
+                (_, v) => v.clone(),
+            };
+            *out_self = Some(new);
+            return Ok(obj);
+        }
+        // Rust's `is_positive` / `is_negative` on signed integers.
+        if matches!(method, "isPositive" | "isNegative" | "is_positive" | "is_negative") && args.is_empty() {
+            let sign = match &obj {
+                Value::Int(n) | Value::Int64(n) => Some(n.signum() as i32),
+                Value::Int8(n) => Some(n.signum() as i32),
+                Value::Int16(n) => Some(n.signum() as i32),
+                Value::Int32(n) => Some(n.signum()),
+                Value::Int128(n) => Some(n.signum() as i32),
+                _ => None,
+            };
+            if let Some(sg) = sign {
+                return Ok(Value::Bool(if method.ends_with("Positive") || method.ends_with("positive") { sg > 0 } else { sg < 0 }));
+            }
+        }
         // Integer powers retain their width and never round through a float.
         // The transpiler converts the exponent to Rust's u32 as well.
         if method == "pow" && matches!(&obj,
@@ -161,6 +189,18 @@ impl Interpreter {
                     ("path".to_string(), Value::Str(path)),
                 ]));
             }
+            if name == "TcpListener" && method == "bind" {
+                let addr = match args.first() { Some(Value::Str(a)) => a.clone(), _ => return Err(err("TcpListener.bind: expected an address string", line)) };
+                let l = std::net::TcpListener::bind(&addr).map_err(|e| Signal::Exception(Value::Str(e.to_string())))?;
+                let id = self.sockets.len() as u64 + 1;
+                self.sockets.insert(id, Socket::Listener(l));
+                return Ok(make_object("TcpListener".to_string(), vec![("id".to_string(), Value::Uint(id))]));
+            }
+            if name == "TcpStream" && method == "connect" {
+                let addr = match args.first() { Some(Value::Str(a)) => a.clone(), _ => return Err(err("TcpStream.connect: expected an address string", line)) };
+                let st = std::net::TcpStream::connect(&addr).map_err(|e| Signal::Exception(Value::Str(e.to_string())))?;
+                return Ok(self.new_stream(st));
+            }
             if name == "SystemTime" && method == "now" {
                 let nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -169,6 +209,34 @@ impl Interpreter {
                 return Ok(make_object("SystemTime".to_string(), vec![
                     ("unixNanos".to_string(), Value::Uint128(nanos)),
                 ]));
+            }
+            if name == "Duration" {
+                let unit: Option<u128> = match method {
+                    "from_secs" | "fromSecs" => Some(1_000_000_000),
+                    "from_millis" | "fromMillis" => Some(1_000_000),
+                    "from_micros" | "fromMicros" => Some(1_000),
+                    "from_nanos" | "fromNanos" => Some(1),
+                    _ => None,
+                };
+                if let Some(unit) = unit {
+                    let n = match args.first() {
+                        Some(Value::Float64(f)) if method.ends_with("secs") || method.ends_with("Secs") => (*f * 1e9) as u128,
+                        Some(v) => match match v {
+                            Value::Int(i) | Value::Int64(i) => Some(*i as i128),
+                            Value::Uint(u) | Value::Uint64(u) => Some(*u as i128),
+                            Value::Int32(i) => Some(*i as i128),
+                            Value::Uint32(u) => Some(*u as i128),
+                            _ => None,
+                        } {
+                            Some(i) if i >= 0 => (i as u128) * unit,
+                            _ => return Err(err(format!("Duration.{}: expected a non-negative integer", method), line)),
+                        },
+                        None => return Err(err(format!("Duration.{}: missing argument", method), line)),
+                    };
+                    return Ok(make_object("Duration".to_string(), vec![
+                        ("nanos".to_string(), Value::Uint128(n)),
+                    ]));
+                }
             }
             // `new` → same as calling the constructor
             if method == "new" {
@@ -688,6 +756,9 @@ impl Interpreter {
                         ("len".to_string(), Value::Uint64(metadata.len())),
                     ]));
                 }
+                if type_name == "TcpListener" || type_name == "TcpStream" {
+                    if let Some(r) = self.socket_method(&type_name, &fields, method, &args, line) { return r; }
+                }
                 if type_name == "Metadata" && method == "len" {
                     return fields
                         .iter()
@@ -727,13 +798,23 @@ impl Interpreter {
                         ("nanos".to_string(), Value::Uint128(nanos)),
                     ]));
                 }
-                if type_name == "Duration" && method == "asSecs" {
-                    let nanos = fields.iter().find_map(|(name, value)| {
-                        if name == "nanos" {
-                            if let Value::Uint128(nanos) = value { Some(*nanos) } else { None }
-                        } else { None }
-                    }).ok_or_else(|| err("invalid Duration value", line))?;
-                    return Ok(Value::Uint64((nanos / 1_000_000_000) as u64));
+                if type_name == "Duration" {
+                    let div: Option<u128> = match method {
+                        "asSecs" | "as_secs" => Some(1_000_000_000),
+                        "asMillis" | "as_millis" => Some(1_000_000),
+                        "asMicros" | "as_micros" => Some(1_000),
+                        "asNanos" | "as_nanos" => Some(1),
+                        _ => None,
+                    };
+                    if let Some(div) = div {
+                        let nanos = fields.iter().find_map(|(name, value)| {
+                            if name == "nanos" {
+                                if let Value::Uint128(nanos) = value { Some(*nanos) } else { None }
+                            } else { None }
+                        }).ok_or_else(|| err("invalid Duration value", line))?;
+                        let q = nanos / div;
+                        return Ok(if div == 1_000_000_000 { Value::Uint64(q as u64) } else { Value::Uint128(q) });
+                    }
                 }
                 let struct_val = self.global.borrow().get(&type_name);
                 if let Some(Value::Struct { decl, captured }) = struct_val {
@@ -761,6 +842,11 @@ impl Interpreter {
                             let result = self.call_fn(&fn_decl, Rc::clone(&fn_env), args, line, false)?;
                             *out_self = fn_env.borrow().get("self");
                             return Ok(result);
+                        }
+                        // Optionals are transparent here (`T?` is the value or nil): a Rust-style
+                        // `Option::unwrap_or` on a present struct value yields the value itself.
+                        if (method == "unwrap_or" || method == "unwrapOr") && args.len() == 1 {
+                            return Ok(obj_clone.clone());
                         }
                         if method.is_empty() {
                             Err(err(format!("'{}' is not callable — no anonymous `def ()` or `req ()` defined", type_name), line))
@@ -1321,6 +1407,7 @@ impl Interpreter {
             "trim" => Ok(Some(Value::Str(s.trim().to_string()))),
             "trimStart" => Ok(Some(Value::Str(s.trim_start().to_string()))),
             "trimEnd"   => Ok(Some(Value::Str(s.trim_end().to_string()))),
+            "as_bytes" | "asBytes" | "into_bytes" | "intoBytes" => Ok(Some(Value::ByteArray(Rc::new(s.as_bytes().to_vec())))),
             "upper" | "toUpper" | "toUpperCase" | "uppercased" => Ok(Some(Value::Str(s.to_uppercase()))),
             "lower" | "toLower" | "toLowerCase" | "lowercased" => Ok(Some(Value::Str(s.to_lowercase()))),
             "replace" => {
@@ -1425,6 +1512,7 @@ impl Interpreter {
         };
         match method {
             "len" | "length" => Ok(Some(Value::Int(arr.len() as i64))),
+            "clear" if args.is_empty() => Ok(Some(Value::Array(Vec::new().into()))),
             "push" => {
                 let mut new_arr = Value::rc_vec_into_owned(arr);
                 new_arr.push(args.into_iter().next().unwrap_or(Value::Nil));
@@ -2018,6 +2106,7 @@ impl Interpreter {
                 Ok(Some(Value::Dict(result)))
             }
             "isEmpty" => Ok(Some(Value::Bool(pairs.is_empty()))),
+            "clear" if args.is_empty() => Ok(Some(Value::Dict(Vec::new()))),
             "count"   => Ok(Some(Value::Int(pairs.len() as i64))),
             "set" | "put" | "insert" => {
                 let key = args.first().cloned().unwrap_or(Value::Nil);
@@ -2072,6 +2161,7 @@ impl Interpreter {
             _ => unreachable!(),
         };
         match method {
+            "clear" if args.is_empty() => Ok(Some(Value::Set(Vec::new()))),
             "add" => {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
                 let mut new_set = set;
@@ -2216,6 +2306,9 @@ impl Interpreter {
                     other => Err(err(format!("Screen has no field '{}'", other), line)),
                 }
             }
+            // `Range.start` / `Range.end` (std.ops.Range).
+            Value::Range { start, .. } if field == "start" => Ok(Value::Int(start)),
+            Value::Range { end, .. } if field == "end" => Ok(Value::Int(end)),
             // KernelHandle.done() / .wait — simulation: kernel already ran, always done.
             Value::KernelHandle { result } if field == "done" => {
                 let _ = result; // mark as used
@@ -2626,6 +2719,70 @@ impl Interpreter {
     /// `assign` for writing a content-mutated value (`s.log.push(x)`, `s.log[i] = x`,
     /// a `mut` param's final value) back to its place: unlike a user-written
     /// `s.log = ...`, this is permitted on a `mut`-typed field that isn't `var`.
+    pub(crate) fn new_stream(&mut self, st: std::net::TcpStream) -> Value {
+        let id = self.sockets.len() as u64 + 1;
+        self.sockets.insert(id, Socket::Stream(st));
+        make_object("TcpStream".to_string(), vec![("id".to_string(), Value::Uint(id))])
+    }
+
+    fn socket_bytes(v: Option<&Value>) -> Option<Vec<u8>> {
+        match v {
+            Some(Value::ByteArray(b)) => Some(b.to_vec()),
+            Some(Value::Str(s)) => Some(s.as_bytes().to_vec()),
+            Some(Value::Array(a)) => Some(a.iter().map(|x| match x { Value::Uint8(b) => *b, Value::Int(n) => *n as u8, _ => 0 }).collect()),
+            _ => None,
+        }
+    }
+
+    /// `std.net` loopback sockets: `TcpListener` (`local_addr`, `accept`) and `TcpStream`
+    /// (`write`, `write_all`, `flush`, `peer_addr`). `read`/`read_exact` fill a caller buffer and
+    /// are handled at the call site (they need to write the buffer back).
+    fn socket_method(&mut self, type_name: &str, fields: &[(String, Value)], method: &str, args: &[Value], line: usize) -> Option<Eval> {
+        use std::io::Write;
+        let id = fields.iter().find_map(|(k, v)| if k == "id" { if let Value::Uint(i) = v { Some(*i) } else { None } } else { None })?;
+        let exc = |e: std::io::Error| Signal::Exception(Value::Str(e.to_string()));
+        match (type_name, method) {
+            ("TcpListener", "local_addr" | "localAddr") => {
+                let Some(Socket::Listener(l)) = self.sockets.get(&id) else { return None };
+                Some(l.local_addr().map(|a| Value::Str(a.to_string())).map_err(exc))
+            }
+            ("TcpListener", "accept") => {
+                let accepted = match self.sockets.get(&id) { Some(Socket::Listener(l)) => l.accept(), _ => return None };
+                Some(accepted.map(|(st, a)| Value::Tuple(vec![self.new_stream(st), Value::Str(a.to_string())])).map_err(exc))
+            }
+            ("TcpStream", "write_all" | "writeAll" | "write") => {
+                let Some(bytes) = Self::socket_bytes(args.first()) else { return Some(Err(err("write: expected a byte buffer", line))) };
+                let Some(Socket::Stream(st)) = self.sockets.get_mut(&id) else { return None };
+                if method == "write" { Some(st.write(&bytes).map(|n| Value::Uint(n as u64)).map_err(exc)) }
+                else { Some(st.write_all(&bytes).map(|_| Value::Void).map_err(exc)) }
+            }
+            ("TcpStream", "flush") => {
+                let Some(Socket::Stream(st)) = self.sockets.get_mut(&id) else { return None };
+                Some(st.flush().map(|_| Value::Void).map_err(exc))
+            }
+            ("TcpStream", "peer_addr" | "peerAddr" | "local_addr" | "localAddr") => {
+                let Some(Socket::Stream(st)) = self.sockets.get(&id) else { return None };
+                let a = if method.starts_with("peer") { st.peer_addr() } else { st.local_addr() };
+                Some(a.map(|a| Value::Str(a.to_string())).map_err(exc))
+            }
+            _ => None,
+        }
+    }
+
+    /// `stream.read(buf)` / `stream.read_exact(buf)`: reads into a copy of `buf` and returns the
+    /// new buffer plus the byte count (`read_exact` returns `None` for the count).
+    pub(crate) fn socket_read(&mut self, stream: &Value, buf: &Value, exact: bool) -> Result<(Value, Option<usize>), Signal> {
+        use std::io::Read;
+        let Value::Object(o) = stream else { return Err(err("read: not a stream", 0)) };
+        let id = o.borrow().fields.iter().find_map(|(k, v)| if k == "id" { if let Value::Uint(i) = v { Some(*i) } else { None } } else { None });
+        let mut bytes = Self::socket_bytes(Some(buf)).ok_or_else(|| err("read: expected a byte buffer", 0))?;
+        let Some(Socket::Stream(st)) = id.and_then(|i| self.sockets.get_mut(&i)) else { return Err(err("read: closed stream", 0)) };
+        let exc = |e: std::io::Error| Signal::Exception(Value::Str(e.to_string()));
+        let n = if exact { st.read_exact(&mut bytes).map_err(exc)?; None } else { Some(st.read(&mut bytes).map_err(exc)?) };
+        let out = match buf { Value::Array(_) => Value::Array(bytes.iter().map(|b| Value::Uint8(*b)).collect::<Vec<_>>().into()), _ => Value::ByteArray(Rc::new(bytes)) };
+        Ok((out, n))
+    }
+
     pub(crate) fn assign_content(&mut self, target: &Expr, val: Value, env: EnvRef, line: usize) -> Result<(), Signal> {
         let prev = std::mem::replace(&mut self.in_content_writeback, true);
         let r = self.assign(target, val, env, line);
@@ -2645,6 +2802,7 @@ impl Interpreter {
                 if env.borrow().resolves_to_self_field(name) {
                     let self_expr = Expr { kind: ExprKind::Var("self".to_string()), line, col: 0, len: 0 };
                     let field_expr = Expr { kind: ExprKind::Field(Box::new(self_expr), name.clone()), line, col: 0, len: 0 };
+                    self.in_content_writeback = content_wb;
                     return self.assign(&field_expr, val, Rc::clone(&env), line);
                 }
                 let set_result = env.borrow_mut().set(name, val.clone());
@@ -2813,7 +2971,9 @@ impl Interpreter {
                             let struct_val = self.global.borrow().get(&type_name);
                             if let Some(Value::Struct { decl, .. }) = struct_val {
                                 if let Some(fd) = decl.fields.iter().find(|f| f.name == *field) {
-                                    if !(fd.mutable || self.in_init_body || content_wb && fd.ty.grants_mut())
+                                    if !(fd.mutable || self.in_init_body || content_wb && (fd.ty.grants_mut() || matches!(
+                                        fd.ty.without_mut(),
+                                        crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask | crate::ast::OwnerQual::Guard | crate::ast::OwnerQual::GuardTask))))
                                     {
                                         return Err(err(format!("cannot assign to immutable field '{}'", field), line));
                                     }
@@ -2823,8 +2983,13 @@ impl Interpreter {
                                     // promises not to mutate `self`, not other objects — e.g.
                                     // a `mut` parameter's content may be mutated by the callee
                                     // (docs/book.md, "`mut` vs `var` on a struct parameter").
+                                    // An `'actor`/`'guard` field has interior mutability (the lock),
+                                    // so a *content* write through it is fine from a `req` method.
+                                    let locked_content = content_wb && matches!(fd.ty.without_mut(),
+                                        crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask | crate::ast::OwnerQual::Guard | crate::ast::OwnerQual::GuardTask));
                                     if !self.current_method_mutating
                                         && !fd.transient
+                                        && !locked_content
                                         && !self.in_init_body
                                         && Self::expr_rooted_at_self(obj_expr)
                                     {

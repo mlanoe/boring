@@ -248,7 +248,7 @@ impl Interpreter {
                 // The receiver expression is evaluated exactly ONCE here; calling
                 // `eval_expr(e)` a second time would re-evaluate it (bug for
                 // non-idempotent receivers like `getArray().push(x)`).
-                const MUTATING: &[&str] = &["push", "append", "extend", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop", "move", "removeIndices"];
+                const MUTATING: &[&str] = &["push", "append", "extend", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop", "move", "removeIndices", "clear"];
                 // "set"/"put" are mutating on Dict/Set but NOT on user-defined structs
                 const MUTATING_COLL_ONLY: &[&str] = &["set", "put"];
                 if let ExprKind::MethodCall(obj_expr, method, args) = &e.kind {
@@ -515,12 +515,16 @@ impl Interpreter {
             let b = self.expect_bool(val, cond.line)?;
             if b {
                 let child = Env::child(Rc::clone(&env));
-                return self.exec_block(body, child);
+                let r = self.exec_block(body, Rc::clone(&child));
+                self.drop_scope_subscriptions(&child, None);
+                return r;
             }
         }
         if let Some(else_body) = &s.else_body {
             let child = Env::child(Rc::clone(&env));
-            self.exec_block(else_body, child)?;
+            let r = self.exec_block(else_body, Rc::clone(&child));
+            self.drop_scope_subscriptions(&child, None);
+            r?;
         }
         Ok(())
     }
@@ -1098,6 +1102,13 @@ impl Interpreter {
     /// this function's scalar-only `base()` dispatch below nor `cast_value` (also scalar-only)
     /// ever looked inside the array to narrow its elements — confirmed via examples/saxpy.br.
     pub(crate) fn coerce_to_type(val: Value, ty: &Type) -> Value {
+        // `T'...'observed`: the value lives in a `__Observed` wrapper (subscribe / notify / `.value`).
+        if let Type::Qualified(inner, OwnerQual::Observed) = ty.without_mut() {
+            if matches!(&val, Value::Object(o) if o.borrow().type_name == super::OBSERVED) { return val; }
+            if matches!(val, Value::Nil | Value::Uninitialized | Value::Void) { return val; }
+            let inner_v = Self::coerce_to_type(val, inner);
+            return super::make_object(super::OBSERVED.to_string(), vec![("value".to_string(), inner_v)]);
+        }
         fn strip_wrapper(ty: &Type) -> &Type {
             match ty {
                 Type::Qualified(inner, _) | Type::Mut(inner) => strip_wrapper(inner),
@@ -1587,7 +1598,17 @@ impl Interpreter {
             Type::Void   => matches!(val, Value::Void),
             Type::Never  => false,
             Type::Optional(inner) => matches!(val, Value::Nil) || self.value_matches_type(val, inner),
-            Type::Qualified(inner, _) => self.value_matches_type(val, inner),
+            Type::Qualified(inner, q) => {
+                if matches!(q, OwnerQual::Observed) {
+                    if let Value::Object(o) = val {
+                        let b = o.borrow();
+                        if b.type_name == super::OBSERVED {
+                            if let Some((_, v)) = b.fields.first() { return self.value_matches_type(v, inner); }
+                        }
+                    }
+                }
+                self.value_matches_type(val, inner)
+            }
             // `mut` has no Rust-level representation and runtime values carry no
             // permission tag — strip and delegate to the inner type.
             Type::Mut(inner) => self.value_matches_type(val, inner),
@@ -1665,6 +1686,7 @@ impl Interpreter {
             // impl Trait — transparent at runtime, match against the inner trait type
             Type::Dyn(inner) | Type::Impl(inner) => self.value_matches_type(val, inner),
             Type::Generic(name, args) => match name.as_str() {
+                "Range" if matches!(val, Value::Range { .. }) => true,
                 // Result<T, E> — accept any Ok(v) / Err(e) EnumVariant; the inner
                 // types are not checked at runtime (erasure), only the wrapper name.
                 "Result" => matches!(val,

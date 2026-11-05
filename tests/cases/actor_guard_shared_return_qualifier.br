@@ -35,11 +35,11 @@ Counter'actor makeActorViaLocal():
     c
 
 def main():
-    let a1 = makeActorTail()
+    mut a1 = makeActorTail()
     a1.inc()
     print "a1={a1.value}"
 
-    let a2 = makeActorReturn()
+    mut a2 = makeActorReturn()
     a2.inc()
     print "a2={a2.value}"
 
@@ -49,6 +49,6 @@ def main():
     let s = makeShared()
     print "s={s.value}"
 
-    let a3 = makeActorViaLocal()
+    mut a3 = makeActorViaLocal()
     a3.inc()
     print "a3={a3.value}"

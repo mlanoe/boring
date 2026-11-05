@@ -1,0 +1,13 @@
+[package]
+name = "gpu_overloaded_array_param_name"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "gpu_overloaded_array_param_name"
+path = "src/main.rs"
+
+[dependencies]
+metal = "0.29"
+half = { version = "2", features = ["bytemuck", "serde"] }
+objc = "0.2"

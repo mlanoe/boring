@@ -1729,6 +1729,14 @@ impl Transpiler {
                 {
                     self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
                 }
+                if !is_req && v != "self" && self.fn_current_params.contains_key(v.as_str())
+                    && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
+                    && (self.struct_fields.contains_key(struct_name.as_str()) || self.enum_has_mut_field(struct_name.as_str()))
+                {
+                    let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
+                    let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
+                    self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
+                }
                 let guard = if is_req {
                     if is_task { self.guard_task_read_access(v) } else { self.guard_read_access(v) }
                 } else {
@@ -1869,8 +1877,17 @@ impl Transpiler {
                 // Params are excluded (unchanged, still-unenforced parameter
                 // model — see `content_mutable_local_vars`'s doc); only a
                 // genuine local binding is checked here.
-                if !self.fn_current_params.contains_key(v.as_str())
-                    && self.known_local_vars.contains(v.as_str())
+                if self.fn_current_params.contains_key(v.as_str()) {
+                    if v != "self"
+                        && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
+                        && (self.struct_fields.contains_key(struct_name.as_str()) || self.enum_has_mut_field(struct_name.as_str()))
+                        && !self.method_is_req_or_task(&struct_name, method)
+                    {
+                        let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
+                        let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
+                        self.push_error(line, col, format!("`{}` is not declared `mut` — cannot call `def` method `.{}()` on an immutable binding; fix: declare the parameter as `mut {} {}` or `var mut {} {}`", v, method, struct_name, v, struct_name, v));
+                    }
+                } else if self.known_local_vars.contains(v.as_str())
                     && !self.content_mutable_local_vars.contains(v.as_str())
                     && self.mut_checked_local_vars.contains(v.as_str())
                 {
@@ -7564,10 +7581,10 @@ impl Transpiler {
             builtins_seeded: self.builtins_seeded,
             emitted_fn_sigs: self.emitted_fn_sigs.clone(),
             fn_current_params: self.fn_current_params.clone(),
-            fn_current_param_lines: std::collections::HashMap::new(),
-            fn_current_param_cols: std::collections::HashMap::new(),
-            fn_current_params_mut: std::collections::HashSet::new(),
-            fn_current_params_rebind_only: std::collections::HashSet::new(),
+            fn_current_param_lines: self.fn_current_param_lines.clone(),
+            fn_current_param_cols: self.fn_current_param_cols.clone(),
+            fn_current_params_mut: self.fn_current_params_mut.clone(),
+            fn_current_params_rebind_only: self.fn_current_params_rebind_only.clone(),
             fn_current_params_lent: std::collections::HashSet::new(),
             last_use_sites: self.last_use_sites.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),

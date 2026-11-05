@@ -264,6 +264,80 @@ def Value clone_value(mut Interpreter interp, Value v):
         _:
             return v
 
+# `view` state helpers. A view method holds the mounted state's fields (and its `bind`s) as locals:
+# fields stored in a `Slot` (a `bind`, or a `state` handed to a child's `bind`) are read through
+# `.value`. `view_sync` mode 0 defines the locals, 1 copies them back into the object/slots, and
+# 2 refreshes existing locals (used around a nested `self.m()` call).
+def [string] view_slotted_names(mut Interpreter interp, string type_name):
+    let decl_opt = interp.get_struct_decl(type_name)
+    mut [string] names = []
+    if let decl = decl_opt:
+        for attr in decl.attrs:
+            if attr.name == "slot" or attr.name == "bind":
+                for an in attr.args:
+                    names.push(an)
+    names
+
+# Is this declared field type an `'actor`/`'guard` (shared, interior-mutable) one? Such a
+# field may be written from a non-mutating (`req`) method, so its local copy must be
+# written back even when the method is not `def`.
+def bool type_is_interior_mutable(Type ty):
+    match ty:
+        Type.Qualified(inner, qual):
+            match qual:
+                OwnerQual.Actor: true
+                OwnerQual.Guard: true
+                _: type_is_interior_mutable(inner)
+        _: false
+
+def [string] interior_mutable_fields(mut Interpreter interp, string type_name):
+    let decl_opt = interp.get_struct_decl(type_name)
+    mut [string] names = []
+    if let decl = decl_opt:
+        for f in decl.fields:
+            if type_is_interior_mutable(f.ty):
+                names.push(f.name)
+    names
+
+def void view_sync(mut Interpreter interp, Value target, bool slotted_only, int mode):
+    match target:
+        Value.Object(obj):
+            let slotted = view_slotted_names(interp, obj.type_name.clone())
+            for vf in obj.fields:
+                let is_slot = slotted.contains(vf.0)
+                if slotted_only and not is_slot:
+                    continue
+                var Value? slot_obj = nil
+                if is_slot:
+                    match vf.1:
+                        Value.Object(so):
+                            slot_obj = Value.Object(so)
+                        _: nil
+                if mode == 1:
+                    let cur = interp.current_env.get(vf.0)
+                    if let cv = cur:
+                        if let sv = slot_obj:
+                            match sv:
+                                Value.Object(so2):
+                                    so2.set_field("value", cv)
+                                _: nil
+                        else:
+                            obj.set_field(vf.0, cv)
+                else:
+                    var Value shown = vf.1
+                    if let sv2 = slot_obj:
+                        match sv2:
+                            Value.Object(so3):
+                                let inner_val = so3.get_field("value")
+                                if let iv = inner_val:
+                                    shown = iv
+                            _: nil
+                    if mode == 0:
+                        env_define(interp, vf.0, shown, true)
+                    else:
+                        interp.current_env.force_set(vf.0, shown)
+        _: nil
+
 def Value call_method(mut Interpreter interp, Value recv, string method_name, [Value] args):
     match recv:
         Value.Fixed(fraw, fsg, fn_, fm):
@@ -490,6 +564,8 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
 
         Value.Array(arr):
             match method_name:
+                "clear":
+                    Value.Array([])
                 "length":
                     Value.Int(arr.length)
                 "len":
@@ -997,6 +1073,8 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
 
         Value.Dict(pairs):
             match method_name:
+                "clear":
+                    Value.Dict([])
                 "length":
                     Value.Int(pairs.length)
                 "len":
@@ -1173,6 +1251,8 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
 
         Value.Set(elements):
             match method_name:
+                "clear":
+                    Value.Set([])
                 "length":
                     Value.Int(elements.length)
                 "len":
@@ -1635,11 +1715,25 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
             let method_decl_opt = interp.find_best_method(type_name, method_name, args)
             if let method_decl = method_decl_opt:
                 let self_val = Value.Object(inner)
+                # `view` methods take the mounted state as a trailing `__st` parameter. A call
+                # that omits it (`self.touch()` inside the view) forwards the caller's own.
+                mut [Value] call_args = []
+                var Value? forwarded_st = nil
+                for a0 in args:
+                    call_args.push(a0)
+                let last_pi = method_decl.params.length - 1
+                if last_pi >= 0 and method_decl.params[last_pi].name == "__st" and args.length < method_decl.params.length:
+                    let fwd_st = interp.current_env.get("__st")
+                    if let fwd = fwd_st:
+                        call_args.push(fwd.clone())
+                        view_sync(interp, fwd.clone(), false, 1)
+                        view_sync(interp, self_val.clone(), true, 1)
+                        forwarded_st = fwd
                 let child_env = push_scope(interp)
                 env_define(interp, "self", self_val, false)
                 for field in inner.fields:
                     env_define(interp, field.0, field.1, true)
-                let bound_args = order_method_args(method_decl.params, args)
+                let bound_args = order_method_args(method_decl.params, call_args)
                 var i = 0
                 while i < method_decl.params.length and i < bound_args.length:
                     let param = method_decl.params[i]
@@ -1652,15 +1746,36 @@ def Value call_method(mut Interpreter interp, Value recv, string method_name, [V
                     i += 1
                 let mutating = method_decl.mutating
                 let method_params = method_decl.params
+                # `view`: expose `bind`s and the mounted state's fields as locals, copy them back after.
+                var view_state_opt = interp.current_env.get("__st")
+                if last_pi < 0 or method_decl.params[last_pi].name != "__st":
+                    view_state_opt = nil
+                view_sync(interp, self_val.clone(), true, 0)
+                if let vs = view_state_opt.clone():
+                    view_sync(interp, vs, false, 0)
                 let result = exec_method_body(interp, method_decl)
                 let method_scope = interp.current_env
                 capture_var_param_outs(interp, method_params, method_scope)
                 if mutating:
                     for field in inner.fields:
                         let updated = interp.current_env.get(field.0)
+                else:
+                    # `req` method writing an `'actor`/`'guard` field (e.g. `memo[k] = w`).
+                    let shared_fields = interior_mutable_fields(interp, type_name.clone())
+                    for field in inner.fields:
+                        if shared_fields.contains(field.0):
+                            let updated = interp.current_env.get(field.0)
+                            if let v = updated:
+                                inner.set_field(field.0, v)
                         if let v = updated:
                             inner.set_field(field.0, v)
+                view_sync(interp, self_val.clone(), true, 1)
+                if let vs2 = view_state_opt:
+                    view_sync(interp, vs2, false, 1)
                 pop_scope(interp)
+                if let fst = forwarded_st:
+                    view_sync(interp, fst, false, 2)
+                    view_sync(interp, self_val.clone(), true, 2)
                 result
             else:
                 # `upgrade()` on weak ref — in the interpreter all refs are strong, just return self

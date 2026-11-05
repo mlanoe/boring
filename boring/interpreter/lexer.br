@@ -221,6 +221,152 @@ def bool tick_is_qualifier([string] chars, int i):
         return before != "&"
     return false
 
+def bool is_word_char(string c):
+    return is_dollar_ident_char(c) or c > "~"
+
+# How many lines around a tick a declaration/function header may span
+# (mirrors `HEADER_LINES` in src/lexer/mod.rs).
+def int header_lines():
+    return 24
+
+# Index just after the last "\n" strictly before `end` (0 when none).
+def int line_start_before([string] chars, int end):
+    var k = end
+    while k > 0:
+        if chars[k - 1] == "\n":
+            return k
+        k -= 1
+    return 0
+
+# Does chars[start..end] (starting at a line start) begin with a
+# `struct|enum|trait|ext Name<` header whose `<...>` list is still open at `end`?
+# Mirrors `decl_header_open` in src/lexer/mod.rs.
+def bool decl_header_open([string] chars, int start, int end):
+    var p = start
+    var word = ""
+    var pass_n = 0
+    while pass_n < 2:
+        while p < end and (chars[p] == " " or chars[p] == "\t" or chars[p] == "\n" or chars[p] == "\r"):
+            p += 1
+        word = ""
+        while p < end and is_word_char(chars[p]):
+            word = word + chars[p]
+            p += 1
+        if pass_n == 0 and word == "pub" and p < end and chars[p] == " ":
+            pass_n += 1
+            continue
+        break
+    if word != "struct" and word != "enum" and word != "trait" and word != "ext":
+        return false
+    while p < end and (chars[p] == " " or chars[p] == "\t" or chars[p] == "\n" or chars[p] == "\r"):
+        p += 1
+    let name_start = p
+    while p < end and is_word_char(chars[p]):
+        p += 1
+    if p == name_start or p >= end or chars[p] != "<":
+        return false
+    var depth = 0
+    while p < end:
+        if chars[p] == "<":
+            depth += 1
+        elif chars[p] == ">":
+            depth -= 1
+        p += 1
+    return depth >= 1
+
+def bool tick_in_decl_header([string] chars, int i):
+    var start = line_start_before(chars, i)
+    var n = 0
+    while n <= header_lines():
+        if decl_header_open(chars, start, i):
+            return true
+        if start == 0:
+            break
+        start = line_start_before(chars, start - 1)
+        n += 1
+    return false
+
+def bool prev_is_arrow([string] line, int k):
+    if k == 0:
+        return false
+    return line[k - 1] == "-" or line[k - 1] == "="
+
+# `line` = chars of a window of whole lines; `tick` = offset of the tick in it.
+# Mirrors `fn_header_open` in src/lexer/mod.rs.
+def bool fn_header_open([string] line, int tick):
+    var mut open = [0]
+    open.clear()
+    var k = 0
+    while k < tick:
+        let c = line[k]
+        if c == "<":
+            open.push(k)
+        elif c == ">" and not prev_is_arrow(line, k):
+            if open.length > 0:
+                open.pop()
+        k += 1
+    if open.length == 0:
+        return false
+    let lt = open[open.length - 1]
+    var name_start = lt
+    while name_start > 0 and is_word_char(line[name_start - 1]):
+        name_start -= 1
+    if name_start == lt:
+        return false
+    let line_start = line_start_before(line, name_start)
+    var prefix = ""
+    var q = line_start
+    while q < name_start:
+        if line[q] == "=":
+            return false
+        prefix = prefix + line[q]
+        q += 1
+    var first = ""
+    var r = 0
+    let pc = prefix.chars()
+    while r < pc.length and (pc[r] == " " or pc[r] == "\t"):
+        r += 1
+    while r < pc.length and is_word_char(pc[r]):
+        first = first + pc[r]
+        r += 1
+    if first == "let" or first == "var" or first == "return" or first == "if" or first == "elif" or first == "while" or first == "for" or first == "print" or first == "match" or first == "guard" or first == "else" or first == "yield" or first == "assert" or first == "use" or first == "struct" or first == "enum" or first == "trait" or first == "ext":
+        return false
+    var depth = 0
+    var m = lt
+    while m < line.length:
+        if line[m] == "<":
+            depth += 1
+        elif line[m] == ">" and not prev_is_arrow(line, m):
+            depth -= 1
+            if depth == 0:
+                return m + 1 < line.length and line[m + 1] == "("
+        m += 1
+    return false
+
+def bool tick_in_fn_header([string] chars, int i):
+    var start = line_start_before(chars, i)
+    var n = 0
+    while n <= header_lines():
+        var end = i
+        var ends = 0
+        while end < chars.length and ends <= header_lines():
+            if chars[end] == "\n":
+                ends += 1
+            end += 1
+        var mut window = [""]
+        window.clear()
+        var w = start
+        while w < end:
+            window.push(chars[w])
+            w += 1
+        if fn_header_open(window, i - start):
+            return true
+        if start == 0:
+            break
+        start = line_start_before(chars, start - 1)
+        n += 1
+    return false
+
 def string preprocess_triple_strings(string source):
     let chars = source.chars()
     let n = chars.length
@@ -280,7 +426,7 @@ def string preprocess_triple_strings(string source):
                 result = result + "\n"
                 nl += 1
             continue
-        if ch == "'" and not tick_is_qualifier(chars, i):
+        if ch == "'" and not tick_is_qualifier(chars, i) and not tick_in_decl_header(chars, i) and not tick_in_fn_header(chars, i):
             # Raw single-line '...': no interpolation, no escapes, ends at the next
             # `'` on the same line. Re-emitted as a regular string token.
             let start_line = line

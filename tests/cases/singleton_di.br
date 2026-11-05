@@ -16,9 +16,9 @@ Counter'actor makeCounter():
     Counter(0)
 
 def main():
-    let c1 = makeCounter()
+    mut c1 = makeCounter()
     c1.inc()
-    let c2 = makeCounter()
+    mut c2 = makeCounter()
     c2.inc()
     # Read one at a time -- c1/c2 alias the same underlying `'actor` cell (that's
     # the whole point of this test), and `std::sync::Mutex` isn't reentrant: locking

@@ -851,6 +851,89 @@ impl Interpreter {
     /// (`Counter.zero()`), the fast-path mutating-array-method shortcut, GPU-device
     /// property mocks, the immutable-`let`-binding mutating-method diagnostic, and an
     /// ordinary struct method call with its modified-`self`/owned-param write-back.
+    /// A method call on an `'observed` wrapper: `subscribe(cb)` registers a callback and returns a
+    /// subscription handle; any other method is forwarded to the wrapped value, and a mutating
+    /// (`def`) one then notifies every subscriber with the wrapper itself. (`.value.m()` reaches the
+    /// wrapped value directly, so it never gets here — the silent escape hatch.)
+    fn observed_method_call(&mut self, wrapper: &Value, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
+        let Value::Object(w) = wrapper else { unreachable!() };
+        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+        let key = Rc::as_ptr(w) as usize;
+        if method == "subscribe" && arg_vals.len() == 1 {
+            self.observed_next_id += 1;
+            let id = self.observed_next_id;
+            self.observed_subs.entry(key).or_default().push((id, arg_vals[0].clone()));
+            return Ok(make_object(super::SUBSCRIPTION.to_string(), vec![
+                ("id".to_string(), Value::Uint(id)),
+                ("target".to_string(), Value::Uint(key as u64)),
+            ]));
+        }
+        let inner = w.borrow().fields.first().map(|(_, v)| v.clone()).unwrap_or(Value::Nil);
+        let mutating = match &inner {
+            Value::Object(o) => {
+                let tn = o.borrow().type_name.clone();
+                match self.global.borrow().get(&tn) {
+                    Some(Value::Struct { ref decl, .. }) =>
+                        decl.methods.iter().find(|m| m.name == *method).map(|m| m.mutating && !m.task).unwrap_or(false),
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        let decl = match &inner {
+            Value::Object(o) => {
+                let tn = o.borrow().type_name.clone();
+                match self.global.borrow().get(&tn) {
+                    Some(Value::Struct { ref decl, .. }) => decl.methods.iter().find(|m| m.name == *method).cloned(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let mut out_self = None;
+        self.last_var_params.clear();
+        let r = self.call_method(inner, method, arg_vals, line, &mut out_self)?;
+        if let Some(new) = out_self {
+            if let Some(slot) = w.borrow_mut().fields.first_mut() { slot.1 = new; }
+        }
+        // Lent `mut` arguments are written back to the caller, as for any other method call.
+        if let Some(d) = decl {
+            for (idx, arg) in args.iter().enumerate() {
+                if let Some(param) = Self::param_for_arg(&d.params, idx, arg).filter(|p| p.mutable) {
+                    self.write_back_mut_arg(&param.name, &arg.value, &env, line);
+                }
+            }
+        }
+        if mutating {
+            let subs: Vec<Value> = self.observed_subs.get(&key).map(|v| v.iter().map(|(_, c)| c.clone()).collect()).unwrap_or_default();
+            for cb in subs {
+                self.call_value(cb, vec![wrapper.clone()], line, false)?;
+            }
+        }
+        Ok(r)
+    }
+
+    /// End-of-scope `Drop` of `'observed` subscription handles bound directly in `env`
+    /// (`keep` = address of a handle that is being returned and so outlives the scope).
+    pub(crate) fn drop_scope_subscriptions(&mut self, env: &EnvRef, keep: Option<usize>) {
+        if self.observed_subs.is_empty() { return; }
+        let mut gone: Vec<(usize, u64)> = Vec::new();
+        for v in env.borrow().vars.values() {
+            if let Value::Object(o) = v {
+                if keep == Some(Rc::as_ptr(o) as usize) { continue; }
+                let b = o.borrow();
+                if b.type_name == super::SUBSCRIPTION {
+                    if let (Some((_, Value::Uint(id))), Some((_, Value::Uint(t)))) = (b.fields.first(), b.fields.get(1)) {
+                        gone.push((*t as usize, *id));
+                    }
+                }
+            }
+        }
+        for (t, id) in gone {
+            if let Some(list) = self.observed_subs.get_mut(&t) { list.retain(|(i, _)| *i != id); }
+        }
+    }
+
     fn eval_expr_method_call(&mut self, obj_expr: &Expr, method: &str, args: &[Arg], env: EnvRef, line: usize) -> Eval {
         if let ExprKind::Field(inner, ns) = &obj_expr.kind {
             if ns == "tensor" && matches!(&inner.kind, ExprKind::Var(g) if g == "gpu") {
@@ -970,6 +1053,17 @@ impl Interpreter {
             }
         }
         let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+        if matches!(method, "read" | "read_exact" | "readExact") && args.len() == 1
+            && matches!(&obj, Value::Object(o) if o.borrow().type_name == "TcpStream")
+        {
+            let buf = self.eval_expr(&args[0].value, Rc::clone(&env))?;
+            let (filled, n) = self.socket_read(&obj, &buf, method != "read")?;
+            self.assign_content(&args[0].value, filled, Rc::clone(&env), line)?;
+            return Ok(match n { Some(n) => Value::Uint(n as u64), None => Value::Void });
+        }
+        if matches!(&obj, Value::Object(o) if o.borrow().type_name == super::OBSERVED) {
+            return self.observed_method_call(&obj, method, args, env, line);
+        }
         // `.clone()` on a struct instance is a real deep copy (Rust `Clone`), except on a
         // `'shared`/`'actor`/`'guard` binding, where it clones the handle (alias, like `Rc::clone`).
         if method == "clone" && args.is_empty() {
@@ -1117,9 +1211,16 @@ impl Interpreter {
                                     let g = self.global.borrow();
                                     if let Some(Value::Struct { ref decl, .. }) = g.get(&recv_type) {
                                         decl.fields.iter().find(|f| f.name == *field_name)
-                                            .map(|f| f.ty.grants_mut())
+                                            .map(|f| f.ty.grants_mut() || matches!(
+                                                f.ty.without_mut(),
+                                                Type::TypeParam(_)
+                                                    | Type::Named(_) if matches!(f.ty.without_mut(), Type::TypeParam(_))
+                                                        || decl.type_params.iter().any(|p| matches!(f.ty.without_mut(), Type::Named(n) if n == p))))
                                     } else { None }
                                 };
+                                // A field typed by a bare type parameter (`T item`) takes its
+                                // permission from the concrete argument (`Container<mut Point>`),
+                                // which the interpreter erases: don't second-guess it here.
                                 if field_grants_mut == Some(false) {
                                     return Err(err(
                                         format!("cannot call mutating method '{}' on field '{}' — its declared type doesn't grant content mutation; declare the field `mut {}`/`var mut {}`", method, field_name, field_name, field_name),
@@ -1539,6 +1640,15 @@ impl Interpreter {
         }
         // Generic call with no special handling: evaluate callee and call it.
         let callee_val = self.eval_expr(callee, Rc::clone(&env))?;
+        if !matches!(callee_val, Value::KernelStruct { .. }) {
+            // Type arguments are erased: take the ordinary call path so labelled
+            // arguments, `mut`/`var` parameter write-back, etc. behave identically.
+            let plain = Expr {
+                kind: ExprKind::Call(Box::new(callee.clone()), args.to_vec()),
+                line, col: callee.col, len: callee.len,
+            };
+            return self.eval_expr(&plain, env);
+        }
         let mut evaled_args = Vec::new();
         for a in args {
             evaled_args.push(self.eval_expr(&a.value, Rc::clone(&env))?);
@@ -1845,6 +1955,47 @@ impl Interpreter {
                 res
             }
 
+            ExprKind::MethodCall(obj_expr, method, args)
+                if matches!(&obj_expr.kind, ExprKind::Var(n) if n == "mem")
+                    && matches!(method.as_str(), "swap" | "replace" | "take")
+                    && env.borrow().get("mem").is_none() =>
+            {
+                // Emulated `std::mem::{swap, replace, take}`: arguments are places.
+                let want = if method == "swap" || method == "replace" { 2 } else { 1 };
+                if args.len() != want {
+                    return Err(err(format!("mem.{} expects {} argument(s)", method, want), line));
+                }
+                let a = self.eval_expr(&args[0].value, Rc::clone(&env))?;
+                match method.as_str() {
+                    "swap" => {
+                        let b = self.eval_expr(&args[1].value, Rc::clone(&env))?;
+                        self.assign_content(&args[0].value, b, Rc::clone(&env), line)?;
+                        self.assign_content(&args[1].value, a, Rc::clone(&env), line)?;
+                        Ok(Value::Void)
+                    }
+                    "replace" => {
+                        let new = self.eval_expr(&args[1].value, Rc::clone(&env))?;
+                        self.assign_content(&args[0].value, new, Rc::clone(&env), line)?;
+                        Ok(a)
+                    }
+                    _ => {
+                        let d = match &a {
+                            Value::Str(_) => Value::Str(String::new()),
+                            Value::Array(_) => Value::Array(Vec::new().into()),
+                            Value::Dict(_) => Value::Dict(vec![]),
+                            Value::Set(_) => Value::Set(vec![]),
+                            Value::Bool(_) => Value::Bool(false),
+                            Value::Int(_) => Value::Int(0),
+                            Value::Uint(_) => Value::Uint(0),
+                            Value::Float64(_) => Value::Float64(0.0),
+                            Value::Nil => Value::Nil,
+                            _ => return Err(err("mem.take: type has no default value", line)),
+                        };
+                        self.assign_content(&args[0].value, d, Rc::clone(&env), line)?;
+                        Ok(a)
+                    }
+                }
+            }
             ExprKind::MethodCall(obj_expr, method, args) => {
                 // Storing a struct into a built-in collection stores a copy (book: "Move semantics").
                 self.copy_var_args = matches!(method.as_str(), "push" | "insert" | "append" | "extend" | "add" | "put" | "set")
@@ -3305,6 +3456,10 @@ impl Interpreter {
         }
     }
 
+    fn unlabel(v: &Value) -> &Value {
+        match v { Value::Labeled { value, .. } => &**value, other => other }
+    }
+
     /// Construct a value from a Rust type name.
     /// Well-known collection types map to boring's native equivalents;
     /// everything else produces an opaque Object.
@@ -3318,6 +3473,15 @@ impl Interpreter {
             "BTreeMap" => Ok(Value::Dict(vec![])),
             // std::collections::BTreeSet →  boring Set
             "BTreeSet" => Ok(Value::Set(vec![])),
+            // Box<T>: an opaque deref cell whose `.pointee` is the boxed value.
+            "Box" if args.len() == 1 => Ok(make_object("Box".to_string(), vec![
+                ("pointee".to_string(), Self::unlabel(&args[0]).clone()),
+            ])),
+            // std::ops::Range built with labelled/positional args
+            "Range" if args.len() == 2 => match (Self::unlabel(&args[0]), Self::unlabel(&args[1])) {
+                (Value::Int(a), Value::Int(b)) => Ok(Value::Range { start: *a, end: *b, inclusive: false }),
+                _ => Ok(make_object("Range".to_string(), vec![])),
+            },
             // Vec  →  boring Array (optionally pre-filled)
             "Vec" | "VecDeque" => Ok(Value::Array(args.into())),
             // String  →  boring Str

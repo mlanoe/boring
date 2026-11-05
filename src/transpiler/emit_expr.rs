@@ -3492,6 +3492,34 @@ impl Transpiler {
                 }
             }
         }
+        // `'actor`/`'guard` get no exception from the mut rule (CLAUDE.md): a field write through
+        // a non-`mut` lock-backed binding is rejected like any other type. The lock branches below
+        // `return` early, so the check lives here rather than in the generic diagnostic further down.
+        if let ExprKind::Field(obj, field) = &target.kind {
+            if let ExprKind::Var(v) = &obj.kind {
+                let is_lock = self.var_mutex_types.contains(v.as_str())
+                    || self.var_mutex_task_types.contains(v.as_str())
+                    || self.var_rwlock_types.contains(v.as_str())
+                    || self.var_rwlock_task_types.contains(v.as_str());
+                if is_lock && v != "self" {
+                    let sn = self.resolve_receiver_type_name(v.as_str());
+                    if self.struct_fields.contains_key(sn.as_str()) {
+                        if self.fn_current_params.contains_key(v.as_str()) {
+                            if !self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()) {
+                                let line = self.fn_current_param_lines.get(v.as_str()).copied().unwrap_or(0);
+                                let col = self.fn_current_param_cols.get(v.as_str()).copied().unwrap_or(0);
+                                self.push_error(line, col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on an immutable binding; fix: declare the parameter as `mut {} {}` or `var mut {} {}`", v, field, sn, v, sn, v));
+                            }
+                        } else if self.known_local_vars.contains(v.as_str())
+                            && !self.content_mutable_local_vars.contains(v.as_str())
+                            && self.mut_checked_local_vars.contains(v.as_str())
+                        {
+                            self.push_error(obj.line, obj.col, format!("`{}` is not declared `mut` — cannot assign to field `.{}` on a non-mut binding; fix: declare it `mut {} {}` or `var mut {} {}`", v, field, sn, v, sn, v));
+                        }
+                    }
+                }
+            }
+        }
         // Mutex field write: w.field = v
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {

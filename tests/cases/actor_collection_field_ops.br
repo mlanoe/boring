@@ -39,10 +39,10 @@ def main():
     let d = Cache(memo = {"z" = 9.0})
     print "{d.lookup("z")} {d.viaInner("q")}"
     print "{c.lookup("a")}"
-    c.remember("a", 1.5)
-    c.remember("b", 2.5)
+    _ = c.remember("a", 1.5)
+    _ = c.remember("b", 2.5)
     print "{c.lookup("a")} {c.size()} {c.has("b")}"
-    c.remember("c", 3.5)
+    _ = c.remember("c", 3.5)
     print "{c.size()} {c.has("a")}"
     print "{c.viaInner("a")}"
     let p = Plain()

@@ -303,6 +303,10 @@ impl Interpreter {
             self.type_param_stack.pop();
         }
 
+        // `'observed` subscriptions bound in this call's scope end with it (their `Drop`).
+        let keep = if let Ok(Value::Object(o)) = &result { Some(Rc::as_ptr(o) as usize) } else { None };
+        self.drop_scope_subscriptions(&fn_env, keep);
+
         // Populate last_var_params so the call site can write back mutated var args.
         self.last_var_params.clear();
         for param in &decl.params {
@@ -699,6 +703,14 @@ impl Interpreter {
                 env.borrow_mut().mark_content_mutable(&param.name);
             } else {
                 env.borrow_mut().define(&param.name, val);
+            }
+            // Same as `call_fn_inner`: an `'actor`/`'guard` init parameter is a shared handle,
+            // so `self.field = param` aliases the caller's value instead of copying it.
+            if let Some(ty) = &param.ty {
+                if matches!(self.resolve_type(ty).without_mut(),
+                    Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)) {
+                    env.borrow_mut().mark_actor(&param.name);
+                }
             }
         }
 

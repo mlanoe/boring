@@ -52,7 +52,7 @@ def string tag(Todo'actor t):
 def int psum(Todo'actor t):
     t.id + t.n + t.n
 
-def pbump(Todo'actor t):
+def pbump(mut Todo'actor t):
     t.title = "{t.title}?"
     t.n = t.n + t.n
     t.hist.push(t.n)
@@ -69,7 +69,7 @@ def main():
     print row.label()
     print row.sum()
     print st.count.value
-    let t'actor = Todo(id = 7, title = "p", n = 3, hist = [])
+    mut Todo'actor t = Todo(id = 7, title = "p", n = 3, hist = [])
     pbump(t)
     print tag(t)
     print psum(t)
