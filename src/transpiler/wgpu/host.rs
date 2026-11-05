@@ -2050,7 +2050,11 @@ impl<'a> HostEmitter<'a> {
                 } else { String::new() };
                 format!("{kname}::new({dim_args}std::sync::Arc::clone(&{pfx}device), std::sync::Arc::clone(&{pfx}queue))")
             }
-            (ExprKind::Call(c, _), _) if matches!(&c.kind, ExprKind::Var(f) if self.is_general_fn(f)) => {
+            // `k = makeKernel(...)`: only when `k` is a kernel -- a per-frame local or an event variable
+            // (`var changed = false` ... `changed = sync(...)`) is a plain assignment, not a rebuild.
+            (ExprKind::Call(c, _), _) if matches!(&c.kind, ExprKind::Var(f) if self.is_general_fn(f))
+                && !self.frame_locals.borrow().contains(name)
+                && !self.event_vars.borrow().contains(name) => {
                 self.host_expr(rhs)
             }
             _ => return None,

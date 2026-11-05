@@ -283,3 +283,47 @@ fn rocm_render_loop_state_values_and_methods() {
     assert!(rs.contains("ticks = (ticks + keyCount(&(boring_input.key_released.iter().map("), "{rs}");
     assert!(rs.contains("pace.frame(&mut rt, &host, 2)"), "{rs}");
 }
+
+#[test]
+fn wgpu_render_loop_local_var_assigned_from_fn_call_in_if() {
+    // `var flag = false` then `flag = f(...)` inside an `if` is a plain local assignment, not a
+    // kernel rebuild (`self.flag = ...; self.__reblit()` -> E0609 no field `flag` on `__App`).
+    let src = r#"
+def bool syncIt(int n):
+    n > 0
+
+let screen = Screen(Dimension(8, 8), title = "t")
+kernel Fill:
+    mut [uint]'surface pixels
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+    def ():
+        pixels[.thread.x] = uint(1)
+var mut k = Fill(Dimension(8, 8))
+kernel:
+    loop:
+        var flag = false
+        if screen.focus_gained:
+            flag = syncIt(2)
+        let other = flag or screen.resized
+        k(block = (4, 4))
+        if other:
+            screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (project, rs) = build(src, "local_var_fn_assign");
+    let rs = rs.unwrap_or_else(|e| panic!("boring build failed:\n{e}"));
+    assert!(rs.contains("flag = syncIt(2);"), "{rs}");
+    assert!(!rs.contains("self.flag"), "{rs}");
+    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_wgpu_target");
+    let out = common::SharedCargo::new("screen_render_loop_state")
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(shared)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
+}
