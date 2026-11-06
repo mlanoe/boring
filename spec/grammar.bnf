@@ -664,6 +664,12 @@ match_stmt      ::= "match" expr ":" NEWLINE INDENT
 
 match_arm       ::= pattern ("|" pattern)* ("if" expr)? ":" (expr NEWLINE | block)
 
+# Inline form: `match expr with arm ("," arm)*` on one line. Same arm head as the block form
+# (alternatives and guard allowed); body is a single expression. `,` separates arms, so a bare
+# comma tuple pattern is not accepted here — parenthesise it.
+match_inline    ::= "match" expr "with" inline_arm ("," inline_arm)*
+inline_arm      ::= pattern ("|" pattern)* ("if" expr)? ":" expr
+
 while_stmt      ::= "while" expr ":" block
                   # inline:  `while cond: stmt` — body is a single statement on the same line
 

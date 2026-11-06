@@ -3052,7 +3052,7 @@ scores.map((s): match s with 0: "fail", 100: "perfect", _: "pass")
 **Rules:**
 - `with` replaces the `:` + newline + indent of the block form.
 - Arm bodies are expressions (no block statements).
-- Guards (`if cond`) and pattern alternatives (`|`) are not supported in the inline form — use the block form for those.
+- Guards (`if cond`) and pattern alternatives (`|`) work exactly as in the block form: `match n with 0 | 1: "small", x if x > 100: "huge", _: "mid"`. The arm head (`P1 | P2 if cond`) always ends at the `:`, so `|` and `if` are unambiguous; the guard is parsed like a block-form guard. The one difference: a *bare* tuple pattern (`1, 2: …`) is not allowed inline because `,` separates arms — write `(1, 2): …`.
 
 **Rust equivalent** — the transpiler emits a standard `match` block:
 ```rust

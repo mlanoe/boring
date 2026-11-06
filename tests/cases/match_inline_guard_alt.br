@@ -1,0 +1,25 @@
+enum Shape:
+    Circle(int)
+    Square(int)
+    Tri(int)
+
+def string classify(int n):
+    match n with 0 | 1: "small", x if x > 100: "huge", x if x > 10: "big", _: "mid"
+
+def string kind(Shape s):
+    match s with Circle(r) | Square(r) if r > 5: "large-round-or-square", Circle(_) | Square(_): "small-round-or-square", Tri(_): "tri"
+
+def main():
+    print classify(0)
+    print classify(1)
+    print classify(500)
+    print classify(50)
+    print classify(5)
+    print kind(Shape.Circle(9))
+    print kind(Shape.Square(9))
+    print kind(Shape.Square(2))
+    print kind(Shape.Tri(2))
+    let s = match 3 with 1 | 2 | 3 if true: "a", _: "b"
+    print s
+    let t = match 7 with 7 if false: "no", 7: "yes", _: "other"
+    print t

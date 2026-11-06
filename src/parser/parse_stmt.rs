@@ -921,11 +921,26 @@ impl Parser {
         loop {
             let line = self.line();
             let col = self.col();
-            let pat = self.parse_pattern()?;
+            // Same arm head as the block form: `P1 | P2 if cond: body`. A bare
+            // tuple pattern is not accepted here (`,` separates inline arms) —
+            // write it parenthesised.
+            let mut patterns = vec![self.parse_pattern()?];
+            while self.eat(&TokenKind::Pipe) {
+                patterns.push(self.parse_pattern()?);
+            }
+            let guard = if self.eat(&TokenKind::If) {
+                let saved = self.allow_noparen_closure;
+                self.allow_noparen_closure = false;
+                let g = self.parse_or()?;
+                self.allow_noparen_closure = saved;
+                Some(g)
+            } else {
+                None
+            };
             self.expect(&TokenKind::Colon)?;
             let body_expr = self.parse_or()?;
             let body = MatchBody::Block(vec![Stmt::Expr(body_expr)]);
-            arms.push(MatchArm { patterns: vec![pat], guard: None, body, line, col });
+            arms.push(MatchArm { patterns, guard, body, line, col });
             if !self.eat(&TokenKind::Comma) { break; }
             self.skip_newlines();
         }

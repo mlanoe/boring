@@ -517,6 +517,7 @@ interp_test!(enum_type_def);
 interp_test!(enum_type_def_throws);
 interp_test!(enum_type_methods_introspect);
 interp_test!(type_var_introspect_set_run);
+interp_test!(match_inline_guard_alt);
 interp_test!(generic_type_method_call);
 
 // Most dangerous of the four: a

@@ -599,6 +599,7 @@ transpile_test!(enum_type_def_throws);
 // (shared with run/itest) and `Method.call` invokes one (build only, needs `FieldValue`).
 transpile_test!(enum_type_methods_introspect);
 transpile_test!(enum_type_methods_call);
+transpile_test!(match_inline_guard_alt);
 // `Field.set` on a struct's `type var` via reflection (build: `FieldValue`; run twin below in run.rs).
 transpile_test!(type_var_introspect_set);
 // `Type<Args>.method(...)`: explicit type arguments on a type-level call (struct and enum).
