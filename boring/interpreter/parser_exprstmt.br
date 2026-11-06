@@ -1594,7 +1594,7 @@ def ReturnStmt parse_return_stmt(mut Parser p) throws:
         nil
     else:
         parse_expr(p)
-    parser_expect_newline(p)
+    parser_expect_newline_soft(p)
     make_return_stmt(value, line)
 
 def ThrowStmt parse_throw_stmt(mut Parser p) throws:
@@ -1604,7 +1604,7 @@ def ThrowStmt parse_throw_stmt(mut Parser p) throws:
         nil
     else:
         parse_expr(p)
-    parser_expect_newline(p)
+    parser_expect_newline_soft(p)
     make_throw_stmt(value, line)
 
 def IfStmt parse_if_stmt(mut Parser p) throws:

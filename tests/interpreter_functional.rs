@@ -505,6 +505,7 @@ fn enum_variant_shadow() {
     run_file_case_ok(".", "enum_variant_shadow.br", "enum_variant_shadow.expected");
 }
 itest!(inline_if_else_next_line_postfix);
+itest!(return_if_expression);
 itest!(qualifier_group_param);
 itest!(shared_return_callsite_no_double_wrap);
 itest!(monomorphize_struct);

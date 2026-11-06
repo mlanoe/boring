@@ -856,6 +856,7 @@ interp_test!(array_block_closure_literal_block);
 // original bug's actual failure mode there was a compile error, not a wrong
 // value).
 interp_test!(inline_if_else_next_line_postfix);
+interp_test!(return_if_expression);
 
 // Regression: `instantiate_kernel_struct` (the kernel-struct constructor path,
 // eval_gpu.rs) used to bind `init()` params and copy field values straight

@@ -626,7 +626,8 @@ impl Parser {
         } else {
             Some(self.parse_expr()?)
         };
-        self.expect_newline()?;
+        // soft: an inline `if…else` / `match` operand may have already consumed the newline
+        self.expect_newline_soft();
         Ok(ReturnStmt { value, line, col })
     }
 
@@ -639,7 +640,7 @@ impl Parser {
         } else {
             Some(self.parse_expr()?)
         };
-        self.expect_newline()?;
+        self.expect_newline_soft();
         Ok(ThrowStmt { value, line, col })
     }
 

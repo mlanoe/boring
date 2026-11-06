@@ -1515,6 +1515,7 @@ transpile_test!(shared_return_callsite_no_double_wrap);
 // wrong runtime value — see tests/cases/inline_if_else_next_line_postfix.br's
 // own doc comment and `parse_postfix_inner` in src/parser/parse_expr.rs.
 transpile_test!(inline_if_else_next_line_postfix);
+transpile_test!(return_if_expression);
 
 transpile_test!(numeric_method_parity);
 

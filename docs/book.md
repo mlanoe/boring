@@ -1702,6 +1702,8 @@ string sign(int n):
     if n > 0: "+" elif n < 0: "-" else "0"
 ```
 
+An `if` expression is also accepted directly after `return` (`return if k == "a": "x" else: "y"`, or the multi-line block form).
+
 Block form:
 
 ```boring
