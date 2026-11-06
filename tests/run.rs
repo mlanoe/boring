@@ -558,6 +558,9 @@ interp_test!(json_scenarios);
 // enum representations (`@serde(tag)`, `@serde(tag, content)`) must agree byte-for-byte.
 interp_test!(json_serde_tagged_enums);
 
+// Same case as the transpile_test of the same name: bare optional-payload variant constructors.
+interp_test!(enum_variant_optional_payload_ctor);
+
 // docs/try-wrap-double-handling-bug.md -- transpiler-only until now, because its
 // `fromJson<Thing>` lines depended on the interpreter's stub. With a real `fromJson`
 // the interpreter matches the compiled output byte-for-byte, so the same .expected

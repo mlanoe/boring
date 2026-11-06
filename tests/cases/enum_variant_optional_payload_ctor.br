@@ -1,0 +1,41 @@
+# A bare enum-variant constructor whose payload field is optional (`Maybe(int?)`) must
+# promote a non-nil argument to `some`, like `let int? x = 7` does. `boring run` always
+# did; `boring build` emitted `Adj::Maybe(7)` for an `Option<isize>` field (rustc E0308).
+# The qualified form `Enum.Variant(7)` already coerced. Also covers a string payload, a
+# multi-field variant mixing an optional and a plain field, and the JSON round trip of the constructed values. Registered in tests/run.rs and
+# tests/transpile.rs against this one .expected file.
+
+@derive(Debug, Clone, Serialize, Deserialize)
+@serde(tag = "t", content = "c")
+enum OptAdj:
+    OptMaybe(int?)
+    OptName(string?)
+    OptPair(int?, int)
+    OptPlain(int)
+
+string describeOpt(OptAdj a):
+    match a:
+        OptMaybe(m):
+            if let m:
+                return "OptMaybe {m}"
+            return "OptMaybe nil"
+        OptName(s):
+            if let s:
+                return "OptName {s}"
+            return "OptName nil"
+        OptPair(x, y):
+            if let x:
+                return "OptPair {x} {y}"
+            return "OptPair nil {y}"
+        OptPlain(n): return "OptPlain {n}"
+
+def main():
+    let n = 5
+    let all = [OptMaybe(7), OptMaybe(nil), OptMaybe(n), OptName("hi"), OptName(nil), OptPair(3, 4), OptPair(nil, 4), OptPlain(1), OptAdj.OptMaybe(8)]
+    for a in all:
+        let s = json(a)
+        print "{describeOpt(a)} {s}"
+        if let back = fromJson<OptAdj>(s):
+            print "  -> {describeOpt(back)}"
+        else:
+            print "  -> FAILED"

@@ -1079,6 +1079,10 @@ transpile_test!(json_scenarios);
 // match real serde. Also registered in tests/run.rs against the same .expected file.
 transpile_test!(json_serde_tagged_enums);
 
+// Bare `Variant(7)` for an optional payload (`Variant(int?)`) must wrap in `Some(..)` in the
+// generated Rust (was rustc E0308). Also registered in tests/run.rs.
+transpile_test!(enum_variant_optional_payload_ctor);
+
 // docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins
 // (`fromJson<T>(s)`, `fs.read`/`fs.readLines`/`fs.readBytes`) that already do their own
 // Result->Option/panic handling in a plain context: `.ok()` got appended a second time

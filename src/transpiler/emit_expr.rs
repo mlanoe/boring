@@ -4825,31 +4825,8 @@ impl Transpiler {
         if let ExprKind::Field(obj_expr, variant_name) = &callee.kind {
             if let ExprKind::Var(enum_type) = &obj_expr.kind {
                 let key = format!("{}::{}", enum_type, variant_name);
-                if let Some(field_types) = self.enum_variant_field_types.get(&key).cloned() {
-                    let callee_s = format!("{}::{}", enum_type, variant_name);
-                    let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
-                        let raw = self.emit_let_value(field_types.get(i), &a.value);
-                        // enum variant fields are owned — strip the leading `&` that
-                        // emit_let_value adds for actor-typed function params.
-                        let raw = if matches!(field_types.get(i),
-                            Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
-                        ) {
-                            raw.strip_prefix('&').unwrap_or(&raw).to_string()
-                        } else {
-                            raw
-                        };
-                        let rec_key = format!("{}::{}::{}", enum_type, variant_name, i);
-                        if self.recursive_fields.contains(&rec_key) {
-                            if matches!(field_types.get(i), Some(Type::Optional(_))) {
-                                format!("{}.map(Box::new)", raw)
-                            } else {
-                                format!("Box::new({})", raw)
-                            }
-                        } else {
-                            raw
-                        }
-                    }).collect();
-                    return format!("{}({})", callee_s, args_s.join(", "));
+                if self.enum_variant_field_types.contains_key(&key) {
+                    return self.emit_enum_variant_ctor(enum_type, variant_name, args);
                 }
             }
         }
@@ -4859,6 +4836,40 @@ impl Transpiler {
             _ => self.emit_args(args),
         };
         format!("{}({})", callee_s, args_s)
+    }
+
+    /// `Enum::Variant(args)` for a variant with positional payload fields: each argument is
+    /// coerced against its declared field type (`T?` payload wraps a non-nil value in
+    /// `Some(...)`, strings are owned, a recursive field is boxed). Shared by the qualified
+    /// (`Enum.Variant(x)`) and bare (`Variant(x)`) construction forms — the bare form used to
+    /// skip this and passed `7` straight to an `Option<isize>` field (E0308).
+    pub(crate) fn emit_enum_variant_ctor(&self, enum_type: &str, variant_name: &str, args: &[Arg]) -> String {
+        let key = format!("{}::{}", enum_type, variant_name);
+        let field_types = self.enum_variant_field_types.get(&key).cloned().unwrap_or_default();
+        let callee_s = key.clone();
+        let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+            let raw = self.emit_let_value(field_types.get(i), &a.value);
+            // enum variant fields are owned — strip the leading `&` that
+            // emit_let_value adds for actor-typed function params.
+            let raw = if matches!(field_types.get(i),
+                Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
+            ) {
+                raw.strip_prefix('&').unwrap_or(&raw).to_string()
+            } else {
+                raw
+            };
+            let rec_key = format!("{}::{}::{}", enum_type, variant_name, i);
+            if self.recursive_fields.contains(&rec_key) {
+                if matches!(field_types.get(i), Some(Type::Optional(_))) {
+                    format!("{}.map(Box::new)", raw)
+                } else {
+                    format!("Box::new({})", raw)
+                }
+            } else {
+                raw
+            }
+        }).collect();
+        format!("{}({})", callee_s, args_s.join(", "))
     }
 
     /// The function type of a param/local `name` declared with one (inline or via a `use` alias).
@@ -5883,6 +5894,9 @@ impl Transpiler {
             }
             // Enum variant with positional args.
             if let Some(enum_name) = self.enum_variants.get(name) {
+                if self.enum_variant_field_types.contains_key(&format!("{}::{}", enum_name, name)) {
+                    return self.emit_enum_variant_ctor(enum_name, name, args);
+                }
                 let args_s = self.emit_args(args);
                 return format!("{}::{}({})", enum_name, name, args_s);
             }

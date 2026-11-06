@@ -1,0 +1,18 @@
+OptMaybe 7 {"t":"OptMaybe","c":7}
+  -> OptMaybe 7
+OptMaybe nil {"t":"OptMaybe","c":null}
+  -> OptMaybe nil
+OptMaybe 5 {"t":"OptMaybe","c":5}
+  -> OptMaybe 5
+OptName hi {"t":"OptName","c":"hi"}
+  -> OptName hi
+OptName nil {"t":"OptName","c":null}
+  -> OptName nil
+OptPair 3 4 {"t":"OptPair","c":[3,4]}
+  -> OptPair 3 4
+OptPair nil 4 {"t":"OptPair","c":[null,4]}
+  -> OptPair nil 4
+OptPlain 1 {"t":"OptPlain","c":1}
+  -> OptPlain 1
+OptMaybe 8 {"t":"OptMaybe","c":8}
+  -> OptMaybe 8

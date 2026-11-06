@@ -27,6 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`boring build` no longer emits `Adj::Maybe(7)` for a bare variant constructor whose payload is optional.** `Maybe(int?)` built as `Maybe(7)` / `Maybe(n)` (without the `Enum.` prefix) skipped the per-field coercion the qualified form `Adj.Maybe(7)` already had, so the generated Rust passed `7` where `Option<isize>` is required (rustc E0308); `Maybe(nil)` and `boring run` were unaffected. The bare form now shares the qualified form's emitter (`emit_enum_variant_ctor`): optional payloads are wrapped in `Some(..)`, string payloads are owned, recursive payloads boxed. Test: `tests/cases/enum_variant_optional_payload_ctor.br` (run and build, same `.expected`).
+
 - **`'actor`/`'guard` `mut` rule is now the same in `boring build` and `boring run`.** `boring build` accepted `def` calls and field writes through a non-`mut` binding whose qualifier was inferred from a function return type (`let d = mk(); d.inc()`), through a non-`mut` `T'actor`/`T'guard` parameter, and field writes through a non-`mut` `let T'actor c`; `boring run` and the docs reject all of these. They are now errors (`"not declared mut"`) in `boring build` too. Also fixed: a closure capturing a `mut` parameter lost the parameter's `mut` status in the checker. Fixtures `singleton_di`, `actor_guard_shared_return_qualifier`, `actor_slot_double_read` and the self-hosted interpreter (`boring/interpreter/*.br`) now spell `mut` where they mutate. Tests: `tests/actor_mut_rule.rs`.
 
 
