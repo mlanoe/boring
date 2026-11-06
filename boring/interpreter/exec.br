@@ -24,6 +24,8 @@ def Signal? exec_block_do(mut Interpreter interp, [Stmt] stmts):
                     return YieldSignal(val, 0)
                 Stmt.If(s):
                     return exec_if_as_do(interp, s)
+                Stmt.IfLet(s):
+                    return exec_if_let_as_do(interp, s)
                 _:
                     let sig = exec_stmt(interp, stmt)
                     if sig != nil:
@@ -34,6 +36,22 @@ def Signal? exec_block_do(mut Interpreter interp, [Stmt] stmts):
                 return sig
         i = i + 1
     nil
+
+# An if-let in tail position of a `do:` block yields its selected branch's value
+# (this is what `if let v = o: a else: b` as an expression desugars to).
+def Signal? exec_if_let_as_do(mut Interpreter interp, IfLetStmt s):
+    let parent = interp.current_env
+    let matched = exec_if_let_match(interp, s.clauses)
+    var Signal? result = nil
+    if matched:
+        result = exec_block_do(interp, s.then_body)
+    else:
+        if let body = s.else_body:
+            mut child = new_env(parent.clone())
+            interp.current_env = child
+            result = exec_block_do(interp, body)
+    interp.current_env = parent
+    result
 
 def Signal? exec_if_as_do(mut Interpreter interp, IfStmt s):
     for branch in s.branches:

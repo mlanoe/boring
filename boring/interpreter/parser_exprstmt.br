@@ -920,6 +920,13 @@ def Expr parse_primary(mut Parser p) throws:
     if parser_check(p, "LBrace"):
         return parse_brace_expr(p, line)
     if parser_check(p, "If"):
+        if parser_peek_next_is(p, "Let"):
+            # `if let v = opt: a else: b` as an expression: a `do:` block whose
+            # tail is the statement-form `if let` (an `else` is required).
+            let il = parse_if_let_stmt(p)
+            if il.else_body == nil:
+                throw "`if let` used as an expression needs an `else` branch (or use the statement form, or `opt else fallback`)"
+            return make_do_expr([stmt_if_let(il)], line)
         let if_stmt = parse_if_stmt(p)
         return make_if_expr(if_stmt, line)
     if parser_check(p, "Match"):

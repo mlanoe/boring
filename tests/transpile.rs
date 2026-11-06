@@ -752,6 +752,7 @@ transpile_test!(dict_index_optional_return);
 // over a plain `let` here. See tests/cases/if_let_dict_index_no_else.br's own
 // doc comment.
 transpile_test!(if_let_dict_index_no_else);
+transpile_test!(if_let_expression);
 transpile_test!(dict_index_nil_context);
 // Dict `[key]` indexing (read via `else`, write via `=`) with a non-integer
 // (string) key always cast the key `as usize` -- invalid for `Arc<str>` --

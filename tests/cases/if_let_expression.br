@@ -1,0 +1,29 @@
+# `if let` as an expression: yields the taken branch's value; needs an `else`.
+def int pick(int? n):
+    let r = if let v = n: v * 2 else: 0
+    r
+
+def main():
+    let int? n = 5
+    let int? m = nil
+    let a = if let v = n: v else: 0
+    let b = if let v = m: v else: -1
+    print a
+    print b
+    # shorthand + extra boolean clause
+    let c = if let n, n > 3: n * 10 else: 0
+    print c
+    # elif let chain
+    let d = if let v = m: v elif let w = n: w + 100 else: 0
+    print d
+    # multi-line form
+    let e = if let v = m:
+        v
+    else:
+        7
+    print e
+    print pick(n)
+    print pick(m)
+    let string? name = "ada"
+    let s = if let x = name: "hi {x}" else: "anon"
+    print s

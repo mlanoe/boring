@@ -1801,6 +1801,19 @@ else:
 
 A plain boolean `elif` (no `let`) is also allowed, as in the `c > 10` branch above.
 
+#### `if let` as an expression
+
+`if let` can also produce a value, like the plain `if cond: a else: b` expression. Every form above works (`if let v = opt:`, the shorthand `if let name:`, comma-separated clauses, `elif let`), with the same unwrapping rules; the value is that of the branch taken. An `else` is **required** (without it the expression would have no value — use the statement form, or `opt else fallback`).
+
+```boring
+let int? n = get()
+let a = if let v = n: v else: 0
+let b = if let v = n: v elif let w = other: w + 100 else: -1
+let label = if let name, name != "": "hi {name}" else: "anon"
+```
+
+It is sugar for a `do:` block whose tail is the statement-form `if let`, and transpiles to `{ if let Some(v) = n { v } else { 0 } }`.
+
 ### `guard`
 
 Early exit if a condition fails:

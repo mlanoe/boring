@@ -2100,6 +2100,21 @@ impl Parser {
             TokenKind::LBrace => {
                 self.parse_brace_expr(line, col)
             }
+            TokenKind::If if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Let) => {
+                // `if let v = opt: a else: b` as an expression. Desugars to a
+                // `do:` block whose tail is the statement-form `if let` — both
+                // backends already yield the tail value of a block, so the
+                // unwrapping rules are exactly the statement form's. An `else`
+                // is required (the expression must always produce a value).
+                let s = self.parse_if_let_stmt()?;
+                if s.else_body.is_none() {
+                    return Err(ParseError::Generic {
+                        line, col, len: self.span_len(line, col),
+                        msg: "`if let` used as an expression needs an `else` branch (or use the statement form, or `opt else fallback`)".to_string(),
+                    });
+                }
+                Ok(Expr { kind: ExprKind::Do(vec![Stmt::IfLet(s)]), line, col, len: self.span_len(line, col)})
+            }
             TokenKind::If => {
                 let if_stmt = self.parse_if_stmt()?;
                 Ok(Expr { kind: ExprKind::If(Box::new(if_stmt)), line, col, len: self.span_len(line, col)})

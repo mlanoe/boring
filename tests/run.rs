@@ -522,6 +522,7 @@ interp_test!(enum_type_def_throws);
 // to always evaluate to `B`, and the same shape as a function's direct tail
 // statement used to fail with an unrelated "return value discarded" error.
 interp_test!(if_let_expr_nested);
+interp_test!(if_let_expression);
 
 // Unary `-` on a genuinely
 // int64/int128-tagged value (as opposed to the generic untyped `Value::Int`)
