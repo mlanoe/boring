@@ -1,0 +1,40 @@
+# `Field.set` on `type var` via reflection — build variant (`FieldValue`; `boring run` takes raw values: type_var_introspect_set_run.br).
+struct Config as Introspect:
+    int id
+
+    pub type let int limit = 10
+    pub type var int count = 0
+    pub type var float ratio = 0.5
+    pub type var bool on = false
+    pub type var int clamped = 1
+
+    pub type set clamped(int v):
+        if v >= 0: Config.clamped = v
+
+def main() throws:
+    let c = Config(id = 1)
+    let info = c.introspect()
+    for f in info.fields:
+        if !f.isInstance:
+            print "{f.name} rebindable={f.isRebindable} = {f.get():?}"
+    for f in info.fields:
+        if f.name == "count": f.set(FieldValue.Int(42))
+        if f.name == "ratio": f.set(FieldValue.Float(2.5))
+        if f.name == "on": f.set(FieldValue.Bool(true))
+        if f.name == "clamped": f.set(FieldValue.Int(-5))
+    print "direct: {Config.count} {Config.ratio} {Config.on} {Config.clamped}"
+    for f in info.fields:
+        if f.name == "clamped": f.set(FieldValue.Int(7))
+    print "clamped after valid set: {Config.clamped}"
+    Config.count = 100
+    for f in info.fields:
+        if f.name == "count": print "after direct write: {f.get():?}"
+    # errors (build: surfaced as `Err`, caught with `try?`)
+    for f in info.fields:
+        if f.name == "limit":
+            let r = try? f.set(FieldValue.Int(1))
+            print "limit rejected: {r == nil}"
+        if f.name == "count":
+            let r = try? f.set(FieldValue.Bool(true))
+            print "count wrong type rejected: {r == nil}"
+    print "count still: {Config.count}"

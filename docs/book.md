@@ -3780,7 +3780,7 @@ A struct has no variants of its own — it's treated as its own single, permanen
 
 #### Type-level members
 
-`type let`/`type def`/`type req` members (see [Type-level members](#type-level-members--type) above) fold into the SAME `Field`/`Method` structs as ordinary instance members — `isInstance: false` marks them, and `get`/`set` (on `Field`) drop the `instance` argument entirely (an arity-differing overload — Boring's documented overloading resolves by parameter *count*, and `type let`/`type var` state is global/shared, not owned by any particular instance, so there's no instance to pass):
+`type let`/`type var`/`type def`/`type req` members (see [Type-level members](#type-level-members--type) above) fold into the SAME `Field`/`Method` structs as ordinary instance members — `isInstance: false` marks them, and `get`/`set` (on `Field`) drop the `instance` argument entirely (an arity-differing overload — Boring's documented overloading resolves by parameter *count*, and `type let`/`type var` state is global/shared, not owned by any particular instance, so there's no instance to pass):
 
 ```boring
 struct MathBox as Introspect:
@@ -3806,9 +3806,26 @@ def main() throws:
 # type method square(6) = Int(36)
 ```
 
+**`type var` — `set` by reflection.** A struct's `type var` appears as a type-level `Field` with `isRebindable: true`, and `f.set(value)` (no instance argument, mirroring `get()`) writes the shared state — the same state `Type.x` reads and `Type.x = v` writes:
+
+```boring
+struct Config as Introspect:
+    int id
+    pub type let int limit = 10
+    pub type var int count = 0
+
+def main() throws:
+    let info = Config(id = 1).introspect()
+    for f in info.fields:
+        if f.name == "count": f.set(FieldValue.Int(42))   # `boring run`: f.set(42)
+    print "{Config.count}"    # 42
+```
+
+Behaviour, identical in `boring run` and `boring build`: `set` goes through the field's `type set` when one is declared (exactly like the direct assignment `Config.count = v`, so validation logic still applies); a `type let` is `isRebindable: false` and `set` fails with `field 'limit' is not rebindable`; a value of the wrong primitive kind fails with `wrong argument type for 'count': expected an integer` (in `build` these are `Err(IntrospectError)`, in `run` a runtime error). As with instance fields, only `int`/`float`/`bool`/`string`-typed `type var`s round-trip through `FieldValue` — a `type var` of any other type reports `isRebindable: false` and keeps `get()` only.
+
 Type-level methods use `call(args)` — no `request`/`modify` split, since there's no caller-privilege boundary to gate on instance mutability (there's no instance) the way `request`/`modify` gate on `Introspect instance` vs `mut Introspect instance`.
 
-> **Scope** — instance-level reflection (`introspect()`, `Field`, `Method`) covers **structs and enums**. The *type-level* part described here covers a struct's `type let` (read-only) fields and `type def`/`type req` methods (`call`), and an **enum's** `type def`/`type req` methods (`call`; the same `Method` entries appear in every variant's `introspect().methods`). Not covered: `type var` (a mutable type-level field lowers to a module-level lock, and wiring `set` through that lock isn't implemented yet), `type set`, and **generic** structs/enums (no single type-parameter-independent Rust item to point a plain `fn` at). Enums have no `type let`/`type var` at all (rejected by the parser), so an enum has no type-level *fields* to reflect. `boring run` accepts raw values in `call([...])`, whereas `boring build` needs `FieldValue` (see the example above).
+> **Scope** — instance-level reflection (`introspect()`, `Field`, `Method`) covers **structs and enums**. The *type-level* part described here covers a struct's `type let` (read-only) fields and `type def`/`type req` methods (`call`), and an **enum's** `type def`/`type req` methods (`call`; the same `Method` entries appear in every variant's `introspect().methods`). A struct's `type var` is readable and settable by reflection (see above). Not covered: `type set` as a standalone reflected method (it is applied automatically when `set`ting its `type var`), and **generic** structs/enums (no single type-parameter-independent Rust item to point a plain `fn` at). Enums have no `type let`/`type var` at all (rejected by the parser), so an enum has no type-level *fields* to reflect. `boring run` accepts raw values in `call([...])`, whereas `boring build` needs `FieldValue` (see the example above).
 
 #### Dynamic dispatch
 

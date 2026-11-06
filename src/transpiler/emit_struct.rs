@@ -1828,8 +1828,41 @@ impl Transpiler {
         let mut fns: Vec<String> = Vec::new();
 
         for tv in type_vars {
-            if tv.mutable { continue; } // `type var` — deferred, see doc comment above
             let Some(ty) = &tv.ty else { continue };
+            if tv.mutable {
+                // `type var` → module-level `static {STRUCT}_{FIELD}: Mutex<T>` (see
+                // `emit_struct`). Getter locks and converts; setter exists only when the
+                // type round-trips through `FieldValue` (same rule as instance fields),
+                // and — like a direct `Type.x = v` — goes through `type set x` if declared.
+                let mangled = format!("{}_{}", type_name.to_uppercase(), tv.name.to_uppercase());
+                let get_fn = format!("__introspectGetStatic_{}_{}", type_name, tv.name);
+                fns.push(format!(
+                    "#[allow(non_snake_case)]\nfn {get_fn}() -> Result<FieldValue, IntrospectError> {{\n    let g = {mangled}.lock().unwrap_or_else(|e| e.into_inner());\n    Ok({})\n}}",
+                    self.introspect_field_value_expr(ty, "(*g)", false, false),
+                ));
+                let setter = match self.introspect_extract_expr(ty, "&value", &tv.name) {
+                    Some(extracted) => {
+                        let set_fn = format!("__introspectSetStatic_{}_{}", type_name, tv.name);
+                        let has_type_set = type_methods.iter().any(|tm|
+                            matches!(tm.kind, crate::ast::TypeMethodKind::Set) && tm.name == tv.name);
+                        let store = if has_type_set {
+                            format!("{}::set_{}(v);", type_name, tv.name)
+                        } else {
+                            format!("*{mangled}.lock().unwrap_or_else(|e| e.into_inner()) = v;")
+                        };
+                        fns.push(format!(
+                            "#[allow(non_snake_case)]\nfn {set_fn}(value: FieldValue) -> Result<(), IntrospectError> {{\n    let v = {extracted};\n    {store}\n    Ok(())\n}}"
+                        ));
+                        format!("Some({set_fn})")
+                    }
+                    None => "None".to_string(),
+                };
+                field_entries.push(format!(
+                    "Field {{ name: {str_ty}::from(\"{}\"), isPublic: {}, isInstance: false, isMutable: false, isRebindable: {}, access: FieldAccess::Type {{ getter: {get_fn}, setter: {setter} }} }}",
+                    tv.name, tv.is_pub, setter != "None",
+                ));
+                continue;
+            }
             let const_ref = format!("{}::{}", type_name, tv.name.to_uppercase());
             let fn_name = format!("__introspectGetStatic_{}_{}", type_name, tv.name);
             fns.push(format!(

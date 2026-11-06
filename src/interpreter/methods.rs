@@ -1048,8 +1048,10 @@ impl Interpreter {
                 // only, `type let` only (no `type var`), `Def`/`Req` only (no `Set`).
                 // `TypeMethod` has no `stream` concept at all (only `task`).
                 for tv in &decl.type_vars {
-                    if tv.mutable { continue; }
-                    all_fields.push(field_obj(&tv.name, tv.is_pub, false, false, false, &type_name, "type"));
+                    // `type var` is rebindable only when its type is a primitive/string
+                    // (same round-trip rule as `boring build`'s `FieldValue` setter).
+                    let rebindable = tv.mutable && tv.ty.as_ref().map(Self::introspect_prim_kind).is_some_and(|k| k.is_some());
+                    all_fields.push(field_obj(&tv.name, tv.is_pub, false, false, rebindable, &type_name, "type"));
                 }
                 for tm in &decl.type_methods {
                     if matches!(tm.kind, TypeMethodKind::Set) { continue; }
@@ -1205,14 +1207,73 @@ impl Interpreter {
         }
     }
 
+    /// `Some(kind)` when `ty` is a primitive/string that round-trips through `FieldValue`
+    /// ("int" | "float" | "bool" | "string"); mirrors the transpiler's `introspect_resolve_ty`.
+    fn introspect_prim_kind(ty: &Type) -> Option<&'static str> {
+        let mut ty = ty;
+        while let Type::Mut(inner) = ty { ty = inner; }
+        match ty {
+            Type::Int | Type::Uint | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+            | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128 => Some("int"),
+            Type::Float32 | Type::Float64 => Some("float"),
+            Type::Bool => Some("bool"),
+            Type::Str => Some("string"),
+            Type::Named(n) => match n.as_str() {
+                "int" | "uint" | "int8" | "int16" | "int32" | "int64" | "int128"
+                | "uint8" | "uint16" | "uint32" | "uint64" | "uint128" | "byte" => Some("int"),
+                "float" | "float32" | "float64" => Some("float"),
+                "bool" => Some("bool"),
+                "string" => Some("string"),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Type-level `Field.set(value)` for a `type var`. Like a direct `Type.x = v`, it goes
+    /// through `type set x` when one is declared, else writes the store. Diagnostics mirror
+    /// the instance-level `set`: `type let` → "not rebindable"; a value of the wrong
+    /// primitive kind → "wrong argument type" (parity with `boring build`).
     fn introspect_type_field_set(&mut self, owner_type: &str, field_name: &str, is_rebindable: bool, args: &[Value], line: usize) -> Eval {
-        let _ = args;
-        let _ = is_rebindable;
-        // `type var` fields are excluded from reflection entirely (see
-        // `try_introspect_method`'s doc comment) — `isRebindable` is always `false` for a
-        // type-level `Field`, so this is unreachable via the documented API; kept as a
-        // clear, defensive error rather than a silent no-op.
-        Err(err(format!("type-level field '{}::{}' is not rebindable — 'type var' reflection is not supported yet", owner_type, field_name), line))
+        if !is_rebindable {
+            return Err(err(format!("field '{}' is not rebindable", field_name), line));
+        }
+        let value = args.first().cloned().ok_or_else(|| err("set() requires a value argument", line))?;
+        let found = self.global.borrow().get(owner_type);
+        let Some(Value::Struct { decl, captured }) = found else {
+            return Err(err(format!("unknown type '{}'", owner_type), line));
+        };
+        let Some(tv) = decl.type_vars.iter().find(|t| t.name == field_name) else {
+            return Err(err(format!("no type-level field '{}' on '{}'", field_name, owner_type), line));
+        };
+        if !tv.mutable {
+            return Err(err(format!("field '{}' is not rebindable", field_name), line));
+        }
+        if let Some(kind) = tv.ty.as_ref().and_then(Self::introspect_prim_kind) {
+            let ok = match (kind, &value) {
+                ("int", Value::Int(_) | Value::Uint(_) | Value::Uint8(_) | Value::Int8(_) | Value::Int16(_) | Value::Int32(_)
+                    | Value::Int64(_) | Value::Int128(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_)) => true,
+                ("float", Value::Float32(_) | Value::Float64(_)) => true,
+                ("bool", Value::Bool(_)) | ("string", Value::Str(_)) => true,
+                _ => false,
+            };
+            if !ok {
+                let expected = match kind { "int" => "an integer", "float" => "a float", "bool" => "a bool", _ => "a string" };
+                return Err(err(format!("wrong argument type for '{}': expected {}", field_name, expected), line));
+            }
+        }
+        let setter = decl.type_methods.iter()
+            .find(|m| m.kind == TypeMethodKind::Set && m.name == field_name).cloned();
+        if let Some(setter) = setter {
+            if !self.in_type_setter {
+                self.in_type_setter = true;
+                let r = self.call_type_method(owner_type, &setter, vec![value], captured, line).map(|_| Value::Void);
+                self.in_type_setter = false;
+                return r;
+            }
+        }
+        self.type_var_store.insert(format!("{}::{}", owner_type, field_name), value);
+        Ok(Value::Void)
     }
 
     fn introspect_method_request(&mut self, args: &[Value], method_name: &str, line: usize) -> Eval {
