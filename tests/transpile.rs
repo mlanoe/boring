@@ -1494,6 +1494,7 @@ transpile_test!(static_di);
 transpile_test!(actor_guard_shared_return_qualifier);
 transpile_test!(actor_collection_field_ops);
 transpile_test!(positional_ctor_qualified_fields);
+transpile_test!(positional_ctor_task_fields);
 
 // Regression test: a bare (unannotated) local assigned from a call to a
 // `'shared`-returning function got the wrong inferred qualifier (`Inline` instead of

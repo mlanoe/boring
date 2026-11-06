@@ -1,0 +1,29 @@
+# `'actor'task` / `'guard'task` struct fields: positional constructor args wrap exactly like the
+# labeled form, the field is the tokio lock (same as its constructor), and a method call through
+# a local (`svc.stats.inc()`) locks it, for the `'guard'task` read/write split too.
+struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct ActorSvc:
+    mut Counter'actor'task stats
+
+struct GuardSvc:
+    mut Counter'guard'task stats
+
+task go():
+    mut a = ActorSvc(Counter(3))
+    a.stats.inc()
+    print "actor = {a.stats.get()}"
+    mut b = GuardSvc(Counter(4))
+    b.stats.inc()
+    print "guard = {b.stats.get()}"
+    mut c = GuardSvc(stats = Counter(10))
+    c.stats.inc()
+    print "labeled = {c.stats.get()}"
+
+let t = task go()
+t.wait

@@ -1,6 +1,6 @@
 # Positional constructor args for lock-qualified struct fields must be wrapped exactly like the
 # labeled form (`Service(stats = Counter())`): `'actor` -> Mutex, `'guard` -> RwLock, and the
-# (`'task` fields are covered by the emission test in tests/transpile_task_ctor_fields.rs).
+# (`'task` fields: positional_ctor_task_fields.br).
 struct Counter:
     var int n = 0
 
@@ -41,3 +41,7 @@ s6.bump()
 print s6.read()
 let s8 = GuardSvc(stats = Counter(20))
 print s8.read()
+# a method called on the guard field from outside the struct
+mut s9 = GuardSvc(Counter(30))
+s9.stats.inc()
+print s9.stats.get()

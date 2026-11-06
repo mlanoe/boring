@@ -414,7 +414,11 @@ impl Transpiler {
                 // qualifier, double-wrapping the field as `Arc<RwLock<Arc<RwLock<T>>>>`
                 // (confirmed via a real `cargo build`, reproduces with zero Introspect
                 // involvement — a plain `struct Outer: Inner'guard g` already hit this).
-                self.emit_guard_type(inner)
+                if Self::is_rwlock_task_binding(f.mutable, &f.ty) {
+                    self.emit_guard_task_type(inner)
+                } else {
+                    self.emit_guard_type(inner)
+                }
             } else if let Some((inner_struct_name, base)) = self.observed_fields.get(&format!("{}::{}", s.name, f.name)).cloned() {
                 // `'observed`-qualified field (docs/book.md's "'observed" section, struct
                 // field support) — covers BOTH an explicit fully-qualified field (`f.ty`

@@ -1757,17 +1757,27 @@ impl Transpiler {
         // RwLock struct field method: self.data.method() → self.data.read/write().await.method()
         if let ExprKind::Field(inner_obj, rwlock_field) = &obj.kind {
             if let ExprKind::Var(v) = &inner_obj.kind {
-                if v == "self" {
-                    let key = self.self_type.as_deref()
-                        .map(|t| format!("{}::{}", t, rwlock_field));
+                // `self.field` or `outer_var.field`; an outer var that is itself a lock handle needs
+                // its own lock first, which this branch does not do.
+                let outer_type: Option<String> = if v == "self" {
+                    self.self_type.clone()
+                } else if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
+                    || self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
+                    || self.managed_mutex_vars.contains(v.as_str()) || self.managed_refcell_vars.contains(v.as_str())
+                {
+                    None
+                } else {
+                    self.var_struct_types.get(v.as_str()).or_else(|| self.var_struct_type.get(v.as_str())).cloned()
+                };
+                if let Some(outer_type) = outer_type {
+                    let key = Some(format!("{}::{}", outer_type, rwlock_field));
                     if let Some(k) = key {
                         if self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k) {
                             self.check_field_def_call_mut_gate(obj, rwlock_field, method);
                             // Preserve the real method name for a known user struct/enum
                             // field — see the matching comment/fix in
                             // `try_emit_mutex_method`'s struct-field branch.
-                            let field_struct_name = self.self_type.as_deref()
-                                .and_then(|sn| self.struct_fields.get(sn))
+                            let field_struct_name = self.struct_fields.get(outer_type.as_str())
                                 .and_then(|fs| fs.iter().find(|(n, _)| n == rwlock_field))
                                 .and_then(|(_, ty)| qualified_named_type_name(ty));
                             let is_known = field_struct_name.as_deref()
@@ -1783,10 +1793,13 @@ impl Transpiler {
                                 args.iter().map(|a| self.emit_expr(&a.value)).collect()
                             };
                             let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
-                            let struct_type_name = self.self_type.as_deref().unwrap_or("");
-                            let req_key = format!("{}::{}", struct_type_name, method);
-                            let is_req = self.struct_req_methods.contains(&req_key);
-                            let field_expr = format!("self.{}", rwlock_field);
+                            // `req`-ness belongs to the method of the type the field holds.
+                            let is_req = match field_struct_name.as_deref() {
+                                Some(held) if self.is_known_user_type(held) => self.method_is_req_or_task(held, method),
+                                _ => self.struct_req_methods.contains(&format!("{}::{}", outer_type, method)),
+                            };
+                            let field_expr = if v == "self" { format!("self.{}", rwlock_field) }
+                                else { format!("{}.{}", self.emit_expr(inner_obj), rwlock_field) };
                             let guard = if is_req {
                                 self.rwlock_field_read(&k, &field_expr)
                             } else {
