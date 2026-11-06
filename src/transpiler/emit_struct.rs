@@ -2712,7 +2712,12 @@ impl Transpiler {
                     let rec_key = format!("{}::{}::{}", e.name, variant_name, idx);
                     self.recursive_fields.contains(&rec_key)
                 });
-                let clone_expr = if field_is_boxed { "(**__fv).clone()" } else { "__fv.clone()" };
+                // An optional recursive field is stored as `Option<Box<T>>`, so unbox inside the Option.
+                let clone_expr = if field_is_boxed {
+                    if matches!(raw_field_ty, Type::Optional(_)) {
+                        "__fv.as_ref().map(|__b| (**__b).clone())"
+                    } else { "(**__fv).clone()" }
+                } else { "__fv.clone()" };
                 for (idx, _field, variant_name) in cases {
                     let n_fields = e.variants.iter()
                         .find(|v| v.name == *variant_name)

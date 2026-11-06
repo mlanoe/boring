@@ -4253,6 +4253,27 @@ mod match_exhaustiveness_tests {
     }
 
     #[test]
+    fn inline_match_guarded_arm_does_not_count_toward_coverage() {
+        let src = "def string f(bool flag):\n    match flag with true if flag: \"yes\", false: \"no\"\ndef main():\n    print f(true)\n";
+        let warns = warnings_for(src);
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+    }
+
+    #[test]
+    fn inline_match_alternatives_cover_both_cases() {
+        let src = "def string f(bool flag):\n    match flag with true | false: \"any\"\ndef main():\n    print f(true)\n";
+        let warns = warnings_for(src);
+        assert!(!has_exhaustiveness_warning(&warns), "expected no warning, got {warns:?}");
+    }
+
+    #[test]
+    fn inline_match_enum_missing_variant_is_flagged() {
+        let src = "enum Shape:\n    Circle(float)\n    Rect(float, float)\ndef string f(Shape s):\n    match s with Circle(r): \"{r}\"\ndef main():\n    print f(Shape.Circle(1.0))\n";
+        let warns = warnings_for(src);
+        assert!(has_exhaustiveness_warning(&warns), "expected a non-exhaustive-match warning, got {warns:?}");
+    }
+
+    #[test]
     fn guarded_arm_does_not_count_toward_coverage() {
         // A guarded `true` arm may reject at runtime — a plain `false` arm
         // alongside it still leaves `true` uncovered, exactly like real

@@ -142,6 +142,7 @@ macro_rules! itest {
 }
 
 itest!(basics);
+itest!(match_inline_guard_alt);
 itest!(strings);
 // `.slice()` negative-index clamping — deliberately NOT added to the
 // `strings`/`collections` fixtures above: those are shared verbatim with
