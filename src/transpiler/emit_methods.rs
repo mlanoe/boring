@@ -2040,6 +2040,8 @@ impl Transpiler {
                             let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
                             let guard_expr = self.mutex_field_write(&k, &format!("self.{}", mutex_field));
                             let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", guard_expr, rust_method, args_s.join(", ")));
+                            let call = if self.struct_mutex_task_fields.contains(&k) { call }
+                                else { self.scope_std_lock_read(field_struct_name.as_deref(), method, call) };
                             let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
                             return Some(if self.in_async && self.instance_task_methods.contains(method) {
                                 format!("{}.await", call)
@@ -2288,7 +2290,8 @@ impl Transpiler {
                         } else if is_task_field {
                             { let g = self.actor_task_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
                         } else {
-                            { let g = self.actor_write_guard(&obj_s); format!("{}.{}({})", g, rust_method, args_s.join(", ")) }
+                            let g = self.actor_write_guard(&obj_s);
+                            self.scope_std_lock_read(field_struct_name.as_deref(), method, format!("{}.{}({})", g, rust_method, args_s.join(", ")))
                         };
                         let call = Self::with_hoisted_args(&hoisted, call);
                         let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
@@ -6193,6 +6196,17 @@ impl Transpiler {
     }
 
     /// `call` preceded by the `hoist_lent_conflicts` prelude, as a single expression.
+    /// A `req` call through a std (`'actor`) lock inside an async fn: the guard is a temporary that
+    /// would live to the end of the enclosing statement, so a later `.await` in the same expression
+    /// (`s.stats.get() + s.jobs.get()` with `jobs` a `'task` tokio lock) holds it across the await and
+    /// the future is no longer `Send`. Read into a block so the guard drops right after the call.
+    fn scope_std_lock_read(&self, struct_name: Option<&str>, method: &str, call: String) -> String {
+        let is_req = struct_name.is_some_and(|n| self.struct_req_methods.contains(&format!("{}::{}", n, method)));
+        if is_req && self.in_async && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
+            format!("{{ let __r = {}; __r }}", call)
+        } else { call }
+    }
+
     pub(crate) fn with_hoisted_args(prelude: &str, call: String) -> String {
         if prelude.is_empty() { call } else { format!("({{ {}{} }})", prelude, call) }
     }

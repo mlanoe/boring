@@ -13,6 +13,10 @@ struct Service:
     mut Counter'actor stats
     mut Counter'task jobs
 
+    # one expression reading a std-lock ('actor) field and a tokio-lock ('task) field
+    task int both():
+        self.stats.get() * 10 + self.jobs.get()
+
     task def bumpOwn():
         bumpActor(self.stats)
         bumpTask(self.jobs)
@@ -24,9 +28,7 @@ task def bumpTask(mut Counter'task c):
     c.inc()
 
 task int total(Service s):
-    let a = s.stats.get()
-    let b = s.jobs.get()
-    a + b
+    s.stats.get() + s.jobs.get()
 
 task go():
     mut svc = Service(stats = Counter(), jobs = Counter())
@@ -37,6 +39,7 @@ task go():
     print "stats = {svc.stats.get()}"
     print "jobs = {svc.jobs.get()}"
     print "total = {total(svc)}"
+    print "both = {svc.both()}"
 
 let t = task go()
 t.wait
