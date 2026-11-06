@@ -2354,14 +2354,27 @@ impl Transpiler {
         if let Some(mname) = method_name {
             // Determine struct type from left operand.
             let struct_ty = if let ExprKind::Var(vname) = &l.kind {
-                self.var_struct_types.get(vname.as_str()).cloned()
+                self.operand_struct_type(vname)
             } else {
                 None
             };
             if let Some(sty) = struct_ty {
                 let key = format!("{}::{}", sty, mname);
                 if self.struct_operator_methods.contains(&key) {
-                    let ls = self.emit_expr(l);
+                    // Managed `'owned` operands are lock cells: the receiver is a copy of the held
+                    // value (never the shared handle, and read through the held guard so the
+                    // method re-locking its rhs can't deadlock), the rhs an independent wrapper.
+                    let ls = match &l.kind {
+                        ExprKind::Var(v) if self.managed_owned_var_src(v).is_some() => {
+                            return {
+                                let recv = format!("{}.clone()", self.managed_owned_var_src(v).unwrap());
+                                let rs = self.managed_owned_var_copy(r)
+                                    .unwrap_or_else(|| self.emit_expr(r));
+                                format!("{}.{}({})", recv, mname, rs)
+                            };
+                        }
+                        _ => self.emit_expr(l),
+                    };
                     // Look up param types to decide if rhs needs Box::new() wrapping.
                     let param_types = self.struct_operator_param_types.get(&key).cloned();
                     let rs_raw = self.emit_expr(r);

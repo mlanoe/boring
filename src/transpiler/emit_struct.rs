@@ -324,6 +324,8 @@ impl Transpiler {
                 if names.iter().any(|n| n == "PartialEq")
                     && !s.fields.iter().any(|f| f.transient)
                     && !s.fields.iter().any(|f| self.field_is_lock_handle(&s.name, &f.name))
+                    // managed single-thread `T'owned` is a `RefCell<T>`: `PartialEq` but no `Hash`.
+                    && !s.fields.iter().any(|f| self.holds_managed_owned(&f.ty))
                     && !s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, &mut vec![s.name.clone()]))
                 {
                     names.push("Eq".to_string());

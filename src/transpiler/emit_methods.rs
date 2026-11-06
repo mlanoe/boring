@@ -1987,6 +1987,17 @@ impl Transpiler {
         // Managed-mode mutex var method: w.method(args) → w.lock().unwrap().method(args)
         // Uses std::sync::Mutex (synchronous), no .await needed.
         if let ExprKind::Var(v) = &obj.kind {
+            // A local/param whose lock is already held in a `__x_mg` shadow guard (multi-thread
+            // managed `T'` / `T'actor`): call through the guard, never re-lock (not reentrant) nor
+            // call the method on the bare `Arc<Mutex<T>>` (E0599).
+            if let Some(shadow) = self.managed_param_shadows.get(v.as_str()).cloned() {
+                let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
+                let mut args_s: Vec<String> = self.emit_user_method_args(self.resolve_expr_struct_type(obj).as_deref(), method, args);
+                let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
+                let call = Self::with_hoisted_args(&hoisted, format!("{}.{}({})", shadow, rust_method, args_s.join(", ")));
+                let call = if let Some(wrap) = extra_wrap { format!("{}{}", call, wrap) } else { call };
+                return Some(call);
+            }
             if self.managed_mutex_vars.contains(v.as_str()) {
                 let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                 let mut args_s: Vec<String> = self.emit_user_method_args(self.resolve_expr_struct_type(obj).as_deref(), method, args);

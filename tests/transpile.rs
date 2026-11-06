@@ -199,23 +199,6 @@ macro_rules! transpile_test {
             fn managed_single() { run_transpile_case_with_config(stringify!($name), "managed", "single"); }
         }
     };
-    // Variant for tests that use T' in complex patterns that managed mode cannot handle yet
-    // (constructor call sites are not updated to emit Arc::new(Mutex::new(...)) instead of Box::new).
-    ($name:ident, ignore_managed) => {
-        mod $name {
-            use super::*;
-            #[test]
-            fn strict_multi()   { run_transpile_case_with_config(stringify!($name), "strict",  "multi"); }
-            #[test]
-            fn strict_single()  { run_transpile_case_with_config(stringify!($name), "strict",  "single"); }
-            #[test]
-            #[ignore = "managed mode: method call on a top-level 'owned local emits `.get()/.inc()/.peek()` on Arc<Mutex<T>>/RefCell<T> (E0599), plus move/borrow and orphan-rule errors for operator/Hash impls on the wrapper; verified still failing 2026-11-06"]
-            fn managed_multi()  { run_transpile_case_with_config(stringify!($name), "managed", "multi"); }
-            #[test]
-            #[ignore = "managed mode: method call on a top-level 'owned local emits `.get()/.inc()/.peek()` on Arc<Mutex<T>>/RefCell<T> (E0599), plus move/borrow and orphan-rule errors for operator/Hash impls on the wrapper; verified still failing 2026-11-06"]
-            fn managed_single() { run_transpile_case_with_config(stringify!($name), "managed", "single"); }
-        }
-    };
     // Variant for tests that have both single-thread and managed mode issues.
     ($name:ident, ignore_single_managed) => {
         mod $name {
@@ -1318,14 +1301,14 @@ transpile_test!(labeled_scenarios);
 // already boxed itself. Managed mode (`Arc<Mutex<T>>`) hits an unrelated,
 // pre-existing gap calling a method directly on a top-level managed-owned
 // variable (`ac.get()`) — see `ignore_managed`'s doc.
-transpile_test!(owned_call_arg_no_double_box, ignore_managed);
+transpile_test!(owned_call_arg_no_double_box);
 // `owned_ctor_arg_no_double_box`: same double-`Box::new(...)` bug as
 // `owned_call_arg_no_double_box`, for a positional struct-constructor call
 // on a struct whose `init()` has a body (`Holder(ac)` → `Holder::new(...)`,
 // see `try_emit_labeled_init_call`'s sibling positional-arg path in
 // `src/transpiler/emit_expr.rs`) — emitted `Holder::new(Box::new(ac))`
 // before the fix.
-transpile_test!(owned_ctor_arg_no_double_box, ignore_managed);
+transpile_test!(owned_ctor_arg_no_double_box);
 // `new_owned_no_double_or_missing_box`: two related `T'new` bugs. (1) Missing
 // wrap: `mut Counter'new ac = Counter(3)` emitted a bare `Counter { .. }`
 // initializer with no `Box::new(...)` against the (correctly-emitted)
@@ -1337,7 +1320,7 @@ transpile_test!(owned_ctor_arg_no_double_box, ignore_managed);
 // to `bump` hit the same double-`Box::new(...)` bug as
 // `owned_call_arg_no_double_box`, via `'new`'s inference-to-`'owned`
 // fallback instead of an explicit `'owned` annotation.
-transpile_test!(new_owned_no_double_or_missing_box, ignore_managed);
+transpile_test!(new_owned_no_double_or_missing_box);
 // `owned_operator_rhs_no_double_box`: same double-`Box::new(...)` bug as
 // `owned_call_arg_no_double_box`, for a struct operator method's rhs operand
 // (`a + b` → `a.clone().add(b.clone())`, see the `BinOp` struct-operator
@@ -1346,7 +1329,7 @@ transpile_test!(new_owned_no_double_or_missing_box, ignore_managed);
 // Managed mode hits the same pre-existing gap as the other tests above (plus
 // a `Arc<Mutex<Box2>>`/`RefCell<Box2>` orphan-rule error from the operator
 // trait impls being generated for the wrapper type directly).
-transpile_test!(owned_operator_rhs_no_double_box, ignore_managed);
+transpile_test!(owned_operator_rhs_no_double_box);
 // `init_owned_trait_param`: an explicit body-`init`'s `Trait'owned` parameter
 // (the `@inject`-relevant shape — docs/book.md §33's
 // `'owned` transient-dependency case, `desugar_inject.rs`'s synthesized init)
@@ -1386,8 +1369,8 @@ transpile_test!(init_bare_trait_param);
 // `var_param_bare_trait_assign`: assigning to a bare-trait `var` out-param boxes the value.
 transpile_test!(var_scenarios);
 // `var_rebind_alias_independent`: `var c2 = c1` then rebinding either is independent, for bare/'owned/'shared/'actor/'guard/trait-typed locals.
-// Managed mode can't call a method on a `'owned` local at all today (separate gap), so strict-only.
-transpile_test!(var_rebind_owned, ignore_managed);
+// All four configs run (managed `'owned` locals now call through their lock/guard).
+transpile_test!(var_rebind_owned);
 
 // ── Strict-mode size-based return-type auto-boxing (docs/transpilation-modes.md
 //    "Size-based auto-boxing") ────────────────────────────────────────────────

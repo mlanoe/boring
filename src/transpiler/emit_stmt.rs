@@ -910,6 +910,20 @@ impl Transpiler {
         None
     }
 
+    /// Struct type of an operator operand variable: the tracked struct type, or — for a managed
+    /// `T'owned` local, which is tracked only through its qualified `var_types` entry — `T`.
+    pub(crate) fn operand_struct_type(&self, v: &str) -> Option<String> {
+        if let Some(t) = self.var_struct_types.get(v) { return Some(t.clone()); }
+        if self.managed_owned_var_src(v).is_none() { return None; }
+        match self.var_types.get(v).map(Type::without_mut) {
+            Some(Type::Qualified(inner, _)) => match inner.as_ref() {
+                Type::Named(n) => Some(n.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Infer whether an expression's result type is a managed-mode owned user type.
     /// Returns true when the result would be `Arc<Mutex<T>>` (multi) or `RefCell<T>` (single).
     /// Used to auto-track untyped `let` bindings in managed mode.
@@ -932,11 +946,7 @@ impl Transpiler {
                 };
                 // Determine struct type of left operand
                 let struct_ty = if let ExprKind::Var(v) = &l.kind {
-                    self.var_struct_types.get(v.as_str()).cloned()
-                        .or({
-                            // Also handle plain (non-tracked) vars whose type we know from constructor
-                            None
-                        })
+                    self.operand_struct_type(v)
                 } else { None };
                 if let Some(sty) = struct_ty {
                     let key = format!("{}::{}", sty, mname);

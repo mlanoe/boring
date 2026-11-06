@@ -1990,7 +1990,9 @@ impl Transpiler {
         ty: &Type) -> bool
     {
         if config.mode != TranspileMode::Managed { return false; }
-        match ty {
+        // See through the `mut`/`var mut` permission wrapper: `var mut Counter'owned o` parses as
+        // `Mut(Qualified(Counter, Owned))` and is just as managed as the plain `let` form.
+        match ty.without_mut() {
             Type::Qualified(inner, q) if q.is_owned_or_new() => match inner.as_ref() {
                 Type::Named(n) => user_types.contains(n.as_str()) && !unit_enums.contains(n.as_str()),
                 _ => false,

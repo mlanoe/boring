@@ -300,7 +300,11 @@ impl Transpiler {
                 self.var_types.entry(s.name.clone()).or_insert_with(|| ty.without_mut().clone());
                 // Emit a lock guard so multi-field accesses in a single expression
                 // don't deadlock (two separate .lock().unwrap() on the same Mutex).
-                if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi) {
+                // A rebindable (`var`) binding can't hold a live guard across reassignment
+                // (E0506); it keeps per-expression `.lock().unwrap()` instead.
+                if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                    && !matches!(s.binding, crate::ast::BindingKind::Var)
+                {
                     let shadow = format!("__{}_mg", s.name);
                     self.line(&format!("let mut {} = {}.lock().unwrap();", shadow, name));
                     self.managed_mutex_vars.remove(&s.name);
@@ -2061,6 +2065,7 @@ impl Transpiler {
             // avoid deadlock when multiple fields are accessed in the same expression
             // (two separate .lock().unwrap() calls hold the guard simultaneously).
             if matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                && !matches!(s.binding, crate::ast::BindingKind::Var)
                 && self.managed_mutex_vars.contains(&s.name)
                 && !self.managed_param_shadows.contains_key(&s.name)
                 && !self.optional_vars.contains(&s.name)
@@ -2557,6 +2562,27 @@ impl Transpiler {
         } else {
             format!("Box::new({})", emitted)
         }
+    }
+
+    /// Source expression reading the held value of a managed `'owned` local/param (through its
+    /// `__x_mg` guard when it has one, else a fresh lock/borrow), or `None` if `v` isn't one.
+    pub(crate) fn managed_owned_var_src(&self, v: &str) -> Option<String> {
+        if let Some(g) = self.managed_param_shadows.get(v) {
+            Some(g.clone())
+        } else if self.managed_mutex_vars.contains(v) {
+            Some(format!("{}.lock().unwrap()", escape_rust_keyword(v)))
+        } else if self.managed_refcell_vars.contains(v) {
+            Some(format!("{}.borrow()", escape_rust_keyword(v)))
+        } else {
+            None
+        }
+    }
+
+    /// Independent wrapped copy (`Arc<Mutex<T>>`/`RefCell<T>`) of a managed `'owned` variable.
+    pub(crate) fn managed_owned_var_copy(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Var(v) = &e.kind else { return None };
+        let src = self.managed_owned_var_src(v)?;
+        Some(self.wrap_managed(&format!("{}.clone()", src)))
     }
 
     /// True when `value`'s *own* emitted representation already matches what a
@@ -3131,6 +3157,15 @@ impl Transpiler {
                 let inner = self.emit_expr(value);
                 let already_owned = self.expr_already_owned_repr(value);
                 if self.is_managed_owned_user(ty) {
+                    // A managed `'owned` *variable* passed/assigned to another `'owned` slot is an
+                    // independent copy (strict mode: `Box<T>` clone), never a shared handle: copy the
+                    // value out of its lock — through the held `__x_mg` guard when there is one, so the
+                    // callee re-locking the same Mutex can't deadlock — into a fresh wrapper.
+                    if already_owned {
+                        if let Some(copy) = self.managed_owned_var_copy(value) {
+                            return copy;
+                        }
+                    }
                     if already_owned
                         || inner.starts_with("Arc::new(std::sync::Mutex::new(")
                         || inner.starts_with("RefCell::new(")
