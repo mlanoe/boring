@@ -1,8 +1,9 @@
 limit rebindable=false = 10
 count rebindable=true = 0
+label rebindable=true = "a"
 ratio rebindable=true = 0.5
 on rebindable=true = false
 clamped rebindable=true = 1
-direct: 42 2.5 true 1
+direct: 42 hello 2.5 true 1
 clamped after valid set: 7
 after direct write: 100

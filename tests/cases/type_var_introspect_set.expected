@@ -1,9 +1,10 @@
 limit rebindable=false = Int(10)
 count rebindable=true = Int(0)
+label rebindable=true = Str("a")
 ratio rebindable=true = Float(0.5)
 on rebindable=true = Bool(false)
 clamped rebindable=true = Int(1)
-direct: 42 2.5 true 1
+direct: 42 hello 2.5 true 1
 clamped after valid set: 7
 after direct write: Int(100)
 limit rejected: true

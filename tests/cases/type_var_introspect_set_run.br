@@ -4,6 +4,7 @@ struct Config as Introspect:
 
     pub type let int limit = 10
     pub type var int count = 0
+    pub type var string label = "a"
     pub type var float ratio = 0.5
     pub type var bool on = false
     pub type var int clamped = 1
@@ -19,10 +20,11 @@ def main() throws:
             print "{f.name} rebindable={f.isRebindable} = {f.get():?}"
     for f in info.fields:
         if f.name == "count": f.set(42)
+        if f.name == "label": f.set("hello")
         if f.name == "ratio": f.set(2.5)
         if f.name == "on": f.set(true)
         if f.name == "clamped": f.set(-5)
-    print "direct: {Config.count} {Config.ratio} {Config.on} {Config.clamped}"
+    print "direct: {Config.count} {Config.label} {Config.ratio} {Config.on} {Config.clamped}"
     for f in info.fields:
         if f.name == "clamped": f.set(7)
     print "clamped after valid set: {Config.clamped}"

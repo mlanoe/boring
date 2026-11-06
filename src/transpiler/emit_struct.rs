@@ -782,7 +782,8 @@ impl Transpiler {
             self.blank();
             if tv.mutable {
                 self.line(&format!(
-                    "{}static {}: std::sync::Mutex<{}> = std::sync::Mutex::new({});",
+                    // `LazyLock` so a non-const initializer (`Arc::from("a")`, a `Vec`, ...) is legal in a static.
+                    "{}static {}: std::sync::LazyLock<std::sync::Mutex<{}>> = std::sync::LazyLock::new(|| std::sync::Mutex::new({}));",
                     vis, mangled, ty_s, val_s
                 ));
             } else {
@@ -1836,9 +1837,14 @@ impl Transpiler {
                 // and — like a direct `Type.x = v` — goes through `type set x` if declared.
                 let mangled = format!("{}_{}", type_name.to_uppercase(), tv.name.to_uppercase());
                 let get_fn = format!("__introspectGetStatic_{}_{}", type_name, tv.name);
+                // A static's string is always `Arc<str>` (statics must be `Sync`), while
+                // `FieldValue::Str` holds the program's own string type (`Rc<str>` under
+                // single threading) — convert through `&str` on both sides.
+                let is_str = matches!(self.introspect_resolve_ty(ty).as_deref(), Some("Rc<str>") | Some("Arc<str>"));
+                let value_expr = if is_str { "FieldValue::Str((&*(*g)).into())".to_string() }
+                    else { self.introspect_field_value_expr(ty, "(*g)", false, false) };
                 fns.push(format!(
-                    "#[allow(non_snake_case)]\nfn {get_fn}() -> Result<FieldValue, IntrospectError> {{\n    let g = {mangled}.lock().unwrap_or_else(|e| e.into_inner());\n    Ok({})\n}}",
-                    self.introspect_field_value_expr(ty, "(*g)", false, false),
+                    "#[allow(non_snake_case)]\nfn {get_fn}() -> Result<FieldValue, IntrospectError> {{\n    let g = {mangled}.lock().unwrap_or_else(|e| e.into_inner());\n    Ok({value_expr})\n}}",
                 ));
                 let setter = match self.introspect_extract_expr(ty, "&value", &tv.name) {
                     Some(extracted) => {
@@ -1847,6 +1853,8 @@ impl Transpiler {
                             matches!(tm.kind, crate::ast::TypeMethodKind::Set) && tm.name == tv.name);
                         let store = if has_type_set {
                             format!("{}::set_{}(v);", type_name, tv.name)
+                        } else if is_str {
+                            format!("*{mangled}.lock().unwrap_or_else(|e| e.into_inner()) = (&*v).into();")
                         } else {
                             format!("*{mangled}.lock().unwrap_or_else(|e| e.into_inner()) = v;")
                         };
