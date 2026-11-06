@@ -2856,6 +2856,16 @@ impl Transpiler {
             //   1. Owned Arc local (in var_mutex_types / var_rwlock_types, NOT a param) → &v
             //   2. &Arc param being forwarded (inferred as actor, or explicit actor param) → v
             //   3. Plain non-actor value → wrap in Arc::new(Mutex::new(v)) and borrow: &Arc::new(...)
+            // A lock-handle struct field (`svc.stats`, `self.stats`, explicit or inferred): it already is
+            // the `Arc<Mutex<T>>` the callee wants — lend it, never re-wrap it.
+            Some(Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask))
+                if self.expr_reads_qualified_field(value, &self.struct_mutex_fields)
+                    || self.expr_reads_qualified_field(value, &self.struct_mutex_task_fields) =>
+            {
+                let h = self.emit_expr(value);
+                let h = h.strip_suffix(".clone()").unwrap_or(&h);
+                format!("&{}", h)
+            }
             Some(Type::Qualified(_, OwnerQual::Actor)) => {
                 if let ExprKind::Var(v) = &value.kind {
                     let is_owned_actor = self.var_mutex_types.contains(v.as_str())

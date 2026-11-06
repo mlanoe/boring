@@ -1673,3 +1673,4 @@ transpile_project_test!(qualifier_fns_xfile);
 // later (no move), and `arr + [x]` on a `[T]` parameter. Transpile-only: the Rust interpreter
 // doesn't evaluate the `[Decl]{}` idiom. See tests/cases/optional_reuse_and_array_concat.br.
 transpile_test!(optional_reuse_and_array_concat);
+transpile_test!(lock_handle_field_argument);

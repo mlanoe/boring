@@ -2224,8 +2224,13 @@ impl Transpiler {
                     // fallback, which emits a `.clone()` instead of a lock/borrow guard —
                     // a real E0599 in the generated Rust (confirmed via `boring build` +
                     // `cargo build`).
+                    // A field whose qualifier was inferred (cross-file or from its own struct's
+                    // uses) is a bare type here: the recorded sets are the source of truth.
+                    let field_key = format!("{}::{}", struct_name, field_name);
                     let is_actor_field = matches!(field_ty.as_ref().map(|t| t.without_mut()),
-                        Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)));
+                        Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask)))
+                        || self.struct_mutex_fields.contains(&field_key)
+                        || self.struct_mutex_task_fields.contains(&field_key);
                     let read_only_coll_call = is_actor_field
                         && self.actor_collection_field(obj).is_some()
                         && !MUTATING_COLLECTION_METHODS.contains(&method);
@@ -2276,7 +2281,8 @@ impl Transpiler {
                         let obj_s = format!("{}.{}", outer_access, field_name);
                         // Same `Type::Mut` wrapper as `is_actor_field` above — strip it here too.
                         let is_task_field = matches!(field_ty.as_ref().map(|t| t.without_mut()),
-                            Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::ActorTask)));
+                            Some(crate::ast::Type::Qualified(_, crate::ast::OwnerQual::ActorTask)))
+                            || self.struct_mutex_task_fields.contains(&field_key);
                         let call = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
                             format!("{}.borrow_mut().{}({})", obj_s, rust_method, args_s.join(", "))
                         } else if is_task_field {

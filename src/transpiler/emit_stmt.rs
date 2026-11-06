@@ -739,20 +739,7 @@ impl Transpiler {
             || matches!(ty, Type::Qualified(inner, _) if matches!(**inner, Type::Str))
     }
 
-    /// Returns true for types that map to `Arc<Mutex<T>>` or `Arc<RwLock<T>>` in Rust.
-    /// Does NOT include `Shared` — handled separately because `Shared` is threading-aware.
-    /// `is_arc_qualified` looking through optionals and collections (`T'actor?`, `[T'actor]`,
-    /// `{K=T'actor}`): such a field holds an `Arc<Mutex<T>>`/`Arc<RwLock<T>>` too.
-    pub(crate) fn holds_arc_qualified(ty: &Type) -> bool {
-        match ty.without_mut() {
-            Type::Optional(i) | Type::Array(i) | Type::Set(i) => Self::holds_arc_qualified(i),
-            Type::Dict(_, v) => Self::holds_arc_qualified(v),
-            Type::Tuple(ts) => ts.iter().any(Self::holds_arc_qualified),
-            t => Self::is_arc_qualified(t),
-        }
-    }
-
-    /// `holds_arc_qualified`'s managed-mode counterpart: a field whose (possibly nested) element
+    /// A field whose (possibly nested) element
     /// type is `T'owned` over a user struct/enum is an `Arc<Mutex<T>>`/`RefCell<T>` in managed mode
     /// (`is_managed_owned_user`), not a `Box<T>`.
     pub(crate) fn holds_managed_owned(&self, ty: &Type) -> bool {
@@ -764,6 +751,19 @@ impl Transpiler {
         }
     }
 
+    /// A type that is, or holds (through optionals and collections), a lock handle: `Arc<Mutex<T>>` /
+    /// `Arc<RwLock<T>>`, std or tokio (`'actor`, `'guard` and their `'task` variants).
+    pub(crate) fn holds_lock_handle(ty: &Type) -> bool {
+        match ty.without_mut() {
+            Type::Optional(i) | Type::Array(i) | Type::Set(i) => Self::holds_lock_handle(i),
+            Type::Dict(_, v) => Self::holds_lock_handle(v),
+            Type::Tuple(ts) => ts.iter().any(Self::holds_lock_handle),
+            t => matches!(t, Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)),
+        }
+    }
+
+    /// Returns true for types that map to `Arc<Mutex<T>>` or `Arc<RwLock<T>>` in Rust.
+    /// Does NOT include `Shared` — handled separately because `Shared` is threading-aware.
     pub(crate) fn is_arc_qualified(ty: &Type) -> bool {
         matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
     }

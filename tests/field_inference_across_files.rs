@@ -7,11 +7,9 @@
 // `Arc<tokio::sync::Mutex<Counter>>` (its constructor argument is wrapped too). Before, only the
 // struct's own file was scanned and the field stayed a plain `Counter`.
 //
-// These tests check the emitted Rust (`boring build`), and `boring run` for the interpreter side.
-// They do not cargo-build the result: a project whose field ends up a lock handle does not yet
-// compile for reasons independent of the inference (a lock-handle field passed as an argument is
-// re-wrapped by move, a struct holding one still derives `Eq`/`Hash`, a read through a local of
-// the struct is not locked), which hit a field written `Counter'task` by hand just the same.
+// Most tests check the emitted Rust (`boring build`) and `boring run` for the interpreter side;
+// `inferred_lock_field_builds_and_runs_in_every_config` also cargo-builds and runs the result in
+// all four mode/threading configurations.
 //
 // Run with:
 //   tools/test.sh --test field_inference_across_files
@@ -269,4 +267,33 @@ fn task_capturing_a_lock_field_clones_the_handle_before_the_spawn() {
     assert!(rs.contains("let __self_stats = self.stats.clone();"), "handle not cloned before the spawn:\n{rs}");
     assert!(rs.contains("__self_stats.lock()"), "task body must use the clone:\n{rs}");
     assert!(!rs.contains("async move {\n        self.stats"), "task body still borrows self:\n{rs}");
+}
+
+/// `boring build main.br` for one config, then `cargo run` of the generated project.
+fn cargo_run(dir: &Path, mode: &str, threading: &str) -> String {
+    let out_dir = dir.join(format!("out_{mode}_{threading}"));
+    let out = boring(dir, &["build", "main.br", "--mode", mode, "--threading", threading,
+                            "--output-dir", out_dir.to_str().unwrap()]);
+    assert!(out.status.success(), "[{mode}+{threading}] build failed:\n{}", text(&out.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"]).arg(out_dir.join("Cargo.toml"))
+        .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_TARGET_DIR", Path::new(env!("CARGO_TARGET_TMPDIR")).join("field_inference_across_files_target"))
+        .env("CARGO_INCREMENTAL", "0")
+        .output().unwrap();
+    assert!(run.status.success(), "[{mode}+{threading}] cargo run failed:\n{}", text(&run.stderr));
+    text(&run.stdout)
+}
+
+/// The field is inferred a lock handle from a use in another file: the handle is lent (not
+/// re-wrapped) to `bump`, the struct derives no `Eq`/`Hash`, and `svc.stats.get()` through the
+/// local is locked.
+#[test]
+fn inferred_lock_field_builds_and_runs_in_every_config() {
+    let a = a_src("mut Counter stats");
+    let main = format!("use a\n\n{BUMP_TASK}{}", MAIN_USES_BUMP.replace("    bump(svc.stats)\n", "    bump(svc.stats)\n    bump(svc.stats)\n"));
+    let dir = project("cargo_run", &[("a.br", &a), ("main.br", &main)]);
+    for (mode, threading) in [("strict", "multi"), ("strict", "single"), ("managed", "multi"), ("managed", "single")] {
+        assert_eq!(cargo_run(&dir, mode, threading), "n = 2\n", "[{mode}+{threading}]");
+    }
 }

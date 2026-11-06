@@ -93,6 +93,8 @@ impl Transpiler {
         if self.struct_lacks_partial_eq(name, &mut vec![]) { return true; }
         // A `transient` field is a `Cell`/`RefCell`, which has no `Hash`.
         if s.fields.iter().any(|f| f.transient) { return true; }
+        // So is an inferred lock handle (`Rc<RefCell<T>>` single-threaded: `PartialEq` but no `Hash`).
+        if s.fields.iter().any(|f| self.field_is_lock_handle(&s.name, &f.name)) { return true; }
         visiting.push(name.to_string());
         let r = s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, visiting));
         visiting.pop();
@@ -154,6 +156,13 @@ impl Transpiler {
         }
     }
 
+    /// A field whose qualifier was inferred (not written) to a lock handle.
+    fn field_is_lock_handle(&self, strukt: &str, field: &str) -> bool {
+        let k = format!("{}::{}", strukt, field);
+        self.struct_mutex_fields.contains(&k) || self.struct_mutex_task_fields.contains(&k)
+            || self.struct_rwlock_fields.contains(&k) || self.struct_rwlock_task_fields.contains(&k)
+    }
+
     /// The field-local reasons an auto-derived struct drops `PartialEq` (mirrors the branch
     /// chain in `emit_struct`; the transitive reason is `struct_lacks_partial_eq`).
     fn struct_local_drops_partial_eq(&self, s: &StructDecl) -> bool {
@@ -162,9 +171,8 @@ impl Transpiler {
         let has_custom_cmp = ["eq", "ne", "lt", "le", "gt", "ge"].iter().any(|m| {
             self.struct_operator_methods.contains(&format!("{}::{}", s.name, m))
         });
-        let has_sync_mutex_field = !self.use_async_actors()
-            && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-            && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty) || self.holds_managed_owned(&f.ty)) || s.fields.iter().any(|f| {
+        let has_sync_mutex_field = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+            && (s.fields.iter().any(|f| Self::holds_lock_handle(&f.ty) || self.holds_managed_owned(&f.ty) || self.field_is_lock_handle(&s.name, &f.name)) || s.fields.iter().any(|f| {
                 self.observed_fields.get(&format!("{}::{}", s.name, f.name))
                     .is_some_and(|(_, base)| matches!(base,
                         OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
@@ -278,9 +286,10 @@ impl Transpiler {
             // `Observed`, not `Actor`/`Guard`), so it's checked separately via
             // `observed_fields` rather than trying to make `is_arc_qualified` itself
             // recurse through an extra `Observed` layer.
-            let has_sync_mutex_field = !self.use_async_actors()
-                && matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
-                && (s.fields.iter().any(|f| Self::holds_arc_qualified(&f.ty) || self.holds_managed_owned(&f.ty)) || s.fields.iter().any(|f| {
+            // Any lock handle drops it, the `tokio` ones of a program with tasks as well as the std
+            // ones (neither `Arc<Mutex<T>>` nor `Arc<RwLock<T>>` is `PartialEq`), `'task` variants included.
+            let has_sync_mutex_field = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+                && (s.fields.iter().any(|f| Self::holds_lock_handle(&f.ty) || self.holds_managed_owned(&f.ty) || self.field_is_lock_handle(&s.name, &f.name)) || s.fields.iter().any(|f| {
                     self.observed_fields.get(&format!("{}::{}", s.name, f.name))
                         .is_some_and(|(_, base)| matches!(base,
                             OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask))
@@ -314,6 +323,7 @@ impl Transpiler {
                 // element / dict key (`{Key}`, `{Key = V}` → `HashSet<Key>` / `HashMap<Key, V>`).
                 if names.iter().any(|n| n == "PartialEq")
                     && !s.fields.iter().any(|f| f.transient)
+                    && !s.fields.iter().any(|f| self.field_is_lock_handle(&s.name, &f.name))
                     && !s.fields.iter().any(|f| self.type_lacks_hash(&f.ty, &mut vec![s.name.clone()]))
                 {
                     names.push("Eq".to_string());
@@ -387,7 +397,12 @@ impl Transpiler {
                     format!("std::cell::RefCell<{}>", inner)
                 }
             } else if let Some(inner) = Self::mutex_inner(&f.ty) {
-                self.emit_mutex_type(inner)
+                // `'task` is the async (tokio) lock, as for params, locals and constructors.
+                if Self::is_mutex_task_binding(f.mutable, &f.ty) {
+                    self.emit_actor_task_type(inner)
+                } else {
+                    self.emit_mutex_type(inner)
+                }
             } else if let Some(inner) = Self::rwlock_inner(&f.ty) {
                 // Explicit `T'guard`/`T'guard'task` field — mirrors the `mutex_inner` branch
                 // just above (which already correctly handles the analogous `T'actor`/

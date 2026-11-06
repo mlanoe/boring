@@ -1,0 +1,42 @@
+# A struct field that is a lock handle (`'actor` / `'task`, written out) passed by value as a call
+# argument is lent as the existing handle -- never re-wrapped in a fresh lock -- whether the receiver
+# is a local (`svc.stats`) or `self`. The struct holding it derives no `PartialEq`/`Eq`/`Hash`, its
+# `'task` field is the same tokio lock as the parameter's, and a read through a local is locked.
+struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct Service:
+    mut Counter'actor stats
+    mut Counter'task jobs
+
+    task def bumpOwn():
+        bumpActor(self.stats)
+        bumpTask(self.jobs)
+
+task def bumpActor(mut Counter'actor c):
+    c.inc()
+
+task def bumpTask(mut Counter'task c):
+    c.inc()
+
+task int total(Service s):
+    let a = s.stats.get()
+    let b = s.jobs.get()
+    a + b
+
+task go():
+    mut svc = Service(stats = Counter(), jobs = Counter())
+    bumpActor(svc.stats)
+    bumpTask(svc.jobs)
+    bumpTask(svc.jobs)
+    svc.bumpOwn()
+    print "stats = {svc.stats.get()}"
+    print "jobs = {svc.jobs.get()}"
+    print "total = {total(svc)}"
+
+let t = task go()
+t.wait
