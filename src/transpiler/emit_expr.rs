@@ -5069,6 +5069,25 @@ impl Transpiler {
             let turbofish = format!("::<{}>", ty_args_s.join(", "));
             self.emit_optional_method_call(obj, method, args, &turbofish)
         } else {
+            // `Type<T>.method(args)` / `Type.method<T>(args)` on a type-level (`type def`/
+            // `type req`) method or an enum variant constructor: a `type def` has no type
+            // parameters of its own, so the arguments always belong to the TYPE — the
+            // turbofish goes on the type segment (`Box::<isize>::of(3)`), not the method.
+            if let ExprKind::Field(obj, method) = &callee.kind {
+                if let ExprKind::Var(type_name) = &obj.kind {
+                    let key = format!("{}::{}", type_name, method);
+                    let is_type_level = self.struct_type_method_params.contains_key(&key)
+                        || self.enum_variant_fields.contains_key(&key);
+                    if is_type_level {
+                        if let Some(call) = self.try_emit_type_method_call(obj, method, args) {
+                            if let Some(rest) = call.strip_prefix(&format!("{}::", type_name)) {
+                                let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
+                                return format!("{}::<{}>::{}", type_name, ty_args_s.join(", "), rest);
+                            }
+                        }
+                    }
+                }
+            }
             let callee_s = self.emit_expr(callee);
             let ty_args_s: Vec<String> = type_args.iter().map(|t| self.emit_type(t)).collect();
             let args_s: Vec<String> = args.iter().map(|a| self.emit_expr(&a.value)).collect();

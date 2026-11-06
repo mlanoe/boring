@@ -1099,7 +1099,7 @@ impl Transpiler {
     /// fallback for external Rust types (`Duration.fromMillis(100)`). Returns `None`
     /// when `obj` isn't a type/module path — including a local var that happens to be
     /// uppercase, which must fall through to ordinary instance-method dispatch.
-    fn try_emit_type_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+    pub(crate) fn try_emit_type_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         let ExprKind::Var(type_name) = &obj.kind else { return None };
         // A known local variable that happens to start with an uppercase letter
         // (e.g. `var Qh = []`), or a top-level `let` constant (`PADDLE_SIZE`,
@@ -4514,6 +4514,10 @@ impl Transpiler {
                 while let ExprKind::Field(inner, _) = &root.kind { root = inner; }
                 matches!(root.kind, ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Index(..))
             } => false,
+            // A unit enum variant (`Shape.Unit` → `Shape::Unit`) is a value, not a module path:
+            // `Shape.Unit.introspect()` must stay a method call on it.
+            ExprKind::Field(inner, variant) if matches!(&inner.kind, ExprKind::Var(en)
+                if self.enum_variant_fields.contains_key(&format!("{}::{}", en, variant))) => false,
             _ => obj_s.contains("::") && !obj_s.ends_with(')') && !obj_s.ends_with('}'),
         };
         if is_path_receiver {

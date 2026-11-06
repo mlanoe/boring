@@ -1269,6 +1269,12 @@ impl Transpiler {
                 _ => None,
             };
             if let Some(enum_name) = inferred_enum {
+                // A bare unit variant (`let u = Shape.Unit`, a `Field` node) also records the
+                // receiver's struct/enum name, like a payload variant constructor does, so
+                // `u.introspect()` and other method dispatch on `u` resolve.
+                if matches!(&s_value.kind, ExprKind::Field(..)) && self.is_known_user_type(enum_name.as_str()) {
+                    self.var_struct_types.insert(s.name.clone(), enum_name.clone());
+                }
                 self.var_types.insert(s.name.clone(), Type::Named(enum_name));
             }
         }

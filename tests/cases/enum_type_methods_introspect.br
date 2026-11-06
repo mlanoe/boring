@@ -14,7 +14,10 @@ enum Shape as Introspect:
         0
 
 def main() throws:
-    let u = Shape.Circle(1.0)
+    # direct call on a unit variant, and through a local
+    let direct = Shape.Unit.introspect()
+    print "{direct.typeName}.{direct.variantName}"
+    let u = Shape.Unit
     let info = u.introspect()
     for m in info.methods:
         print "{m.name} instance={m.isInstance} callable={m.isCallable}"

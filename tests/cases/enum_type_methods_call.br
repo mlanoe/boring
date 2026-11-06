@@ -8,7 +8,7 @@ enum Shape as Introspect:
         n + 1
 
 def main() throws:
-    let u = Shape.Circle(1.0)
+    let u = Shape.Unit
     let info = u.introspect()
     for m in info.methods:
         if !m.isInstance:

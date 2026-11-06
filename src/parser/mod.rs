@@ -1004,6 +1004,34 @@ impl Parser {
         false
     }
 
+    /// True when the token at `lt_pos` starts a `<Types>.method(` pattern — explicit type
+    /// arguments on a type-level call (`Box<int>.of(3)`): the matching `>` is followed by
+    /// `.`, an identifier and `(`. A comparison can never continue with `> .`, so this
+    /// cannot steal valid `a < b > c` input.
+    fn is_generic_type_method_ahead(&self, lt_pos: usize) -> bool {
+        let mut depth = 0i32;
+        let mut i = lt_pos;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::Lt => { depth += 1; i += 1; }
+                TokenKind::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Dot))
+                            && matches!(self.tokens.get(i + 2).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                            && matches!(self.tokens.get(i + 3).map(|t| &t.kind), Some(TokenKind::LParen));
+                    }
+                    i += 1;
+                }
+                TokenKind::Newline | TokenKind::Semicolon | TokenKind::Indent | TokenKind::Dedent
+                | TokenKind::EqEq | TokenKind::BangEq | TokenKind::LtEq | TokenKind::GtEq
+                | TokenKind::PipeArrow | TokenKind::LParen => return false,
+                _ => { i += 1; }
+            }
+        }
+        false
+    }
+
     /// Parse the optional error type after `throws`.
     ///
     /// Handles both simple names (`throws CalcError`) and module-qualified paths

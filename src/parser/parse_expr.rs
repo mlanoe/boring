@@ -1774,6 +1774,22 @@ impl Parser {
                     };
                     return Ok(Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col)});
                 }
+                // Type-level call with explicit type arguments: `Box<int>.of(3)`. Desugared to
+                // the same node as `Box.of<int>(3)` (a `GenericCall` over `Type.method`).
+                if Self::is_type_name(&name)
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Lt))
+                    && self.is_generic_type_method_ahead(self.pos + 1)
+                {
+                    self.advance(); // consume Ident
+                    self.advance(); // consume '<'
+                    let type_args = self.parse_generic_arg_list(ArgTarget::Type(&name), |p| p.parse_type())?;
+                    self.expect(&TokenKind::Dot)?;
+                    let method = self.expect_ident()?;
+                    let recv = Expr { kind: ExprKind::Var(name), line, col, len: self.span_len(line, col) };
+                    let callee = Expr { kind: ExprKind::Field(Box::new(recv), method), line, col, len: self.span_len(line, col) };
+                    let args = self.parse_call_args()?;
+                    return Ok(Expr { kind: ExprKind::GenericCall(Box::new(callee), type_args, args), line, col, len: self.span_len(line, col) });
+                }
                 // Trailing array-block sugar, bare (no-parens) form: `Column:` followed
                 // by a real indented block. This shares its exact token shape
                 // (`Ident Colon` then a real indented block) with the pre-existing

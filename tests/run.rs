@@ -516,6 +516,7 @@ interp_test!(enum_type_def);
 // pairs with tests/transpile.rs's registration below.
 interp_test!(enum_type_def_throws);
 interp_test!(enum_type_methods_introspect);
+interp_test!(generic_type_method_call);
 
 // Most dangerous of the four: a
 // silent wrong-value bug, not a compile error: a two-branch

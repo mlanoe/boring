@@ -1,0 +1,33 @@
+# `Type<Args>.method(...)`: explicit type arguments on a type-level call (`type def`),
+# for a struct and an enum, including one the compiler cannot infer from the arguments.
+struct Box<T>:
+    T v
+
+    type def Box<T> of(T x):
+        return Box(v = x)
+
+enum Opt<T>:
+    Just(T)
+    Empty
+
+    type def Opt<T> of(T v):
+        return Opt.Just(v)
+
+    type def Opt<T> none():
+        return Opt.Empty
+
+def main():
+    let b = Box<int>.of(3)
+    print b.v
+    let o = Opt<int>.of(4)
+    match o:
+        Just(v): print v
+        Empty: print "nil"
+    let n = Opt<string>.none()
+    match n:
+        Just(v): print v
+        Empty: print "nil"
+    let big = 5
+    let small = 2
+    if small < big and big > small:
+        print "cmp ok"

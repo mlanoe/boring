@@ -599,6 +599,8 @@ transpile_test!(enum_type_def_throws);
 // (shared with run/itest) and `Method.call` invokes one (build only, needs `FieldValue`).
 transpile_test!(enum_type_methods_introspect);
 transpile_test!(enum_type_methods_call);
+// `Type<Args>.method(...)`: explicit type arguments on a type-level call (struct and enum).
+transpile_test!(generic_type_method_call);
 transpile_test!(ref_identity);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);
