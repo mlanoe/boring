@@ -41,6 +41,27 @@ const FLOAT_MATH_FNS: &[&str] = &[
     "signum", "copysign",
 ];
 
+/// Free functions that *produce or consume* a float without any float literal or declared
+/// float type appearing in the source: conversion constructors (`float(n)`, `float32(n)`,
+/// `float16(n)`, `float64(n)`), the bit-cast pair and the float predicates. Without this list
+/// `let x = float(n)` passed validation — the value's type is only ever inferred.
+const FLOAT_ORIGIN_FNS: &[&str] = &[
+    "float", "float16", "float32", "float64", "f16", "f32", "f64",
+    "bitsToFloat", "floatToBits", "isNaN", "isInfinite",
+];
+
+/// Float-valued built-in constants (`PI`, `E`, `INF`, `NAN`, also as `Math.PI`...). Ignored when
+/// the program itself binds the same name (a user `let E = 5`).
+const FLOAT_CONSTS: &[&str] = &["PI", "E", "INF", "NAN"];
+
+/// Methods that only exist to cross the int/float boundary. (`sqrt`/`sin`/... are *not* listed
+/// here: the fixed-point types, which are integer-backed and FPU-free, have methods of the same
+/// names, so a method-name match would reject legitimate code — those are covered by the
+/// float origins above instead.)
+const FLOAT_ORIGIN_METHODS: &[&str] = &[
+    "parseFloat", "toFloat", "toFloat32", "toFloat64", "isNaN", "isInfinite", "isFinite",
+];
+
 // ─── Validator ───────────────────────────────────────────────────────────────
 
 /// Kernel validation visitor.  Accumulates diagnostics as it walks the AST.
@@ -51,6 +72,9 @@ pub struct KernelValidator {
     /// second line of defense: the parser already bounds nested-block depth, but this
     /// validator has its own recursive walk and had no counter of its own at all.
     depth: usize,
+    /// Names the program binds itself (`let`/`var`/`mut`, top-level or local) — a user binding
+    /// shadows the float built-in constants (`E`, `PI`, ...).
+    bound: std::collections::HashSet<String>,
 }
 
 /// Mirrors `parser::MAX_EXPR_DEPTH` (200) — see that constant's doc comment for the
@@ -72,7 +96,7 @@ impl Default for KernelValidator {
 
 impl KernelValidator {
     pub fn new() -> Self {
-        KernelValidator { diags: Vec::new(), depth: 0 }
+        KernelValidator { diags: Vec::new(), depth: 0, bound: Default::default() }
     }
 
     // ── Public entry point ───────────────────────────────────────────────────
@@ -212,6 +236,11 @@ impl KernelValidator {
                             line,
                             "floating-point math is not allowed in kernel context",
                         );
+                    } else if FLOAT_ORIGIN_FNS.contains(&name.as_str()) && !self.bound.contains(name) {
+                        self.error(
+                            line,
+                            format!("`{name}(...)` produces or consumes a float, which is not allowed in kernel context — FPU is disabled"),
+                        );
                     }
                     // Rule 2 — panic(...)
                     if name == "panic" {
@@ -289,6 +318,12 @@ impl KernelValidator {
                         );
                     }
                 }
+                if FLOAT_ORIGIN_METHODS.contains(&method.as_str()) {
+                    self.error(
+                        line,
+                        format!("`.{method}()` converts to or from a float, which is not allowed in kernel context — FPU is disabled"),
+                    );
+                }
                 self.check_expr(receiver);
                 for arg in args {
                     self.check_expr(&arg.value);
@@ -297,7 +332,18 @@ impl KernelValidator {
 
             // Cast — check target type
             ExprKind::Cast(inner, ty) => {
-                self.check_expr(inner);
+                // `1.5 as fixed16_16` is folded to its raw integer at transpile time: no float
+                // exists at runtime, so a bare decimal literal cast to fixed-point is allowed.
+                let fixed_target = matches!(ty.without_mut(), Type::Fixed(_))
+                    || matches!(ty.without_mut(), Type::Named(n) if crate::fixed::FixedFmt::from_name(n).is_some());
+                let bare_float_lit = match &inner.kind {
+                    ExprKind::Float(_) => true,
+                    ExprKind::UnaryOp(crate::ast::UnaryOp::Neg, i) => matches!(i.kind, ExprKind::Float(_)),
+                    _ => false,
+                };
+                if !(fixed_target && bare_float_lit) {
+                    self.check_expr(inner);
+                }
                 self.check_type(ty, line);
             }
 
@@ -528,8 +574,15 @@ impl KernelValidator {
             | ExprKind::Bool(_)
             | ExprKind::Nil
             | ExprKind::Void
-            | ExprKind::Var(_)
             | ExprKind::DotIdent(_) => {}
+            ExprKind::Var(name) => {
+                if FLOAT_CONSTS.contains(&name.as_str()) && !self.bound.contains(name) {
+                    self.error(
+                        line,
+                        format!("`{name}` is a float constant, which is not allowed in kernel context — FPU is disabled"),
+                    );
+                }
+            }
         }
     }
 
@@ -571,6 +624,7 @@ impl KernelValidator {
     fn check_stmt_inner(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(let_stmt) => {
+                self.bound.insert(let_stmt.name.clone());
                 if let Some(ty) = &let_stmt.ty {
                     self.check_type(ty, let_stmt.line);
                 }
@@ -725,16 +779,23 @@ impl KernelValidator {
                     self.check_stmt(s);
                 }
                 for clause in &try_stmt.catch_clauses {
-                    // Rule 4 — catch clause warning (kernel error type not yet defined)
-                    for ty_name in &clause.types {
-                        self.warn(
-                            clause.line,
-                            format!(
-                                "catch {ty_name}: kernel error stdlib is not yet defined — \
-                                 ensure {ty_name} is declared as `type {ty_name} as kernel.error.Error(...)`"
-                            ),
-                        );
-                    }
+                    // Rule 4 — `catch` is rejected: the kernel `?`-propagates a single
+                    // `kernel::error::Error` and has no `BoringError` variants to dispatch on
+                    // (that is std-runtime machinery). The emitter used to drop the clauses
+                    // silently, so the handler never ran. Say so instead.
+                    let what = if clause.types.is_empty() {
+                        "catch".to_string()
+                    } else {
+                        format!("catch {}", clause.types.join(", "))
+                    };
+                    self.error(
+                        clause.line,
+                        format!(
+                            "`{what}` is not supported on the Rust-for-Linux Linux target — errors are a single \
+                             `kernel::error::Error` that propagates with `?`; handle failure with \
+                             `try expr else default` / `try: ... else: ...`, or let it propagate"
+                        ),
+                    );
                     for s in &clause.body {
                         self.check_stmt(s);
                     }
@@ -1035,6 +1096,7 @@ impl KernelValidator {
             Item::Ext(e) => self.check_ext(e),
             Item::Mod(m) => self.check_mod(m),
             Item::Let(let_stmt) => {
+                self.bound.insert(let_stmt.name.clone());
                 if let Some(ty) = &let_stmt.ty {
                     self.check_type(ty, let_stmt.line);
                 }
@@ -1176,13 +1238,11 @@ impl KernelValidator {
 
 /// Returns `true` if the type carries a `'shared`, `'actor`, or `'guard`
 /// qualifier (possibly nested inside borrows or optional wrappers). Note:
-/// `'task` alone is not one of these — it's a deprecated alias that already
-/// resolves to `OwnerQual::Shared` (see that variant's own doc comment), so
-/// it's covered by the `Shared` arm below; the *compound* `'actor'task`/
-/// `'guard'task` qualifiers (`OwnerQual::ActorTask`/`GuardTask`) are not.
+/// `'task` alone is a deprecated alias that resolves to `OwnerQual::Shared`;
+/// the compound `'actor'task`/`'guard'task` qualifiers are covered too.
 fn is_shared_actor_or_guard(ty: &Type) -> bool {
     match ty {
-        Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard) => true,
+        Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask) => true,
         Type::Qualified(inner, _) => is_shared_actor_or_guard(inner),
         Type::Optional(inner) => is_shared_actor_or_guard(inner),
         _ => false,

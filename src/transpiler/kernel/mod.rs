@@ -18,6 +18,7 @@
 use crate::ast::{Program, Item, Stmt, ExprKind, Expr};
 
 mod helpers;
+mod fixed;
 mod emit_top;
 mod emit_stmt;
 mod emit_expr;
@@ -39,6 +40,10 @@ pub fn transpile_kernel(program: &Program) -> KernelTranspileOutput {
     crate::transpiler::helpers::clear_reported_errors();
     let mut t = KernelTranspiler::new();
     t.emit_kernel_program(program);
+    if let Some(prelude) = fixed::fixed_point_prelude_kernel(&t.out) {
+        t.out.push('\n');
+        t.out.push_str(&prelude);
+    }
     let mut errors = crate::transpiler::helpers::take_reported_errors();
     let backstop = crate::transpiler::helpers::placeholder_errors(&t.out, "kernel", !errors.is_empty());
     errors.extend(backstop);
@@ -264,6 +269,7 @@ impl KernelTranspiler {
         self.line("extern crate kernel;");
         self.blank();
 
+        self.collect_fixed_decls(program);
         let has_tasks         = program_has_task_fns(program);
         let has_chan          = program_has_channel(program);
         let has_dyn_chan      = program_has_dyn_channel(program);

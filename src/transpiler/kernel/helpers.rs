@@ -60,6 +60,19 @@ pub(super) struct KernelTranspiler {
     /// partially-moved state the `while let Some(name) = outer` match left it in —
     /// read by the post-loop `{name} = {outer};` sync in the `WhileLet` arm.
     pub(super) while_let_break_sync: Option<(String, String)>,
+    /// Fixed-point formats of bindings / struct fields / fn return types (see `fixed.rs`).
+    pub(super) fixed_vars: std::collections::HashMap<String, crate::fixed::FixedFmt>,
+    pub(super) fixed_fields: std::collections::HashMap<String, crate::fixed::FixedFmt>,
+    pub(super) fixed_fns: std::collections::HashMap<String, crate::fixed::FixedFmt>,
+    /// Program-wide: `let`/static bindings at the top level, method return formats, and the
+    /// parameter / struct-field formats used to fold literal arguments.
+    pub(super) fixed_globals: std::collections::HashMap<String, crate::fixed::FixedFmt>,
+    pub(super) fixed_methods: std::collections::HashMap<String, crate::fixed::FixedFmt>,
+    pub(super) fixed_fn_params: std::collections::HashMap<String, super::fixed::ParamFmts>,
+    pub(super) fixed_method_params: std::collections::HashMap<String, super::fixed::ParamFmts>,
+    pub(super) fixed_struct_fields: std::collections::HashMap<String, super::fixed::ParamFmts>,
+    /// Fixed-point return format of the function being emitted (folds `return 3`).
+    pub(super) cur_ret_fixed: Option<crate::fixed::FixedFmt>,
 }
 
 impl KernelTranspiler {
@@ -80,6 +93,15 @@ impl KernelTranspiler {
             broadcast_receivers: std::collections::HashSet::new(),
             while_let_redirect: std::collections::HashMap::new(),
             while_let_break_sync: None,
+            fixed_vars: Default::default(),
+            fixed_fields: Default::default(),
+            fixed_fns: Default::default(),
+            fixed_globals: Default::default(),
+            fixed_methods: Default::default(),
+            fixed_fn_params: Default::default(),
+            fixed_method_params: Default::default(),
+            fixed_struct_fields: Default::default(),
+            cur_ret_fixed: None,
         }
     }
 
@@ -129,6 +151,8 @@ impl KernelTranspiler {
             Type::Nil | Type::Void => "()".into(),
             Type::Never => "!".into(),
 
+            Type::Named(n) if crate::fixed::FixedFmt::from_name(n).is_some() =>
+                crate::fixed::FixedFmt::from_name(n).unwrap().rust_name(),
             Type::Named(n) => match n.as_str() {
                 "int"    | "isize" => "isize".into(),
                 "uint"   | "usize" => "usize".into(),
@@ -203,11 +227,16 @@ impl KernelTranspiler {
                     format!("Arc<{}>", self.emit_type(inner))
                 }
                 // T'actor → Arc<kernel::sync::Mutex<T>>
-                OwnerQual::Actor => {
+                // T'actor'task → the same Arc<kernel::sync::Mutex<T>>: the kernel `Mutex` is a
+                // sleeping lock and a `task def` is a work item whose caller blocks, so there is
+                // no separate async-aware lock to pick (tokio's `Mutex` is the only reason the
+                // std targets distinguish them).
+                OwnerQual::Actor | OwnerQual::ActorTask => {
                     format!("Arc<kernel::sync::Mutex<{}>>", self.emit_type(inner))
                 }
                 // T'guard → Arc<kernel::sync::RwLock<T>>
-                OwnerQual::Guard => {
+                // T'guard'task → likewise the same Arc<kernel::sync::RwLock<T>> as T'guard.
+                OwnerQual::Guard | OwnerQual::GuardTask => {
                     format!("Arc<kernel::sync::RwLock<{}>>", self.emit_type(inner))
                 }
                 // T'weak → Weak<T>

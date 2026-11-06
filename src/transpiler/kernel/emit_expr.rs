@@ -95,6 +95,7 @@ impl KernelTranspiler {
             ExprKind::Var(n)   => n.clone(),
 
             ExprKind::BinOp(op, l, r) => {
+                if let Some(s) = self.try_emit_fixed_binop(op, l, r) { return s; }
                 let ls = self.emit_expr(l);
                 let rs = self.emit_expr(r);
                 format!("({} {} {})", ls, binop_str(op), rs)
@@ -122,11 +123,15 @@ impl KernelTranspiler {
                     }
                 }
                 let ls = self.emit_expr(lhs);
-                let rs = self.emit_expr(rhs);
+                let rs = match self.fixed_fmt_of(lhs) {
+                    Some(fm) => self.emit_fixed_operand(rhs, &fm),
+                    None => self.emit_expr(rhs),
+                };
                 format!("{} = {}", ls, rs)
             }
 
             ExprKind::Field(obj, field) => {
+                if let Some(s) = self.try_emit_fixed_field(obj, field) { return s; }
                 // watch rx.value → rx.value() (current value without waiting)
                 if field == "value" {
                     if let ExprKind::Var(var_name) = &obj.kind {
@@ -153,9 +158,11 @@ impl KernelTranspiler {
                     }
                 }
                 let callee_s = self.emit_expr(callee);
-                let args_s: Vec<String> = args.iter()
-                    .map(|a| self.emit_expr(&a.value))
-                    .collect();
+                let fmts = match &callee.kind {
+                    ExprKind::Var(n) => self.fixed_fn_params.get(n).or_else(|| self.fixed_struct_fields.get(n)),
+                    _ => None,
+                };
+                let args_s = self.emit_args_with(args, fmts);
                 format!("{}({})", callee_s, args_s.join(", "))
             }
 
@@ -175,6 +182,7 @@ impl KernelTranspiler {
             }
 
             ExprKind::MethodCall(obj, method, args) => {
+                if let Some(s) = self.try_emit_fixed_method(obj, method, args) { return s; }
                 if let ExprKind::Var(var_name) = &obj.kind {
                     // oneshot/watch/broadcast senders: tx.send(v) → tx.send(v).ok()
                     if method == "send"
@@ -209,9 +217,7 @@ impl KernelTranspiler {
                     }
                 }
                 let obj_s = self.emit_expr(obj);
-                let args_s: Vec<String> = args.iter()
-                    .map(|a| self.emit_expr(&a.value))
-                    .collect();
+                let args_s = self.emit_args_with(args, self.fixed_method_params.get(method.as_str()));
                 format!("{}.{}({})", obj_s, method, args_s.join(", "))
             }
 
@@ -266,6 +272,7 @@ impl KernelTranspiler {
             }
 
             ExprKind::Cast(e, ty) => {
+                if let Some(s) = self.try_emit_fixed_cast(e, ty) { return s; }
                 let es = self.emit_expr(e);
                 let ty_s = self.emit_type(ty);
                 format!("({} as {})", es, ty_s)
@@ -282,6 +289,7 @@ impl KernelTranspiler {
             }
 
             ExprKind::Else(e, default) => {
+                if let Some(s) = self.try_emit_fixed_else(e, default) { return s; }
                 // nil-coalescing
                 let es = self.emit_expr(e);
                 let ds = self.emit_expr(default);

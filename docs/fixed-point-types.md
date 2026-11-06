@@ -244,6 +244,10 @@ Formats are emitted by a small generator keyed on `(signed, N, M)`, not
 hand-written per format. Literals are folded to their raw integer at
 transpile time (`1.5` in `fixed16_16` → `Fixed16_16(98304)`).
 
+## Linux target (`--linux`)
+
+Supported with integer-only generated code (no `f32`/`f64`), float conversions rejected; details and limits in [linux-target.md](linux-target.md#fixed-point-types).
+
 ## Interpreter (`boring run`) and self-hosted interpreter
 
 New runtime variant `Value::Fixed { raw: i128, signed, n, m }` with a matching

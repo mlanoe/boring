@@ -28,7 +28,13 @@ impl KernelTranspiler {
             Item::Let(s)    => {
                 // Top-level let/var becomes a static or const
                 if let Some(val) = &s.value {
-                    let val_s = self.emit_expr(val);
+                    let val_s = match &s.ty {
+                        Some(ty) => self.emit_fixed_let_value(ty, val).unwrap_or_else(|| self.emit_expr(val)),
+                        None => self.emit_expr(val),
+                    };
+                    self.fixed_vars.clear();
+                    self.track_fixed(&s.name, s.ty.as_ref(), Some(val));
+                    if let Some(f) = self.fixed_vars.get(&s.name).copied() { self.fixed_globals.insert(s.name.clone(), f); }
                     if let Some(ty) = &s.ty {
                         let ty_s = self.emit_type(ty);
                         if s.binding.is_mutable() {
@@ -420,6 +426,13 @@ impl KernelTranspiler {
     /// Emit a function declaration.
     pub(super) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
         if f.is_native { return; }
+
+        // Per-function scope for fixed-point bindings: globals + this function's parameters.
+        self.fixed_vars = self.fixed_globals.clone();
+        for p in &f.params {
+            self.track_fixed(&p.name, p.ty.as_ref(), None);
+        }
+        self.cur_ret_fixed = if f.task || f.stream { None } else { f.return_ty.as_ref().and_then(super::fixed::fmt_of_type) };
 
         // Delegate task functions to the specialized emitter
         if f.task {

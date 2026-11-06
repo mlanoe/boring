@@ -162,3 +162,259 @@ def void run():
     assert!(!after_for.contains("__wl_countdown = Some(countdown);"),
         "the nested for-loop's break must not trigger the outer-binding refill;\ngot:\n{rs}");
 }
+
+// ── Linux target: float detection, `catch`, `'actor'task` / `'guard'task` ────
+
+/// Run `boring build --linux` on `src` and return (success, stderr).
+fn kernel_build_result(test_name: &str, src: &str) -> (bool, String) {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("kernel_codegen").join(test_name);
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let br_file = tmp.join("test.br");
+    fs::write(&br_file, src).unwrap();
+    let out = Command::new(bin).args(["build", "--linux"]).arg(&br_file).output().unwrap();
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn float_origins_without_literal_or_declared_type_are_rejected() {
+    // Each of these yields a float purely by inference — no float literal, no float type.
+    for (i, expr) in [
+        "float(n)", "float32(n)", "PI", "E", "INF", "NAN", "bitsToFloat(n)",
+        "\"1.5\".parseFloat()", "n.toFloat()",
+    ].iter().enumerate() {
+        let src = format!("def int g(int n):\n    let x = {expr}\n    return 1\n");
+        let (ok, err) = kernel_build_result(&format!("float_origin_{i}"), &src);
+        assert!(!ok, "`{expr}` must be rejected on --linux");
+        assert!(err.contains("FPU is disabled"), "`{expr}`: unexpected diagnostic:\n{err}");
+    }
+}
+
+#[test]
+fn integer_code_and_user_bound_float_constant_names_still_pass() {
+    // A user binding named like a float constant shadows it; plain int math is untouched.
+    let rs = kernel_codegen("float_shadow_ok", "def int g(int n):\n    let E = 5\n    let y = abs(n) + E\n    return y\n");
+    assert!(rs.contains("fn g"), "got:\n{rs}");
+}
+
+#[test]
+fn catch_clauses_are_rejected_not_silently_dropped() {
+    let (ok, err) = kernel_build_result("catch_rejected", r#"
+def int f() throws:
+    return 1
+
+def int g():
+    try:
+        let a = f()
+    catch String:
+        return 0
+    return 1
+"#);
+    assert!(!ok, "`catch` must be diagnosed on --linux");
+    assert!(err.contains("`catch String` is not supported on the Rust-for-Linux Linux target"), "got:\n{err}");
+}
+
+#[test]
+fn actor_task_and_guard_task_use_kernel_locks_not_a_borrow() {
+    let rs = kernel_codegen("actor_guard_task", r#"
+struct C:
+    var int n = 0
+
+struct H:
+    C'actor'task a
+    C'guard'task b
+"#);
+    assert!(rs.contains("pub a: Arc<kernel::sync::Mutex<C>>,"), "got:\n{rs}");
+    assert!(rs.contains("pub b: Arc<kernel::sync::RwLock<C>>,"), "got:\n{rs}");
+}
+
+// ── Linux target: fixed-point types (integer-only, no FPU) ───────────────────
+
+const FIXED_SRC: &str = "def int32 g(int n):\n    let a = 3 as fixed16_16\n    let b = a * a\n    let c = b.sqrt()\n    return c.raw\n";
+
+#[test]
+fn fixed_point_emits_integer_newtypes_and_no_float_items() {
+    let rs = kernel_codegen("fixed_basic", FIXED_SRC);
+    assert!(rs.contains("pub struct Fixed16_16(pub i32)"), "got:\n{rs}");
+    assert!(rs.contains("Fixed16_16::from_raw(196608)"), "literal cast must fold:\n{rs}");
+    assert!(rs.contains(".sqrt()") && rs.contains(".raw()"), "got:\n{rs}");
+    assert!(!rs.contains("3 as fixed16_16"), "got:\n{rs}");
+    for banned in ["f64", "f32"] {
+        assert!(!rs.contains(banned), "generated kernel code must contain no `{banned}`:\n{rs}");
+    }
+}
+
+#[test]
+fn fixed_point_members_fields_and_decimal_cast_literal() {
+    let src = "struct Pt:\n    var fixed16_16 x = fixed16_16.fromRaw(65536)\n\n\
+def int32 g(Pt p, fixed16_16 y, int n):\n    let h = 1.5 as fixed16_16\n    let z = (p.x + y) * h + 2\n    let w = n as fixed16_16\n    let s = z.sin() + z.cos() + z.exp() + w.ln()\n    let k = z.checkedAdd(y) else 0\n    return (s + k).raw + (z as int32) + fixed16_16.epsilon.raw\n";
+    let rs = kernel_codegen("fixed_members", src);
+    assert!(rs.contains("Fixed16_16::from_raw(98304)"), "1.5 folds to raw 98304:\n{rs}");
+    assert!(rs.contains("Fixed16_16::from_raw(131072)"), "bare int literal operand takes the format:\n{rs}");
+    assert!(rs.contains("__fx_cast_sat::<Fixed16_16, _>(n)"), "got:\n{rs}");
+    assert!(rs.contains(".unwrap_or(Fixed16_16::from_raw(0))"), "got:\n{rs}");
+    assert!(rs.contains("__FixedFormat::__to_i128(z) as i32"), "got:\n{rs}");
+    assert!(rs.contains("Fixed16_16::EPSILON.raw()"), "got:\n{rs}");
+    assert!(!rs.contains("f64") && !rs.contains("f32"), "got:\n{rs}");
+}
+
+#[test]
+fn fixed_point_float_conversions_are_rejected() {
+    for (i, body) in [
+        "let x = 1.5\n    let a = x as fixed16_16\n    return 1",
+        "let a = 3 as fixed16_16\n    let x = a * 1.5\n    return 1",
+        "let a = 3 as fixed16_16\n    let x = a as float\n    return 1",
+        "let a = 3 as fixed16_16\n    let x = a.toFloat()\n    return 1",
+    ].iter().enumerate() {
+        let src = format!("def int g(int n):\n    {body}\n");
+        let (ok, err) = kernel_build_result(&format!("fixed_float_{i}"), &src);
+        assert!(!ok, "case {i} must be rejected on --linux:\n{body}");
+        assert!(err.contains("FPU is disabled"), "case {i}: unexpected diagnostic:\n{err}");
+    }
+}
+
+/// Compiles the generated fixed-point module with plain `rustc` (`#![no_std]` kept, the
+/// `kernel` crate import dropped — fixed-point code needs none) and, in a second build with a
+/// std `main`, runs it: `g(0)` = raw of sqrt(3*3) = 3.0 in 16.16 = 196608.
+#[test]
+fn fixed_point_generated_code_compiles_no_std_and_computes() {
+    let rs = kernel_codegen("fixed_compile", FIXED_SRC);
+    let rs = rs.replace("extern crate kernel;", "");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("kernel_codegen").join("fixed_compile");
+    // 1. no_std library build
+    let lib = tmp.join("lib_check.rs");
+    fs::write(&lib, &rs).unwrap();
+    let out = Command::new("rustc").args(["--edition", "2021", "--crate-type", "lib", "--emit", "metadata", "-o"])
+        .arg(tmp.join("lib_check.rmeta")).arg(&lib).output().expect("rustc not found");
+    assert!(out.status.success(), "no_std build failed:\n{}\n--- code ---\n{rs}", String::from_utf8_lossy(&out.stderr));
+    // 2. std build + run
+    let main_rs = format!("{}\nfn main() {{ println!(\"{{}}\", g(0)); }}\n", rs.replace("#![no_std]", ""));
+    let main_file = tmp.join("run_check.rs");
+    fs::write(&main_file, main_rs).unwrap();
+    let exe = tmp.join("run_check");
+    let out = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&exe).arg(&main_file).output().unwrap();
+    assert!(out.status.success(), "std build failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "196608");
+}
+
+// ── Linux target: fixed-point inference scope, literal folding, panic-free policy ──
+
+const FIXED_FOLD_SRC: &str = "\
+def fixed16_16 one():
+    return 1
+
+def fixed16_16 twice(fixed16_16 x):
+    return x * 2
+
+def int32 f_fold():
+    return twice(3).raw
+
+def int32 f_wrap():
+    return (fixed16_16.max + one()).raw
+
+def int32 f_div0():
+    let z = 0 as fixed16_16
+    return (one() / z).raw
+
+def int32 f_rem0():
+    let z = 0 as fixed16_16
+    return (one() % z).raw
+
+def int32 f_sqrt_neg():
+    let m = 0 - one()
+    return m.sqrt().raw
+
+def int32 f_ln0():
+    let z = 0 as fixed16_16
+    return z.ln().raw
+
+def int32 f_cast_hi(int n):
+    return (n as fixed16_16).raw
+
+def int32 f_cast_lo(int n):
+    return ((0 - n) as fixed16_16).raw
+
+def int64 f_wide():
+    let a = 3 as fixed64_64
+    let b = a * a / a
+    return (b as int64) + (a.raw as int64)
+";
+
+#[test]
+fn fixed_point_literals_fold_in_return_arguments_and_assignments() {
+    let src = "\
+struct Acc:
+    var fixed16_16 v
+
+    req fixed16_16 get():
+        return v
+
+def fixed16_16 one():
+    return 1
+
+def fixed16_16 inc(fixed16_16 x, fixed16_16 by):
+    return x + by
+
+def int32 g(Acc a, int a2):
+    var t = inc(1, 2)
+    t = 5
+    let k = a.get() + 1
+    let u = Acc(7)
+    return (t + k).raw + (a2 + 1)
+
+def int32 h(int t):
+    return t + 1
+";
+    let rs = kernel_codegen("fixed_fold", src);
+    assert!(rs.contains("-> Fixed16_16 {\n    return Fixed16_16::from_raw(65536);"), "return literal:\n{rs}");
+    assert!(rs.contains("inc(Fixed16_16::from_raw(65536), Fixed16_16::from_raw(131072))"), "call args:\n{rs}");
+    assert!(rs.contains("t = Fixed16_16::from_raw(327680)"), "assignment:\n{rs}");
+    assert!(rs.contains("(a.get() + Fixed16_16::from_raw(65536))"), "method return type tracked:\n{rs}");
+    assert!(rs.contains("Acc(Fixed16_16::from_raw(458752))"), "constructor argument:\n{rs}");
+    assert!(rs.contains("(a2 + 1)"), "an int binding is not folded:\n{rs}");
+    // `t` is fixed in g but an int parameter in h: the per-function scope must not leak.
+    assert!(rs.contains("(t + 1)"), "binding scope leaked across functions:\n{rs}");
+}
+
+#[test]
+fn fixed_point_prelude_is_panic_free_and_semantics_are_total() {
+    let rs = kernel_codegen("fixed_total", FIXED_FOLD_SRC);
+    let prelude = &rs[rs.find("// ---- fixed-point support").expect("prelude")..];
+    for banned in ["panic!", ".expect(", "assert!", "debug_assertions", ".unwrap()", "f64", "f32"] {
+        assert!(!prelude.contains(banned), "kernel prelude must not contain `{banned}`");
+    }
+    let rs = rs.replace("extern crate kernel;", "");
+    let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("kernel_codegen").join("fixed_total");
+    let lib = tmp.join("lib_check.rs");
+    fs::write(&lib, &rs).unwrap();
+    let out = Command::new("rustc").args(["--edition", "2021", "--crate-type", "lib", "--emit", "metadata", "-o"])
+        .arg(tmp.join("lib_check.rmeta")).arg(&lib).output().expect("rustc not found");
+    assert!(out.status.success(), "no_std build failed:\n{}\n{rs}", String::from_utf8_lossy(&out.stderr));
+    // Run in a *debug* std build: nothing may panic, whatever the overflow checks.
+    let main_rs = format!("{}\nfn main() {{ println!(\"{{}} {{}} {{}} {{}} {{}} {{}} {{}} {{}} {{}}\", f_fold(), f_wrap(), f_div0(), f_rem0(), f_sqrt_neg(), f_ln0(), f_cast_hi(70000), f_cast_lo(70000), f_wide()); }}\n",
+        rs.replace("#![no_std]", ""));
+    let main_file = tmp.join("run_check.rs");
+    fs::write(&main_file, main_rs).unwrap();
+    let exe = tmp.join("run_check");
+    let out = Command::new("rustc").args(["--edition", "2021", "-C", "debug-assertions=on", "-C", "overflow-checks=on", "-o"])
+        .arg(&exe).arg(&main_file).output().unwrap();
+    assert!(out.status.success(), "std build failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new(&exe).output().unwrap();
+    assert!(run.status.success(), "generated code panicked:\n{}", String::from_utf8_lossy(&run.stderr));
+    // twice(3)=6.0 -> 393216 ; max+1.0 wraps ; x/0 = 0 ; x%0 = 0 ; sqrt(-1)=0 ; ln(0)=MIN ;
+    // 70000 / -70000 as fixed16_16 saturate ; fixed64_64: 3*3/3 = 3, raw 3<<64 truncates to 0 in int64 -> 3+0
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "393216 -2147418113 0 0 0 -2147483648 2147483647 -2147483648 3");
+}
+
+#[test]
+fn fixed_point_128_bit_math_members_are_a_transpile_error() {
+    for m in ["sqrt", "sin", "cos", "tan", "exp", "ln"] {
+        let src = format!("def int g(int n):\n    let a = 3 as fixed64_64\n    let b = a.{m}()\n    return 1\n");
+        let (ok, err) = kernel_build_result(&format!("fixed_wide_{m}"), &src);
+        assert!(!ok, "128-bit `{m}` must be rejected on --linux");
+        assert!(err.contains("128-bit"), "`{m}`: unexpected diagnostic:\n{err}");
+    }
+}

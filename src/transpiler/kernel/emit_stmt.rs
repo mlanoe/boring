@@ -72,6 +72,11 @@ impl KernelTranspiler {
                     }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+                let fixed_val = match (&s.ty, &s.value) {
+                    (Some(ty), Some(v)) => self.emit_fixed_let_value(ty, v),
+                    _ => None,
+                };
+                self.track_fixed(&s.name, s.ty.as_ref(), s.value.as_ref());
                 match &s.value {
                     None => {
                         if let Some(ty) = &s.ty {
@@ -81,7 +86,7 @@ impl KernelTranspiler {
                         }
                     }
                     Some(val) => {
-                        let val_s = self.emit_expr(val);
+                        let val_s = fixed_val.unwrap_or_else(|| self.emit_expr(val));
                         if let Some(ty) = &s.ty {
                             let ty_s = self.emit_type(ty);
                             self.line(&format!("{} {}: {} = {};", kw, s.name, ty_s, val_s));
@@ -96,7 +101,7 @@ impl KernelTranspiler {
                 match &r.value {
                     None    => self.line("return;"),
                     Some(v) => {
-                        let s = self.emit_expr(v);
+                        let s = self.emit_return_value(v);
                         self.line(&format!("return {};", s));
                     }
                 }
@@ -145,7 +150,7 @@ impl KernelTranspiler {
             Stmt::Expr(e) => {
                 if is_last {
                     // Last expression in a non-throws function: no semicolon
-                    let s = self.emit_expr(e);
+                    let s = self.emit_return_value(e);
                     self.line(&s);
                 } else {
                     let s = self.emit_expr(e);

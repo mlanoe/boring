@@ -58,6 +58,7 @@ The Linux kernel imposes constraints that make the standard Rust backend unusabl
 | `T'shared` | `Arc<T>` / `Rc<T>` | `Arc<T>` (`kernel::prelude::Arc`) | `Rc` unavailable in `no_std` |
 | `T'actor` | `Arc<Mutex<T>>` / `Rc<RefCell<T>>` | `Arc<kernel::sync::Mutex<T>>` | |
 | `T'guard` | `Arc<RwLock<T>>` | `Arc<kernel::sync::RwLock<T>>` | |
+| `T'actor'task` / `T'guard'task` | tokio `Mutex`/`RwLock` | same as `'actor` / `'guard` | kernel locks are sleeping locks and `task def` is a blocking work item, so no async-aware variant exists |
 | `T'weak` | `Weak<T>` | `Weak<T>` | |
 | `T'inline` | `T` | `T` | |
 | `T&` / `var T&` | `&T` / `&mut T` | `&T` / `&mut T` | |
@@ -74,7 +75,7 @@ The Linux kernel imposes constraints that make the standard Rust backend unusabl
 
 All errors collapse to `kernel::error::Error` (errno-based `i32`).
 
-`throws` without a type produces `Result<T, kernel::error::Error>`. Typed `catch` branches are a known limitation — see [Known limitations](#known-limitations).
+`throws` without a type produces `Result<T, kernel::error::Error>`. `catch` clauses are rejected on this target — see [Known limitations](#known-limitations).
 
 ---
 
@@ -299,6 +300,18 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 
 ---
 
+## Fixed-point types
+
+`fixedN_M` / `ufixedN_M` (see [fixed-point-types.md](fixed-point-types.md)) are the FPU-free way to do fractional math on this target. The generated module carries integer-only newtypes (`Fixed16_16(pub i32)`...) and the same integer math core as the std backend; no `f32`/`f64` item is emitted. Supported: same-format `+ - * / %` and comparisons, `.raw`, `T.fromRaw(n)`, `T.epsilon/min/max`, `floor/ceil/round/trunc/fract/abs/signum/min/max/clamp`, `wrapping*/saturating*/checked*` (`checkedAdd(y) else d`), `mulRound/divRound`, `sqrt/sin/cos/tan/exp/ln`, `int as fixedN_M`, `fixed as int`.
+
+- `.raw` has the storage type (`int32` for `fixed16_16`), so a function returning it is `int32`, not `int`.
+- Folded at transpile time: an int literal next to a fixed operand (`x + 2`), `let fixed16_16 y = 3`, and `1.5 as fixed16_16` (a bare decimal literal is the only float-looking source the validator accepts, since no float exists at runtime).
+- Rejected: `fixed as float`, `float as fixed`, `x * 1.5` (write `x * (1.5 as fixed16_16)`), `.toFloat()`.
+- **No panic, ever.** The kernel prelude drops every `panic!`/`expect`/`assert!`/`cfg!(debug_assertions)` of the std one (a kernel module must not `BUG()`): `+ - * /` and unary `-` **wrap** on overflow, `x / 0` and `x % 0` give `0`, and a math function outside its domain saturates (`sqrt` of a negative gives `0`, `ln` of a non-positive gives `MIN`, overflow and `tan` at a pole give `MAX`). Use `checked*` / `saturating*` when the input is untrusted. `int as fixedN_M` out of range saturates too (`MIN` for a negative source, `MAX` otherwise) instead of panicking.
+- **Inference** is by name, not by a type checker. Parameters, `let`s (declared type or inferred from the initializer), struct fields, function return types and method return types are tracked; bindings are scoped per function (plus top-level `let`s). A field, function or method name declared with two different formats (overloads, two structs sharing a field name) is dropped and falls back to "unknown": annotate the `let` or cast.
+- **Literal folding** (an int literal becomes the fixed value at transpile time) applies to operators, member arguments, `let` with a declared type, `return` and the tail expression of a function returning a fixed type, assignments to a fixed binding, arguments of calls to user functions/methods/struct constructors with a fixed parameter or field, and casts. It does not apply to task/stream returns, nor to arguments of calls through a closure or an unresolved callee: write `3 as fixed16_16`.
+- 128-bit formats (`fixed64_64`...) work for `+ - * / %`, comparisons, `.raw`, rounding members and casts; `sqrt/sin/cos/tan/exp/ln` on them are a transpile error (the integer math core is limited to 120-bit products; the std backend panics at run time there).
+
 ## Forbidden constructs
 
 **Errors** — rejected before emission:
@@ -322,9 +335,8 @@ fn read_lines(path: CString) -> KernelReceiver<CString, 32> {
 
 ## Known limitations
 
-- **`float` detection is incomplete** — the validator rejects float literals and a fixed list of float math builtins, but a `float`-typed parameter or binding with no literal passes validation and is emitted as `f64` with a comment marker. Treat `float` as unsupported regardless.
-- **Typed `catch` branches** — `throws MyError` and `catch MyError` are not implemented. The `type X as kernel.error.Error(ERRNO)` errno-binding syntax is not recognized by the parser. All errors collapse to `kernel::error::Error`; `catch` clauses are silently dropped in generated code.
-- **`'actor'task` / `'guard'task`** — these qualifiers have no match arm in the kernel emitter and fall through to `&T`. Use plain `'actor` / `'guard` in kernel context.
+- **Float detection is name/shape based, not type-based** — the validator has no type checker, so it rejects every place a float can *originate*: float literals, `float`/`float16`/`float32`/`float64` types (parameters, fields, returns, bindings, casts, generics), the math builtins, the conversion/constant builtins (`float(n)`, `float32(n)`, `bitsToFloat`, `floatToBits`, `isNaN`, `isInfinite`, `PI`, `E`, `INF`, `NAN`) and the conversion methods (`.parseFloat()`, `.toFloat()`, `.isNaN()`, ...). A float can't reach a binding without passing one of those, so inferred bindings are covered. Residual gaps: `sqrt`/`sin`/... *as methods* (`x.sqrt()`) are not rejected by name because the integer-backed fixed-point types share those method names — but `x` can only be a float if it came from a rejected origin; and a user binding called `PI`/`E`/`INF`/`NAN` shadows the constant check by name. The generated-code `/* float forbidden */` markers remain as a backstop.
+- **`catch` is rejected** — the kernel has one error type (`kernel::error::Error`, propagated with `?`); there are no `BoringError` variants to dispatch on, so `catch`/`catch Type` now fails with a diagnostic (it used to be silently dropped, so the handler never ran). Use `try expr else default` / `try: ... else: ...`, or let the error propagate. `throws MyError` and the `type X as kernel.error.Error(ERRNO)` errno-binding syntax are still not implemented.
 - **`assert_eq!`** — no kernel-specific override; plain `assert_eq!` is emitted without mapping to `WARN_ON` or `kernel::build_assert!`.
 
 ---
