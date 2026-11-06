@@ -5209,6 +5209,149 @@ impl Transpiler {
         Some(format!("{}::new({})", name, reordered.join(", ")))
     }
 
+    /// Emits one constructor-argument value for field `label` of struct `name`, applying the
+    /// field's qualifier wrapping (`'actor`/`'guard`/`'task`/`'observed`/recursive `Box`).
+    /// Shared by the labeled and positional struct-literal paths so they cannot diverge.
+    fn emit_ctor_field_value(&self, name: &str, label: &str, field_ty: Option<&Type>, eff_value: &Expr) -> String {
+        let mutex_key = format!("{}::{}", name, label);
+                    if let Some((inner_struct_name, base)) = self.observed_fields.get(&mutex_key).cloned() {
+                        // `'observed`-qualified field, constructed via a labeled-arg struct
+                        // literal call (`Container(model = ...)`, docs/book.md's
+                        // "'observed" section, "Construction"). Two shapes:
+                        //  - the value is ALREADY an `'observed` local/param of the exact
+                        //    same (struct, base) — the `@ObservedObject`-shaped case,
+                        //    `docs/design-notes/boring-ui-draft.md` — passed in from
+                        //    outside rather than constructed here: `.clone()` the whole
+                        //    `BoringObserved<V>` wrapper (cheap identity-sharing clone for
+                        //    `'actor'observed`/`'guard'observed`'s Arc-based `value` AND
+                        //    subscriber list; a real, independent deep clone for
+                        //    `'inline'observed`/`'owned'observed`, matching Boring's normal
+                        //    by-value struct-field semantics elsewhere in this same
+                        //    function — the caller's own binding is untouched either way,
+                        //    consistent with "the caller keeps ownership" for every other
+                        //    struct-shaped argument).
+                        //  - otherwise a fresh base-typed constructor expression
+                        //    (`Container(model = FormModel())`) — wrap it from scratch,
+                        //    initializing both `value` and an empty subscriber list.
+                        let already_observed = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.observed_locals.get(v.as_str()) == Some(&(inner_struct_name.clone(), base.clone())));
+                        if already_observed {
+                            format!("{}.clone()", self.emit_expr(eff_value))
+                        } else {
+                            let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), eff_value);
+                            let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
+                            format!("BoringObserved::new({})", wrapped)
+                        }
+                    } else if self.struct_mutex_fields.contains(&mutex_key) {
+                        // If the value is already an actor/rc variable, just clone the Rc pointer.
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_fields);
+                        if already_rc {
+                            // A view state's own cell (`NameEditor(name = st.name)`) is passed as the cell.
+                            let raw = match self.mark_state_cell(eff_value) {
+                                Some(cell) => self.emit_expr(&cell),
+                                None => self.emit_expr(eff_value),
+                            };
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::Actor) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
+                        } else {
+                        let inner_ty = field_ty.and_then(Self::mutex_inner);
+                        let raw = self.emit_let_value(inner_ty, eff_value);
+                        match self.config.threading {
+                            crate::transpiler::ThreadingMode::Multi =>
+                                self.emit_actor_new(&raw),
+                            crate::transpiler::ThreadingMode::Single =>
+                                format!("Rc::new(RefCell::new({}))", raw),
+                        }
+                        }
+                    } else if self.struct_mutex_task_fields.contains(&mutex_key) {
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_task_fields);
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::ActorTask) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
+                        } else {
+                            let inner_ty = field_ty.and_then(Self::mutex_inner);
+                            let raw = self.emit_let_value(inner_ty, eff_value);
+                            self.emit_actor_task_new(&raw)
+                        }
+                    } else if self.struct_rwlock_fields.contains(&mutex_key) {
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_rwlock_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_fields);
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::Guard) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
+                        } else {
+                            let inner_ty = field_ty.and_then(Self::rwlock_inner);
+                            let raw = self.emit_let_value(inner_ty, eff_value);
+                            self.emit_guard_new(&raw)
+                        }
+                    } else if self.struct_rwlock_task_fields.contains(&mutex_key) {
+                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
+                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_task_fields);
+                        if already_rc {
+                            let raw = self.emit_expr(eff_value);
+                            match self.config.threading {
+                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
+                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
+                            }
+                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::GuardTask) {
+                            // A call whose declared return type is already this field's
+                            // qualified type yields a fresh owned handle — pass it through
+                            // as-is rather than wrapping it a second time.
+                            self.emit_expr(eff_value)
+                        } else {
+                            let inner_ty = field_ty.and_then(Self::rwlock_inner);
+                            let raw = self.emit_let_value(inner_ty, eff_value);
+                            self.emit_guard_task_new(&raw)
+                        }
+                    } else if self.recursive_fields.contains(&mutex_key) {
+                        // Recursive struct field — wrap in Box::new() at construction site.
+                        let raw = self.emit_let_value(field_ty, eff_value);
+                        if matches!(field_ty, Some(Type::Optional(_))) {
+                            format!("{}.map(Box::new)", raw)
+                        } else {
+                            format!("Box::new({})", raw)
+                        }
+                    } else if matches!(&eff_value.kind, ExprKind::Str(_))
+                        && field_ty.and_then(|t| if let Type::Named(n) | Type::TypeParam(n) = t.without_mut() { Some(n) } else { None })
+                            .is_some_and(|n| self.struct_type_param_names.get(name).is_some_and(|ps| ps.contains(n)))
+                    {
+                        // A string literal for a generic `T` field (`Slot(value = "a")`) is a
+                        // `string` — owned `Rc<str>`/`Arc<str>`, never a `&'static str`.
+                        self.emit_let_value(Some(&Type::Str), eff_value)
+                    } else {
+                        self.emit_struct_field_value(field_ty, eff_value)
+                    }
+    }
+
     pub(crate) fn emit_constructor_inner(&self, name: &str, args: &[Arg]) -> String {
         // Result constructors: `Ok(v)` / `Err(e)` are Rust built-ins, not struct types.
         if name == "Ok" || name == "Err" {
@@ -5407,145 +5550,7 @@ impl Transpiler {
                     let field_ty = self.struct_fields.get(name)
                         .and_then(|fs| fs.iter().find(|(n, _)| n == label))
                         .map(|(_, ty)| ty);
-                    let mutex_key = format!("{}::{}", name, label);
-                    // Same wrapping regardless of whether the qualifier is explicit (`T'actor`)
-                    // or inferred from usage — both populate these sets identically.
-                    let val = if let Some((inner_struct_name, base)) = self.observed_fields.get(&mutex_key).cloned() {
-                        // `'observed`-qualified field, constructed via a labeled-arg struct
-                        // literal call (`Container(model = ...)`, docs/book.md's
-                        // "'observed" section, "Construction"). Two shapes:
-                        //  - the value is ALREADY an `'observed` local/param of the exact
-                        //    same (struct, base) — the `@ObservedObject`-shaped case,
-                        //    `docs/design-notes/boring-ui-draft.md` — passed in from
-                        //    outside rather than constructed here: `.clone()` the whole
-                        //    `BoringObserved<V>` wrapper (cheap identity-sharing clone for
-                        //    `'actor'observed`/`'guard'observed`'s Arc-based `value` AND
-                        //    subscriber list; a real, independent deep clone for
-                        //    `'inline'observed`/`'owned'observed`, matching Boring's normal
-                        //    by-value struct-field semantics elsewhere in this same
-                        //    function — the caller's own binding is untouched either way,
-                        //    consistent with "the caller keeps ownership" for every other
-                        //    struct-shaped argument).
-                        //  - otherwise a fresh base-typed constructor expression
-                        //    (`Container(model = FormModel())`) — wrap it from scratch,
-                        //    initializing both `value` and an empty subscriber list.
-                        let already_observed = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.observed_locals.get(v.as_str()) == Some(&(inner_struct_name.clone(), base.clone())));
-                        if already_observed {
-                            format!("{}.clone()", self.emit_expr(eff_value))
-                        } else {
-                            let raw = self.emit_let_value(Some(&Type::Named(inner_struct_name.clone())), eff_value);
-                            let wrapped = self.wrap_observed_base(&inner_struct_name, &base, &raw);
-                            format!("BoringObserved::new({})", wrapped)
-                        }
-                    } else if self.struct_mutex_fields.contains(&mutex_key) {
-                        // If the value is already an actor/rc variable, just clone the Rc pointer.
-                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
-                            || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_fields);
-                        if already_rc {
-                            // A view state's own cell (`NameEditor(name = st.name)`) is passed as the cell.
-                            let raw = match self.mark_state_cell(eff_value) {
-                                Some(cell) => self.emit_expr(&cell),
-                                None => self.emit_expr(eff_value),
-                            };
-                            match self.config.threading {
-                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
-                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
-                            }
-                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::Actor) {
-                            // A call whose declared return type is already this field's
-                            // qualified type yields a fresh owned handle — pass it through
-                            // as-is rather than wrapping it a second time.
-                            self.emit_expr(eff_value)
-                        } else {
-                        let inner_ty = field_ty.and_then(Self::mutex_inner);
-                        let raw = self.emit_let_value(inner_ty, eff_value);
-                        match self.config.threading {
-                            crate::transpiler::ThreadingMode::Multi =>
-                                self.emit_actor_new(&raw),
-                            crate::transpiler::ThreadingMode::Single =>
-                                format!("Rc::new(RefCell::new({}))", raw),
-                        }
-                        }
-                    } else if self.struct_mutex_task_fields.contains(&mutex_key) {
-                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
-                            || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_task_fields);
-                        if already_rc {
-                            let raw = self.emit_expr(eff_value);
-                            match self.config.threading {
-                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
-                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
-                            }
-                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::ActorTask) {
-                            // A call whose declared return type is already this field's
-                            // qualified type yields a fresh owned handle — pass it through
-                            // as-is rather than wrapping it a second time.
-                            self.emit_expr(eff_value)
-                        } else {
-                            let inner_ty = field_ty.and_then(Self::mutex_inner);
-                            let raw = self.emit_let_value(inner_ty, eff_value);
-                            self.emit_actor_task_new(&raw)
-                        }
-                    } else if self.struct_rwlock_fields.contains(&mutex_key) {
-                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_rwlock_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
-                            || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_fields);
-                        if already_rc {
-                            let raw = self.emit_expr(eff_value);
-                            match self.config.threading {
-                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
-                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
-                            }
-                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::Guard) {
-                            // A call whose declared return type is already this field's
-                            // qualified type yields a fresh owned handle — pass it through
-                            // as-is rather than wrapping it a second time.
-                            self.emit_expr(eff_value)
-                        } else {
-                            let inner_ty = field_ty.and_then(Self::rwlock_inner);
-                            let raw = self.emit_let_value(inner_ty, eff_value);
-                            self.emit_guard_new(&raw)
-                        }
-                    } else if self.struct_rwlock_task_fields.contains(&mutex_key) {
-                        let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
-                            || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_task_fields);
-                        if already_rc {
-                            let raw = self.emit_expr(eff_value);
-                            match self.config.threading {
-                                crate::transpiler::ThreadingMode::Multi => format!("Arc::clone(&{})", raw),
-                                crate::transpiler::ThreadingMode::Single => format!("Rc::clone(&{})", raw),
-                            }
-                        } else if self.call_returns_qualified(eff_value, crate::ast::OwnerQual::GuardTask) {
-                            // A call whose declared return type is already this field's
-                            // qualified type yields a fresh owned handle — pass it through
-                            // as-is rather than wrapping it a second time.
-                            self.emit_expr(eff_value)
-                        } else {
-                            let inner_ty = field_ty.and_then(Self::rwlock_inner);
-                            let raw = self.emit_let_value(inner_ty, eff_value);
-                            self.emit_guard_task_new(&raw)
-                        }
-                    } else if self.recursive_fields.contains(&mutex_key) {
-                        // Recursive struct field — wrap in Box::new() at construction site.
-                        let raw = self.emit_let_value(field_ty, eff_value);
-                        if matches!(field_ty, Some(Type::Optional(_))) {
-                            format!("{}.map(Box::new)", raw)
-                        } else {
-                            format!("Box::new({})", raw)
-                        }
-                    } else if matches!(&eff_value.kind, ExprKind::Str(_))
-                        && field_ty.and_then(|t| if let Type::Named(n) | Type::TypeParam(n) = t.without_mut() { Some(n) } else { None })
-                            .is_some_and(|n| self.struct_type_param_names.get(name).is_some_and(|ps| ps.contains(n)))
-                    {
-                        // A string literal for a generic `T` field (`Slot(value = "a")`) is a
-                        // `string` — owned `Rc<str>`/`Arc<str>`, never a `&'static str`.
-                        self.emit_let_value(Some(&Type::Str), eff_value)
-                    } else {
-                        self.emit_struct_field_value(field_ty, eff_value)
-                    };
+                    let val = self.emit_ctor_field_value(name, label, field_ty, eff_value);
                     format!("{}: {}", escape_rust_keyword(label), val)
                 })
                 .collect();
@@ -5789,7 +5794,6 @@ impl Transpiler {
                                     }
                                 } else { &a.value }
                             } else { &a.value };
-                            let rec_key = format!("{}::{}", name, fname);
                             // 'actor/'guard fields: `emit_let_value`'s dispatch for these two
                             // qualifiers assumes the by-reference function-parameter calling
                             // convention (`&Arc<Mutex<T>>`, matching `emit_param`) — appropriate
@@ -5797,22 +5801,7 @@ impl Transpiler {
                             // an owned `Arc<Mutex<T>>`/`Arc<RwLock<T>>` value, not a borrow.
                             // Route through `emit_let_value_arc_qualified` instead, same fix as
                             // the `struct_has_init_body` ::new(args) branch above.
-                            let val = if self.recursive_fields.contains(&rec_key) {
-                                let raw = if Self::is_arc_qualified(fty) {
-                                    self.emit_let_value_arc_qualified(fty, effective_value)
-                                } else {
-                                    self.emit_struct_field_value(Some(fty), effective_value)
-                                };
-                                if matches!(fty, Type::Optional(_)) {
-                                    format!("{}.map(Box::new)", raw)
-                                } else {
-                                    format!("Box::new({})", raw)
-                                }
-                            } else if Self::is_arc_qualified(fty) {
-                                self.emit_let_value_arc_qualified(fty, effective_value)
-                            } else {
-                                self.emit_struct_field_value(Some(fty), effective_value)
-                            };
+                            let val = self.emit_ctor_field_value(name, fname, Some(fty), effective_value);
                             format!("{}: {}", escape_rust_keyword(fname), val)
                         })
                         .collect();

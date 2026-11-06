@@ -1,0 +1,43 @@
+# Positional constructor args for lock-qualified struct fields must be wrapped exactly like the
+# labeled form (`Service(stats = Counter())`): `'actor` -> Mutex, `'guard` -> RwLock, and the
+# (`'task` fields are covered by the emission test in tests/transpile_task_ctor_fields.rs).
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+    req int get():
+        n
+
+struct Service:
+    mut Counter'actor stats
+
+struct ServiceNoMut:
+    Counter'actor stats
+
+struct GuardSvc:
+    mut Counter'guard stats
+
+    def bump():
+        stats.inc()
+
+    req int read():
+        stats.get()
+
+mut s1 = Service(Counter())
+s1.stats.inc()
+print s1.stats.get()
+mut s2 = Service(Counter(5))
+s2.stats.inc()
+print s2.stats.get()
+mut s3 = Service(stats = Counter(7))
+s3.stats.inc()
+print s3.stats.get()
+let s4 = ServiceNoMut(Counter(2))
+print s4.stats.get()
+mut s6 = GuardSvc(Counter(4))
+s6.bump()
+print s6.read()
+let s8 = GuardSvc(stats = Counter(20))
+print s8.read()
