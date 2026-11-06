@@ -183,19 +183,19 @@ macro_rules! transpile_test {
             fn managed_single() { run_transpile_case_with_config(stringify!($name), "managed", "single"); }
         }
     };
-    // Variant for tests that should be ignored in single-thread mode (e.g. LocalSet issues).
+    // Variant for tests that should be ignored in single-thread mode (@singleton + --threading single is a permanent, intentional compile error).
     ($name:ident, ignore_single) => {
         mod $name {
             use super::*;
             #[test]
             fn strict_multi()   { run_transpile_case_with_config(stringify!($name), "strict",  "multi"); }
             #[test]
-            #[ignore = "single-thread LocalSet not yet supported"]
+            #[ignore = "permanent: @singleton needs a Sync static, but --threading single makes 'actor Rc<RefCell<T>> (rejected at compile time by design; see dependency_injection.rs singleton_rejects_under_threading_single)"]
             fn strict_single()  { run_transpile_case_with_config(stringify!($name), "strict",  "single"); }
             #[test]
             fn managed_multi()  { run_transpile_case_with_config(stringify!($name), "managed", "multi"); }
             #[test]
-            #[ignore = "single-thread LocalSet not yet supported"]
+            #[ignore = "permanent: @singleton needs a Sync static, but --threading single makes 'actor Rc<RefCell<T>> (rejected at compile time by design; see dependency_injection.rs singleton_rejects_under_threading_single)"]
             fn managed_single() { run_transpile_case_with_config(stringify!($name), "managed", "single"); }
         }
     };
@@ -209,10 +209,10 @@ macro_rules! transpile_test {
             #[test]
             fn strict_single()  { run_transpile_case_with_config(stringify!($name), "strict",  "single"); }
             #[test]
-            #[ignore = "managed mode T' call sites not yet fully supported"]
+            #[ignore = "managed mode: method call on a top-level 'owned local emits `.get()/.inc()/.peek()` on Arc<Mutex<T>>/RefCell<T> (E0599), plus move/borrow and orphan-rule errors for operator/Hash impls on the wrapper; verified still failing 2026-11-06"]
             fn managed_multi()  { run_transpile_case_with_config(stringify!($name), "managed", "multi"); }
             #[test]
-            #[ignore = "managed mode T' call sites not yet fully supported"]
+            #[ignore = "managed mode: method call on a top-level 'owned local emits `.get()/.inc()/.peek()` on Arc<Mutex<T>>/RefCell<T> (E0599), plus move/borrow and orphan-rule errors for operator/Hash impls on the wrapper; verified still failing 2026-11-06"]
             fn managed_single() { run_transpile_case_with_config(stringify!($name), "managed", "single"); }
         }
     };
@@ -226,10 +226,10 @@ macro_rules! transpile_test {
             #[ignore = "single-thread mode has known issues with Rc/Arc mixing in weak refs"]
             fn strict_single()  { run_transpile_case_with_config(stringify!($name), "strict",  "single"); }
             #[test]
-            #[ignore = "managed mode T' call sites not yet fully supported"]
+            #[ignore = "managed mode: method call on a top-level 'owned local emits `.get()/.inc()/.peek()` on Arc<Mutex<T>>/RefCell<T> (E0599), plus move/borrow and orphan-rule errors for operator/Hash impls on the wrapper; verified still failing 2026-11-06"]
             fn managed_multi()  { run_transpile_case_with_config(stringify!($name), "managed", "multi"); }
             #[test]
-            #[ignore = "managed mode T' call sites not yet fully supported"]
+            #[ignore = "managed mode: method call on a top-level 'owned local emits `.get()/.inc()/.peek()` on Arc<Mutex<T>>/RefCell<T> (E0599), plus move/borrow and orphan-rule errors for operator/Hash impls on the wrapper; verified still failing 2026-11-06"]
             fn managed_single() { run_transpile_case_with_config(stringify!($name), "managed", "single"); }
         }
     };
