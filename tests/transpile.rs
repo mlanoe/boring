@@ -595,6 +595,10 @@ transpile_test!(misc_scenarios_5);
 // `throws Type:` clause on an enum type method, mirroring `type_def_typed_throws` (item 4).
 transpile_test!(enum_type_def);
 transpile_test!(enum_type_def_throws);
+// Type-level reflection on enums: `introspect().methods` lists `type def`/`type req`
+// (shared with run/itest) and `Method.call` invokes one (build only, needs `FieldValue`).
+transpile_test!(enum_type_methods_introspect);
+transpile_test!(enum_type_methods_call);
 transpile_test!(ref_identity);
 transpile_test!(int_float_literal_compare);
 transpile_test!(float32_math_builtins);

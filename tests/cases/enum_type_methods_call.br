@@ -1,0 +1,16 @@
+# `Method.call` on an enum's type-level method (build only: `FieldValue` is a
+# generated-code type; `boring run` takes raw values instead).
+enum Shape as Introspect:
+    Circle(float radius)
+    Unit
+
+    pub type req int sides(int n):
+        n + 1
+
+def main() throws:
+    let u = Shape.Circle(1.0)
+    let info = u.introspect()
+    for m in info.methods:
+        if !m.isInstance:
+            let r = m.call([FieldValue.Int(3)])
+            print "{m.name}(3) = {r:?}"

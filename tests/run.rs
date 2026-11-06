@@ -515,6 +515,7 @@ interp_test!(enum_type_def);
 // the same as a struct's already is (item 4). `boring run` side of this
 // pairs with tests/transpile.rs's registration below.
 interp_test!(enum_type_def_throws);
+interp_test!(enum_type_methods_introspect);
 
 // Most dangerous of the four: a
 // silent wrong-value bug, not a compile error: a two-branch

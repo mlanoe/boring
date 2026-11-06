@@ -976,10 +976,9 @@ impl Interpreter {
     /// mechanism in Boring at all (`VariantField` carries only a name/type, no mutability
     /// flag), so `isMutable`/`isRebindable` are always `false` for an enum field's `Field`
     /// entry — there is no Boring-source syntax that would grant either permission. Type-
-    /// level (`type let`/`type def`/`type req`) members are struct-only here too — there is
-    /// no `EnumDecl::type_vars` at all, and (see `EnumDecl::type_methods`'s own doc
-    /// comment) the language's `type_methods` support for enums is itself still a
-    /// pre-existing, Introspect-unrelated gap. `type var` (mutable type-level fields) and
+    /// level members: an enum gets `type def`/`type req` methods only — there is
+    /// no `EnumDecl::type_vars` at all (enums have no `type let`/`type var`, so an enum
+    /// gets type-level *methods* only, never type-level fields). `type var` (mutable type-level fields) and
     /// `TypeMethodKind::Set` are excluded too, matching the transpiler's own deferred scope.
     fn try_introspect_method(&self, obj: &Value) -> Option<Eval> {
         use crate::ast::TypeMethodKind;
@@ -1068,7 +1067,7 @@ impl Interpreter {
                 ])))
             }
             Value::EnumVariant { type_name, variant, .. } => {
-                let Some(Value::EnumNamespace { protocols, methods, .. }) = self.global.borrow().get(type_name) else { return None; };
+                let Some(Value::EnumNamespace { protocols, methods, type_methods, .. }) = self.global.borrow().get(type_name) else { return None; };
                 if !protocols.iter().any(|p| p == "Introspect") { return None; }
                 // Only NAMED variant fields are exposed — same rule as
                 // `emit_introspect_enum_impl` (no string to look an unnamed positional
@@ -1084,9 +1083,16 @@ impl Interpreter {
                         .map(|fname| field_obj(fname, true, true, false, false, type_name, "instance"))
                         .collect())
                     .unwrap_or_default();
-                let method_objs: Vec<Value> = methods.iter().filter(|m| !m.is_native)
+                let mut method_objs: Vec<Value> = methods.iter().filter(|m| !m.is_native)
                     .map(|m| method_obj(&m.name, m.is_pub, true, m.mutating, m.task, m.stream, m.throws, type_name, "instance"))
                     .collect();
+                // Type-level `type def`/`type req` methods (no `Set`) — same as a struct.
+                // Enums have no `type let`/`type var`, so there are no type-level fields.
+                for tm in type_methods.iter() {
+                    if matches!(tm.kind, TypeMethodKind::Set) { continue; }
+                    method_objs.push(method_obj(&tm.name, tm.is_pub, false,
+                        matches!(tm.kind, TypeMethodKind::Def), tm.task, false, tm.throws, type_name, "type"));
+                }
                 Some(Ok(make_object("IntrospectInfo".to_string(), vec![
                     ("typeName".to_string(), Value::Str(type_name.clone())),
                     ("variantName".to_string(), Value::Str(variant.clone())),
@@ -1250,10 +1256,13 @@ impl Interpreter {
 
     fn introspect_type_method_call(&mut self, owner_type: &str, method_name: &str, args: &[Value], line: usize) -> Eval {
         let call_args = Self::introspect_unpack_call_args(args.first());
-        let Some(Value::Struct { decl, captured }) = self.global.borrow().get(owner_type) else {
-            return Err(err(format!("unknown type '{}'", owner_type), line));
+        let found = self.global.borrow().get(owner_type);
+        let (type_methods, captured) = match found {
+            Some(Value::Struct { decl, captured }) => (decl.type_methods.clone(), captured),
+            Some(Value::EnumNamespace { type_methods, captured, .. }) => ((*type_methods).clone(), captured),
+            _ => return Err(err(format!("unknown type '{}'", owner_type), line)),
         };
-        let Some(tm) = decl.type_methods.iter().find(|m| m.name == method_name).cloned() else {
+        let Some(tm) = type_methods.iter().find(|m| m.name == method_name).cloned() else {
             return Err(err(format!("no type method '{}' on '{}'", method_name, owner_type), line));
         };
         if tm.task {

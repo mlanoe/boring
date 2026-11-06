@@ -1,0 +1,20 @@
+# Type-level reflection on an enum: its `type def`/`type req` methods show up in
+# `introspect().methods` with isInstance == false (same listing under run and build).
+enum Shape as Introspect:
+    Circle(float radius)
+    Unit
+
+    pub type def Shape unit():
+        Shape.Unit
+
+    pub type req int sides(int n):
+        n + 1
+
+    pub req int corners():
+        0
+
+def main() throws:
+    let u = Shape.Circle(1.0)
+    let info = u.introspect()
+    for m in info.methods:
+        print "{m.name} instance={m.isInstance} callable={m.isCallable}"

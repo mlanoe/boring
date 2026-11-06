@@ -2595,6 +2595,8 @@ Counter.max_val()        # 100
 | `Type.method()` | `Type::method()` |
 | `Type.CONST` | `Type::CONST` |
 
+`type def`/`type req`/`type set` also work inside an `enum` body (payload and generic enums included; `Shape.circle(2.0)` → `Shape::circle(2.0)`). `type let`/`type var` are **not** supported on enums — the parser rejects them.
+
 ### `as string:`
 
 Defines how a struct is converted to a string (implements `Display`):
@@ -3806,7 +3808,7 @@ def main() throws:
 
 Type-level methods use `call(args)` — no `request`/`modify` split, since there's no caller-privilege boundary to gate on instance mutability (there's no instance) the way `request`/`modify` gate on `Introspect instance` vs `mut Introspect instance`.
 
-> **Scope** — instance-level reflection (`introspect()`, `Field`, `Method`) covers **structs and enums**. Only the *type-level* part described here (`type_fields`, `type_methods`, `call`) is limited to **structs**, and within them to `type let` (read-only) fields, not `type var` (a mutable type-level field lowers to a module-level lock, and wiring `set` through that lock isn't implemented yet). Enums have no `type_vars` at all in Boring today, and the transpiler doesn't yet emit `type_methods` for enums regardless of `Introspect` — both are language gaps that predate `Introspect` and are not specific to it. Once enums support type-level methods, reflecting on them is expected to follow with little extra work; this is not a 1.0 requirement.
+> **Scope** — instance-level reflection (`introspect()`, `Field`, `Method`) covers **structs and enums**. The *type-level* part described here covers a struct's `type let` (read-only) fields and `type def`/`type req` methods (`call`), and an **enum's** `type def`/`type req` methods (`call`; the same `Method` entries appear in every variant's `introspect().methods`). Not covered: `type var` (a mutable type-level field lowers to a module-level lock, and wiring `set` through that lock isn't implemented yet), `type set`, and **generic** structs/enums (no single type-parameter-independent Rust item to point a plain `fn` at). Enums have no `type let`/`type var` at all (rejected by the parser), so an enum has no type-level *fields* to reflect. `boring run` accepts raw values in `call([...])`, whereas `boring build` needs `FieldValue` (see the example above).
 
 #### Dynamic dispatch
 

@@ -1807,10 +1807,8 @@ impl Transpiler {
 
     /// Builds type-level (`type let`/`type def`/`type req`) `Field`/`Method` reflection
     /// entries — the no-`instance` overloads (see `emit_introspect_prelude`'s
-    /// `FieldAccess`/`MethodAccess::Type` doc). STRUCT-ONLY (there is no
-    /// `EnumDecl::type_vars` at all, and enums' `type_methods` — emitted in the enum's
-    /// `impl` block — are not reflected here either; an out-of-scope gap, not something
-    /// this feature works around) and
+    /// `FieldAccess`/`MethodAccess::Type` doc). Also used for enums (which have no
+    /// `type let`/`type var`, so they pass an empty `type_vars` and only get methods) and
     /// NON-GENERIC-ONLY (a `type let`/`type def` inside `impl<T> Struct<T>` has no single
     /// T-independent Rust item to reference from a plain, non-generic `fn() -> ...`
     /// pointer — the call site gates this by only calling here when `s.type_params` is
@@ -2222,6 +2220,16 @@ impl Transpiler {
         }
         self.indent += 1;
         let (method_entries, method_fns) = self.build_introspect_methods(&e.name, &e.methods, &tp_impl, &tp_use);
+        let mut method_entries = method_entries;
+        let mut method_fns = method_fns;
+        // Type-level `type def`/`type req` methods — non-generic enums only (same reason as
+        // structs: no single T-independent Rust item to point a plain `fn` at). Enums have
+        // no `type let`/`type var`, so `build_introspect_type_members` yields no fields here.
+        if e.type_params.is_empty() {
+            let (_f, tm_entries, tm_fns) = self.build_introspect_type_members(&e.name, &[], &e.type_methods);
+            method_entries.extend(tm_entries);
+            method_fns.extend(tm_fns);
+        }
         if method_entries.is_empty() {
             self.line("let __methods: Vec<Method> = vec![];");
         } else {
