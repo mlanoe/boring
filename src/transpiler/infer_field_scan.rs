@@ -96,6 +96,16 @@ pub(super) fn rewrite_bare_fields(stmts: &mut [Stmt], fields: &HashSet<&str>, pa
     crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(stmts);
 }
 
+/// The struct a local of type `ty` holds (`Service`), or `[Service]` for an array of it.
+/// Arrays carry the brackets so `for s in arr` and `arr[i]` can be typed from them.
+fn type_tag(ty: &Type) -> Option<String> {
+    match ty.without_mut() {
+        Type::Array(inner) => named_of(inner).map(|n| format!("[{n}]")),
+        Type::Qualified(inner, _) => type_tag(inner),
+        other => named_of(other).map(str::to_string),
+    }
+}
+
 fn named_of(ty: &Type) -> Option<&str> {
     match ty.without_mut() {
         Type::Named(n) => Some(n.as_str()),
@@ -128,16 +138,26 @@ impl Transpiler {
         };
         if let Some(owner) = owner { locals.insert("self".into(), owner.to_string()); }
         for (n, t) in params {
-            bind(&mut locals, &mut ambiguous, n, named_of(t).map(str::to_string));
+            bind(&mut locals, &mut ambiguous, n, type_tag(t));
         }
         let no_alias = HashMap::new();
         let mut stmts = stmts.to_vec();
         let locals_cell = std::cell::RefCell::new((&mut locals, &mut ambiguous));
         let mut on_stmt = |st: &mut Stmt| {
+            if let Stmt::For(f) = st {
+                // `for s in services`: `s` is a `Service` when `services` is a `[Service]`.
+                if let [var] = f.vars.as_slice() {
+                    let mut g = locals_cell.borrow_mut();
+                    let elem = self.method_receiver_type(&f.iterable, &*g.0, &no_alias)
+                        .and_then(|t| t.strip_prefix('[').and_then(|t| t.strip_suffix(']')).map(str::to_string));
+                    let (loc, amb) = &mut *g;
+                    bind(loc, amb, var, elem);
+                }
+            }
             if let Stmt::Let(l) = st {
                 let mut g = locals_cell.borrow_mut();
                 let ty = match &l.ty {
-                    Some(t) => named_of(t).map(str::to_string),
+                    Some(t) => type_tag(t),
                     None => l.value.as_ref().and_then(|v| self.method_receiver_type(v, &*g.0, &no_alias)),
                 };
                 let (loc, amb) = &mut *g;
@@ -165,7 +185,62 @@ impl Transpiler {
         let field_set: HashSet<&str> = target_fields.keys().map(String::as_str).collect();
         let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
         rewrite_bare_fields(&mut stmts, &field_set, &names);
+        substitute_field_aliases(&mut stmts, &field_set);
         let locals = self.body_local_types(Some(struct_name), params, &stmts);
         self.walk_stmts_for_field_qualifiers(&stmts, struct_name, target_fields, &locals, alias_of, candidates);
     }
+}
+
+/// `mut c = svc.stats` (a `let` whose value is `self.field`, in a body already rewritten so the
+/// scanned struct is `self`) makes `c` another name of the field for the rest of the body:
+/// every later `c` is replaced by `self.field`, so a demand on `c` is a demand on the field.
+/// Only a name bound exactly once in the body is substituted (a rebound or shadowed `c` could
+/// hold something else).
+pub(super) fn substitute_field_aliases(stmts: &mut Vec<Stmt>, fields: &HashSet<&str>) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut candidates: HashMap<String, String> = HashMap::new();
+    {
+        let mut copy = stmts.clone();
+        let mut on_expr = |_: &mut Expr| {};
+        let mut on_stmt = |st: &mut Stmt| {
+            if let Stmt::Let(l) = st {
+                *counts.entry(l.name.clone()).or_default() += 1;
+                if let Some(Expr { kind: ExprKind::Field(obj, f), .. }) = &l.value {
+                    if matches!(&obj.kind, ExprKind::Var(v) if v == "self") && fields.contains(f.as_str()) {
+                        candidates.insert(l.name.clone(), f.clone());
+                    }
+                }
+            }
+        };
+        crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut copy);
+    }
+    candidates.retain(|n, _| counts.get(n) == Some(&1));
+    if candidates.is_empty() { return; }
+    // Other binders (loop variables, patterns, closure parameters) of the same name disqualify it.
+    let mut others: HashMap<String, usize> = HashMap::new();
+    {
+        let mut copy = stmts.clone();
+        let cell = std::cell::RefCell::new(&mut others);
+        let mut on_stmt = |st: &mut Stmt| match st {
+            Stmt::For(f) => { for v in &f.vars { *cell.borrow_mut().entry(v.clone()).or_default() += 1; } }
+            Stmt::LetDestructure(l) => { for b in &l.bindings { *cell.borrow_mut().entry(b.name.clone()).or_default() += 1; } }
+            _ => {}
+        };
+        let mut on_expr = |e: &mut Expr| {
+            if let ExprKind::Closure(ps, ..) = &e.kind {
+                for p in ps { *cell.borrow_mut().entry(p.name.clone()).or_default() += 1; }
+            }
+        };
+        crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut copy);
+    }
+    candidates.retain(|n, _| !others.contains_key(n));
+    let mut on_stmt = |_: &mut Stmt| {};
+    let mut on_expr = |e: &mut Expr| {
+        let ExprKind::Var(name) = &e.kind else { return };
+        let Some(f) = candidates.get(name) else { return };
+        let (line, col, len) = (e.line, e.col, e.len);
+        let recv = Expr { kind: ExprKind::Var("self".into()), line, col, len };
+        e.kind = ExprKind::Field(Box::new(recv), f.clone());
+    };
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(stmts);
 }

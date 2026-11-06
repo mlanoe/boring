@@ -859,6 +859,15 @@ impl Transpiler {
         if matches!(ty, Type::Qualified(_, OwnerQual::Shared)) {
             return Some(self.emit_let_value(Some(ty), e));
         }
+        // Returning a lock-handle field/element (`s.stats`) from a function declared to return
+        // that handle: share it, never move out of the borrowed struct.
+        if matches!(e.kind, ExprKind::Field(..) | ExprKind::Index(..)) {
+            let guard = Self::rwlock_inner(ty).is_some();
+            if guard || Self::mutex_inner(ty).is_some() {
+                let is_task = if guard { Self::is_rwlock_task_binding(false, ty) } else { Self::is_mutex_task_binding(false, ty) };
+                if let Some(h) = self.existing_lock_handle(e, is_task, guard) { return Some(h); }
+            }
+        }
         if !self.is_fresh_struct_ctor(e) {
             return None;
         }

@@ -2100,7 +2100,10 @@ impl Transpiler {
                     while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
                     receiver_type_name(cur)
                 };
-                let via_handle = !matches!(&obj.kind, ExprKind::Field(..)) || self.is_managed_owned_user(r.field_ty.without_mut());
+                // A lock field reached through anything but a plain local/`self` (`svcs[0].stats`,
+                // `make().stats`) has no dedicated dispatch: call through its guard here.
+                let via_handle = !matches!(&obj.kind, ExprKind::Field(..)) || self.is_managed_owned_user(r.field_ty.without_mut())
+                    || matches!(&obj.kind, ExprKind::Field(inner, _) if matches!(&inner.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..) | ExprKind::Call(..)));
                 if via_handle && held.as_deref().is_some_and(|n| self.is_known_user_type(n)) {
                     let mut args_s: Vec<String> = self.emit_user_method_args(held.as_deref(), method, args);
                     let hoisted = Self::hoist_lent_conflicts_locked(&mut args_s);
@@ -5359,6 +5362,57 @@ impl Transpiler {
     /// Also reorders labeled (named) arguments to match the declared parameter order.
     /// Returns the arguments left separate, so a call site can run `hoist_lent_conflicts`
     /// over them before assembling the call.
+    /// Guard-acquiring expression (`c.lock().unwrap()`, `self.stats.borrow_mut()`, ...) for an
+    /// argument that is a lock handle, or `None` when it is not one. Handles locals/parameters
+    /// (via the variable registries) and `recv.field` (via the field registries, the receiver's
+    /// struct type resolved like for a method call). Reports the same `.await`-held-guard error
+    /// as before for a plain lock handed to a `task` function.
+    fn lock_arg_access(&self, arg: &Expr, emitted: &str, mutable: bool, fn_name: &str) -> Option<String> {
+        #[derive(PartialEq)]
+        enum K { Actor, ActorTask, Guard, GuardTask }
+        let kind = match &arg.kind {
+            ExprKind::Var(v) => {
+                if self.var_mutex_task_types.contains(v.as_str()) { K::ActorTask }
+                else if self.var_mutex_types.contains(v.as_str()) { K::Actor }
+                else if self.var_rwlock_task_types.contains(v.as_str()) { K::GuardTask }
+                else if self.var_rwlock_types.contains(v.as_str()) { K::Guard }
+                else {
+                    match self.inferred_qualifiers.get(v.as_str()) {
+                        Some(OwnerQual::ActorTask) => K::ActorTask,
+                        Some(OwnerQual::Actor) => K::Actor,
+                        Some(OwnerQual::GuardTask) => K::GuardTask,
+                        Some(OwnerQual::Guard) => K::Guard,
+                        _ => return None,
+                    }
+                }
+            }
+            ExprKind::Field(obj, f) => {
+                let owner = self.resolve_expr_struct_type(obj)?;
+                let key = format!("{owner}::{f}");
+                if self.struct_mutex_task_fields.contains(&key) { K::ActorTask }
+                else if self.struct_mutex_fields.contains(&key) { K::Actor }
+                else if self.struct_rwlock_task_fields.contains(&key) { K::GuardTask }
+                else if self.struct_rwlock_fields.contains(&key) { K::Guard }
+                else { return None }
+            }
+            _ => return None,
+        };
+        if matches!(kind, K::Actor | K::Guard) && self.task_fns.contains(fn_name) {
+            let what = if kind == K::Actor { ("'actor", "a MutexGuard") } else { ("'guard", "an RwLockGuard") };
+            self.push_error(arg.line, arg.col, format!("cannot pass {} argument to `mut Counter&` in async function `{}` — holding {} across .await makes the future !Send. Acquire the lock inside the callee body instead.", what.0, fn_name, what.1));
+        }
+        let raw = match &arg.kind {
+            ExprKind::Var(v) => v.clone(),
+            _ => emitted.strip_prefix('&').unwrap_or(emitted).trim_end_matches(".clone()").to_string(),
+        };
+        Some(match kind {
+            K::Actor => if mutable { self.actor_write_guard(&raw) } else { self.actor_read_access(&raw) },
+            K::ActorTask => if mutable { self.actor_task_write_guard(&raw) } else { self.actor_task_read_access(&raw) },
+            K::Guard => if mutable { self.guard_write_guard(&raw) } else { self.guard_read_access(&raw) },
+            K::GuardTask => if mutable { self.guard_task_write_guard(&raw) } else { self.guard_task_read_access(&raw) },
+        })
+    }
+
     pub(crate) fn emit_args_coerced_vec(&self, fn_name: &str, args: &[Arg]) -> Vec<String> {
         let sig = self.fn_sigs.get(fn_name).cloned().unwrap_or_default();
         let coerced_args;
@@ -5742,6 +5796,15 @@ impl Transpiler {
                                 .to_owned()
                         };
                         result.push(format!("{}{}", ref_prefix, base));
+                        i += 1;
+                        continue;
+                    }
+                    // A lock handle (`'actor`/`'guard`, `'task` variants too) — a local or a struct
+                    // field, written or inferred — handed to a borrowed parameter: the call
+                    // borrows through a guard that lives as a temporary of the call's statement
+                    // (`f(&*c.lock().unwrap())`), released when the statement ends.
+                    if let Some(access) = self.lock_arg_access(&a.value, &emitted, mutable, fn_name) {
+                        result.push(format!("{}*{}", ref_prefix, access));
                         i += 1;
                         continue;
                     }

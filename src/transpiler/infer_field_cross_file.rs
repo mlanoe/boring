@@ -28,6 +28,8 @@ struct ScanBody {
     /// The type `self` denotes (struct, enum or `ext` target), `None` for a free function.
     owner: Option<String>,
     params: Vec<(String, Type)>,
+    /// Declared return type (a lock-qualified one makes a returned field a demand).
+    ret: Option<Type>,
     stmts: Vec<Stmt>,
 }
 
@@ -36,12 +38,14 @@ fn collect_items<'a>(items: &'a [Item], structs: &mut Vec<&'a StructDecl>, bodie
         label: match owner { Some(o) => format!("{o}.{}", f.name), None => f.name.clone() },
         owner: owner.map(str::to_string),
         params: f.params.iter().filter_map(|p| p.ty.clone().map(|t| (p.name.clone(), t))).collect(),
+        ret: f.return_ty.clone(),
         stmts: f.body.clone(),
     };
     let set_body = |owner: &str, s: &crate::ast::SetDecl| ScanBody {
         label: format!("{owner}.{}", s.name),
         owner: Some(owner.to_string()),
         params: vec![(s.param_name.clone(), s.param_ty.clone())],
+        ret: None,
         stmts: s.body.clone(),
     };
     for item in items {
@@ -74,7 +78,7 @@ impl Transpiler {
             let mut p_top = Vec::new();
             collect_items(&p.items, &mut structs, &mut bodies, &mut p_top);
             if !p_top.is_empty() {
-                bodies.push(ScanBody { label: "top-level code".into(), owner: None, params: vec![], stmts: p_top });
+                bodies.push(ScanBody { label: "top-level code".into(), owner: None, params: vec![], ret: None, stmts: p_top });
             }
         }
         let mut seen = HashSet::new();
@@ -99,9 +103,11 @@ impl Transpiler {
                 let Some((stmts, locals)) = self.rewrite_for_field_scan(body, &s.name, &targets) else { continue };
                 touched = true;
                 self.walk_stmts_for_field_qualifiers(&stmts, &s.name, &targets, &locals, &empty_alias, &mut candidates);
+                constrain_returned_fields(&stmts, body.ret.as_ref(), &targets, &empty_alias, &mut candidates);
                 // What this body alone allows, for the conflict diagnostic.
                 let mut alone = fresh();
                 self.walk_stmts_for_field_qualifiers(&stmts, &s.name, &targets, &locals, &empty_alias, &mut alone);
+                constrain_returned_fields(&stmts, body.ret.as_ref(), &targets, &empty_alias, &mut alone);
                 contributions.push((body.label.clone(), alone));
             }
             if !touched { continue; }
@@ -157,6 +163,7 @@ impl Transpiler {
             super::infer_field_scan::rewrite_bare_fields(&mut stmts, &fields, &names);
         }
         let mut locals = self.body_local_types(body.owner.as_deref(), &body.params, &stmts);
+        let fields_set: HashSet<&str> = targets.keys().map(String::as_str).collect();
         let no_alias = HashMap::new();
         let mut hit = false;
         {
@@ -183,6 +190,7 @@ impl Transpiler {
             }
         };
         crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut stmts);
+        super::infer_field_scan::substitute_field_aliases(&mut stmts, &fields_set);
         // In the rewritten body `self` is the scanned struct, `__self` the original receiver.
         locals.remove("self");
         if let Some(owner) = &body.owner { locals.insert("__self".into(), owner.clone()); }
@@ -193,4 +201,31 @@ impl Transpiler {
 fn describe(q: &[OwnerQual]) -> String {
     let names: Vec<&str> = q.iter().map(|q| super::infer_qualifiers::qual_name(q)).collect();
     if names.is_empty() { "nothing".into() } else { format!("allows only '{}", names.join("/'")) }
+}
+
+/// A field returned (`return s.stats`, or as the tail) by a function declared to return a lock
+/// handle is a demand for that qualifier, like a field passed to a parameter that demands it.
+fn constrain_returned_fields(
+    stmts: &[Stmt],
+    ret: Option<&Type>,
+    targets: &HashMap<String, String>,
+    alias_of: &HashMap<String, String>,
+    candidates: &mut HashMap<String, Vec<OwnerQual>>,
+) {
+    let Some(ret) = ret else { return };
+    if !matches!(ret.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)) {
+        return;
+    }
+    let mut returned: Vec<Expr> = Vec::new();
+    if let Some(Stmt::Expr(e)) = stmts.last() { returned.push(e.clone()); }
+    let mut copy = stmts.to_vec();
+    let cell = std::cell::RefCell::new(&mut returned);
+    let mut on_expr = |_: &mut Expr| {};
+    let mut on_stmt = |st: &mut Stmt| {
+        if let Stmt::Return(r) = st { if let Some(v) = &r.value { cell.borrow_mut().push(v.clone()); } }
+    };
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut copy);
+    for e in &returned {
+        Transpiler::constrain_field_arg(e, ret, targets, alias_of, candidates);
+    }
 }

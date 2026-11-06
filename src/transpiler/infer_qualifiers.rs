@@ -1546,7 +1546,7 @@ impl Transpiler {
     }
 
     /// `self.field` handed to a parameter that demands a concrete qualifier.
-    fn constrain_field_arg(
+    pub(super) fn constrain_field_arg(
         arg: &Expr,
         param_ty: &Type,
         target_fields: &std::collections::HashMap<String, String>,
@@ -1562,7 +1562,18 @@ impl Transpiler {
         if matches!(demanded, OwnerQual::ActorTask | OwnerQual::GuardTask) {
             promote_task_variants(candidates, field_name, alias_of);
         }
-        constrain_candidates(candidates, field_name, &coercible_from(demanded), alias_of);
+        // Same rule as for a local variable: an `'actor`/`'guard` demand (or an optional parameter)
+        // needs the exact qualifier. A plain `'inline`/`'owned` field would be wrapped into a
+        // fresh lock at the call site (`f(&Arc::new(Mutex::new(self.stats)))`), which moves the
+        // field and hides the callee's mutations from every later read.
+        let compatible = if matches!(param_ty, Type::Optional(_))
+            || matches!(demanded, OwnerQual::Actor | OwnerQual::Guard)
+        {
+            vec![demanded]
+        } else {
+            coercible_from(demanded)
+        };
+        constrain_candidates(candidates, field_name, &compatible, alias_of);
     }
 
     /// The constraints one expression node contributes (its children are visited by the caller).
@@ -2613,11 +2624,23 @@ impl Transpiler {
                     Some(n.clone()),
                 _ => None,
             },
+            // `[Service(..), ..]`: an array of the struct its first element constructs.
+            ExprKind::Array(items) => {
+                let first = items.first()?;
+                let t = self.method_receiver_type(first, var_struct_types, alias_of)?;
+                (!t.starts_with('[')).then(|| format!("[{t}]"))
+            }
+            // `arr[i]`: the element type of an array typed `[S]`.
+            ExprKind::Index(arr, _) => {
+                let t = self.method_receiver_type(arr, var_struct_types, alias_of)?;
+                t.strip_prefix('[')?.strip_suffix(']').map(str::to_string)
+            }
             ExprKind::Field(inner, field) => {
                 let owner = self.method_receiver_type(inner, var_struct_types, alias_of)?;
                 match self.struct_fields.get(&owner)?.iter().find(|(n, _)| n == field)?.1.without_mut() {
                     Type::Named(n) => Some(n.clone()),
                     Type::Qualified(inner, _) => match inner.without_mut() { Type::Named(n) => Some(n.clone()), _ => None },
+                    Type::Array(inner) => match inner.without_mut() { Type::Named(n) => Some(format!("[{n}]")), _ => None },
                     _ => None,
                 }
             }

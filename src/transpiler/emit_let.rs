@@ -143,7 +143,44 @@ impl Transpiler {
     /// `value` is a bare local already declared with the same lock qualifier
     /// (`'actor`/`'guard`, `task` variant matching): the handle itself is the value, so
     /// share it (`Arc::clone`) instead of wrapping it in a second lock.
+    /// The place or value expression of `value` when it is a lock handle of the given flavour
+    /// that is not a bare local: a struct field (written or inferred), an element of a
+    /// collection of handles, or a call declared to return one. `true` in the second slot when
+    /// the expression is a place that must be cloned to be shared (a call already yields an
+    /// owned handle).
+    pub(crate) fn lock_handle_place(&self, value: &Expr, is_task: bool, guard: bool) -> Option<(String, bool)> {
+        match &value.kind {
+            ExprKind::Field(..) | ExprKind::Index(..) => {
+                let r = self.resolve_lock_field_ref(value)?;
+                // A managed-mode `'owned` member is guarded like a lock but is not a shareable handle.
+                let registered = self.struct_mutex_fields.contains(&r.key) || self.struct_mutex_task_fields.contains(&r.key)
+                    || self.struct_rwlock_fields.contains(&r.key) || self.struct_rwlock_task_fields.contains(&r.key)
+                    || matches!(r.field_ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask));
+                if !registered { return None; }
+                let field_task = self.struct_mutex_task_fields.contains(&r.key) || self.struct_rwlock_task_fields.contains(&r.key)
+                    || matches!(r.field_ty.without_mut(), Type::Qualified(_, OwnerQual::ActorTask | OwnerQual::GuardTask));
+                (r.rwlock == guard && field_task == is_task).then(|| (r.handle, true))
+            }
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Var(f) = &callee.kind else { return None };
+                let ok = match self.fn_return_types.get(f.as_str()).map(|t| t.without_mut()) {
+                    Some(Type::Qualified(_, OwnerQual::Actor)) => !guard && !is_task,
+                    Some(Type::Qualified(_, OwnerQual::ActorTask)) => !guard && is_task,
+                    Some(Type::Qualified(_, OwnerQual::Guard)) => guard && !is_task,
+                    Some(Type::Qualified(_, OwnerQual::GuardTask)) => guard && is_task,
+                    _ => false,
+                };
+                ok.then(|| (self.emit_expr(value), false))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn existing_lock_handle(&self, value: &Expr, is_task: bool, guard: bool) -> Option<String> {
+        let clone_fn = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) { "Rc::clone" } else { "Arc::clone" };
+        if let Some((place, needs_clone)) = self.lock_handle_place(value, is_task, guard) {
+            return Some(if needs_clone { format!("{}(&{})", clone_fn, place) } else { place });
+        }
         let ExprKind::Var(v) = &value.kind else { return None };
         let known = match (guard, is_task) {
             (false, false) => self.var_mutex_types.contains(v.as_str()),
@@ -1956,6 +1993,33 @@ impl Transpiler {
                 }
             }
         }
+        // A bare local initialised from a lock handle (`mut c = svc.stats`, `let h = handles[0]`,
+        // `let h = pick(svc)` returning `T'actor`) whose uses inferred the same lock flavour is
+        // another name of that handle (`Arc::clone`), never a fresh lock around a copy.
+        if s.ty.is_none() && !self.rc_identity_vars.contains(&s.name)
+            && matches!(&s_value.kind, ExprKind::Field(..) | ExprKind::Index(..))
+        {
+            // The initializer decides the flavour: whatever the local's own uses would infer, a
+            // second name of a lock handle is a lock handle of the same kind.
+            let flavour = [OwnerQual::Actor, OwnerQual::ActorTask, OwnerQual::Guard, OwnerQual::GuardTask]
+                .into_iter()
+                .find(|q| self.lock_handle_place(
+                    s_value, matches!(q, OwnerQual::ActorTask | OwnerQual::GuardTask),
+                    matches!(q, OwnerQual::Guard | OwnerQual::GuardTask)).is_some());
+            if let Some(qual) = flavour {
+                let held = self.resolve_expr_type(s_value).and_then(|t| {
+                    let mut cur = t.without_mut().clone();
+                    while let Type::Qualified(inner, _) = cur { cur = inner.without_mut().clone(); }
+                    matches!(cur, Type::Named(_)).then_some(cur)
+                });
+                if let Some(held) = held {
+                    let qualified_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(&held, qual);
+                    if self.try_emit_qualified_let(s, &qualified_ty, s_value) {
+                        return;
+                    }
+                }
+            }
+        }
         // Infer actor/refcell type for local let bindings from function return type (no explicit annotation).
         // E.g. `let child = new_env(...)` where `new_env` returns `Env'actor` — add child to managed_refcell_vars.
         if s.ty.is_none() {
@@ -2364,6 +2428,8 @@ impl Transpiler {
                     if self.var_mutex_types.contains(v.as_str())
                     || self.var_rwlock_types.contains(v.as_str())
                     || self.rc_vars.contains(v.as_str()))
+                || (matches!(&value.kind, ExprKind::Field(..))
+                    && self.resolve_lock_field_ref(value).is_some_and(|r| r.rwlock == is_guard))
                 // MethodCall(obj, "clone", []) on a known rc_var — already an Rc<RefCell<T>>
                 || matches!(&value.kind, ExprKind::MethodCall(obj, m, args)
                     if m == "clone" && args.is_empty()
@@ -2395,6 +2461,9 @@ impl Transpiler {
                 if m == "clone" && args.is_empty()
                 && matches!(&obj.kind, ExprKind::Var(v)
                     if self.var_mutex_types.contains(v.as_str()) || self.arc_vars.contains(v.as_str())))
+            // A struct field that is itself a lock handle, written or inferred (`svc.stats`).
+            || (matches!(&value.kind, ExprKind::Field(..))
+                && self.resolve_lock_field_ref(value).is_some_and(|r| r.rwlock == is_guard))
             // Field access on a struct where the field is actor/Arc typed (e.g. interp.global_env)
             || matches!(&value.kind, ExprKind::Field(obj, field_name)
                 if matches!(&obj.kind, ExprKind::Var(v) if {
@@ -2897,6 +2966,16 @@ impl Transpiler {
                 let h = self.emit_expr(value);
                 let h = h.strip_suffix(".clone()").unwrap_or(&h);
                 format!("&{}", h)
+            }
+            // A field/element/call that is already a lock handle of the parameter's flavour: lend it.
+            Some(Type::Qualified(_, q @ (OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)))
+                if matches!(&value.kind, ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Call(..))
+                    && self.lock_handle_place(value, matches!(q, OwnerQual::ActorTask | OwnerQual::GuardTask),
+                                              matches!(q, OwnerQual::Guard | OwnerQual::GuardTask)).is_some() =>
+            {
+                let (place, _) = self.lock_handle_place(value, matches!(q, OwnerQual::ActorTask | OwnerQual::GuardTask),
+                                                        matches!(q, OwnerQual::Guard | OwnerQual::GuardTask)).unwrap();
+                format!("&{}", place)
             }
             Some(Type::Qualified(_, OwnerQual::Actor)) => {
                 if let ExprKind::Var(v) = &value.kind {

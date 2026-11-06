@@ -1238,7 +1238,7 @@ Primitives (`int`, `uint`, `float`, `bool`) have no meaningful qualifier — the
 
 Struct field inference sees the uses of a field in every file of the project (`src/transpiler/infer_field_cross_file.rs`): once every file is registered and the function and method parameters are inferred, each unqualified struct-typed field is inferred again from all bodies, where `x.field` on a local `x` of the struct's type (parameter, typed `let`, constructor call, alias, `a.b.field` chain) counts like `self.field` in the struct's own methods. It alternates with the parameter pre-pass to a fixed point. A qualifier written on the field is never overwritten, the result does not depend on the order of the files, and requirements that no single qualifier meets are a `conflicting qualifier requirements for field` error naming the functions involved.
 
-Not covered: a `for` variable or array element typed as the struct, a receiver reached through a method's return value. Also open, and independent of cross-file inference: a field that ends up a lock handle (written or inferred) is re-wrapped when passed by value, is not locked when read through a local of the struct, and its struct still derives `Eq`/`Hash`.
+Followed too: a `for` variable or element of a `[S]`, `mut c = svc.stats` aliases, a field returned from a function declared to return a lock handle, a field passed to a plain borrowed parameter (borrowed through its guard). Not followed: a field placed in an array/dict/tuple literal, a field returned under a bare return type, and a `mut` method parameter (always lent `&mut T`) — see "Struct field inference" in `docs/book.md` for the reasons.
 
 ### Managed mode and a bare oversized local variable (fixed)
 
