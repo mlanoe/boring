@@ -65,14 +65,6 @@ fn collect_items<'a>(items: &'a [Item], structs: &mut Vec<&'a StructDecl>, bodie
     }
 }
 
-fn named_of(ty: &Type) -> Option<&str> {
-    match ty.without_mut() {
-        Type::Named(n) => Some(n.as_str()),
-        Type::Qualified(inner, _) => named_of(inner),
-        _ => None,
-    }
-}
-
 impl Transpiler {
     /// Returns `true` when it changed the qualifier of at least one field.
     pub(crate) fn infer_cross_file_field_qualifiers(&mut self, programs: &[Program]) -> bool {
@@ -104,12 +96,12 @@ impl Transpiler {
             let mut contributions: Vec<(String, HashMap<String, Vec<OwnerQual>>)> = Vec::new();
             let mut touched = false;
             for body in &bodies {
-                let Some(stmts) = self.rewrite_for_field_scan(body, &s.name, &targets) else { continue };
+                let Some((stmts, locals)) = self.rewrite_for_field_scan(body, &s.name, &targets) else { continue };
                 touched = true;
-                self.walk_stmts_for_field_qualifiers(&stmts, &s.name, &targets, &empty_alias, &mut candidates);
+                self.walk_stmts_for_field_qualifiers(&stmts, &s.name, &targets, &locals, &empty_alias, &mut candidates);
                 // What this body alone allows, for the conflict diagnostic.
                 let mut alone = fresh();
-                self.walk_stmts_for_field_qualifiers(&stmts, &s.name, &targets, &empty_alias, &mut alone);
+                self.walk_stmts_for_field_qualifiers(&stmts, &s.name, &targets, &locals, &empty_alias, &mut alone);
                 contributions.push((body.label.clone(), alone));
             }
             if !touched { continue; }
@@ -149,41 +141,23 @@ impl Transpiler {
 
     /// A clone of `body` where every `x.field` whose receiver `x` has the scanned struct's type
     /// reads `self.field` (and the body's own `self` is renamed away), or `None` when the body
-    /// never reaches a field of the struct.
-    fn rewrite_for_field_scan(&self, body: &ScanBody, struct_name: &str, targets: &HashMap<String, String>) -> Option<Vec<Stmt>> {
-        let mut locals: HashMap<String, String> = HashMap::new();
-        let mut ambiguous: HashSet<String> = HashSet::new();
-        let mut bind = |locals: &mut HashMap<String, String>, name: &str, ty: Option<String>| {
-            match ty {
-                Some(t) => match locals.get(name) {
-                    Some(prev) if *prev != t => { ambiguous.insert(name.to_string()); }
-                    _ => { locals.insert(name.to_string(), t); }
-                },
-                // Rebound to something we cannot type: no claim is safe.
-                None => { ambiguous.insert(name.to_string()); }
-            }
-        };
-        if let Some(owner) = &body.owner { locals.insert("self".into(), owner.clone()); }
-        for (n, t) in &body.params {
-            let ty = named_of(t).map(str::to_string);
-            bind(&mut locals, n, ty);
-        }
-        let no_alias = HashMap::new();
+    /// never reaches a field of the struct. Also returns the body's local types, for the
+    /// rewritten body (`self` is the scanned struct there, `__self` the body's own owner).
+    fn rewrite_for_field_scan(
+        &self,
+        body: &ScanBody,
+        struct_name: &str,
+        targets: &HashMap<String, String>,
+    ) -> Option<(Vec<Stmt>, HashMap<String, String>)> {
         let mut stmts = body.stmts.clone();
-        {
-            let mut on_stmt = |st: &mut Stmt| {
-                if let Stmt::Let(l) = st {
-                    let ty = match &l.ty {
-                        Some(t) => named_of(t).map(str::to_string),
-                        None => l.value.as_ref().and_then(|v| self.method_receiver_type(v, &locals, &no_alias)),
-                    };
-                    bind(&mut locals, &l.name, ty);
-                }
-            };
-            let mut on_expr = |_: &mut Expr| {};
-            crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut stmts);
+        // Inside the struct's own methods a bare `field` is `self.field`.
+        if body.owner.as_deref() == Some(struct_name) {
+            let fields: HashSet<&str> = targets.keys().map(String::as_str).collect();
+            let names: Vec<String> = body.params.iter().map(|(n, _)| n.clone()).collect();
+            super::infer_field_scan::rewrite_bare_fields(&mut stmts, &fields, &names);
         }
-        for n in &ambiguous { locals.remove(n); }
+        let mut locals = self.body_local_types(body.owner.as_deref(), &body.params, &stmts);
+        let no_alias = HashMap::new();
         let mut hit = false;
         {
             let mut on_stmt = |_: &mut Stmt| {};
@@ -209,7 +183,10 @@ impl Transpiler {
             }
         };
         crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut stmts);
-        Some(stmts)
+        // In the rewritten body `self` is the scanned struct, `__self` the original receiver.
+        locals.remove("self");
+        if let Some(owner) = &body.owner { locals.insert("__self".into(), owner.clone()); }
+        Some((stmts, locals))
     }
 }
 

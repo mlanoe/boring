@@ -32,6 +32,7 @@ mod emit_kernel;
 pub(crate) mod unified;
 mod infer_qualifiers;
 mod infer_field_cross_file;
+mod infer_field_scan;
 pub use infer_qualifiers::{note_inferred_actor_param, take_cpu_decisions, CpuDecision};
 mod infer_trait_borrow;
 mod share_dyn_traits;

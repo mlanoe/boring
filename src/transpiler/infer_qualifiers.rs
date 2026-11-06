@@ -1429,40 +1429,18 @@ impl Transpiler {
         let empty_alias: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         // Walk every method body looking for self.field access patterns.
-        for method in &s.methods {
-            self.walk_stmts_for_field_qualifiers(
-                &method.body,
-                &s.name,
-                &target_fields,
-                &empty_alias,
-                &mut candidates,
+        let fn_params = |f: &crate::ast::FnDecl| -> Vec<(String, Type)> {
+            f.params.iter().filter_map(|p| p.ty.clone().map(|t| (p.name.clone(), t))).collect()
+        };
+        let set_params = |st: &crate::ast::SetDecl| vec![(st.param_name.clone(), st.param_ty.clone())];
+        for method in s.methods.iter().chain(ext_methods.iter().copied()) {
+            self.walk_own_body_for_field_qualifiers(
+                &fn_params(method), &method.body, &s.name, &target_fields, &empty_alias, &mut candidates,
             );
         }
-        for setter in &s.setters {
-            self.walk_stmts_for_field_qualifiers(
-                &setter.body,
-                &s.name,
-                &target_fields,
-                &empty_alias,
-                &mut candidates,
-            );
-        }
-        for method in ext_methods {
-            self.walk_stmts_for_field_qualifiers(
-                &method.body,
-                &s.name,
-                &target_fields,
-                &empty_alias,
-                &mut candidates,
-            );
-        }
-        for setter in ext_setters {
-            self.walk_stmts_for_field_qualifiers(
-                &setter.body,
-                &s.name,
-                &target_fields,
-                &empty_alias,
-                &mut candidates,
+        for setter in s.setters.iter().chain(ext_setters.iter().copied()) {
+            self.walk_own_body_for_field_qualifiers(
+                &set_params(setter), &setter.body, &s.name, &target_fields, &empty_alias, &mut candidates,
             );
         }
 
@@ -1542,108 +1520,75 @@ impl Transpiler {
         ]
     }
 
+    /// Constrain the candidate qualifiers of `struct_name`'s fields from every use of
+    /// `self.field` in `stmts` (bare fields were normalized to `self.field` by the caller).
+    /// The walk is the generic `ast_walk` one, so every statement and expression kind is
+    /// reached: blocks, closures, task bodies, index/assignment targets, loops...
+    /// `locals` maps the body's locals to their struct type, to resolve method receivers.
     pub(super) fn walk_stmts_for_field_qualifiers(
         &mut self,
         stmts: &[Stmt],
         struct_name: &str,
         target_fields: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, String>,
         alias_of: &std::collections::HashMap<String, String>,
         candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     ) {
-        for stmt in stmts {
-            self.walk_stmt_for_field_qualifiers(stmt, struct_name, target_fields, alias_of, candidates);
-        }
+        let mut stmts = stmts.to_vec();
+        let cell = std::cell::RefCell::new((self, candidates));
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut on_expr = |e: &mut Expr| {
+            let mut g = cell.borrow_mut();
+            let (this, cands) = &mut *g;
+            this.field_constraints_at(e, struct_name, target_fields, locals, alias_of, cands);
+        };
+        crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut stmts);
     }
 
-    fn walk_stmt_for_field_qualifiers(
-        &mut self,
-        stmt: &Stmt,
-        struct_name: &str,
+    /// `self.field` handed to a parameter that demands a concrete qualifier.
+    fn constrain_field_arg(
+        arg: &Expr,
+        param_ty: &Type,
         target_fields: &std::collections::HashMap<String, String>,
         alias_of: &std::collections::HashMap<String, String>,
         candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     ) {
-        match stmt {
-            Stmt::Let(s) => {
-                if let Some(val) = &s.value {
-                    self.walk_expr_for_field_qualifiers(val, struct_name, target_fields, alias_of, candidates);
-                }
-            }
-            Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {
-                self.walk_expr_for_field_qualifiers(e, struct_name, target_fields, alias_of, candidates);
-            }
-            Stmt::If(s) => {
-                for (cond, body) in &s.branches {
-                    self.walk_expr_for_field_qualifiers(cond, struct_name, target_fields, alias_of, candidates);
-                    self.walk_stmts_for_field_qualifiers(body, struct_name, target_fields, alias_of, candidates);
-                }
-                if let Some(eb) = &s.else_body {
-                    self.walk_stmts_for_field_qualifiers(eb, struct_name, target_fields, alias_of, candidates);
-                }
-            }
-            Stmt::While(s) => {
-                self.walk_expr_for_field_qualifiers(&s.condition, struct_name, target_fields, alias_of, candidates);
-                self.walk_stmts_for_field_qualifiers(&s.body, struct_name, target_fields, alias_of, candidates);
-            }
-            Stmt::For(s) => {
-                self.walk_expr_for_field_qualifiers(&s.iterable, struct_name, target_fields, alias_of, candidates);
-                self.walk_stmts_for_field_qualifiers(&s.body, struct_name, target_fields, alias_of, candidates);
-            }
-            Stmt::Match(s) => {
-                self.walk_expr_for_field_qualifiers(&s.subject, struct_name, target_fields, alias_of, candidates);
-                for arm in &s.arms {
-                    match &arm.body {
-                        MatchBody::Expr(e) => {
-                            self.walk_expr_for_field_qualifiers(e, struct_name, target_fields, alias_of, candidates);
-                        }
-                        MatchBody::Block(stmts) => {
-                            self.walk_stmts_for_field_qualifiers(stmts, struct_name, target_fields, alias_of, candidates);
-                        }
-                    }
-                }
-            }
-            _ => {}
+        let Some(demanded) = qual_of_type(param_ty) else { return };
+        let Some(field_name) = self_field_name(arg) else { return };
+        if !target_fields.contains_key(field_name) { return; }
+        // Same cross-function widening as the local-variable Call case in
+        // `walk_expr_for_qualifiers` — see its comment for why this is needed before
+        // intersecting, not just for symmetry.
+        if matches!(demanded, OwnerQual::ActorTask | OwnerQual::GuardTask) {
+            promote_task_variants(candidates, field_name, alias_of);
         }
+        constrain_candidates(candidates, field_name, &coercible_from(demanded), alias_of);
     }
 
-    fn walk_expr_for_field_qualifiers(
+    /// The constraints one expression node contributes (its children are visited by the caller).
+    fn field_constraints_at(
         &mut self,
         expr: &Expr,
         struct_name: &str,
         target_fields: &std::collections::HashMap<String, String>,
+        locals: &std::collections::HashMap<String, String>,
         alias_of: &std::collections::HashMap<String, String>,
         candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     ) {
         match &expr.kind {
             ExprKind::Call(callee, args) => {
-                self.walk_expr_for_field_qualifiers(callee, struct_name, target_fields, alias_of, candidates);
-                for arg in args {
-                    self.walk_expr_for_field_qualifiers(&arg.value, struct_name, target_fields, alias_of, candidates);
-                }
                 // self.field passed to a function demanding a concrete qualifier.
                 if let ExprKind::Var(fn_name) = &callee.kind {
-                    let param_types = self.fn_sigs.get(fn_name.as_str()).cloned();
-                    if let Some(param_types) = param_types {
+                    if let Some(param_types) = self.fn_sigs.get(fn_name.as_str()).cloned() {
                         for (i, arg) in args.iter().enumerate() {
-                            let Some(demanded) = param_types.get(i).and_then(qual_of_type) else { continue };
-                            let Some(field_name) = self_field_name(&arg.value) else { continue };
-                            if target_fields.contains_key(field_name) {
-                                // Same cross-function widening as the local-variable Call case
-                                // in `walk_expr_for_qualifiers` — see its comment for why this
-                                // is needed before intersecting, not just for symmetry.
-                                if matches!(demanded, OwnerQual::ActorTask | OwnerQual::GuardTask) {
-                                    promote_task_variants(candidates, field_name, alias_of);
-                                }
-                                constrain_candidates(candidates, field_name, &coercible_from(demanded), alias_of);
+                            if let Some(pt) = param_types.get(i) {
+                                Self::constrain_field_arg(&arg.value, pt, target_fields, alias_of, candidates);
                             }
                         }
                     }
                 }
             }
             ExprKind::MethodCall(obj, method, args) => {
-                for arg in args {
-                    self.walk_expr_for_field_qualifiers(&arg.value, struct_name, target_fields, alias_of, candidates);
-                }
                 // self.field.method() — check if it's a def (mutating) call.
                 if let Some(field_name) = self_field_name(obj) {
                     if let Some(field_struct_type) = target_fields.get(field_name) {
@@ -1657,30 +1602,27 @@ impl Transpiler {
                             );
                         }
                     }
-                } else {
-                    self.walk_expr_for_field_qualifiers(obj, struct_name, target_fields, alias_of, candidates);
                 }
-            }
-            ExprKind::BinOp(_, l, r) => {
-                self.walk_expr_for_field_qualifiers(l, struct_name, target_fields, alias_of, candidates);
-                self.walk_expr_for_field_qualifiers(r, struct_name, target_fields, alias_of, candidates);
-            }
-            ExprKind::UnaryOp(_, e) => {
-                self.walk_expr_for_field_qualifiers(e, struct_name, target_fields, alias_of, candidates);
-            }
-            ExprKind::If(if_stmt) => {
-                for (cond, body) in &if_stmt.branches {
-                    self.walk_expr_for_field_qualifiers(cond, struct_name, target_fields, alias_of, candidates);
-                    self.walk_stmts_for_field_qualifiers(body, struct_name, target_fields, alias_of, candidates);
-                }
-                if let Some(eb) = &if_stmt.else_body {
-                    self.walk_stmts_for_field_qualifiers(eb, struct_name, target_fields, alias_of, candidates);
+                // self.field passed to a *method* parameter demanding a concrete qualifier.
+                let mut locals = locals.clone();
+                locals.insert("self".into(), struct_name.to_string());
+                if let Some(recv_ty) = self.method_receiver_type(obj, &locals, alias_of) {
+                    let decl = self.struct_method_overload_decls
+                        .get(&format!("{}::{}", recv_ty, method))
+                        .filter(|ds| ds.len() == 1)
+                        .map(|ds| ds[0].clone());
+                    if let Some(decl) = decl {
+                        for (i, arg) in args.iter().enumerate() {
+                            if let Some(pt) = decl.params.get(i).and_then(|p| p.ty.as_ref()) {
+                                Self::constrain_field_arg(&arg.value, pt, target_fields, alias_of, candidates);
+                            }
+                        }
+                    }
                 }
             }
             // Task capture: self.field captured in a task body.
             ExprKind::Task(inner) | ExprKind::TaskWithTimeout(_, inner) => {
                 self.constrain_task_field_captures(inner, target_fields, alias_of, candidates);
-                self.walk_expr_for_field_qualifiers(inner, struct_name, target_fields, alias_of, candidates);
             }
             _ => {}
         }
@@ -1697,8 +1639,7 @@ impl Transpiler {
         alias_of: &std::collections::HashMap<String, String>,
         candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     ) {
-        let receiver_methods = method_receivers(body);
-        let accessed = self_field_names_in_expr(body);
+        let (accessed, receiver_methods) = self_fields_and_receivers(body);
 
         for field_name in &accessed {
             if !target_fields.contains_key(field_name.as_str()) { continue; }
@@ -2478,82 +2419,30 @@ fn self_field_name(expr: &Expr) -> Option<&str> {
     None
 }
 
-/// Collect all `self.field` names accessed anywhere in an expression tree.
-fn self_field_names_in_expr(expr: &Expr) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    collect_self_fields_in_expr(expr, &mut out);
-    out
-}
-
-fn collect_self_fields_in_expr(expr: &Expr, out: &mut std::collections::HashSet<String>) {
-    if let Some(field) = self_field_name(expr) {
-        out.insert(field.to_string());
-        return;
-    }
-    match &expr.kind {
-        ExprKind::MethodCall(obj, _, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
-            collect_self_fields_in_expr(obj, out);
-            for a in args { collect_self_fields_in_expr(&a.value, out); }
+/// Every `self.field` accessed anywhere under `expr`, and for each field (or plain variable)
+/// that is the receiver of a method call, the methods called on it.
+pub(super) fn self_fields_and_receivers(expr: &Expr) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    let mut fields = std::collections::HashSet::new();
+    let mut receivers: std::collections::HashMap<String, std::collections::HashSet<String>> = Default::default();
+    let mut root = expr.clone();
+    let cell = std::cell::RefCell::new((&mut fields, &mut receivers));
+    let mut on_stmt = |_: &mut Stmt| {};
+    let mut on_expr = |e: &mut Expr| {
+        let mut g = cell.borrow_mut();
+        if let Some(f) = self_field_name(e) { g.0.insert(f.to_string()); }
+        if let ExprKind::MethodCall(obj, m, _) | ExprKind::OptionalMethodCall(obj, m, _) = &e.kind {
+            let key = match &obj.kind {
+                ExprKind::Var(n) => Some(n.as_str()),
+                _ => self_field_name(obj),
+            };
+            if let Some(k) = key { g.1.entry(k.to_string()).or_default().insert(m.clone()); }
         }
-        ExprKind::Call(callee, args) => {
-            collect_self_fields_in_expr(callee, out);
-            for a in args { collect_self_fields_in_expr(&a.value, out); }
-        }
-        ExprKind::BinOp(_, l, r) => {
-            collect_self_fields_in_expr(l, out);
-            collect_self_fields_in_expr(r, out);
-        }
-        ExprKind::UnaryOp(_, e) | ExprKind::Field(e, _) => {
-            collect_self_fields_in_expr(e, out);
-        }
-        ExprKind::If(s) => {
-            for (cond, body) in &s.branches {
-                collect_self_fields_in_expr(cond, out);
-                for st in body { collect_self_fields_in_stmt(st, out); }
-            }
-            if let Some(eb) = &s.else_body {
-                for st in eb { collect_self_fields_in_stmt(st, out); }
-            }
-        }
-        ExprKind::Block(stmts) => {
-            for st in stmts { collect_self_fields_in_stmt(st, out); }
-        }
-        ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
-            for e in elems { collect_self_fields_in_expr(e, out); }
-        }
-        ExprKind::Assign(target, val) => {
-            collect_self_fields_in_expr(target, out);
-            collect_self_fields_in_expr(val, out);
-        }
-        _ => {}
-    }
-}
-
-fn collect_self_fields_in_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
-    match stmt {
-        Stmt::Let(s) => { if let Some(v) = &s.value { collect_self_fields_in_expr(v, out); } }
-        Stmt::Expr(e) | Stmt::Return(crate::ast::ReturnStmt { value: Some(e), .. }) => {
-            collect_self_fields_in_expr(e, out);
-        }
-        Stmt::If(s) => {
-            for (cond, body) in &s.branches {
-                collect_self_fields_in_expr(cond, out);
-                for st in body { collect_self_fields_in_stmt(st, out); }
-            }
-            if let Some(eb) = &s.else_body {
-                for st in eb { collect_self_fields_in_stmt(st, out); }
-            }
-        }
-        Stmt::While(s) => {
-            collect_self_fields_in_expr(&s.condition, out);
-            for st in &s.body { collect_self_fields_in_stmt(st, out); }
-        }
-        Stmt::For(s) => {
-            collect_self_fields_in_expr(&s.iterable, out);
-            for st in &s.body { collect_self_fields_in_stmt(st, out); }
-        }
-        _ => {}
-    }
+    };
+    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.expr(&mut root);
+    (fields, receivers)
 }
 
 #[cfg(test)]

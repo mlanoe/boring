@@ -872,6 +872,40 @@ impl Transpiler {
         }
     }
 
+    /// The fields of the current struct that a task body reaches as `self.field` and whose
+    /// type is a shared handle (`Arc`/`Rc` around a lock, or `'shared`), sorted.
+    fn task_captured_handle_fields(&self, body: &Expr) -> Vec<String> {
+        let Some(owner) = self.self_type.as_deref() else { return Vec::new() };
+        let (mut fields, _) = super::infer_qualifiers::self_fields_and_receivers(body);
+        // A bare field name is `self.field` too (implicit self), unless a local shadows it.
+        {
+            let bound = super::infer_field_scan::bound_names(&[], &[Stmt::Expr(body.clone())]);
+            let mut root = body.clone();
+            let mut on_stmt = |_: &mut Stmt| {};
+            let mut on_expr = |x: &mut Expr| {
+                if let ExprKind::Var(n) = &x.kind {
+                    let is_field = self.struct_fields.get(owner)
+                        .is_some_and(|fs| fs.iter().any(|(f, _)| f == n));
+                    if is_field && !bound.contains(n.as_str()) && !self.known_local_vars.contains(n.as_str()) {
+                        fields.insert(n.clone());
+                    }
+                }
+            };
+            crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.expr(&mut root);
+        }
+        let mut out: Vec<String> = fields.into_iter().filter(|f| {
+            let key = format!("{owner}::{f}");
+            self.struct_mutex_fields.contains(&key)
+                || self.struct_mutex_task_fields.contains(&key)
+                || self.struct_rwlock_fields.contains(&key)
+                || self.struct_rwlock_task_fields.contains(&key)
+                || self.struct_fields.get(owner).and_then(|fs| fs.iter().find(|(n, _)| n == f))
+                    .is_some_and(|(_, t)| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)))
+        }).collect();
+        out.sort();
+        out
+    }
+
     /// `task expr` — auto-detects `tokio::spawn` (async body) vs. `tokio::task::spawn_blocking`
     /// (sync/CPU-bound body), cloning any captured `Arc<T>` vars into the spawned closure so the
     /// outer bindings remain valid. `expr` (the whole node) is only used for warning line/col.
@@ -910,7 +944,7 @@ impl Transpiler {
             format!("{{ {} }}", sub.emit_expr(e))
         };
 
-        let clones: String = arc_captures.iter()
+        let mut clones: String = arc_captures.iter()
             .map(|v| {
                 if self.rc_vars.contains(*v) {
                     format!("let {} = Rc::clone(&{});", v, v)
@@ -920,6 +954,17 @@ impl Transpiler {
             })
             .collect::<Vec<_>>()
             .join(" ");
+
+        // `self.field` captured by the task where the field is a shared handle (a lock
+        // field, or `'shared`): the spawned future must be `'static`, so it cannot borrow
+        // `self` (E0521). Clone the handle before the spawn and let the body use the clone.
+        let mut inner_s = inner_s;
+        for field in self.task_captured_handle_fields(e) {
+            let local = format!("__self_{field}");
+            if !clones.is_empty() { clones.push(' '); }
+            clones.push_str(&format!("let {local} = self.{field}.clone();"));
+            inner_s = replace_self_field(&inner_s, &field, &local);
+        }
 
         // !Send warning: spawn_local captures Rc vars in single-thread mode.
         if !blocking && matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) {
@@ -932,7 +977,7 @@ impl Transpiler {
 
         if blocking {
             // Synchronous closure — tokio::task::spawn_blocking(move || { body })
-            let closure = if arc_captures.is_empty() {
+            let closure = if clones.is_empty() {
                 format!("move || {}", inner_s)
             } else {
                 format!("{{ {} move || {} }}", clones, inner_s)
@@ -944,7 +989,7 @@ impl Transpiler {
                 crate::transpiler::ThreadingMode::Single => "tokio::task::spawn_local",
                 crate::transpiler::ThreadingMode::Multi  => "tokio::spawn",
             };
-            if arc_captures.is_empty() {
+            if clones.is_empty() {
                 if self.in_async {
                     format!("{}(async move {})", spawn_fn, inner_s)
                 } else {
@@ -6587,4 +6632,28 @@ fn param_ty_is_copy_scalar(t: &Type) -> bool {
         Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
             | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
+}
+
+
+/// `code` with every `self.<field>` (as a whole path segment) spelled `local`.
+fn replace_self_field(code: &str, field: &str, local: &str) -> String {
+    let pat = format!("self.{field}");
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    let mut prev: Option<char> = None;
+    while let Some(i) = rest.find(&pat) {
+        let before = rest[..i].chars().next_back().or(prev);
+        let after = rest[i + pat.len()..].chars().next();
+        out.push_str(&rest[..i]);
+        if before.is_some_and(|c| is_ident(c) || c == '.') || after.is_some_and(is_ident) {
+            out.push_str(&pat);
+        } else {
+            out.push_str(local);
+        }
+        prev = pat.chars().next_back();
+        rest = &rest[i + pat.len()..];
+    }
+    out.push_str(rest);
+    out
 }

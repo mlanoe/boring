@@ -72,6 +72,12 @@ fn assert_field_is_lock_and_ctor_wrapped(rs: &str) {
     assert!(rs.contains(WRAPPED_CTOR), "constructor argument not wrapped:\n{rs}");
 }
 
+/// The field is a lock handle of either flavour (`'actor` → std Mutex, `'actor'task` → tokio Mutex).
+fn assert_field_is_some_lock(rs: &str) {
+    assert!(rs.contains("stats: Arc<std::sync::Mutex<Counter>>,") || rs.contains(LOCKED),
+        "field not inferred as a lock handle:\n{rs}");
+}
+
 fn assert_field_is_plain(rs: &str) {
     assert!(rs.contains("stats: Counter,"), "field should stay a plain Counter:\n{rs}");
 }
@@ -194,3 +200,73 @@ fn conflict_message_is_the_same_whatever_the_order() {
     assert_eq!(msg("use a\nuse b\nuse c\n", "ord1"), msg("use c\nuse b\nuse a\n", "ord2"));
 }
 
+
+// ── Walker gaps: bare fields, task bodies, method parameters, task capture emission ──────────
+// Same-file and cross-file share one field walker; each case below is checked in the struct's own
+// file, and the bare-field one also from another file's `ext` block.
+
+fn single(name: &str, body: &str) -> String {
+    let dir = project(name, &[("main.br", &format!("{COUNTER}{body}"))]);
+    build_rust(&dir)
+}
+
+const MAIN_TAIL: &str = "\nlet s = Service(stats = Counter())\nprint \"ok\"\n";
+
+#[test]
+fn bare_field_name_in_a_method_is_a_use_of_self_field() {
+    let rs = single("bare", &format!("{BUMP_TASK}struct Service:\n    mut Counter stats\n\n    task def feed():\n        bump(stats)\n{MAIN_TAIL}"));
+    assert_field_is_lock_and_ctor_wrapped(&rs);
+}
+
+#[test]
+fn bare_field_name_in_an_ext_block_of_another_file() {
+    let a = a_src("mut Counter stats");
+    let b = format!("use a\n\n{BUMP_TASK}ext Service:\n    task def feed():\n        bump(stats)\n");
+    let main = "use a\nuse b\n\ndef main():\n    print \"ok\"\n";
+    let dir = project("bare_ext", &[("a.br", &a), ("b.br", &b), ("main.br", main)]);
+    assert_field_is_lock(&build_rust(&dir));
+}
+
+#[test]
+fn a_parameter_shadowing_the_field_is_not_a_use_of_the_field() {
+    let rs = single("bare_shadow", &format!("{BUMP_TASK}struct Service:\n    mut Counter stats\n\n    task def feed(mut Counter'task stats):\n        bump(stats)\n{MAIN_TAIL}"));
+    assert_field_is_plain(&rs);
+}
+
+#[test]
+fn a_local_shadowing_the_field_is_not_a_use_of_the_field() {
+    let rs = single("bare_local", &format!("{BUMP_TASK}struct Service:\n    mut Counter stats\n\n    task def feed():\n        mut stats = Counter()\n        bump(stats)\n{MAIN_TAIL}"));
+    assert_field_is_plain(&rs);
+}
+
+#[test]
+fn def_call_on_the_field_inside_a_task_body_block_is_seen() {
+    let rs = single("task_block", &format!("struct Service:\n    mut Counter stats\n\n    task def go():\n        let t = task:\n            self.stats.inc()\n            self.stats.inc()\n        t.wait\n{MAIN_TAIL}"));
+    assert_field_is_some_lock(&rs);
+}
+
+#[test]
+fn field_passed_to_a_method_parameter_is_a_demand() {
+    let worker = "struct Worker:\n    int id = 0\n    task def take(mut Counter'task c):\n        c.inc()\n\n";
+    let rs = single("method_param", &format!("{worker}struct Service:\n    mut Counter stats\n\n    task def feed(mut Worker w):\n        w.take(stats)\n{MAIN_TAIL}"));
+    assert_field_is_lock(&rs);
+}
+
+#[test]
+fn field_passed_to_a_method_parameter_of_a_struct_in_another_file() {
+    let a = a_src("mut Counter stats");
+    let b = "use a\n\nstruct Worker:\n    int id = 0\n    task def take(mut Counter'task c):\n        c.inc()\n\ntask def feed(Service s, mut Worker w):\n    w.take(s.stats)\n";
+    let main = "use a\nuse b\n\ndef main():\n    print \"ok\"\n";
+    let dir = project("method_param_cross", &[("a.br", &a), ("b.br", b), ("main.br", main)]);
+    assert_field_is_lock(&build_rust(&dir));
+}
+
+#[test]
+fn task_capturing_a_lock_field_clones_the_handle_before_the_spawn() {
+    // `tokio::spawn(async move { self.stats ... })` borrows `self` for 'static (E0521).
+    let rs = single("task_capture", &format!("struct Service:\n    mut Counter stats\n\n    task def go():\n        let t = task:\n            stats.inc()\n        t.wait\n{MAIN_TAIL}"));
+    assert_field_is_some_lock(&rs);
+    assert!(rs.contains("let __self_stats = self.stats.clone();"), "handle not cloned before the spawn:\n{rs}");
+    assert!(rs.contains("__self_stats.lock()"), "task body must use the clone:\n{rs}");
+    assert!(!rs.contains("async move {\n        self.stats"), "task body still borrows self:\n{rs}");
+}
