@@ -1,0 +1,35 @@
+# A recursive enum payload that is optional (`OptLink(int, OptChain?)`). The generated enum
+# declared the field as `Box<Option<OptChain>>` while the constructor (and a struct field)
+# used `Option<Box<OptChain>>`, and a `match` arm unboxed the binding with `*next` (neither
+# type can be dereferenced that way): `boring build` failed with rustc E0308/E0614, while
+# `boring run` was fine. Registered in tests/run.rs and tests/transpile.rs against this one
+# .expected file.
+
+@derive(Debug, Clone)
+enum OptChain:
+    OptEnd
+    OptLink(int, OptChain?)
+
+int chainLen(OptChain c):
+    match c:
+        OptEnd: return 0
+        OptLink(_, next):
+            if let next:
+                return 1 + chainLen(next)
+            return 1
+
+int sumChain(OptChain c):
+    match c:
+        OptEnd: return 0
+        OptLink(v, next):
+            if let next:
+                return v + sumChain(next)
+            return v
+
+def main():
+    let a = OptLink(1, OptLink(2, nil))
+    let b = OptChain.OptLink(1, OptLink(2, OptLink(3, nil)))
+    print chainLen(a)
+    print chainLen(b)
+    print sumChain(b)
+    print chainLen(OptEnd)

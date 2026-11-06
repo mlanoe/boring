@@ -1083,6 +1083,13 @@ transpile_test!(json_serde_tagged_enums);
 // generated Rust (was rustc E0308). Also registered in tests/run.rs.
 transpile_test!(enum_variant_optional_payload_ctor);
 
+// Recursive optional enum payload (`Link(int, Chain?)`): declaration, constructor and match
+// must agree on `Option<Box<T>>`. Also registered in tests/run.rs.
+transpile_test!(enum_recursive_optional_payload);
+
+// `fromJson<P>` for a one-letter declared type. Also registered in tests/run.rs.
+transpile_test!(json_single_letter_type_names);
+
 // docs/try-wrap-double-handling-bug.md -- `try? EXPR` used to double-handle builtins
 // (`fromJson<T>(s)`, `fs.read`/`fs.readLines`/`fs.readBytes`) that already do their own
 // Result->Option/panic handling in a plain context: `.ok()` got appended a second time

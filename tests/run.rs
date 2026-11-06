@@ -560,6 +560,8 @@ interp_test!(json_serde_tagged_enums);
 
 // Same case as the transpile_test of the same name: bare optional-payload variant constructors.
 interp_test!(enum_variant_optional_payload_ctor);
+interp_test!(enum_recursive_optional_payload);
+interp_test!(json_single_letter_type_names);
 
 // docs/try-wrap-double-handling-bug.md -- transpiler-only until now, because its
 // `fromJson<Thing>` lines depended on the interpreter's stub. With a real `fromJson`

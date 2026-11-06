@@ -2490,7 +2490,12 @@ impl Transpiler {
                         let is_recursive = self.recursive_fields.contains(&rec_key);
                         if is_recursive {
                             // Auto-inferred recursive field — wrap in Box to break the cycle.
-                            format!("Box<{}>", self.emit_type(&f.ty))
+                            // A `T?` payload boxes the inside (`Option<Box<T>>`), the shape the
+                            // constructor (`.map(Box::new)`) and a struct field already use.
+                            match &f.ty {
+                                Type::Optional(inner) => format!("Option<Box<{}>>", self.emit_type(inner)),
+                                other => format!("Box<{}>", self.emit_type(other)),
+                            }
                         } else {
                             // Non-recursive: unwrap explicit Owned/Box qualifiers so that
                             // nested pattern matching works without Box wrapping.

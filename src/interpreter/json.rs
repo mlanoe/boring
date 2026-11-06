@@ -183,6 +183,11 @@ impl Interpreter {
         loop {
             match cur {
                 Type::Qualified(inner, _) | Type::Mut(inner) => cur = self.resolve_type(&inner),
+                // The parser reads any single uppercase letter as a type parameter, so
+                // `fromJson<P>` for a declared `enum P` / `struct P` arrives as
+                // `TypeParam("P")`. `resolve_type` already looked it up in the bound
+                // type-parameter frames; what is left names a declared type.
+                Type::TypeParam(name) => return Type::Named(name),
                 other => return other,
             }
         }

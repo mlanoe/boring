@@ -1,0 +1,32 @@
+# `fromJson<T>` where `T` is a one-letter declared type. The parser reads any single
+# uppercase letter as a type parameter, so `boring run` saw `TypeParam("P")` and never
+# found the enum/struct (always `nil`), while `boring build` was right. Registered in
+# tests/run.rs and tests/transpile.rs against this one .expected file.
+
+@derive(Debug, Clone, Serialize, Deserialize)
+enum P:
+    A(int)
+    B
+
+@derive(Debug, Clone, Serialize, Deserialize)
+struct Q:
+    int x
+
+string d(P p):
+    match p:
+        A(n): return "A {n}"
+        B: return "B"
+
+def main():
+    print d(A(1))
+    print json(A(1))
+    if let x = fromJson<P>("{{\"A\":7}}"):
+        print d(x)
+    else:
+        print "none"
+    if let q = fromJson<Q>("{{\"x\":3}}"):
+        print q.x
+    else:
+        print "none"
+    let P z = B
+    print d(z)

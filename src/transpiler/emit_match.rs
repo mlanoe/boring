@@ -1416,7 +1416,8 @@ impl Transpiler {
             }
         }
         // Collect boxed bindings — pattern vars bound from recursive (Box<T>) fields.
-        // We emit `let x = *x;` at the top of the arm body to auto-unbox them.
+        // We emit `let x = *x;` (or `let x = x.map(|b| *b);` for a `T?` field stored as
+        // `Option<Box<T>>`) at the top of the arm body to auto-unbox them.
         let mut boxed_bindings: Vec<String> = Vec::new();
         let subj_enum_ref = self.match_subject_enum.as_deref();
         for p in &arm.patterns {
@@ -1482,7 +1483,7 @@ impl Transpiler {
                     }
                 };
                 self.in_throws = prev_throws;
-                for b in &boxed_bindings { self.line(&format!("let {} = *{};", b, b)); }
+                for b in &boxed_bindings { self.line(b); }
                 self.line(&format!("{} => {},", inner_pat_s, body_s));
                 self.line("_ => unreachable!(),");
                 self.indent -= 1;
@@ -1522,7 +1523,7 @@ impl Transpiler {
                     // Can't emit let statements in expr position; wrap in a block.
                     self.line(&format!("{}{} => {{", pat_s, guard));
                     self.indent += 1;
-                    for b in &boxed_bindings { self.line(&format!("let {} = *{};", b, b)); }
+                    for b in &boxed_bindings { self.line(b); }
                     self.line(&expr_s);
                     self.indent -= 1;
                     self.line("}");
@@ -1531,7 +1532,7 @@ impl Transpiler {
             MatchBody::Block(stmts) => {
                 self.line(&format!("{}{} => {{", pat_s, guard));
                 self.indent += 1;
-                for b in &boxed_bindings { self.line(&format!("let {} = *{};", b, b)); }
+                for b in &boxed_bindings { self.line(b); }
                 if use_value_body {
                     self.emit_body(stmts);
                 } else {
@@ -1690,7 +1691,15 @@ impl Transpiler {
                         let rec_key = format!("{}::{}::{}", enum_name, variant_name, i);
                         if recursive_fields.contains(&rec_key) {
                             if let Pattern::Bind(name) = f {
-                                out.push(name.clone());
+                                let optional = matches!(
+                                    enum_variant_field_types.get(&key).and_then(|t| t.get(i)).map(Type::without_mut),
+                                    Some(Type::Optional(_))
+                                );
+                                out.push(if optional {
+                                    format!("let {0} = {0}.map(|__boxed| *__boxed);", name)
+                                } else {
+                                    format!("let {0} = *{0};", name)
+                                });
                             }
                         } else {
                             Self::collect_boxed_bindings(f, enum_variant_field_types, recursive_fields, subject_enum, out);
