@@ -1415,20 +1415,7 @@ impl Transpiler {
         ext_setters: &[&crate::ast::SetDecl],
     ) {
 
-        // Collect private, unqualified fields with their declared inner type name.
-        let target_fields: std::collections::HashMap<String, String> = s.fields.iter()
-            // `mut Point p` wraps `f.ty` in `Type::Mut` (docs/book.md
-            // §3) — strip it before inspecting the shape, same as everywhere else.
-            .filter(|f| !matches!(f.ty.without_mut(), Type::Qualified(..)))
-            .filter_map(|f| {
-                // Only struct-typed fields (Named type) are candidates for qualifier inference.
-                if let Type::Named(type_name) = f.ty.without_mut() {
-                    Some((f.name.clone(), type_name.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let target_fields = Self::field_inference_targets(s);
 
         if target_fields.is_empty() { return; }
 
@@ -1479,9 +1466,31 @@ impl Transpiler {
             );
         }
 
-        // Resolve candidates for struct fields.
-        for (field_name, remaining) in &candidates {
-            let key = format!("{}::{}", s.name, field_name);
+        for (field_name, q) in self.resolve_field_candidates(&target_fields, &candidates) {
+            self.register_field_qualifier(format!("{}::{}", s.name, field_name), &q);
+        }
+    }
+
+    /// Fields of `s` that qualifier inference considers: struct-typed, no written qualifier.
+    pub(super) fn field_inference_targets(s: &crate::ast::StructDecl) -> std::collections::HashMap<String, String> {
+        s.fields.iter()
+            .filter(|f| !matches!(f.ty.without_mut(), Type::Qualified(..)))
+            .filter_map(|f| match f.ty.without_mut() {
+                Type::Named(type_name) => Some((f.name.clone(), type_name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Turn the surviving candidate sets of `struct_name`'s fields into one qualifier each
+    /// (fields whose set is empty, or that no fallback can decide, are left out).
+    pub(super) fn resolve_field_candidates(
+        &self,
+        target_fields: &std::collections::HashMap<String, String>,
+        candidates: &std::collections::HashMap<String, Vec<OwnerQual>>,
+    ) -> Vec<(String, OwnerQual)> {
+        let mut out = Vec::new();
+        for (field_name, remaining) in candidates {
             // If both a plain qualifier and its 'task variant survived elimination, pick
             // one based on whether a task-declared method was called on this field.
             let mut remaining: Vec<OwnerQual> = remaining.clone();
@@ -1505,18 +1514,35 @@ impl Transpiler {
                     }
                 }
             };
-            match &resolved {
-                OwnerQual::Actor    => { self.struct_mutex_fields.insert(key); }
-                OwnerQual::ActorTask => { self.struct_mutex_task_fields.insert(key); }
-                OwnerQual::Guard    => { self.struct_rwlock_fields.insert(key); }
-                OwnerQual::GuardTask => { self.struct_rwlock_task_fields.insert(key); }
-                // Stack / Owned / Shared: no registry needed — plain T or Box<T>.
-                _ => {}
-            }
+            out.push((field_name.clone(), resolved));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Record an inferred field qualifier in the registries emission reads.
+    pub(super) fn register_field_qualifier(&mut self, key: String, q: &OwnerQual) {
+        match q {
+            OwnerQual::Actor     => { self.struct_mutex_fields.insert(key); }
+            OwnerQual::ActorTask => { self.struct_mutex_task_fields.insert(key); }
+            OwnerQual::Guard     => { self.struct_rwlock_fields.insert(key); }
+            OwnerQual::GuardTask => { self.struct_rwlock_task_fields.insert(key); }
+            // Stack / Owned / Shared: no registry needed — plain T or Box<T>.
+            _ => {}
         }
     }
 
-    fn walk_stmts_for_field_qualifiers(
+    /// The registry state of a field, to detect that a re-inference changed it.
+    pub(super) fn field_registry_state(&self, key: &str) -> [bool; 4] {
+        [
+            self.struct_mutex_fields.contains(key),
+            self.struct_mutex_task_fields.contains(key),
+            self.struct_rwlock_fields.contains(key),
+            self.struct_rwlock_task_fields.contains(key),
+        ]
+    }
+
+    pub(super) fn walk_stmts_for_field_qualifiers(
         &mut self,
         stmts: &[Stmt],
         struct_name: &str,
@@ -1980,7 +2006,7 @@ fn coercible_from(demanded: OwnerQual) -> Vec<OwnerQual> {
     }
 }
 
-fn all_qualifiers() -> Vec<OwnerQual> {
+pub(super) fn all_qualifiers() -> Vec<OwnerQual> {
     vec![
         OwnerQual::Inline,
         OwnerQual::Owned,
@@ -2324,7 +2350,7 @@ fn quals_equal(a: &OwnerQual, b: &OwnerQual) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
-fn qual_name(q: &OwnerQual) -> &'static str {
+pub(super) fn qual_name(q: &OwnerQual) -> &'static str {
     match q {
         OwnerQual::Inline    => "inline",
         OwnerQual::Owned     => "owned",
@@ -2676,7 +2702,7 @@ impl Transpiler {
     /// tell without the emission-time state: a local of known struct type (through `let t = s`
     /// aliases), `self` inside a method, a constructor call `Type(..)`, and `self.field` /
     /// `local.field` chains over declared struct fields.
-    fn method_receiver_type(
+    pub(super) fn method_receiver_type(
         &self,
         obj: &Expr,
         var_struct_types: &std::collections::HashMap<String, String>,
@@ -2700,9 +2726,9 @@ impl Transpiler {
             },
             ExprKind::Field(inner, field) => {
                 let owner = self.method_receiver_type(inner, var_struct_types, alias_of)?;
-                match &self.struct_fields.get(&owner)?.iter().find(|(n, _)| n == field)?.1 {
+                match self.struct_fields.get(&owner)?.iter().find(|(n, _)| n == field)?.1.without_mut() {
                     Type::Named(n) => Some(n.clone()),
-                    Type::Qualified(inner, _) => match inner.as_ref() { Type::Named(n) => Some(n.clone()), _ => None },
+                    Type::Qualified(inner, _) => match inner.without_mut() { Type::Named(n) => Some(n.clone()), _ => None },
                     _ => None,
                 }
             }

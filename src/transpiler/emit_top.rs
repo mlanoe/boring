@@ -560,8 +560,18 @@ impl Transpiler {
     /// Run the speculative qualifier pre-inference for every file queued by `deep_pre_scan`,
     /// now that every struct of every reachable file is registered.
     pub(crate) fn run_pending_pre_infer(&mut self) {
-        for program in std::mem::take(&mut self.pending_pre_infer) {
-            self.pre_infer_fn_qualifiers(&program);
+        let programs = std::mem::take(&mut self.pending_pre_infer);
+        for program in &programs {
+            self.pre_infer_fn_qualifiers(program);
+        }
+        // Struct field qualifiers seen from every file (see `infer_field_cross_file.rs`). A field
+        // that changes can change what the signatures infer (and the reverse), so alternate to a
+        // fixed point; each round only ever narrows candidate sets, so it terminates.
+        for _ in 0..8 {
+            if !self.infer_cross_file_field_qualifiers(&programs) { break; }
+            for program in &programs {
+                self.pre_infer_fn_qualifiers(program);
+            }
         }
     }
 
