@@ -66,11 +66,17 @@ def main():
     bins = {"rust": native}
     for mode in MODES if args.all_modes else MODES[:1]:
         target = ROOT / "boring/interpreter" / mode / "target"
-        candidates = sorted(target.glob(f"*/debug/main{exe}"))
-        bins[mode] = candidates[0] if candidates else target / f"debug/main{exe}"
+        # Newest wins: interpreter_build recreates a stale <triple>/debug/main
+        # that must not shadow a fresher plain `cargo build` in debug/main.
+        candidates = [p for p in [target / f"debug/main{exe}", *target.glob(f"*/debug/main{exe}")]
+                      if p.is_file()]
+        bins[mode] = (max(candidates, key=lambda p: p.stat().st_mtime) if candidates
+                      else target / f"debug/main{exe}")
     for binary in bins.values():
         if not binary.is_file():
             parser.error(f"missing {binary}; run the build prerequisites")
+    for label, binary in bins.items():
+        print(f"using {label}: {binary}", flush=True)
     rows = []
     for name in names:
         fixture = ROOT / f"tests/cases/{name}.br"
