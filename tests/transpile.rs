@@ -1171,6 +1171,10 @@ transpile_test!(introspect_thread_safety);
 // tests/cases/qualifier_group_param.br's own doc comment.
 transpile_test!(qualifier_group_param);
 
+// Regression: a local declared `T'many` and passed to group parameters is promoted to the
+// shared handle they resolve to (no throwaway wrapper, no moved value); see the case's doc comment.
+transpile_test!(qualifier_group_local_caller);
+
 // Regression: `pre_scan`'s built-in `Error`/`MethodKind`/`FieldValue` enum seeding used
 // to run unconditionally on every call, and in a multi-file build `pre_scan` runs once
 // per `.br` file -- so a later file's call would re-clobber an earlier file's own enum

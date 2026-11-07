@@ -584,6 +584,7 @@ interp_test!(match_outer_subject_in_loop);
 // parameter -- see tests/cases/qualifier_group_param.br's doc comment and the
 // matching `transpile_test!` in tests/transpile.rs for the parser-level bug.
 interp_test!(qualifier_group_param);
+interp_test!(qualifier_group_local_caller);
 interp_test!(cast_scenarios);
 interp_test!(if_else_cast_numeric);
 interp_test!(nested_numeric_cast);

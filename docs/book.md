@@ -9505,7 +9505,20 @@ Pipe-separated unions are also valid: `T'inline|owned` accepts only `'inline` or
 
 Groups have no Rust representation — no trait bound is emitted. The constraint is enforced at the Boring level: the transpiler rejects callers that pass a qualifier outside the declared group, and uses the body's inference signals to resolve to a single concrete qualifier for emission. If inference cannot resolve to one qualifier, the first member of the group is used as fallback.
 
-> Groups are meaningful only on parameters, not on local variables. On a local variable the inference starting set already covers this information, and writing an explicit qualifier is clearer. `'new` (above) is a different kind of thing — a candidate-set qualifier, not an acceptance group — which is why it's documented separately and does narrow on local variables.
+**A local passed to a group parameter.** The group parameter resolves to one concrete qualifier from its body (`'actor` → `&Arc<Mutex<T>>`, `'shared` → `Arc<T>`, …), so a *caller* handing it a local must hold that same handle. A local declared with a group (`mut Counter'many a = Counter(0)`) is therefore inferred like a group parameter: its candidates start as the group's members and every call it is passed to narrows them. It is emitted as if written with the resolved qualifier (`Counter'actor a`), reused across all its calls: no temporary wrapper, nothing moved, a mutation made through `bump(a)` is visible to the next `peek(a)`, in `boring run` and `boring build` alike (`--show-qualifiers` lists the local and says it was narrowed by the parameters it is passed to).
+
+```boring
+def bump(mut Counter'many c): c.inc()          # inferred 'actor
+def peek(Counter'many c): print "v={c.value}"  # inferred 'shared
+
+mut Counter'many a = Counter(0)
+bump(a)
+peek(a)          # v=1
+```
+
+A local has one qualifier for all its uses. When its calls resolve differently, an `'actor` demand wins (`mut 'shared` is an error): `a` above is `'actor`, and the `'shared` parameter `peek` receives an immutable snapshot of its value taken under the lock at the call. A `'shared` local with no `'actor`/`'guard` demand stays `Arc<T>` shared by reference count; a `'one` local needs no handle and stays a plain value. Contradictory demands that no qualifier satisfies (e.g. `'actor` and `'guard`) are the usual "no valid qualifier" error.
+
+> Apart from that caller case, groups are not needed on local variables: the inference starting set already covers the same information, and writing an explicit qualifier is clearer. `'new` (above) is a different kind of thing — a candidate-set qualifier, not an acceptance group — which is why it's documented separately and does narrow on local variables.
 
 ---
 

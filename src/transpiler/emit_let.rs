@@ -1682,6 +1682,21 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, is_last: bool) {
+        // A local declared with a qualifier group (`Counter'many a`) whose call sites resolved it to
+        // a shared handle: emit it exactly as if written with that qualifier (`Counter'actor a`).
+        if let Some(ty) = s.ty.as_ref() {
+            if let Type::Qualified(inner, OwnerQual::Union(members)) = ty.without_mut() {
+                let is_group = !OwnerQual::Union(members.clone()).is_new();
+                if let (true, Type::Named(_), Some(q)) = (is_group, inner.as_ref(), self.inferred_qualifiers.get(&s.name).cloned()) {
+                    if matches!(q, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Shared) {
+                        let resolved = crate::transpiler::infer_qualifiers::apply_inferred_qual(inner, q);
+                        let mut typed = s.clone();
+                        typed.ty = Some(if matches!(ty, Type::Mut(_)) { Type::Mut(Box::new(resolved)) } else { resolved });
+                        return self.emit_let(&typed, is_last);
+                    }
+                }
+            }
+        }
         // `let {string=float16|32|64} d = {"k" = 2.5}` / `let [float16] a = [1.5, 2]`: Rust literals can't infer `half::f16`,
         // so materialize each untyped numeric value literal as an explicit f16 cast.
         if let (Some(ty), Some(v)) = (&s.ty, &s.value) {
@@ -3158,6 +3173,17 @@ impl Transpiler {
                 // too closes that gap the same way the other qualified arms already do.
                 let is_inferred_shared = matches!(&value.kind, ExprKind::Var(v)
                     if matches!(self.inferred_qualifiers.get(v.as_str()), Some(OwnerQual::Shared)));
+                // An `'actor` local handed to a `'shared` parameter (e.g. one local passed to a
+                // `'many` parameter that resolved `'shared` and to another that resolved `'actor`):
+                // the callee gets an immutable snapshot of the value under the lock.
+                if let ExprKind::Var(v) = &value.kind {
+                    if self.var_mutex_types.contains(v.as_str()) && !self.fn_current_params.contains_key(v.as_str()) {
+                        return match self.config.threading {
+                            crate::transpiler::ThreadingMode::Single => format!("Rc::new({v}.borrow().clone())"),
+                            crate::transpiler::ThreadingMode::Multi => format!("Arc::new({v}.lock().unwrap().clone())"),
+                        };
+                    }
+                }
                 match self.config.threading {
                     crate::transpiler::ThreadingMode::Single => {
                         let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")

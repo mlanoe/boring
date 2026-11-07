@@ -1023,7 +1023,7 @@ Named qualifier groups expand to the corresponding member sets:
 | `'mut` | `'inline`, `'owned`, `'actor`, `'guard` |
 | `'req` | `'shared`, `'static` |
 
-**Scope: parameters only.** Qualifier groups are not useful on local variables — the inference starting set already covers the same information.
+**Scope: parameters, and the locals passed to them.** A local declared with a group (`mut Counter'many a`) is inferred like a group parameter, narrowed by the parameters it is passed to, and emitted with the resolved handle (`'actor` → `Arc<Mutex<T>>` / `Rc<RefCell<T>>`, `'shared` → `Arc<T>` / `Rc<T>`), reused across calls rather than wrapped at each call site. One qualifier per local: when calls resolve differently, an `'actor` demand wins over a `'shared` one (which then receives a read-only snapshot taken under the lock); `--show-qualifiers` lists the local and why. Groups are otherwise not needed on locals — the inference starting set already covers the same information. See the book's "Qualifier groups".
 
 ### Qualifier parameters — the qualifier chosen at the use site
 

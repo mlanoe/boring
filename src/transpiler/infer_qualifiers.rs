@@ -146,6 +146,14 @@ impl Transpiler {
             collect_anonymous_vars(stmt, &mut anonymous_vars, &mut alias_of, &mut var_struct_types, &mut mut_bindings, &mut tick_bindings);
         }
 
+        // A local declared with a qualifier group (`Counter'many a = ...`, `'one`/`'many`/`'mut`/`'req`
+        // or `T'a|b|c`) is inferred like a group parameter: its candidates start as the group's
+        // members and the call sites it is passed to narrow them (a `'many` parameter that resolved to
+        // `'actor` makes `a` an `'actor` handle, reused across calls, not a throwaway wrapper).
+        for stmt in stmts {
+            collect_group_local_lets(stmt, &mut anonymous_vars, &mut union_initial, &mut var_struct_types, &mut mut_bindings);
+        }
+
         // Bare `T'observed` locals (docs/book.md's "'observed" section, "Qualifier
         // inference for bare `'observed`"): represented at parse time as a single-level
         // `Qualified(Named(n), Observed)` — no base qualifier chosen yet. Judgment call
@@ -468,6 +476,9 @@ impl Transpiler {
                 }
                 1 => {
                     let mut why = format!("the usage constraints leave only {}", cpu_qual_text(&remaining[0]));
+                    if union_initial.contains_key(var_name.as_str()) && !self.fn_current_params.contains_key(var_name.as_str()) {
+                        why = format!("a local declared with a qualifier group, narrowed by the parameters it is passed to (an 'actor demand wins over a 'shared one): {why}");
+                    }
                     if matches!(remaining[0], OwnerQual::ActorTask | OwnerQual::GuardTask) {
                         why.push_str(" (a task-declared method is called on it, or it is held across an await: the tokio lock)");
                     }
@@ -779,6 +790,19 @@ impl Transpiler {
                                 } else {
                                     coercible_from(demanded.clone())
                                 };
+                                // A caller value that is already a shared handle (its candidates hold
+                                // neither `'inline` nor `'owned`, e.g. a `T'many` local) and is also
+                                // demanded as `'actor` elsewhere keeps being `'actor`: a `'shared`
+                                // parameter then gets an immutable snapshot of it (`Arc::new(<locked
+                                // clone>)`), so the `'actor` demand wins over a `'shared` one.
+                                let mut compatible = compatible;
+                                if matches!(demanded, OwnerQual::Shared)
+                                    && !matches!(param_ty, Type::Optional(_))
+                                    && candidates.get(var_name.as_str()).is_some_and(|c|
+                                        !c.iter().any(|q| matches!(q, OwnerQual::Inline | OwnerQual::Owned)))
+                                {
+                                    compatible.push(OwnerQual::Actor);
+                                }
                                 constrain_candidates(candidates, var_name, &compatible, alias_of);
                                 // A concrete qualifier demand (not Borrow/BorrowMut) is a
                                 // qualifier-demand signal: auto-ref inference does not apply.
@@ -2034,6 +2058,45 @@ fn indirection_qualifiers() -> Vec<OwnerQual> {
         OwnerQual::Actor,
         OwnerQual::Guard,
     ]
+}
+
+/// Seed locals declared with a qualifier group (see the call site in `infer_qualifiers`).
+fn collect_group_local_lets(
+    stmt: &Stmt,
+    anonymous_vars: &mut std::collections::HashSet<String>,
+    union_initial: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
+    var_struct_types: &mut std::collections::HashMap<String, String>,
+    mut_bindings: &mut std::collections::HashSet<String>,
+) {
+    let mut recurse = |body: &[Stmt]| {
+        for st in body { collect_group_local_lets(st, anonymous_vars, union_initial, var_struct_types, mut_bindings); }
+    };
+    match stmt {
+        Stmt::Let(s) => {
+            if let Some(Type::Qualified(inner, OwnerQual::Union(members))) = s.ty.as_ref().map(Type::without_mut) {
+                if let (false, Type::Named(n)) = (OwnerQual::Union(members.clone()).is_new(), inner.as_ref()) {
+                    anonymous_vars.insert(s.name.clone());
+                    union_initial.insert(s.name.clone(), members.clone());
+                    var_struct_types.insert(s.name.clone(), n.clone());
+                    if s.binding == BindingKind::Mut || matches!(s.ty, Some(Type::Mut(_))) {
+                        mut_bindings.insert(s.name.clone());
+                    }
+                }
+            }
+        }
+        Stmt::If(s) => {
+            for (_, body) in &s.branches { recurse(body); }
+            if let Some(eb) = &s.else_body { recurse(eb); }
+        }
+        Stmt::While(s) => recurse(&s.body),
+        Stmt::For(s) => recurse(&s.body),
+        Stmt::Match(s) => {
+            for arm in &s.arms {
+                if let MatchBody::Block(b) = &arm.body { recurse(b); }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_anonymous_vars(

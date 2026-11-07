@@ -1,0 +1,35 @@
+# Regression: a LOCAL declared with a qualifier group (`Counter'many a`) and passed to
+# functions whose group parameter resolved to a concrete shared handle. The callee side was
+# fine (`bump` -> 'actor = &Arc<Mutex<T>>, `peek` -> 'shared = Arc<T>), but the caller's
+# local stayed a plain `Counter` and each call built a throwaway wrapper
+# (`bump(&Arc::new(Mutex::new(a)))` moved `a`, E0382, and its mutation was never visible).
+# Now the local is promoted to the handle its calls demand (one qualifier for all its uses:
+# an 'actor demand wins over a 'shared one, which then receives a read-only snapshot).
+# tests/cases/qualifier_group_param.br only passed temporaries, which is why this was missed.
+struct Counter:
+    var int value = 0
+    def inc():
+        value += 1
+
+def bump(mut Counter'many c):
+    c.inc()
+
+def peek(Counter'many c):
+    print "v={c.value}"
+
+# local used by 'actor and 'shared consumers
+mut Counter'many a = Counter(0)
+bump(a)
+peek(a)
+bump(a)
+bump(a)
+peek(a)
+
+# local only read by a 'shared consumer
+let Counter'many b = Counter(41)
+peek(b)
+peek(b)
+
+# 'one local: no shared handle needed, stays a plain value
+let Counter'one d = Counter(7)
+print "d={d.value}"
