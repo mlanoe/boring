@@ -4141,9 +4141,9 @@ impl Transpiler {
         if let Some(r) = self.try_emit_observed_field_method_direct(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_observed_field_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_atomic_method(obj, method, args) { return r; }
-        if let Some(r) = self.try_emit_rwlock_method(obj, method, args) { return r; }
-        if let Some(r) = self.try_emit_mutex_method(obj, method, args) { return r; }
-        if let Some(r) = self.try_emit_actor_field_method(obj, method, args) { return r; }
+        if let Some(r) = self.try_emit_rwlock_method(obj, method, args) { return self.scope_req_lock_call(obj, method, r); }
+        if let Some(r) = self.try_emit_mutex_method(obj, method, args) { return self.scope_req_lock_call(obj, method, r); }
+        if let Some(r) = self.try_emit_actor_field_method(obj, method, args) { return self.scope_req_lock_call(obj, method, r); }
         if let Some(r) = self.try_emit_special_case_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_tuple_method(obj, method, args) { return r; }
         if let Some(r) = self.try_emit_string_method(obj, method, args) { return r; }
@@ -6287,6 +6287,32 @@ impl Transpiler {
     }
 
     /// `call` preceded by the `hoist_lent_conflicts` prelude, as a single expression.
+    /// A `req` (read-only) call made through a lock handle (`e.get()` with `e` an `'actor`/`'guard`
+    /// local, field or element): the guard is a temporary of the *enclosing statement*, so two such
+    /// calls in one expression on the same lock (`print "{e.get()} {arr[0].get()}"` with `e` aliasing
+    /// `arr[0]`, `a.get() + b.get()`, `f(a.get(), b.get())`) hold it while taking it again — a
+    /// deadlock with `std::sync::Mutex`, a `BorrowMutError` panic with `RefCell`. The call returns an
+    /// owned value, so read it into a block: the guard drops right after the call.
+    fn scope_req_lock_call(&self, obj: &Expr, method: &str, call: String) -> String {
+        if call.starts_with('{') || call.starts_with("({") || call.contains(".await") { return call; }
+        if !Self::LOCK_TOKENS.iter().any(|t| call.contains(t)) { return call; }
+        let struct_name = self.resolve_expr_struct_type(obj)
+            .or_else(|| if let ExprKind::Var(v) = &obj.kind { Some(self.resolve_receiver_type_name(v.as_str())) } else { None })
+            .filter(|n| !n.is_empty());
+        let is_req = match struct_name {
+            Some(n) => self.struct_req_methods.contains(&format!("{}::{}", n, method)),
+            // Receiver type unknown (an inferred alias `mut e = arr[0]`): decide by method name —
+            // every struct declaring `method` must declare it `req`, otherwise leave the call alone.
+            None => {
+                let owners: Vec<&String> = self.struct_method_names.iter()
+                    .filter(|(_, ms)| ms.contains(method)).map(|(n, _)| n).collect();
+                !owners.is_empty() && owners.iter().all(|n| self.struct_req_methods.contains(&format!("{}::{}", n, method)))
+            }
+        };
+        if !is_req { return call; }
+        format!("({{ let __r = {}; __r }})", call)
+    }
+
     /// A `req` call through a std (`'actor`) lock inside an async fn: the guard is a temporary that
     /// would live to the end of the enclosing statement, so a later `.await` in the same expression
     /// (`s.stats.get() + s.jobs.get()` with `jobs` a `'task` tokio lock) holds it across the await and
