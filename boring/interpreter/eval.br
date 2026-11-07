@@ -3574,7 +3574,7 @@ def void assign_target(mut Interpreter interp, Expr target, Value val):
                                 let child_env = push_scope(interp)
                                 env_define(interp, "self", Value.Object(inner), true)
                                 env_define(interp, s.param_name, val, true)
-                                eval_block(interp, s.body)
+                                _ = eval_block(interp, s.body)
                                 pop_scope(interp)
                                 setter_called = true
                                 break
@@ -3738,7 +3738,7 @@ def Value instantiate_struct(mut Interpreter interp, StructDecl decl, [Value] ar
                             if let default_expr2 = param_default2:
                                 pval = eval_expr(interp, default_expr2)
                         env_define(interp, param.name, pval, param.mutable)
-                    eval_block(interp, init_decl.body)
+                    _ = eval_block(interp, init_decl.body)
                     for field in init_inner.fields:
                         let updated_opt = interp.current_env.get(field.0)
                         if let updated_val = updated_opt:

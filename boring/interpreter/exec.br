@@ -144,7 +144,7 @@ def Signal? exec_block_fn(mut Interpreter interp, [Stmt] stmts):
     if defers.length > 0:
         var di = defers.length - 1
         while di >= 0:
-            exec_block(interp, defers[di])
+            _ = exec_block(interp, defers[di])
             di = di - 1
     final_sig
 
@@ -1046,7 +1046,7 @@ def [Value] exec_stream_fn(mut Interpreter interp, [Stmt] stmts):
     let prev_yields = interp.stream_yields
     interp.in_stream_fn = true
     interp.stream_yields = []
-    exec_block_fn(interp, stmts)
+    _ = exec_block_fn(interp, stmts)
     interp.in_stream_fn = prev_in_stream
     let result = interp.stream_yields
     interp.stream_yields = prev_yields

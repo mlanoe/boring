@@ -1,0 +1,18 @@
+struct Point:
+    var float x
+    var float y
+    def bump():
+        x += 1.0
+
+# Script level (outside any `def`): an element binding still makes `[mut T]` an `'actor` element.
+var [mut Point] arr = [Point(1.0, 2.0)]
+let q = arr[0]
+arr[0].x = 9.0
+print q.x
+arr[0].bump()
+print q.x
+
+var {string = mut Point} d = {"a" = Point(3.0, 4.0)}
+let r = d["a"]
+d["a"].y = 8.0
+print r.y

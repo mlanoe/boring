@@ -99,6 +99,9 @@ fn visit_fn_bodies(items: &mut [Item], f: &mut dyn FnMut(&mut [Stmt])) {
             Item::Ext(e) => { for m in &mut e.methods { f(&mut m.body); } }
             Item::Mod(m) => visit_fn_bodies(&mut m.items, f),
             Item::Stmt(s) => f(std::slice::from_mut(s)),
+            // A script-level `let`/`mut`/`var` (`let q = arr[0]`) is an item of its own, not a
+            // statement: examine its initializer as a one-statement body too.
+            Item::Let(l) => f(&mut [Stmt::Let(l.clone())]),
             _ => {}
         }
     }
