@@ -1,5 +1,5 @@
 //! Errors of qualifier-generic functions and methods
-//! (docs/design-notes/qualifier-generic-params.md, section 12): `boring run` and `boring build`
+//! (docs/book.md "Qualifier parameters"): `boring run` and `boring build`
 //! report the same diagnostic at the same position, since every one is found while parsing.
 use std::path::Path;
 use std::process::Command;

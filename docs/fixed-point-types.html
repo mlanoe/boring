@@ -223,6 +223,8 @@ fixed16_16.min   fixed16_16.max</code></pre></div>
 <span class="co">// Sub, Neg, Div, Rem, the *Assign variants, Display, Debug, …</span></code></pre></div>
 <p><code>i64 / (1 &lt;&lt; 16)</code> truncates toward zero, matching the stated semantics (an arithmetic <code>&gt;&gt;</code> would floor). Overflow checks go through the same <code>debug_assert</code>/<code>wrapping_*</code> policy the transpiler already uses for integers.</p>
 <p>Formats are emitted by a small generator keyed on <code>(signed, N, M)</code>, not hand-written per format. Literals are folded to their raw integer at transpile time (<code>1.5</code> in <code>fixed16_16</code> → <code>Fixed16_16(98304)</code>).</p>
+<h2 id="linux-target---linux">Linux target (<code>--linux</code>)</h2>
+<p>Supported with integer-only generated code (no <code>f32</code>/<code>f64</code>), float conversions rejected; details and limits in <a href="linux-target.md#fixed-point-types">linux-target.md</a>.</p>
 <h2 id="interpreter-boring-run-and-self-hosted-interpreter">Interpreter (<code>boring run</code>) and self-hosted interpreter</h2>
 <p>New runtime variant <code>Value::Fixed { raw: i128, signed, n, m }</code> with a matching <code>Type::Fixed { signed, n, m }</code>. The interpreter implements exactly the semantics table above using <code>i128</code> math (hence no 2W-bit problem for any format ≤ 64 bits). This is the reference semantics; the transpiled Rust, the self-hosted interpreter (<code>boring/interpreter/</code>) and GPU lowerings must agree with it, and the shared test-case corpus (<code>tests/cases/*.br</code> + <code>.expected</code>) gets fixed-point cases so all four builds are checked against one answer.</p>
 <h2 id="gpu-backends">GPU backends</h2>

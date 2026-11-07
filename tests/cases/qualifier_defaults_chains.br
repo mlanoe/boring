@@ -1,4 +1,4 @@
-# Qualifier parameters, phase 3 (docs/design-notes/qualifier-generic-params.md, section 10):
+# Qualifier parameters, phase 3 (docs/book.md "Qualifier parameters"):
 # default values (`'elem = 'inline`) and chained qualifiers (`elem'actor'observed`).
 struct Point:
     var int x = 0

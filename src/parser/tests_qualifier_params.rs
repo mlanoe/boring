@@ -1,4 +1,4 @@
-//! Qualifier parameters (docs/design-notes/qualifier-generic-params.md): declaration forms,
+//! Qualifier parameters (docs/book.md "Qualifier parameters"): declaration forms,
 //! `label'qualifier` arguments in every position, and the `T'elem` use.
 use crate::ast::*;
 

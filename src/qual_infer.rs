@@ -9,7 +9,7 @@
 //
 // See the LICENSE file at the project root for the full text.
 
-//! Inference of qualifier arguments at construction (docs/design-notes/qualifier-generic-params.md,
+//! Inference of qualifier arguments at construction (docs/book.md "Qualifier parameters",
 //! section 8): `Board(cells = [a, b])` is `Board<elem'actor>` when the construction itself
 //! determines the parameter `elem` of `struct Board<'elem>`.
 //!

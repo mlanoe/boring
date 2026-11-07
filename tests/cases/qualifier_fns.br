@@ -1,4 +1,4 @@
-# Functions and methods generic over a qualifier (docs/design-notes/qualifier-generic-params.md,
+# Functions and methods generic over a qualifier (docs/book.md "Qualifier parameters",
 # section 12): `int count<'q>(Board<elem'q> b)` is specialised per qualifier (`count_actor`,
 # `count_owned`), with an explicit declaration, an implicit one (the name written in the signature),
 # a bound and a default, a parameter passed on to another function, and a method that declares a

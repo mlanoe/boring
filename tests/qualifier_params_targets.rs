@@ -1,4 +1,4 @@
-//! Qualifier parameters (docs/design-notes/qualifier-generic-params.md) on the other targets:
+//! Qualifier parameters (docs/book.md "Qualifier parameters") on the other targets:
 //! the GPU host emitters (`--target metal|cuda|rocm`) reuse the general emission, so a
 //! kernel-file program gets the same specialised `Board_actor` / `Board_inline`; `--linux` has no
 //! specialisation pass and rejects the feature with one clear message. Text checks only: no
@@ -53,7 +53,7 @@ def main():
 "#;
 
 /// The same instances, none of them written: every qualifier argument is inferred at construction
-/// (docs/design-notes/qualifier-generic-params.md, section 8).
+/// (docs/book.md "Qualifier parameters").
 const INFERRED_MAIN: &str = r#"def main():
     let Point'actor p = Point(1)
     mut a = Board(cells = [p])

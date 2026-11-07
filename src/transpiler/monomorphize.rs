@@ -50,7 +50,7 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 use std::cell::{Cell, RefCell};
 
-// ─── Qualifier parameters (docs/design-notes/qualifier-generic-params.md) ───────
+// ─── Qualifier parameters (docs/book.md "Qualifier parameters") ───────
 //
 // A declaration with a qualifier parameter (`struct Board<'elem>`; encoded `^elem` in
 // `type_params`) has no generic-Rust form: every use names its qualifier argument

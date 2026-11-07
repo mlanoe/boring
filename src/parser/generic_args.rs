@@ -10,7 +10,7 @@
 // See the LICENSE file at the project root for the full text.
 
 //! Labelled generic arguments (`Pair<K = int, V = string>`, `Grid<N = 4>`;
-//! docs/design-notes/labelled-generic-args.md).
+//! docs/book.md "Labelled generic arguments").
 //!
 //! Every generic argument list (constructor/call, method turbofish, type position, `ext`
 //! header) is read by `parse_generic_arg_list`, which accepts positional arguments followed
@@ -457,7 +457,7 @@ impl Parser {
 }
 
 /// A bare use of a declaration with qualifier parameters (`Board`, `Board()`, `Slot.Full(x)`)
-/// is an error: every use names its qualifier arguments (docs/design-notes/qualifier-generic-params.md).
+/// is an error: every use names its qualifier arguments (docs/book.md "Qualifier parameters").
 /// Declarations come from the file and the files it `use`s.
 pub(crate) fn check_bare_qual_uses(program: &Program) -> Result<(), ParseError> {
     if !program.items.iter().any(|i| matches!(i, Item::Use(_)) || crate::transpiler::monomorphize::is_qual_generic_item(i)) {

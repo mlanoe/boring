@@ -1,4 +1,4 @@
-//! Labelled generic argument errors (docs/design-notes/labelled-generic-args.md): `boring run`
+//! Labelled generic argument errors (docs/book.md "Labelled generic arguments"): `boring run`
 //! and `boring build` must report the same diagnostic, with the position of the offending
 //! argument. Both go through `parser::parse`, where labels are resolved.
 use std::path::Path;

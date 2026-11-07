@@ -1767,7 +1767,7 @@ impl Parser {
         let mut where_clause = Vec::new();
         self.skip_newlines_and_indent();
         loop {
-            // Qualifier parameter: `'elem`, `'elem as 'new` (docs/design-notes/qualifier-generic-params.md).
+            // Qualifier parameter: `'elem`, `'elem as 'new` (docs/book.md "Qualifier parameters").
             if self.check(&TokenKind::Tick) {
                 match self.parse_qual_param_decl() {
                     Ok(p) => params.push(p),

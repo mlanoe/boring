@@ -1424,7 +1424,7 @@ pub enum OwnerQual {
     /// shape to preserve that local-narrowing behavior).
     Union(Vec<OwnerQual>),
     /// `T'elem` — use of a qualifier parameter declared as `struct Board<'elem>`
-    /// (docs/design-notes/qualifier-generic-params.md). Substituted by the monomorphizer
+    /// (docs/book.md "Qualifier parameters"). Substituted by the monomorphizer
     /// (`Board<elem'actor>` → `Board_actor`) before any later pass sees it; the checker and
     /// the interpreter treat it as an unresolved qualifier.
     Param(String),

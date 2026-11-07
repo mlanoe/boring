@@ -389,7 +389,7 @@ fn tick_is_qualifier(chars: &[char], i: usize) -> bool {
 
 /// Is the `'` at `chars[i]` inside the `<...>` list of a `struct`/`enum`/`trait`/`ext` header
 /// line (`struct Board<'elem as 'new>:`)? A raw string cannot occur there, so every tick in the
-/// list is a qualifier-parameter tick (docs/design-notes/qualifier-generic-params.md). Only
+/// list is a qualifier-parameter tick (docs/book.md "Qualifier parameters"). Only
 /// the text of the current line before the tick is looked at.
 fn tick_in_decl_header(chars: &[char], i: usize) -> bool {
     // The list may span several lines: try the line the header starts on, up to `HEADER_LINES`
@@ -433,7 +433,7 @@ fn decl_header_open(text: &[char]) -> bool {
 /// function's name directly and be closed by a `>` that is immediately followed by `(`, which no
 /// comparison written on a statement line is (`x < 'a'`, `f(a < 'b', c > (d))` keep their raw
 /// strings): every tick in such a list is a qualifier-parameter tick
-/// (docs/design-notes/qualifier-generic-params.md, section 12).
+/// (docs/book.md "Qualifier parameters").
 fn tick_in_fn_header(chars: &[char], i: usize) -> bool {
     // The list may span several lines: windows from the tick's own line back to `HEADER_LINES`
     // earlier, extended forward to the line that closes the list.

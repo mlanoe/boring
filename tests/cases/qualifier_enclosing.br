@@ -1,4 +1,4 @@
-# Passing a qualifier parameter to an enclosing struct (docs/design-notes/qualifier-generic-params.md,
+# Passing a qualifier parameter to an enclosing struct (docs/book.md "Qualifier parameters",
 # "Passing the parameter to an enclosing struct"): `struct Game<'cells>` hands its own parameter to
 # the `Board` it holds, written explicitly as `Board<elem'cells>`; the names are independent.
 struct Point:

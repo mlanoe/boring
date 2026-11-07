@@ -1,4 +1,4 @@
-//! Qualifier parameter errors (docs/design-notes/qualifier-generic-params.md): `boring run` and
+//! Qualifier parameter errors (docs/book.md "Qualifier parameters"): `boring run` and
 //! `boring build` must report the same diagnostic, with the position of the offending token. All
 //! of them are found while parsing, so both go through `parser::parse`.
 use std::path::Path;
