@@ -2465,7 +2465,22 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
         report_inferred_cpu_qualifiers(&path);
     }
 
+    // The compiled program shares a struct field only where it is a lock handle (`'actor`/
+    // `'guard`, written or inferred) and copies every other one on a by-value read; the
+    // interpreter needs the same set of fields to behave identically.
+    let lock_fields = {
+        let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+        let cfg = transpiler::TranspileConfig { source_dir, deps: deps.clone(), ..Default::default() };
+        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = transpiler::transpile_with_config(&program, cfg);
+            transpiler::take_lock_fields()
+        })).unwrap_or_default();
+        let _ = transpiler::take_cpu_decisions();
+        found
+    };
+
     let mut interp = interpreter::Interpreter::new();
+    interp.lock_fields = lock_fields;
 
     // Forwarded to the `args()`/`raw_args()` builtins — see `user_args`'s doc
     // comment on `Interpreter`. argv[0] is the program name (this script), then

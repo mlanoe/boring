@@ -38,6 +38,7 @@ impl Interpreter {
                 let s_val = s.value.as_ref().unwrap();
                 Self::check_no_owned_extract(s_val, &env, s.line)?;
                 let val = self.eval_expr(s_val, Rc::clone(&env))?;
+                let val = if s.ty.as_ref().is_some_and(|t| self.type_is_alias(t)) { val } else { self.field_read_copy(s_val, val, &env) };
                 // Apply type coercion if annotation is present (e.g. Int literal → Uint).
                 // Also try implicit user-defined `as T:` conversion when the value doesn't
                 // directly match the annotation (e.g. `let Animal a = dog`).
@@ -208,7 +209,10 @@ impl Interpreter {
                         };
                         match hinted {
                             Some(v) => v,
-                            None => self.eval_expr(e, Rc::clone(&env))?,
+                            None => {
+                                let v = self.eval_expr(e, Rc::clone(&env))?;
+                                self.returned_copy(e, v, &env)
+                            }
                         }
                     }
                     None => Value::Nil,

@@ -507,3 +507,73 @@ fn no_param_annotation_hint_warning() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(!text(&out.stderr).contains("consider annotating"), "{}", text(&out.stderr));
 }
+
+// ---------------------------------------------------------------------------------------------
+// `boring run` and the compiled program agree on by-value reads of a struct field: a plain
+// field is copied (let, assignment, bare return, method return, nested path, array/dict
+// literal element, constructor argument), a lock-handle field is shared.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn plain_field_reads_are_copies_in_run_and_build() {
+    check("plain_field_copies", &[("main.br", r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct Svc:
+    var Counter stats = Counter()
+
+struct Outer:
+    var Svc svc = Svc()
+
+struct Holder:
+    var mut Counter c = Counter()
+
+struct Box2:
+    var Counter inner = Counter()
+    def Counter take():
+        inner
+
+Counter pick(Svc s):
+    s.stats
+
+mut s = Svc()
+mut a = s.stats
+a.inc()
+print "let {s.stats.get()} {a.get()}"
+
+var mut Counter d = Counter()
+d = s.stats
+d.inc()
+print "assign {s.stats.get()} {d.get()}"
+
+mut r = pick(s)
+r.inc()
+print "return {s.stats.get()} {r.get()}"
+
+mut b = Box2()
+mut t = b.take()
+t.inc()
+print "method {b.inner.get()} {t.get()}"
+
+mut o = Outer()
+mut n = o.svc.stats
+n.inc()
+print "nested {o.svc.stats.get()} {n.get()}"
+
+var [mut Counter] arr = [s.stats]
+arr[0].inc()
+print "array {s.stats.get()} {arr[0].get()}"
+
+var {string = mut Counter} dd = {"k" = s.stats}
+dd["k"].inc()
+print "dict {s.stats.get()} {dd["k"].get()}"
+
+mut h = Holder(c = s.stats)
+h.c.inc()
+print "ctor {s.stats.get()} {h.c.get()}"
+"#)], "let 0 1\nassign 0 1\nreturn 0 1\nmethod 0 1\nnested 0 1\narray 0 1\ndict 0 1\nctor 0 1\n");
+}

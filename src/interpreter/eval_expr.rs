@@ -503,6 +503,7 @@ impl Interpreter {
     /// structs are `Rc` references, so return a fresh copy instead of the shared instance.
     /// `'shared`/`'actor`/`'guard` bindings are aliases and `self` is left alone.
     pub(crate) fn stored_copy(&self, e: &Expr, v: Value, env: &EnvRef) -> Value {
+        if matches!(&e.kind, ExprKind::Field(..)) { return self.field_read_copy(e, v, env); }
         let ExprKind::Var(name) = &e.kind else { return v };
         if name == "self" || !matches!(v, Value::Object(_)) { return v; }
         {
@@ -517,6 +518,66 @@ impl Interpreter {
             }
         }
         self.copy_struct_value(&v)
+    }
+
+    /// Side-effect-free read of a `a.b.c` path (variables and fields only): the value it
+    /// denotes, or `None` when it needs evaluation.
+    fn peek_path(&self, e: &Expr, env: &EnvRef) -> Option<Value> {
+        match &e.kind {
+            ExprKind::Var(n) => env.borrow().get(n),
+            ExprKind::Field(b, f) => {
+                let Value::Object(o) = self.peek_path(b, env)? else { return None };
+                let o = o.borrow();
+                o.fields.iter().find(|(k, _)| k == f).map(|(_, v)| v.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// A struct-valued field read by value (`let c = s.stats`, `return s.stats`, `[s.stats]`,
+    /// a constructor argument): the compiled program clones it (value semantics), while the
+    /// interpreter's structs are `Rc` references, so return an independent copy. A field that
+    /// is a shared lock handle (declared `'actor`/`'guard`/`'shared`..., or inferred as one by
+    /// the transpiler's analysis, see `lock_fields`) stays shared. Anything the path cannot be
+    /// resolved for without evaluation is left as is.
+    pub(crate) fn field_read_copy(&self, e: &Expr, v: Value, env: &EnvRef) -> Value {
+        // A bare name that resolves to a field of `self` is that field (implicit self).
+        let (parent, fname): (Option<Value>, &str) = match &e.kind {
+            ExprKind::Field(inner, fname) => (self.peek_path(inner, env), fname.as_str()),
+            ExprKind::Var(n) if n != "self" && env.borrow().resolves_to_self_field(n) => (env.borrow().get("self"), n.as_str()),
+            _ => return v,
+        };
+        match &v {
+            Value::Object(o) => {
+                let ty = o.borrow().type_name.clone();
+                if !matches!(self.global.borrow().get(&ty), Some(Value::Struct { .. })) { return v; }
+            }
+            Value::Array(_) | Value::Tuple(_) | Value::Dict(_) => {}
+            _ => return v,
+        }
+        let Some(Value::Object(parent)) = parent else { return v };
+        let pty = parent.borrow().type_name.clone();
+        if self.field_is_alias(&pty, fname) || self.lock_fields.contains(&format!("{pty}::{fname}")) { return v; }
+        self.copy_struct_value(&v)
+    }
+
+    /// Whether `ty` is an aliasing handle type (`'shared`/`'actor`/`'guard`/`'weak`/borrow, or a trait).
+    pub(crate) fn type_is_alias(&self, ty: &Type) -> bool {
+        match self.resolve_type(ty).without_mut() {
+            Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::ActorTask
+                | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Weak
+                | OwnerQual::Borrow | OwnerQual::BorrowMut | OwnerQual::BorrowShared) => true,
+            other => Self::type_base_name(other).map(|n| self.traits.contains_key(&n)).unwrap_or(false),
+        }
+    }
+
+    /// `field_read_copy` for the value a function returns, unless its declared return type is an alias.
+    pub(crate) fn returned_copy(&self, e: &Expr, v: Value, env: &EnvRef) -> Value {
+        if !matches!(&e.kind, ExprKind::Field(..) | ExprKind::Var(..)) { return v; }
+        match self.return_ty_stack.last() {
+            Some(Some(ty)) if !self.type_is_alias(ty) => self.field_read_copy(e, v, env),
+            _ => v,
+        }
     }
 
     /// Whether field `field` of struct `type_name` is declared as an aliased handle
@@ -1872,7 +1933,9 @@ impl Interpreter {
                 }
                 // Implicit-self field write (`kept = p` in a method) stores by value like `self.kept = p`.
                 let implicit_self_field = matches!(&target.kind, ExprKind::Var(n) if env.borrow().resolves_to_self_field(n));
-                if implicit_self_field || matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..)) {
+                if implicit_self_field || matches!(target.kind, ExprKind::Index(..) | ExprKind::Field(..))
+                    || matches!(value.kind, ExprKind::Field(..))
+                {
                     val = self.stored_copy(value, val, &env);
                 }
                 // The write-back of a host tensor destination field (`desugar_tensor_fields`)
@@ -2063,7 +2126,8 @@ impl Interpreter {
             ExprKind::Array(elems) => {
                 let mut vals = Vec::new();
                 for e in elems {
-                    vals.push(self.eval_expr(e, Rc::clone(&env))?);
+                    let v = self.eval_expr(e, Rc::clone(&env))?;
+                    vals.push(self.field_read_copy(e, v, &env));
                 }
                 // Untyped numeric literals adopt the width of the array's typed
                 // float elements (`[a, 2.0, 0.5]` with `float32 a`), same rule as
@@ -2152,7 +2216,8 @@ impl Interpreter {
             ExprKind::Tuple(elems) => {
                 let mut vals = Vec::new();
                 for e in elems {
-                    vals.push(self.eval_expr(e, Rc::clone(&env))?);
+                    let v = self.eval_expr(e, Rc::clone(&env))?;
+                    vals.push(self.field_read_copy(e, v, &env));
                 }
                 Ok(Value::Tuple(vals))
             }
@@ -2162,6 +2227,7 @@ impl Interpreter {
                 for (k, v) in pairs {
                     let kv = self.eval_expr(k, Rc::clone(&env))?;
                     let vv = self.eval_expr(v, Rc::clone(&env))?;
+                    let vv = self.field_read_copy(v, vv, &env);
                     result.push((kv, vv));
                 }
                 // Untyped numeric literal values adopt the width of the dict's typed
@@ -2558,7 +2624,7 @@ impl Interpreter {
                 if matches!(e.kind, ExprKind::Assign(..)) {
                     Ok(Value::Nil)
                 } else {
-                    Ok(v)
+                    Ok(self.returned_copy(e, v, &env))
                 }
             }
             Stmt::If(s)    => self.eval_if_expr(s, env),

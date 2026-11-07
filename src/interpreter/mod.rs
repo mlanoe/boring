@@ -2585,6 +2585,10 @@ pub struct Interpreter {
     pub(crate) stream_yields: Vec<Value>,
     /// Arguments forwarded to the user's script (for `args()` built-in).
     pub user_args: Vec<String>,
+    /// `"Struct::field"` of every field that is a shared lock handle (`'actor`/`'guard`), written
+    /// or inferred by the transpiler's analysis: a by-value read of such a field keeps sharing
+    /// the handle; any other struct-valued field read by value is copied (see `field_read_copy`).
+    pub lock_fields: std::collections::HashSet<String>,
     /// Final values of `var` params after the most recent function call.
     /// Keyed by param name. Cleared and repopulated by every call_fn invocation.
     /// Read by the call site to write back mutated values to caller variables.
@@ -2758,6 +2762,7 @@ impl Interpreter {
             in_stream: false,
             stream_yields: Vec::new(),
             user_args: Vec::new(),
+            lock_fields: std::collections::HashSet::new(),
             last_var_params: HashMap::new(),
             sync_fields: HashMap::new(),
             kernel_barrier: None,
@@ -2812,6 +2817,7 @@ impl Interpreter {
             in_stream: false,
             stream_yields: Vec::new(),
             user_args: Vec::new(),
+            lock_fields: std::collections::HashSet::new(),
             last_var_params: HashMap::new(),
             sync_fields: HashMap::new(),
             kernel_barrier: None,
@@ -3638,6 +3644,7 @@ impl Interpreter {
                 };
                 Self::check_no_owned_extract(stmt_value, &env, stmt.line)?;
                 let val = self.eval_expr(stmt_value, Rc::clone(&env))?;
+                let val = if stmt.ty.as_ref().is_some_and(|t| self.type_is_alias(t)) { val } else { self.field_read_copy(stmt_value, val, &env) };
                 // Apply type coercion if annotation is present (e.g. Int literal → Uint).
                 // Also try implicit user-defined `as T:` conversion when needed.
                 let val = if let Some(ty) = &stmt.ty {

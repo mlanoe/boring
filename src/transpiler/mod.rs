@@ -305,6 +305,18 @@ pub fn kernel_target_base_config() -> TranspileConfig {
     KERNEL_TARGET_PROJECT_CONFIG.with(|c| c.borrow().clone())
 }
 
+thread_local! {
+    static LOCK_FIELDS: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// `"Struct::field"` of every struct field that is a shared lock handle (`'actor`/`'guard`,
+/// `'task` variants), written or inferred, as found by the last transpile on this thread.
+/// `boring run` reads it so by-value reads of such a field keep sharing the handle exactly
+/// where the compiled program does, while every other struct field is copied.
+pub fn take_lock_fields() -> std::collections::HashSet<String> {
+    LOCK_FIELDS.with(|f| std::mem::take(&mut *f.borrow_mut()))
+}
+
 pub fn transpile(program: &Program) -> String {
     transpile_full(program).code
 }
@@ -439,6 +451,13 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
             errors.extend(helpers::placeholder_errors(c, &format!("Rust (module `{}`)", name), failed));
         }
     }
+    LOCK_FIELDS.with(|f| {
+        let mut f = f.borrow_mut();
+        f.clear();
+        for set in [&t.struct_mutex_fields, &t.struct_mutex_task_fields, &t.struct_rwlock_fields, &t.struct_rwlock_task_fields] {
+            f.extend(set.iter().cloned());
+        }
+    });
     TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get(), screen_setup_fields: t.screen_setup_fields.into_inner() }
 }
 
