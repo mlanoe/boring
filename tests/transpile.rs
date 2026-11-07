@@ -1682,3 +1682,4 @@ transpile_project_test!(qualifier_fns_xfile);
 // doesn't evaluate the `[Decl]{}` idiom. See tests/cases/optional_reuse_and_array_concat.br.
 transpile_test!(optional_reuse_and_array_concat);
 transpile_test!(lock_handle_field_argument);
+transpile_test!(task_local_to_task_param);

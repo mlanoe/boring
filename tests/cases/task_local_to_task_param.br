@@ -1,0 +1,25 @@
+# A task-local `mut c = Counter()` (or `var mut`) passed to a `task` function whose parameter is
+# `mut Counter'task` is lent as the existing tokio-lock handle: no fresh `Arc::new` wrapper, no
+# `.clone()` of the argument.
+struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+task def bump(mut Counter'task c):
+    c.inc()
+
+task go():
+    mut c = Counter()
+    bump(c)
+    bump(c)
+    var mut d = Counter()
+    for i in 0..<3:
+        bump(d)
+    print "c = {c.get()}"
+    print "d = {d.get()}"
+
+let t = task go()
+t.wait

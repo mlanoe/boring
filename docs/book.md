@@ -7878,7 +7878,7 @@ struct App:
 | `T'guard` | `Arc<std::sync::RwLock<T>>` | reader-writer; sync (`read()`/`write()`) |
 | `T'guard'task` | `Arc<tokio::sync::RwLock<T>>` | reader-writer; async (`read().await`/`write().await`) |
 
-> Use `'actor'task` / `'guard'task` inside `task` functions. Use bare `'actor` / `'guard` in sync code.
+> Use `'actor'task` / `'guard'task` inside `task` functions. Use bare `'actor` / `'guard` in sync code. A parameter of a non-`task` function typed `'actor'task`/`'guard'task` (or `'task`) is a compile error: its body would have to `.await` the lock.
 
 ### Read-heavy shared state — `T'guard` / `T'guard'task`
 

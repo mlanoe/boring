@@ -1,0 +1,12 @@
+# A `'task` (tokio lock) parameter needs `.await`, so the function must be a `task` function.
+struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+
+def bump(mut Counter'task c):
+    c.inc()
+
+def main():
+    mut c = Counter()
+    bump(c)

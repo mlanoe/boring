@@ -1768,6 +1768,14 @@ impl Checker {
             self.check_set_mut_constraint(&p.ty, p.line, p.col);
             self.check_atomic_compatibility(&p.ty, p.line, p.col);
             self.check_observed_compatibility(&p.ty, p.line, p.col);
+            if !f.task {
+                if let Some(Type::Qualified(_, q @ (OwnerQual::ActorTask | OwnerQual::GuardTask))) = &p.ty {
+                    let spelled = if matches!(q, OwnerQual::ActorTask) { "'actor'task" } else { "'guard'task" };
+                    self.error(format!(
+                        "parameter `{}` of `{}` is `{spelled}` (a tokio lock, acquired with `.await`) but `{}` is not a `task` function; declare it `task def {}(...)`, or use `'actor`/`'guard` for synchronous code",
+                        p.name, f.name, f.name, f.name), p.line, p.col);
+                }
+            }
             self.define_param(p);
         }
         // Return type — same `'shared'observed` rejection as params/fields/locals

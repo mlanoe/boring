@@ -1128,3 +1128,4 @@ fn qualifier_infer_xfile() {
     let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert_eq!(actual.trim_end(), "3\n40\n5\nfull 9");
 }
+error_test!(error_task_param_in_sync_fn);
