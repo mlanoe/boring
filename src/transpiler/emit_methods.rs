@@ -7472,6 +7472,7 @@ impl Transpiler {
             enum_variant_fields: self.enum_variant_fields.clone(),
             enum_variant_field_types: self.enum_variant_field_types.clone(),
             optional_vars: self.optional_vars.clone(),
+            copied_literal_demand: self.copied_literal_demand.clone(),
             nil_tested_vars: self.nil_tested_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),

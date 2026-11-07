@@ -343,6 +343,7 @@ impl Transpiler {
     }
 
     fn emit_for_inner(&mut self, s: &ForStmt) {
+        self.check_copied_field_literal(&s.iterable);
         // Loop variables are scoped to the for body: save outer set first so
         // that after the loop the loop vars are not visible to subsequent code.
         let saved_locals = self.known_local_vars.clone();

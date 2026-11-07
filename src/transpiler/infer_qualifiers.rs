@@ -29,6 +29,7 @@ impl Transpiler {
     /// to either member are propagated to the whole group.
     pub(crate) fn infer_qualifiers(&mut self, stmts: &[Stmt]) {
         self.inferred_qualifiers.clear();
+        self.scan_copied_literal_demands(stmts);
         self.observed_locals.clear();
         self.task_method_call_vars.clear();
         self.unresolved_call_args.clear();

@@ -1682,6 +1682,7 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, is_last: bool) {
+        if let Some(v) = &s.value { self.check_copied_field_literal(v); }
         // A local declared with a qualifier group (`Counter'many a`) whose call sites resolved it to
         // a shared handle: emit it exactly as if written with that qualifier (`Counter'actor a`).
         if let Some(ty) = s.ty.as_ref() {

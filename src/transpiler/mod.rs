@@ -33,6 +33,7 @@ pub(crate) mod unified;
 mod infer_qualifiers;
 mod infer_field_cross_file;
 mod infer_field_scan;
+mod copied_field_literals;
 pub use infer_qualifiers::{note_inferred_actor_param, take_cpu_decisions, CpuDecision};
 mod infer_trait_borrow;
 mod share_dyn_traits;
@@ -1379,6 +1380,8 @@ struct Transpiler {
     /// Maps local variable name → inferred OwnerQual, populated by a pre-pass over each
     /// function body before emission. Cleared between function bodies.
     pub(crate) inferred_qualifiers: std::collections::HashMap<String, crate::ast::OwnerQual>,
+    /// Positions of literals whose elements demand a lock handle (see `copied_field_literals`).
+    pub(crate) copied_literal_demand: std::cell::RefCell<std::collections::HashSet<(usize, usize)>>,
     /// `'observed`-qualified local variables AND function/method parameters (name →
     /// (base struct type name, base qualifier)) in the current function body — see
     /// docs/book.md's "'observed" section. Populated three ways: explicitly-annotated
@@ -1902,6 +1905,7 @@ impl Transpiler {
             struct_method_names: std::collections::HashMap::new(),
             pending_pre_infer: Vec::new(),
             inferred_qualifiers: std::collections::HashMap::new(),
+            copied_literal_demand: Default::default(),
             observed_locals: std::collections::HashMap::new(),
             observed_fields: std::collections::HashMap::new(),
             infer_local_actor_vars: std::collections::HashSet::new(),

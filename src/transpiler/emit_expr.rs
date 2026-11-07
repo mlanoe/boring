@@ -523,12 +523,7 @@ impl Transpiler {
                     // array, dict, struct...) out of `&self` is E0507, so it takes the same
                     // clone `emit_expr_owned` gives every other by-value field read.
                     if let Some(h) = self.lock_handle_clone_any(e) {
-                        self.push_error(e.line, e.col, format!(
-                            "`{}` is a shared lock handle ('actor/'guard) placed in an array literal with no \
-                             declared element type: its elements would be copies. Declare the element type \
-                             with the qualifier (e.g. `[Counter'actor] xs = [...]`) to share the handle",
-                            Self::expr_path_text(e)
-                        ));
+                        self.reject_lock_handle_copy(e, "an array literal", "`[Counter'actor] xs = [...]`");
                         return h;
                     }
                     let owned_field = matches!(&e.kind, ExprKind::Field(..))
@@ -567,6 +562,7 @@ impl Transpiler {
                 // Use emit_expr_owned so string literals become Rc/Arc<str> in tuple slots.
                 // Auto-clone non-Copy vars/fields so they remain usable after the tuple is built.
                 let es: Vec<String> = elems.iter().map(|e| {
+                    self.reject_lock_handle_copy(e, "a tuple literal", "`(Counter'actor, int) t = (...)`");
                     let s = self.emit_expr_owned(e);
                     if s.ends_with(".clone()") || s.starts_with('&') || s.starts_with("Arc::") || s.starts_with("Rc::") {
                         return s;
@@ -599,6 +595,7 @@ impl Transpiler {
                     let has_f16 = pairs.iter().any(|(_, v)| self.infer_float_width(v) == Some("f16"));
                     let ps: Vec<String> = pairs.iter()
                         .map(|(k, v)| {
+                            self.reject_lock_handle_copy(v, "a dict literal", "`{string=Counter'actor} d = {...}`");
                             let vs = if has_f16 && matches!(&v.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
                                 format!("half::f16::from_f32(({}) as f32)", self.emit_expr(v))
                             } else { self.emit_expr_owned(v) };
@@ -613,6 +610,13 @@ impl Transpiler {
                     // Provide a default element type so Rust can infer the HashSet type.
                     "HashSet::<isize>::new()".into()
                 } else {
+                    for e in elems.iter().filter(|e| self.lock_handle_clone_any(e).is_some()) {
+                        self.push_error(e.line, e.col, format!(
+                            "`{}` is a shared lock handle ('actor/'guard) and cannot be a set element: a lock is \
+                             not Hash/Eq. Use an array (`[Counter'actor]`) or key a dict by an id instead",
+                            Self::expr_path_text(e)
+                        ));
+                    }
                     let es: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
                     format!("HashSet::from([{}])", es.join(", "))
                 }
