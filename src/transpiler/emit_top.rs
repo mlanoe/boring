@@ -2994,7 +2994,6 @@ impl Transpiler {
         self.infer_qualifiers(stmts);
         self.scan_atomic_promotions(stmts);
         self.validate_union_constraints(stmts);
-        self.suggest_param_annotations();
         let non_defers: Vec<&Stmt> = stmts.iter().filter(|s| !matches!(s, Stmt::Defer(_))).collect();
         let last_idx = non_defers.len().saturating_sub(1);
         for (i, stmt) in non_defers.iter().enumerate() {
@@ -3032,10 +3031,8 @@ impl Transpiler {
         // Priority 5: use-site qualifier inference — runs before size-based decisions, all modes.
         self.infer_qualifiers(stmts);
         self.scan_atomic_promotions(stmts);
-        // After inference: validate union constraints (both caller-side and body-side),
-        // then emit hints for unqualified parameters that could benefit from annotation.
+        // After inference: validate union constraints (both caller-side and body-side).
         self.validate_union_constraints(stmts);
-        self.suggest_param_annotations();
         // Collect defer bodies (preserve order; will emit LIFO at end).
         let defers: Vec<&[Stmt]> = stmts.iter().filter_map(|s| {
             if let Stmt::Defer(d) = s { Some(d.as_slice()) } else { None }

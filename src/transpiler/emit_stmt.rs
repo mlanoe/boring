@@ -823,6 +823,16 @@ impl Transpiler {
         })
     }
 
+    /// Source-like text of a `a.b[i].c` place, for diagnostics.
+    pub(crate) fn expr_path_text(e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Var(v) => v.clone(),
+            ExprKind::Field(b, f) => format!("{}.{}", Self::expr_path_text(b), f),
+            ExprKind::Index(b, _) => format!("{}[..]", Self::expr_path_text(b)),
+            _ => "<expr>".to_string(),
+        }
+    }
+
     /// Wraps a bare, freshly-constructed return/tail-expression value to match the
     /// function's own declared `'actor`/`'actor'task`/`'guard`/`'guard'task`/`'shared`
     /// return-type qualifier — the return-type-driven counterpart of `emit_let.rs`'s
@@ -867,6 +877,20 @@ impl Transpiler {
                 let is_task = if guard { Self::is_rwlock_task_binding(false, ty) } else { Self::is_mutex_task_binding(false, ty) };
                 if let Some(h) = self.existing_lock_handle(e, is_task, guard) { return Some(h); }
             }
+        }
+        // A lock-handle field returned under a bare (unqualified) return type: the value would
+        // have to be a copy of the guarded struct, which the generated Rust cannot express as a
+        // plain clone of the handle. Say so here, with the fix, instead of an opaque E0308.
+        if matches!(e.kind, ExprKind::Field(..) | ExprKind::Index(..))
+            && !matches!(ty, Type::Qualified(..))
+            && self.lock_handle_clone_any(e).is_some()
+        {
+            self.push_error(e.line, e.col, format!(
+                "`{}` is a shared lock handle ('actor/'guard); returning it under the plain return type `{}` \
+                 would need an implicit copy. Declare the return type with the same qualifier \
+                 (e.g. `{}'actor`) to share the handle",
+                Self::expr_path_text(e), self.emit_type(ty), self.emit_type(ty)
+            ));
         }
         if !self.is_fresh_struct_ctor(e) {
             return None;

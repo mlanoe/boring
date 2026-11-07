@@ -443,3 +443,67 @@ fn cross_file_inference_and_fields_end_to_end() {
     check("cross_file", &[("model.br", XF_MODEL), ("ops.br", XF_OPS), ("main.br", XF_MAIN)],
           "n = 2\nn = 4\nn = 2\nn = 3\ntotal = 9\n");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Implicit copies of a lock handle are rejected with the fix in the message, instead of an
+// opaque rustc error (E0599 / E0308) in the generated project.
+// ---------------------------------------------------------------------------------------------
+
+const COPY_PRELUDE: &str = r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct Svc:
+    var Counter stats = Counter()
+
+def bump(mut Counter'actor c):
+    c.inc()
+
+"#;
+
+fn build_error(name: &str, body: &str) -> String {
+    let dir = project(name, &[("main.br", &format!("{COPY_PRELUDE}{body}"))]);
+    let out = boring(&dir, &["build", "main.br", "--output-dir", dir.join("out").to_str().unwrap()]);
+    assert!(!out.status.success(), "{name}: build should be rejected");
+    text(&out.stderr)
+}
+
+#[test]
+fn lock_field_in_untyped_array_literal_is_rejected() {
+    let err = build_error("copy_array_literal", "mut s = Svc()\nbump(s.stats)\nvar arr = [s.stats]\nprint \"{arr.length}\"\n");
+    assert!(err.contains("`s.stats` is a shared lock handle") && err.contains("array literal"), "{err}");
+    assert!(err.contains("[Counter'actor]"), "message must name the fix: {err}");
+}
+
+#[test]
+fn lock_field_returned_under_bare_type_is_rejected() {
+    let err = build_error("copy_bare_return", "Counter pick(Svc s):\n    s.stats\n\nmut s = Svc()\nbump(s.stats)\nvar c = pick(s)\nprint \"{c.get()}\"\n");
+    assert!(err.contains("`s.stats` is a shared lock handle") && err.contains("plain return type `Counter`"), "{err}");
+    assert!(err.contains("Counter'actor"), "message must name the fix: {err}");
+}
+
+#[test]
+fn plain_field_in_untyped_array_literal_still_copies() {
+    // Not a lock anywhere: value semantics, no diagnostic.
+    check("plain_field_array_literal", &[("main.br", r#"struct Counter:
+    var int n = 0
+
+struct Svc:
+    var Counter stats = Counter()
+
+mut s = Svc()
+var arr = [s.stats]
+print "{arr.length}"
+"#)], "1\n");
+}
+
+#[test]
+fn no_param_annotation_hint_warning() {
+    let dir = project("no_param_hint", &[("main.br", &format!("{COPY_PRELUDE}def bump2(mut Counter c):\n    bump(c)\n\nmut c = Counter()\nbump2(c)\nprint \"{{c.get()}}\"\n"))]);
+    let out = boring(&dir, &["build", "main.br", "--output-dir", dir.join("out").to_str().unwrap()]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("consider annotating"), "{}", text(&out.stderr));
+}

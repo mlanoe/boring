@@ -1824,32 +1824,6 @@ impl Transpiler {
         None
     }
 
-    /// After inference: for each unqualified parameter whose body uses demanded a concrete
-    /// qualifier, emit a hint suggesting an explicit annotation on the parameter.
-    pub(crate) fn suggest_param_annotations(&self) {
-        for (param_name, param_ty) in &self.fn_current_params {
-            if qual_of_type(param_ty).is_some() { continue; }
-            if matches!(param_ty, Type::Qualified(_, OwnerQual::Union(_))) { continue; }
-            if let Some(inferred) = self.inferred_qualifiers.get(param_name.as_str()) {
-                // Auto-ref (Borrow / BorrowMut) is resolved silently — no annotation needed.
-                if matches!(inferred, OwnerQual::Borrow | OwnerQual::BorrowMut) { continue; }
-                let line = self.fn_current_param_lines.get(param_name.as_str()).copied().unwrap_or(0);
-                // Advisory only — a successfully-inferred qualifier with a suggestion to
-                // annotate it explicitly, not a conflict. Unlike the other 4 `eprintln!`
-                // sites this module used to have (see the audit finding this fixes), this
-                // one is legitimately non-fatal: `push_warning` (not `push_error`) is the
-                // right severity — promoting it to a hard error would fail every build with
-                // an unannotated-but-successfully-inferred parameter, which is the common
-                // case, not a bug.
-                self.push_warning(line, 0, format!(
-                    "parameter `{}` is always used as '{}' in this body — \
-                     consider annotating it explicitly to make the contract clear at call sites",
-                    param_name, qual_name(inferred)
-                ));
-            }
-        }
-    }
-
     /// Returns true if `expr` evaluates to a value whose qualifier is 'actor or 'guard.
     /// Handles: calls to functions with declared 'actor/'guard return types, and variables
     /// already known to be 'actor (via var_mutex_types, var_mutex_task_types, or

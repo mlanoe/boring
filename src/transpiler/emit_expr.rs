@@ -522,7 +522,15 @@ impl Transpiler {
                     // A field read (`[self.font]`) is by value: moving a non-Copy field (an
                     // array, dict, struct...) out of `&self` is E0507, so it takes the same
                     // clone `emit_expr_owned` gives every other by-value field read.
-                    if let Some(h) = self.lock_handle_clone_any(e) { return h; }
+                    if let Some(h) = self.lock_handle_clone_any(e) {
+                        self.push_error(e.line, e.col, format!(
+                            "`{}` is a shared lock handle ('actor/'guard) placed in an array literal with no \
+                             declared element type: its elements would be copies. Declare the element type \
+                             with the qualifier (e.g. `[Counter'actor] xs = [...]`) to share the handle",
+                            Self::expr_path_text(e)
+                        ));
+                        return h;
+                    }
                     let owned_field = matches!(&e.kind, ExprKind::Field(..))
                         && !matches!(self.resolve_expr_type(e), Some(t) if param_ty_is_copy_scalar(&t));
                     if has_str_lit || owned_field { self.emit_expr_owned(e) } else { self.emit_expr(e) }
