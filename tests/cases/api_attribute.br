@@ -1,0 +1,36 @@
+# `@api` marks a pub item as part of the surface other projects rely on: it is a
+# Boring-side contract marker (checked, never emitted to Rust), so the program below
+# must behave exactly as it would without it, in `boring run` and `boring build` alike.
+
+@api(since = "1.0")
+pub struct Counter:
+    var int n = 0
+
+    pub def inc():
+        n += 1
+
+    pub req int get():
+        n
+
+@api(since = "1.0", deprecated = "use Counter")
+pub enum Level:
+    Low
+    High
+
+@api
+pub def int double(int x):
+    return x * 2
+
+# Without `@api`, nothing changes.
+pub def int triple(int x):
+    return x * 3
+
+mut c = Counter()
+c.inc()
+c.inc()
+print c.get()
+print double(21)
+print triple(5)
+match Level.High:
+    Low: print "low"
+    High: print "high"

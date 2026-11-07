@@ -372,6 +372,8 @@ transpile_test!(newtypes);
 transpile_test!(guard);
 transpile_test!(with_stmt);
 transpile_test!(generics);
+// `@api` is a Boring-side marker: it must never reach the generated Rust as an attribute.
+transpile_test!(api_attribute);
 transpile_test!(operators);
 transpile_test!(macros);
 transpile_test!(defer);

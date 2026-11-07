@@ -438,6 +438,16 @@ impl Parser {
                         // examples/todo.br) — parse normally; attrs are discarded,
                         // same as before this fix. Only the Pub-after-attrs case
                         // above is new behavior.
+                        //
+                        // `@api` must not be dropped silently: it promises a checked, stable
+                        // signature, so on an item it cannot attach to (`trait`, `ext`, `mod`...)
+                        // it is an error instead of a no-op.
+                        if let Some(a) = attrs.iter().find(|a| a.name == "api") {
+                            return Err(ParseError::Generic {
+                                msg: "`@api` is only supported on `def`/`req` functions, `struct`, `enum` and `view` declarations for now".to_string(),
+                                line: a.line, col: a.col, len: 4,
+                            });
+                        }
                         self.parse_item(is_pub)
                     }
                 }

@@ -29,6 +29,7 @@
 // will need redesigning to be parameterized per backend, not these individual
 // checks rewritten one by one.
 
+mod api;
 mod rust_checks;
 
 use std::collections::HashMap;
@@ -284,6 +285,8 @@ struct Checker {
     /// Names of every user struct and enum — what makes a `mut T` parameter a lent `&mut T`
     /// (mirrors `Transpiler::is_lent_param`'s `all_struct_types` / `all_enum_types`).
     user_types: std::collections::HashSet<String>,
+    /// Top-level struct/enum name -> whether it is marked `@api` (see `api.rs`'s exposure lint).
+    api_types: HashMap<String, bool>,
     /// Declared traits and per-type `as` conformances — for `check_trait_downcast`.
     type_traits: crate::downcast::TypeTraits,
     /// (struct name, method name) -> the parameter list of every overload, for
@@ -396,6 +399,7 @@ impl Checker {
             in_qual_generic_decl: false,
             current_struct: None,
             user_types: std::collections::HashSet::new(),
+            api_types: HashMap::new(),
             type_traits: crate::downcast::TypeTraits::default(),
             struct_methods: HashMap::new(),
             struct_field_types: HashMap::new(),
@@ -734,9 +738,9 @@ impl Checker {
     fn collect_item_signatures(&mut self, item: &Item) {
         match item {
             Item::Fn(f)     => self.collect_fn_signature(f),
-            Item::Struct(s) => self.collect_struct_signature(s),
+            Item::Struct(s) => { self.note_api_type(&s.name, &s.attrs); self.collect_struct_signature(s) }
             Item::Kernel(k) => { self.kernel_decls.insert(k.name.clone(), k.clone()); }
-            Item::Enum(e)   => { self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); self.enum_variant_types.insert(e.name.clone(), e.variants.iter().map(|v| (v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect())).collect()); }
+            Item::Enum(e)   => { self.note_api_type(&e.name, &e.attrs); self.user_types.insert(e.name.clone()); self.enums.insert(e.name.clone(), e.variants.iter().map(|v| v.name.clone()).collect()); self.enum_variant_types.insert(e.name.clone(), e.variants.iter().map(|v| (v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect())).collect()); }
             Item::Mod(m)    => { for i in &m.items { self.collect_item_signatures(i); } }
             // `ext T:` methods are overloads of `T`'s own methods.
             Item::Ext(e)    => {
@@ -1284,9 +1288,9 @@ impl Checker {
     fn check_item(&mut self, item: &Item) {
         match item {
             Item::Let(s)    => self.check_let_stmt(s),
-            Item::Fn(f)     => { self.check_di_provider_attrs(f); self.check_fn(f); }
-            Item::Struct(s) => self.check_struct(s),
-            Item::Enum(e)   => self.check_enum(e),
+            Item::Fn(f)     => { self.check_di_provider_attrs(f); self.check_api_fn(f); self.check_fn(f); }
+            Item::Struct(s) => { self.check_api_struct(s); self.check_struct(s) }
+            Item::Enum(e)   => { self.check_api_enum(e); self.check_enum(e) }
             Item::Ext(e)    => self.check_ext(e),
             Item::Mod(m)    => { for i in &m.items { self.check_item(i); } }
             Item::Stmt(s)   => self.check_stmt(s),

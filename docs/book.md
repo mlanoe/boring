@@ -4860,6 +4860,36 @@ The body is parsed once, then expanded **in the parser** into `if fmt == 8: ... 
 - Control flow is that of the ladder: an arm that does not `return` falls through to the code after the `dispatch`.
 - `dispatch` is a contextual keyword: it only starts a statement when followed by `IDENT in`, so existing variables and functions named `dispatch` are unaffected.
 
+### `@api` — a signature other projects can rely on
+
+`pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:
+
+```boring
+@api(since = "1.0")
+pub struct Counter:
+    var int n = 0
+
+    pub def inc():
+        n += 1
+
+    pub req int get():
+        n
+
+@api
+pub def int double(int x):
+    return x * 2
+```
+
+- **It requires `pub`** (`@api requires pub`), like `@provide`.
+- **The signature must be written out in full.** Every parameter typed, every qualifier parameter declared (`<'q>`, not introduced by its first use), and a `pub type let`/`type var` of an `@api` type needs its type written rather than inferred from its value. Inside the body, inference is unaffected. Today the parser already requires an annotation on every parameter and field, so the rule is mostly about what the language will later let you omit: an `@api` item keeps its explicit signature when those relaxations arrive.
+- **On a `struct` or `enum` it covers every `pub` member** (fields, methods, `type` members, setters, conversions): the attribute is not repeated on each one. Non-`pub` members are not part of the API.
+- **Arguments are free text.** `since = "..."` and `deprecated = "..."` are documentation for readers and tooling; they are never parsed or compared with `boring.toml`'s `version`, and never emitted to Rust. Any other argument, a non-string value or a repeated key is an error.
+- **Exposure warning.** An `@api` signature that mentions a type declared in the same program without `@api` produces a warning (the equivalent of Rust's private-in-public lint): the API would depend on a type free to change. A type declared in an imported file is not known to the checker and is never flagged.
+- **Where it applies.** `def`/`req` functions, `struct`, `enum` and `view`. On a `trait`, `ext`, `mod` or any other item it is a compile error rather than a silent no-op.
+- **It guarantees form, not stability.** `@api` does not detect that a signature changed between two versions; that needs a snapshot comparison (`boring api --check`), not built yet. In `boring run` and `boring build` it changes nothing else: the attribute never reaches the generated Rust.
+
+Design background: `docs/design-notes/implicit-generics-draft.md` (D1).
+
 ---
 
 ## 14. Closures and Higher-Order Functions

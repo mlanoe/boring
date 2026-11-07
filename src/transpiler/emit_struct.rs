@@ -345,7 +345,7 @@ impl Transpiler {
         // Any other explicit attrs (not `derive`, already folded into `derive_names` above)
         // still emit verbatim, unchanged.
         for attr in &s.attrs {
-            if attr.name == "derive" { continue; }
+            if attr.name == "derive" || attr.name == "api" { continue; }
             let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
             self.line(&format!("#[{}{}]", attr.name, args_s));
         }
@@ -2499,6 +2499,7 @@ impl Transpiler {
             self.line(&format!("#[derive({})]", extra_derives.join(", ")));
         }
         for attr in &e.attrs {
+            if attr.name == "api" { continue; }
             // `derive` args go through the same bare-Serialize/Deserialize qualification as
             // the struct path — enums have no equivalent `derive_names` merge step of their
             // own, so this attr is otherwise emitted completely verbatim.

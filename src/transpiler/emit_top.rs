@@ -1736,7 +1736,8 @@ impl Transpiler {
         // all; `inject` is fully resolved and desugared away by `desugar_inject.rs`
         // before the transpiler ever runs (see `emit_struct.rs`'s own note on this).
         for attr in &f.attrs {
-            if matches!(attr.name.as_str(), "singleton" | "provide" | "inject") { continue; }
+            // `api` is a Boring-side contract marker (checker/api.rs), not Rust attribute syntax.
+            if matches!(attr.name.as_str(), "singleton" | "provide" | "inject" | "api") { continue; }
             let args_s = if attr.args.is_empty() {
                 String::new()
             } else {

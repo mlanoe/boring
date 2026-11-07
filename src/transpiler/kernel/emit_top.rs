@@ -453,6 +453,7 @@ impl KernelTranspiler {
 
         // Attributes
         for attr in &f.attrs {
+            if attr.name == "api" { continue; }
             let args_s = if attr.args.is_empty() {
                 String::new()
             } else {
