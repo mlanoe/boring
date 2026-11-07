@@ -268,6 +268,121 @@ fn explicit_handle_flows() {
     check("explicit_handle_flows", &[("main.br", EXPLICIT_HANDLE_FLOWS)], "n = 2\n");
 }
 
+const MUT_METHOD_PARAM_DEMANDING_ACTOR: &str = r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+def bump(mut Counter'actor c):
+    c.inc()
+
+struct Walker:
+    int id = 0
+    def ping(mut Counter c, int k):
+        if k > 0:
+            self.pong(c, k - 1)
+    def pong(mut Counter c, int k):
+        bump(c)
+        if k > 0:
+            self.ping(c, k - 1)
+
+mut w = Walker()
+mut c = Counter()
+w.ping(c, 5)
+print "n = {c.get()}"
+"#;
+
+#[test]
+fn mut_method_param_demanding_actor() {
+    check("mut_method_param_demanding_actor", &[("main.br", MUT_METHOD_PARAM_DEMANDING_ACTOR)], "n = 3\n");
+}
+
+const TASK_LOCAL_INFERRED_TASK_ACTOR: &str = r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct Service:
+    mut Counter stats
+    int id = 0
+
+task def bump(mut Counter'task c):
+    c.inc()
+def show(Counter c):
+    print "n = {c.get()}"
+
+task go():
+    mut c = Counter()
+    bump(c)
+    bump(c)
+    print "n = {c.get()}"
+
+let t = task go()
+t.wait
+"#;
+
+#[test]
+fn task_local_inferred_task_actor() {
+    check("task_local_inferred_task_actor", &[("main.br", TASK_LOCAL_INFERRED_TASK_ACTOR)], "n = 2\n");
+}
+
+const TYPED_ARRAY_OF_FIELD_HANDLES_INFERRED_FIELD: &str = r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct Service:
+    mut Counter stats
+    int id = 0
+
+def bump(mut Counter'actor c):
+    c.inc()
+
+mut svc = Service(stats = Counter())
+let [Counter'actor] arr = [svc.stats]
+bump(arr[0])
+print "n = {svc.stats.get()}"
+"#;
+
+#[test]
+fn typed_array_of_field_handles_inferred_field() {
+    check("typed_array_of_field_handles_inferred_field", &[("main.br", TYPED_ARRAY_OF_FIELD_HANDLES_INFERRED_FIELD)], "n = 1\n");
+}
+
+const FOR_VARIABLE_OVER_ARRAY_OF_HANDLES: &str = r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+struct Service:
+    mut Counter stats
+    int id = 0
+
+def bump(mut Counter'actor c):
+    c.inc()
+
+mut svc = Service(stats = Counter())
+mut other = Service(stats = Counter())
+let [Counter'actor] arr = [svc.stats, other.stats]
+for x in arr:
+    bump(x)
+bump(arr[1])
+print "n = {svc.stats.get()} {other.stats.get()}"
+"#;
+
+#[test]
+fn for_variable_over_array_of_handles() {
+    check("for_variable_over_array_of_handles", &[("main.br", FOR_VARIABLE_OVER_ARRAY_OF_HANDLES)], "n = 1 2\n");
+}
+
 const XF_MODEL: &str = r#"struct Counter:
     var int n = 0
     def inc():

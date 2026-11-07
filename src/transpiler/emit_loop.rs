@@ -402,7 +402,27 @@ impl Transpiler {
             if matches!(&elem_ty, Some(Type::Named(n)) if self.trait_method_names.contains_key(n.as_str())) {
                 self.boxed_trait_ref_vars.insert(s.vars[0].clone());
             }
+            // The loop variable shadows any earlier binding of the same name: drop its lock flags.
+            for set in [&mut self.var_mutex_types, &mut self.var_mutex_task_types, &mut self.var_rwlock_types, &mut self.var_rwlock_task_types] {
+                set.remove(s.vars[0].as_str());
+            }
             match &elem_ty {
+                // `[T'actor]` / `[T'guard]` (`'task` variants too): each element is a lock handle,
+                // so the loop variable is one, locked on use and lent as a handle.
+                Some(Type::Qualified(inner, q @ (OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask)))
+                    if matches!(inner.without_mut(), Type::Named(n) if self.is_known_user_type(n.as_str())) => {
+                    if let Type::Named(n) = inner.without_mut() {
+                        self.var_struct_types.insert(s.vars[0].clone(), n.clone());
+                    }
+                    let v = s.vars[0].clone();
+                    match q {
+                        OwnerQual::Actor => { self.var_mutex_types.insert(v.clone()); }
+                        OwnerQual::ActorTask => { self.var_mutex_task_types.insert(v.clone()); }
+                        OwnerQual::Guard => { self.var_rwlock_types.insert(v.clone()); }
+                        _ => { self.var_rwlock_task_types.insert(v.clone()); }
+                    }
+                    self.arc_vars.insert(v);
+                }
                 // `is_known_user_type` (not `struct_fields` alone) so iterating a `[SomeEnum]`
                 // array (`for w in walls: w.position()`) also gets the loop var registered for
                 // method dispatch — matches the struct case exactly, enums just have no fields.

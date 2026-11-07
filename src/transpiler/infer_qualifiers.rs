@@ -1536,7 +1536,21 @@ impl Transpiler {
     ) {
         let mut stmts = stmts.to_vec();
         let cell = std::cell::RefCell::new((self, candidates));
-        let mut on_stmt = |_: &mut Stmt| {};
+        let mut on_stmt = |st: &mut Stmt| {
+            // `let [Counter'actor] arr = [svc.stats, ..]` / `{K = Counter'actor}`: a field placed in a
+            // slot declared with a lock qualifier is a demand for it, like an argument.
+            let Stmt::Let(l) = st else { return };
+            let (Some(ty), Some(val)) = (&l.ty, &l.value) else { return };
+            let mut g = cell.borrow_mut();
+            let (_, cands) = &mut *g;
+            match (ty.without_mut(), &val.kind) {
+                (Type::Array(elem), ExprKind::Array(items)) =>
+                    for it in items { Self::constrain_field_arg(it, elem, target_fields, alias_of, cands); },
+                (Type::Dict(_, v), ExprKind::Dict(pairs)) =>
+                    for (_, it) in pairs { Self::constrain_field_arg(it, v, target_fields, alias_of, cands); },
+                _ => {}
+            }
+        };
         let mut on_expr = |e: &mut Expr| {
             let mut g = cell.borrow_mut();
             let (this, cands) = &mut *g;

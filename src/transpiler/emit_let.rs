@@ -176,6 +176,14 @@ impl Transpiler {
         }
     }
 
+    /// `value` as a shared handle (`Arc::clone(&svc.stats)`) when it is a lock-handle field or
+    /// element of any flavour: a value position (array/tuple slot) must not move it out.
+    pub(crate) fn lock_handle_clone_any(&self, value: &Expr) -> Option<String> {
+        if !matches!(&value.kind, ExprKind::Field(..) | ExprKind::Index(..)) { return None; }
+        [(false, false), (false, true), (true, false), (true, true)].into_iter()
+            .find_map(|(guard, task)| self.existing_lock_handle(value, task, guard))
+    }
+
     pub(crate) fn existing_lock_handle(&self, value: &Expr, is_task: bool, guard: bool) -> Option<String> {
         let clone_fn = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) { "Rc::clone" } else { "Arc::clone" };
         if let Some((place, needs_clone)) = self.lock_handle_place(value, is_task, guard) {
@@ -1975,7 +1983,7 @@ impl Transpiler {
         // — wrapped value, registered lock handle (reads/method calls lock, call sites pass
         // `&x` instead of moving it).
         if s.ty.is_none() && !self.rc_identity_vars.contains(&s.name) {
-            if let (Some(qual @ (OwnerQual::Actor | OwnerQual::Guard)), ExprKind::Call(callee, _)) =
+            if let (Some(qual @ (OwnerQual::Actor | OwnerQual::Guard | OwnerQual::ActorTask | OwnerQual::GuardTask)), ExprKind::Call(callee, _)) =
                 (self.inferred_qualifiers.get(&s.name).cloned(), &s_value.kind)
             {
                 if let ExprKind::Var(n) = &callee.kind {

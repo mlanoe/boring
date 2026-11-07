@@ -730,6 +730,15 @@ impl Transpiler {
                 .map(|p| p.name.clone())
                 .collect();
             sub.fn_current_params_lent = sub.fn_lent_param_names(f, self_ty.is_some());
+            // A `mut` struct parameter of a method is lent as `&mut T` unless the body hands it to
+            // something that demands a shared lock handle: try it unlent, keep that only when the
+            // inference does resolve it to `'actor`/`'guard`.
+            let lent_candidates: Vec<String> = if self_ty.is_some() {
+                f.params.iter()
+                    .filter(|p| sub.fn_current_params_lent.contains(&p.name) && !crate::transpiler::helpers::is_lent_collection_param(p))
+                    .map(|p| p.name.clone()).collect()
+            } else { vec![] };
+            for n in &lent_candidates { sub.fn_current_params_lent.remove(n); }
             sub.fn_return_ty = f.return_ty.clone();
             sub.self_type = self_ty.map(str::to_string);
             sub.in_struct_method = self_ty.is_some();
@@ -739,6 +748,11 @@ impl Transpiler {
             let pre_inferred: std::collections::HashMap<String, crate::ast::OwnerQual> = f.params.iter()
                 .filter_map(|p| sub.inferred_qualifiers.get(&p.name).map(|q| (p.name.clone(), q.clone())))
                 .collect();
+            for p in f.params.iter().filter(|p| lent_candidates.contains(&p.name)) {
+                if matches!(pre_inferred.get(&p.name), Some(crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::Guard)) {
+                    if self.unlent_method_params.insert((p.name.clone(), p.line, p.col)) { changed = true; }
+                }
+            }
 
             // Update both the plain-name entry and the mangled-name entry (pre_register_fn
             // always registers both — see its comment — regardless of whether this name turns
@@ -2476,7 +2490,7 @@ impl Transpiler {
         if is_lent_collection_param(p) { return true; }
         in_method && is_mut_user_type_param_shape(p).is_some_and(|n| {
             self.all_struct_types.contains(n) || self.all_enum_types.contains(n)
-        })
+        }) && !self.unlent_method_params.contains(&(p.name.clone(), p.line, p.col))
     }
 
     pub(crate) fn fn_lent_param_names(&self, f: &FnDecl, in_method: bool) -> std::collections::HashSet<String> {

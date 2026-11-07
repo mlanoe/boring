@@ -992,6 +992,9 @@ struct Transpiler {
     /// parameter (`helpers::is_lent_collection_param`): always `BorrowMut` (`&mut Vec<T>`),
     /// whatever the body does.
     pub(crate) fn_current_params_lent: std::collections::HashSet<String>,
+    /// `mut` struct parameters of methods (name, line, col) the pre-pass resolved to a lock handle
+    /// (`'actor`/`'guard`) instead of the default `&mut T` lend.
+    pub(crate) unlent_method_params: std::collections::HashSet<(String, usize, usize)>,
     /// `(name, line, col)` of the `Var` occurrences in the function being emitted that are the
     /// provably last use of their (owned, let-bound) variable — by-value reads there may be a
     /// Rust move instead of a `.clone()`. See `last_use.rs`; empty outside a function body.
@@ -1755,6 +1758,7 @@ impl Transpiler {
             fn_current_params_mut: std::collections::HashSet::new(),
             fn_current_params_rebind_only: std::collections::HashSet::new(),
             fn_current_params_lent: std::collections::HashSet::new(),
+            unlent_method_params: std::collections::HashSet::new(),
             last_use_sites: std::collections::HashSet::new(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),

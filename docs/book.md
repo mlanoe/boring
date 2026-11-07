@@ -9709,7 +9709,7 @@ The same pre-pass covers the methods of structs, enums and `ext` blocks: `first(
 
 A qualifier written by the user is never overwritten; only parameters left bare are refined. For methods, propagation reaches a call only when the receiver's type is statically known where the call is read: `self`, a local of known type (including a `let t = s` alias), a constructor call `Type(..)`, or a `self.field` / `local.field` chain over declared fields. A call on a receiver whose type the pass cannot see (a method's return value, an element of an array, a generic value) is not propagated, and neither is a method name overloaded within one type (a single declaration is needed to know which signature applies); the callee's own signature is still correct, but the caller keeps its plain parameter. Annotate the caller's parameter explicitly (`Counter'actor c`) in those cases.
 
-The fixed point also covers mutual recursion between free functions, between methods that call each other (`self.ping(c)` / `self.pong(c)`, pinned by `tests/method_qualifier_propagation.rs`) and across files. One exception: a `mut` method parameter is always lent as `&mut T`, so the demand a callee makes of it cannot be propagated (annotate it `Counter'actor c`).
+The fixed point also covers mutual recursion between free functions, between methods that call each other (`self.ping(c)` / `self.pong(c)`, pinned by `tests/method_qualifier_propagation.rs`) and across files. A `mut` struct parameter of a method is lent as `&mut T` unless its body hands it to something that demands a lock handle: then the pre-pass resolves it to `'actor`/`'guard` like a free function's (`first(mut Counter c): self.second(c)` with `second` forwarding to `bump(Counter'actor)`).
 
 ### Struct field inference
 
@@ -9739,12 +9739,13 @@ Same scope as inside the struct: the signals are a `def` call on the field, a ta
 | `show(svc.stats)` where `show`'s parameter is a plain borrow (`Counter c`) | the field is borrowed through its guard for the duration of the call statement (`show(&*svc.stats.lock().unwrap())`, `.borrow()` in single-threaded builds, `.lock().await` / `.read().await` for the `'task` variants); the same holds for a local lock handle |
 | `svcs[0].stats.m()` | the method is called through the field's guard |
 
-What is **not** followed, and why:
+Also followed: a field placed in an array/dict literal bound to a *declared* lock-qualified element type (`let [Counter'actor] arr = [svc.stats]`, `{K = Counter'actor}`) is a demand for that qualifier; the literal holds shared handles and `for x in arr` / `arr[i]` use them as such.
 
-- A field placed in an array, dict or tuple *literal* (`[svc.stats]`, `for x in [svc.stats]`). Boring's value semantics make each element an independent copy, so a demand on the element is not a demand on the field; the build then either copies (the callee's mutations are lost) or, for a local written `T'actor`, wraps a copy and fails in rustc. Write the field's qualifier by hand and keep the handle in a local (`mut c = svc.stats`).
-- A field returned from a function whose return type is bare (`Counter pick(Service s): s.stats`): the returned value is a by-value copy, and a demand on the call's result does not flow back to the field. Declare the return type (`Counter'actor pick(..)`) and the field is inferred from it.
-- A local bound more than once, or shadowed by a loop variable, pattern or closure parameter of the same name, is never treated as an alias.
-- A `mut` *method* parameter is lent as `&mut T` unconditionally (see "`mut` vs `var` on a struct parameter"), so a callee that demands `'actor` of it cannot be satisfied: write `Counter'actor c` on that method's parameter.
+What is **not** followed, and why (each is a deliberate consequence of Boring's value semantics, not a missing pass):
+
+- A field placed in an *unannotated* array, dict or tuple literal (`let arr = [svc.stats]`, `for x in [svc.stats]`). The element type of such a literal is the field's declared, bare type: each element is an independent copy, so a demand on the element is not a demand on the field. Declare the element type (`[Counter'actor]`) and the field is inferred from it.
+- A field returned from a function whose return type is bare (`Counter pick(Service s): s.stats`), and an rvalue handed to a parameter that demands a lock (`bump(pick(svc))`): the value is a by-value copy, wrapped into a fresh lock at the call. Declare the return type (`Counter'actor pick(..)`) and the field is inferred from it.
+- A local bound more than once, or shadowed by a loop variable, pattern or closure parameter of the same name, is never treated as an alias: it could hold something else.
 
 A task that captures a lock-handle (or `'shared`) field of `self` clones the handle before the spawn (`let __self_stats = self.stats.clone();` and the body uses the clone), since a `'static` future cannot borrow `self`. A struct with a lock-handle field does not derive `Eq`/`Hash`, and reading such a field through a local of the struct in another file locks it, like inside the struct (`inferred_lock_field_builds_and_runs_in_every_config`, `tests/field_lock_flows.rs`).
 

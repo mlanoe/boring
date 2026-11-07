@@ -479,6 +479,7 @@ impl Transpiler {
             }
             ExprKind::Array(elems) if self.actor_elem_lits.borrow().contains(&(expr.line, expr.col)) => {
                 let es: Vec<String> = elems.iter().map(|e| {
+                    if let Some(h) = self.lock_handle_clone_any(e) { return h; }
                     let v = self.emit_expr_owned(e);
                     if self.is_fresh_struct_ctor(e) { self.emit_actor_new(&v) } else { v }
                 }).collect();
@@ -486,6 +487,7 @@ impl Transpiler {
             }
             ExprKind::Dict(pairs) if !pairs.is_empty() && self.actor_elem_lits.borrow().contains(&(expr.line, expr.col)) => {
                 let ps: Vec<String> = pairs.iter().map(|(k, e)| {
+                    if let Some(h) = self.lock_handle_clone_any(e) { return format!("({}, {})", self.emit_expr_owned(k), h); }
                     let v = self.emit_expr_owned(e);
                     let v = if self.is_fresh_struct_ctor(e) { self.emit_actor_new(&v) } else { v };
                     format!("({}, {})", self.emit_expr_owned(k), v)
@@ -520,6 +522,7 @@ impl Transpiler {
                     // A field read (`[self.font]`) is by value: moving a non-Copy field (an
                     // array, dict, struct...) out of `&self` is E0507, so it takes the same
                     // clone `emit_expr_owned` gives every other by-value field read.
+                    if let Some(h) = self.lock_handle_clone_any(e) { return h; }
                     let owned_field = matches!(&e.kind, ExprKind::Field(..))
                         && !matches!(self.resolve_expr_type(e), Some(t) if param_ty_is_copy_scalar(&t));
                     if has_str_lit || owned_field { self.emit_expr_owned(e) } else { self.emit_expr(e) }

@@ -7697,6 +7697,7 @@ impl Transpiler {
             fn_current_params_mut: self.fn_current_params_mut.clone(),
             fn_current_params_rebind_only: self.fn_current_params_rebind_only.clone(),
             fn_current_params_lent: std::collections::HashSet::new(),
+            unlent_method_params: self.unlent_method_params.clone(),
             last_use_sites: self.last_use_sites.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),
             mut_local_vars: self.mut_local_vars.clone(),
