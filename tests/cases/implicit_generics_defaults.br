@@ -1,0 +1,26 @@
+# Implicit generics, D11: an untyped field with a default value. The default types the field only
+# when the construction does not supply it; a supplied argument always wins.
+
+struct Request:
+    url
+    var retries = 0
+
+def plain():
+    return Request(url = "/x")
+
+def tuned():
+    return Request(url = "/x", retries = 1.5)
+
+def named():
+    return Request(url = 42, retries = "three")
+
+def main():
+    let a = plain()
+    let b = tuned()
+    let c = named()
+    print "{a.url} {a.retries}"
+    print "{b.url} {b.retries}"
+    print "{c.url} {c.retries}"
+    var mut r = plain()
+    r.retries += 2
+    print "{r.retries}"

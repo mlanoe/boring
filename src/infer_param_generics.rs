@@ -182,10 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn untyped_field_with_a_default_still_needs_a_type() {
-        let tokens = lex("struct B:\n    retries = 0\n").expect("lex");
-        let e = parser::parse(tokens).err().expect("rejected").to_string();
-        assert!(e.contains("default value but no type"), "{e}");
+    fn untyped_field_with_a_default_keeps_it() {
+        let s = first_struct("struct B:\n    string url\n    retries = 0\n");
+        assert_eq!(s.type_params, vec!["T_retries".to_string()]);
+        assert!(s.fields[1].default.is_some());
     }
 
     #[test]

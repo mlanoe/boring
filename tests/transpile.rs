@@ -380,6 +380,8 @@ transpile_test!(infer_return_types);
 transpile_test!(implicit_generics_params);
 // Untyped struct fields as implicit type parameters (phase 3 of implicit generics).
 transpile_test!(implicit_generics_fields);
+// An untyped field with a default value: the default types it unless the construction overrides it.
+transpile_test!(implicit_generics_defaults);
 transpile_test!(operators);
 transpile_test!(macros);
 transpile_test!(defer);

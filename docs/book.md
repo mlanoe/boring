@@ -4934,7 +4934,7 @@ def fetchScores():                         # -> Response<int, [int]>
 
 It is the same thing as writing `struct Response<S, P>` with `S status` and `P payload`, minus the parameters. As for an [untyped `def` parameter](#untyped-parameters), the bounds come from how the struct's own methods use the field directly (`"{status}"` or `self.status` interpolated or printed gives `Display`, `==` gives `PartialEq`, ...); a use that adds no bound is rejected by rustc, naming it, and writing the field's type is the way out.
 
-Not built yet, so these still need a written type: a field with a default value (`retries = 0`: the default would have to type the field only when the construction does not override it), and a field of a `view`. An instance whose argument has no type of its own (`Response(status = 200, payload = [])`) is left to rustc, which cannot infer it either.
+A field may have a default value (`retries = 0`): the default types the field only when the construction does not supply it, and an argument always wins. `Request(url = "/x")` is `Request<string, int>`, `Request(url = "/x", retries = 1.5)` is `Request<string, float>`; the default is not evaluated in the second one, so it need not be compatible with the overriding type. There is no implicit numeric coercion (`retries = 1` binds `int`; write `1.0` for a `float`). A field of a `view` still needs a written type, and an instance whose argument has no type of its own (`Response(status = 200, payload = [])`) is left to rustc, which cannot infer it either.
 
 ### `@api` — a signature other projects can rely on
 

@@ -690,20 +690,14 @@ impl Parser {
             // no keyword → implicit `pub let`
             (true, false, false)
         };
-        // A field written without a type (`let payload`, `status`): a lone name. Its type is a
-        // fresh type parameter of the struct (implicit generics, phase 3; `fresh_name`), fixed by
-        // each construction. With a default value (`let retries = 0`) the type would have to come
-        // from the default unless overridden, which is not built yet: that still needs a type.
+        // A field written without a type (`let payload`, `status`, `retries = 0`): a lone name. Its
+        // type is a fresh type parameter of the struct (implicit generics, phase 3; `fresh_name`),
+        // fixed by each construction. With a default value the default types it only when the
+        // construction does not supply the field (D11); an argument always wins.
         let untyped = matches!(self.peek(), TokenKind::Ident(_))
             && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Newline) | Some(TokenKind::Eq) | Some(TokenKind::Dedent) | Some(TokenKind::Eof));
         let ty = if untyped {
             let TokenKind::Ident(n) = self.peek().clone() else { unreachable!() };
-            if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Eq)) {
-                return Err(ParseError::Generic {
-                    msg: format!("field '{n}' has a default value but no type annotation — add a type (e.g. 'int {n} = ...'); an untyped field cannot have a default yet"),
-                    line: self.line(), col: self.col(), len: n.len().max(1),
-                });
-            }
             Type::TypeParam(crate::infer_param_generics::fresh_name(&n))
         } else {
             self.parse_type()?

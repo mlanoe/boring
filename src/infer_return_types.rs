@@ -511,6 +511,22 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
+        // A field the construction leaves out falls back on its default, which then types the
+        // parameter (D11: a supplied argument has already won above).
+        for (i, field) in s.fields.iter().enumerate() {
+            let supplied = args.iter().enumerate().any(|(j, a)| match &a.label {
+                Some(l) => *l == field.name,
+                None => j == i,
+            });
+            let Some(default) = &field.default else { continue };
+            if supplied || !mentions(&field.ty, &s.type_params) {
+                continue;
+            }
+            let dt = self.ty_of(default, &Env::new())?;
+            if !is_plain(&dt) || !unify(&field.ty, &dt, &s.type_params, &mut bindings) {
+                return None;
+            }
+        }
         let targs: Vec<Type> =
             s.type_params.iter().map(|p| bindings.get(p).cloned()).collect::<Option<Vec<_>>>()?;
         Some(Type::Generic(s.name.clone(), targs))
@@ -593,6 +609,25 @@ mod tests {
     #[test]
     fn typed_functions_are_never_reported() {
         assert!(parse_err("def f(int a, int b):\n    return a + b\n").is_none());
+    }
+
+    #[test]
+    fn untyped_field_default_types_it_unless_overridden() {
+        let decl = "struct Req:\n    url\n    retries = 0\n\n";
+        let g = |a: Type, b: Type| Some(Type::Generic("Req".into(), vec![a, b]));
+        assert_eq!(
+            inferred(&format!("{decl}def f():\n    return Req(url = \"/x\")\n"), "f"),
+            g(n("string"), n("int"))
+        );
+        assert_eq!(
+            inferred(&format!("{decl}def f():\n    return Req(url = \"/x\", retries = 1.5)\n"), "f"),
+            g(n("string"), n("float"))
+        );
+        // Positionally supplied: the argument wins too.
+        assert_eq!(
+            inferred(&format!("{decl}def f():\n    return Req(\"/x\", true)\n"), "f"),
+            g(n("string"), n("bool"))
+        );
     }
 
     const BOX: &str = "struct Box<T>:\n    let T v\n\n";
