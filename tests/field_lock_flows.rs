@@ -521,6 +521,30 @@ fn no_param_annotation_hint_warning() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+fn element_read_copies_unless_elements_are_handles() {
+    // `let q = arr[0]`: a copy when the element type is plain (`[mut Counter'inline]` opts out of
+    // the promotion), the same object when the elements are `'actor` handles. `run` and `build`
+    // must print the same thing.
+    check("elem_read_copy", &[("main.br", r#"struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+    req int get():
+        n
+
+mut [mut Counter'inline] plain = [Counter()]
+mut q = plain[0]
+q.inc()
+print "plain {plain[0].get()} {q.get()}"
+
+mut [mut Counter'actor] shared = [Counter()]
+mut h = shared[0]
+h.inc()
+print "shared {shared[0].get()} {h.get()}"
+"#)], "plain 0 1\nshared 1 1\n");
+}
+
+#[test]
 fn plain_field_reads_are_copies_in_run_and_build() {
     check("plain_field_copies", &[("main.br", r#"struct Counter:
     var int n = 0

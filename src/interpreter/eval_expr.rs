@@ -541,6 +541,24 @@ impl Interpreter {
     /// the transpiler's analysis, see `lock_fields`) stays shared. Anything the path cannot be
     /// resolved for without evaluation is left as is.
     pub(crate) fn field_read_copy(&self, e: &Expr, v: Value, env: &EnvRef) -> Value {
+        // `arr[i]` / `dict[k]`: an element read by value is a copy in the compiled program unless
+        // the collection's declared element type is a shared handle (`[mut T'actor]`, written or
+        // promoted by `infer_actor_elems`). A collection with no declared type (inferred) is left
+        // as is: the transpiler's inference for it is not visible here.
+        if let ExprKind::Index(obj, _) = &e.kind {
+            if !matches!(&v, Value::Object(_) | Value::Array(_) | Value::Tuple(_) | Value::Dict(_)) { return v; }
+            if let Value::Object(o) = &v {
+                let ty = o.borrow().type_name.clone();
+                if !matches!(self.global.borrow().get(&ty), Some(Value::Struct { .. })) { return v; }
+            }
+            let Some(cty) = self.declared_container_type(obj, env) else { return v };
+            let elem = match self.resolve_type(&cty).without_mut() {
+                Type::Array(el) => (**el).clone(),
+                Type::Dict(_, val) => (**val).clone(),
+                _ => return v,
+            };
+            return if self.type_is_alias(&elem) { v } else { self.copy_struct_value(&v) };
+        }
         // A bare name that resolves to a field of `self` is that field (implicit self).
         let (parent, fname): (Option<Value>, &str) = match &e.kind {
             ExprKind::Field(inner, fname) => (self.peek_path(inner, env), fname.as_str()),
@@ -559,6 +577,34 @@ impl Interpreter {
         let pty = parent.borrow().type_name.clone();
         if self.field_is_alias(&pty, fname) || self.lock_fields.contains(&format!("{pty}::{fname}")) { return v; }
         self.copy_struct_value(&v)
+    }
+
+    /// Declared type of a collection expression: a local/parameter with a written (or promoted)
+    /// type, or a struct field's declared type.
+    fn declared_container_type(&self, e: &Expr, env: &EnvRef) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Var(n) => {
+                if let Some(t) = env.borrow().get_declared_type(n) { return Some(t); }
+                if n != "self" && env.borrow().resolves_to_self_field(n) {
+                    let Some(Value::Object(o)) = env.borrow().get("self") else { return None };
+                    let pty = o.borrow().type_name.clone();
+                    return self.struct_field_type(&pty, n);
+                }
+                None
+            }
+            ExprKind::Field(inner, f) => {
+                let Value::Object(o) = self.peek_path(inner, env)? else { return None };
+                let pty = o.borrow().type_name.clone();
+                self.struct_field_type(&pty, f)
+            }
+            _ => None,
+        }
+    }
+
+    fn struct_field_type(&self, type_name: &str, field: &str) -> Option<Type> {
+        let global = self.global.borrow();
+        let Some(Value::Struct { decl, .. }) = global.get(type_name) else { return None };
+        decl.fields.iter().find(|f| f.name == field).map(|f| f.ty.clone())
     }
 
     /// Whether `ty` is an aliasing handle type (`'shared`/`'actor`/`'guard`/`'weak`/borrow, or a trait).
