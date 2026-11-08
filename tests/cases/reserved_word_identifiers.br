@@ -1,0 +1,41 @@
+# Regression: Boring identifiers that are reserved words in Rust (`box`, `ref`, `final`,
+# `abstract`, `override`, `virtual`; `type`/`match`/`yield` are Boring keywords too) must be escaped consistently in every position — declaration,
+# call argument, field base, assignment and closure parameter. A call argument used to be
+# emitted unescaped (`width(box)`), which did not parse.
+
+struct Area:
+    float x0
+    float x1
+
+float width(Area a):
+    a.x1 - a.x0
+
+float usesBox(Area box, Area clip):
+    let visible = width(box)
+    visible + width(clip)
+
+float useRef(Area ref, Area abstract):
+    width(ref) * width(abstract)
+
+float useVirtual(Area virtual, Area final):
+    let override = width(virtual)
+    override + final.x1 - final.x0
+
+float scaled(float box, float ref):
+    var abstract = box
+    abstract = abstract * ref
+    abstract
+
+def main():
+    let a = Area(0.0, 4.0)
+    let b = Area(1.0, 3.0)
+    print "box: {usesBox(a, b)}"
+    print "ref: {useRef(a, b)}"
+    print "virtual: {useVirtual(a, b)}"
+    print "scaled: {scaled(2.0, 3.0)}"
+    let box = Area(2.0, 5.0)
+    let ref = width(box)
+    var final = ref
+    final = final + 1.0
+    let override = [1.0, 2.0, 3.0].map(abstract: abstract * 2.0)
+    print "locals: {width(box)} {ref} {final} {override[2]}"

@@ -1,0 +1,21 @@
+# Non-empty set/dict/array literals of strings: as plain `let` values and as struct
+# field initial values (the same lowering a view `state` initialiser uses). The set
+# case used to emit `HashSet<&str>` where `HashSet<Arc<str>>` was needed (E0308).
+struct Holder:
+    var {string} picked = {"2"}
+    var {string=int} counts = {"a" = 1, "b" = 2}
+    var [string] names = ["x", "y"]
+
+def main():
+    let {string} s = {"1", "2", "3"}
+    let {string=int} d = {"a" = 1, "b" = 2}
+    let [string] a = ["p", "q"]
+    print s.contains("2")
+    print s.contains("9")
+    print s.count
+    print d["b"]
+    print a[1]
+    let h = Holder()
+    print h.picked.contains("2")
+    print h.counts["a"]
+    print h.names[0]

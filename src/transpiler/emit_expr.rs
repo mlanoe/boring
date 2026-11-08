@@ -619,7 +619,12 @@ impl Transpiler {
                             Self::expr_path_text(e)
                         ));
                     }
-                    let es: Vec<String> = elems.iter().map(|e| self.declared_elem_value(expr, e).unwrap_or_else(|| self.emit_expr(e))).collect();
+                    // String literals become Rc/Arc<str> (a string set is HashSet<Arc<str>>), as in
+                    // array and dict literals.
+                    let has_str_lit = elems.iter().any(|e| matches!(&e.kind, ExprKind::Str(_) | ExprKind::StringInterp(_)));
+                    let es: Vec<String> = elems.iter().map(|e| self.declared_elem_value(expr, e).unwrap_or_else(|| {
+                        if has_str_lit { self.emit_expr_owned(e) } else { self.emit_expr(e) }
+                    })).collect();
                     format!("HashSet::from([{}])", es.join(", "))
                 }
             }
@@ -1081,7 +1086,7 @@ impl Transpiler {
             ))
         });
         let ps: Vec<String> = params.iter().map(|p| {
-            let name = if p.mutable { format!("mut {}", p.name) } else { p.name.clone() };
+            let name = if p.mutable { format!("mut {}", escape_rust_keyword(&p.name)) } else { escape_rust_keyword(&p.name) };
             let is_observed_param = observed_param
                 .as_ref()
                 .is_some_and(|(obs_name, _)| p.name == *obs_name);
@@ -3139,6 +3144,68 @@ impl Transpiler {
     /// assignment desugaring (`x += y`), dict/array-index writes, and the general
     /// fallback (GPU-resident materialization, actor auto-clone, Optional auto-wrap).
     fn emit_expr_assign(&self, target: &Expr, value: &Expr) -> String {
+        if let Some(code) = self.emit_assign_hoisting_self_reading_indices(target, value) {
+            return code;
+        }
+        self.emit_expr_assign_inner(target, value)
+    }
+
+    /// `f[f.length - 1] = v` on a `&mut Vec` parameter: Rust takes the `IndexMut` borrow before
+    /// evaluating the index (no two-phase borrow through a `&mut` reference), so an index that
+    /// reads the indexed array fails the borrow checker (E0502). Evaluate such indices into
+    /// temporaries first: `{ let __bidx0 = (<idx>) as usize; f[__bidx0] = v }`. The temporary
+    /// replaces the index expression in the target and in the value (a compound `x[i] += y` is
+    /// desugared to `x[i] = x[i] + y`, with a structurally identical copy of the target).
+    fn emit_assign_hoisting_self_reading_indices(&self, target: &Expr, value: &Expr) -> Option<String> {
+        // Root variable of the index chain and every non-range index along it.
+        let mut idxs: Vec<(&Expr, &Expr)> = Vec::new(); // (receiver, index)
+        let mut cur = target;
+        while let ExprKind::Index(recv, idx) = &cur.kind {
+            if matches!(idx.kind, ExprKind::SliceRange { .. }) { return None; }
+            idxs.push((recv, idx));
+            cur = recv;
+        }
+        if idxs.is_empty() { return None; }
+        let mut root = cur;
+        while let ExprKind::Field(o, _) = &root.kind { root = o; }
+        let root_name = match &root.kind { ExprKind::Var(n) => n.clone(), _ => return None };
+        let mentions = |e: &Expr| {
+            let mut found = false;
+            let mut c = e.clone();
+            let mut f = |x: &mut Expr| { if matches!(&x.kind, ExprKind::Var(n) if *n == root_name) { found = true; } };
+            let mut g = |_: &mut Stmt| {};
+            crate::ast_walk::Walker { expr: &mut f, stmt: &mut g }.expr(&mut c);
+            found
+        };
+        let mut hoist: Vec<(String, &Expr)> = Vec::new();
+        for (recv, idx) in &idxs {
+            if matches!(idx.kind, ExprKind::Int(_) | ExprKind::Var(_)) { continue; }
+            if self.expr_is_dict(recv) || self.index_receiver_is_string(recv) { continue; }
+            if mentions(idx) { hoist.push((format!("{:?}", idx), idx)); }
+        }
+        if hoist.is_empty() { return None; }
+        let mut new_target = target.clone();
+        let mut new_value = value.clone();
+        let mut pre = String::new();
+        for (i, (dbg, idx)) in hoist.iter().enumerate() {
+            let tmp = format!("__bidx{i}");
+            pre.push_str(&format!("let {tmp} = ({}) as usize; ", self.emit_expr(idx)));
+            let mut sub = |x: &mut Expr| {
+                if matches!(x.kind, ExprKind::Index(..) | ExprKind::Var(_)) { return; }
+                if format!("{:?}", x) == *dbg {
+                    *x = Expr { kind: ExprKind::Var(tmp.clone()), line: x.line, col: x.col, len: x.len };
+                }
+            };
+            let mut g = |_: &mut Stmt| {};
+            crate::ast_walk::Walker { expr: &mut sub, stmt: &mut g }.expr(&mut new_target);
+            crate::ast_walk::Walker { expr: &mut sub, stmt: &mut g }.expr(&mut new_value);
+        }
+        if format!("{:?}", new_target) == format!("{:?}", target) { return None; }
+        let inner = self.emit_expr_assign_inner(&new_target, &new_value);
+        Some(format!("{{ {pre}{inner}; }}"))
+    }
+
+    fn emit_expr_assign_inner(&self, target: &Expr, value: &Expr) -> String {
         // `x = 1.5` on a fixed-point target: the literal takes the target's format.
         if let Some(fmt) = self.fixed_fmt_of_expr(target) {
             if let Some(lit) = self.emit_fixed_literal(value, &fmt) {

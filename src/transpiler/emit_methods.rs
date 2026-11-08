@@ -5403,7 +5403,7 @@ impl Transpiler {
             self.push_error(arg.line, arg.col, format!("cannot pass {} argument to `mut Counter&` in async function `{}` — holding {} across .await makes the future !Send. Acquire the lock inside the callee body instead.", what.0, fn_name, what.1));
         }
         let raw = match &arg.kind {
-            ExprKind::Var(v) => v.clone(),
+            ExprKind::Var(v) => escape_rust_keyword(v),
             _ => emitted.strip_prefix('&').unwrap_or(emitted).trim_end_matches(".clone()").to_string(),
         };
         Some(match kind {
@@ -5500,7 +5500,7 @@ impl Transpiler {
                     // parameter, `&local`, `&obj.field`, or a temporary for a host array.
                     let lent = if let ExprKind::Var(vname) = &a.value.kind {
                         if self.current_fn_gpu_borrow_param_names.contains(vname.as_str()) {
-                            vname.clone()
+                            escape_rust_keyword(vname)
                         } else if self.resident_call_vars.contains_key(vname.as_str())
                             || self.current_fn_gpu_arg_param_names.contains(vname.as_str())
                         {
@@ -5788,7 +5788,7 @@ impl Transpiler {
                     // The Rust param is &Rc<T>, so pass `&var` directly — no clone, no deref.
                     if borrow_inner_is_smart_ptr {
                         let base = if let ExprKind::Var(vname) = &a.value.kind {
-                            vname.as_str().to_owned()
+                            escape_rust_keyword(vname)
                         } else {
                             emitted.strip_prefix("Rc::clone(&")
                                 .and_then(|s| s.strip_suffix(')'))
@@ -5856,7 +5856,7 @@ impl Transpiler {
                             // Use the raw variable name (not the auto-ref'd form) for lock acquisition,
                             // so the guard lifetime is correct: `let __g = ac.borrow()` not `&ac.borrow()`.
                             let raw = if let ExprKind::Var(vname) = &a.value.kind {
-                                vname.clone()
+                                escape_rust_keyword(vname)
                             } else {
                                 emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                             };
@@ -5871,7 +5871,7 @@ impl Transpiler {
                                 self.push_error(a.value.line, a.value.col, format!("cannot pass 'guard argument to `mut Counter&` in async function `{}` — holding an RwLockGuard across .await makes the future !Send. Acquire the lock inside the callee body instead.", fn_name));
                             }
                             let raw = if let ExprKind::Var(vname) = &a.value.kind {
-                                vname.clone()
+                                escape_rust_keyword(vname)
                             } else {
                                 emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                             };
@@ -5883,7 +5883,7 @@ impl Transpiler {
                         // Arg is already a borrow (Counter&): pass through without adding another &.
                         Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)) => {
                             if let ExprKind::Var(vname) = &a.value.kind {
-                                vname.clone()
+                                escape_rust_keyword(vname)
                             } else {
                                 emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                             }
@@ -5896,7 +5896,7 @@ impl Transpiler {
                         // identical double-`&` bug was a hard error.
                         Some(Type::Qualified(_, OwnerQual::Static)) => {
                             if let ExprKind::Var(vname) = &a.value.kind {
-                                vname.clone()
+                                escape_rust_keyword(vname)
                             } else {
                                 emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                             }
@@ -5928,7 +5928,7 @@ impl Transpiler {
                     if is_backing_static {
                         format!("&{}", emitted)
                     } else if let ExprKind::Var(vname) = &a.value.kind {
-                        vname.clone()
+                        escape_rust_keyword(vname)
                     } else {
                         emitted.strip_prefix('&').unwrap_or(&emitted).to_string()
                     }

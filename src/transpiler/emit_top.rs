@@ -2426,8 +2426,8 @@ impl Transpiler {
         match &key.kind {
             ExprKind::Str(s) => self.str_from(&escape_str(s)),
             ExprKind::Var(v) if self.chars_vars.contains(v.as_str()) =>
-                self.str_from_expr(&format!("{}.to_string()", v)),
-            ExprKind::Var(v) => format!("{}.clone()", v),
+                self.str_from_expr(&format!("{}.to_string()", escape_rust_keyword(v))),
+            ExprKind::Var(v) => format!("{}.clone()", escape_rust_keyword(v)),
             _ => self.emit_expr_owned(key),
         }
     }
@@ -2939,7 +2939,7 @@ impl Transpiler {
             ExprKind::Var(v) if self.string_vars.contains(v.as_str())
                 || self.string_arc_vars.contains(v.as_str()) =>
             {
-                format!("{}.clone()", v)
+                format!("{}.clone()", escape_rust_keyword(v))
             }
             // Arc/Rc var in owned position (actor/shared params passed by ref): clone the pointer.
             ExprKind::Var(v) if self.arc_vars.contains(v.as_str())
@@ -2947,7 +2947,7 @@ impl Transpiler {
                 || self.managed_mutex_vars.contains(v.as_str())
                 || self.managed_refcell_vars.contains(v.as_str()) =>
             {
-                format!("{}.clone()", v)
+                format!("{}.clone()", escape_rust_keyword(v))
             }
             // Non-Copy named types (user enums/structs tracked in var_types): clone to preserve value semantics.
             // `var_types` keeps a `mut`/`var mut` binding's `Type::Mut(..)` wrapper
@@ -2960,10 +2960,10 @@ impl Transpiler {
             ) || self.is_owned_collection_local(v) => {
                 // Holds a trait object (not `Clone`): forward, never `.clone()`.
                 if self.var_types.get(v.as_str()).is_some_and(|t| self.type_holds_dyn(t, false, &mut vec![])) {
-                    return v.clone();
+                    return escape_rust_keyword(v);
                 }
                 // Last use of an owned local: move it instead of cloning (see `last_use.rs`).
-                if self.is_last_use_move(expr) { v.clone() } else { format!("{}.clone()", v) }
+                if self.is_last_use_move(expr) { escape_rust_keyword(v) } else { format!("{}.clone()", escape_rust_keyword(v)) }
             }
             // Bare implicit-self field (`items` meaning `self.items`) in owned/return position:
             // a collection field is behind `&self`, so it must be cloned out exactly like the

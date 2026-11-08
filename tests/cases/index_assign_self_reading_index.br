@@ -1,0 +1,26 @@
+def void setLast(mut [float32] f, float v):
+    f.push(0.0 as float32)
+    f[f.length - 1] = v as float32
+
+def void addSecondLast(mut [float32] f, float v):
+    f[f.length - 2] += v as float32
+
+def void copyFirst(mut [int] a, [int] b):
+    a[b.length - 1] = a[0]
+
+def void nested(mut [[int]] g, int v):
+    g[g.length - 1][g[0].length - 1] = v
+    g[g.length - 1][g[0].length - 2] += v
+
+def main():
+    mut data = [] as [float32]
+    setLast(data, 2.0)
+    setLast(data, 3.0)
+    addSecondLast(data, 10.0)
+    print "{data[0]} {data[1]}"
+    mut a = [7, 0, 0]
+    copyFirst(a, [1, 2, 3])
+    print "{a[0]} {a[1]} {a[2]}"
+    mut g = [[1, 2, 3], [4, 5, 6]]
+    nested(g, 9)
+    print "{g[1][0]} {g[1][1]} {g[1][2]}"
