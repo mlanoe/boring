@@ -2473,12 +2473,19 @@ fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
         let source_dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
         let cfg = transpiler::TranspileConfig { source_dir, deps: deps.clone(), ..Default::default() };
         let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = transpiler::transpile_with_config(&program, cfg);
-            transpiler::take_lock_fields()
+            let out = transpiler::transpile_with_config(&program, cfg);
+            let copies: Vec<_> = out.errors.into_iter().filter(transpiler::is_implicit_copy_error).collect();
+            (transpiler::take_lock_fields(), copies)
         })).unwrap_or_default();
         let _ = transpiler::take_cpu_decisions();
         found
     };
+    let (lock_fields, copy_errors) = lock_fields;
+    // `boring build` rejects an implicit copy of a lock handle; `boring run` must too.
+    if !copy_errors.is_empty() {
+        report_transpile_errors(&path, &source, &copy_errors);
+        process::exit(1);
+    }
 
     let mut interp = interpreter::Interpreter::new();
     interp.lock_fields = lock_fields;

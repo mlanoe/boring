@@ -318,6 +318,17 @@ pub fn take_lock_fields() -> std::collections::HashSet<String> {
     LOCK_FIELDS.with(|f| std::mem::take(&mut *f.borrow_mut()))
 }
 
+/// True for the diagnostics about an implicit copy of a shared lock handle (a lock-handle field
+/// placed in an untyped literal, returned under a bare type, or a plain field copied into a
+/// literal whose elements need a shared handle). They describe a value-semantics mismatch, not a
+/// target limit, so `boring run` reports them exactly like `boring build` instead of silently
+/// running a program the compiled build rejects.
+pub fn is_implicit_copy_error(e: &TranspileError) -> bool {
+    let m = &e.message;
+    m.contains("is a shared lock handle ('actor/'guard)")
+        || m.contains("is copied into a literal, but its elements need a shared handle")
+}
+
 pub fn transpile(program: &Program) -> String {
     transpile_full(program).code
 }
@@ -474,6 +485,10 @@ struct Transpiler {
     /// Position of an array/dict literal initializing a declared `[mut T'actor]` / `{K = mut V'actor}`
     /// binding: its fresh struct-constructor elements are wrapped in the actor constructor.
     pub(crate) actor_elem_lits: std::cell::RefCell<std::collections::HashSet<(usize, usize)>>,
+    /// Array/dict literals whose declared element type is a lock handle, by position, with the
+    /// handle's flavour `(guard, task)`: a lock-handle field written in one is the shared handle
+    /// the declaration asked for, not an implicit copy.
+    pub(crate) declared_lock_lits: std::cell::RefCell<std::collections::HashMap<(usize, usize), (bool, bool)>>,
     pub(crate) warnings: std::cell::RefCell<Vec<TranspileError>>,
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
@@ -1609,6 +1624,7 @@ impl Transpiler {
             errors: std::cell::RefCell::new(Vec::new()),
             hoisted_ext_arrays: Default::default(),
             actor_elem_lits: Default::default(),
+            declared_lock_lits: Default::default(),
             warnings: std::cell::RefCell::new(Vec::new()),
             indent: 0,
             in_throws: false,

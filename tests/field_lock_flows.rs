@@ -468,7 +468,13 @@ fn build_error(name: &str, body: &str) -> String {
     let dir = project(name, &[("main.br", &format!("{COPY_PRELUDE}{body}"))]);
     let out = boring(&dir, &["build", "main.br", "--output-dir", dir.join("out").to_str().unwrap()]);
     assert!(!out.status.success(), "{name}: build should be rejected");
-    text(&out.stderr)
+    // `boring run` must reject the very same program with the very same diagnostic.
+    let run = boring(&dir, &["run", "main.br"]);
+    assert!(!run.status.success(), "{name}: run should be rejected too");
+    let (b, r) = (text(&out.stderr), text(&run.stderr));
+    let first = |t: &str| t.lines().find(|l| l.contains("shared lock handle") || l.contains("shared handle")).unwrap_or("").to_string();
+    assert_eq!(first(&b), first(&r), "{name}: run and build diagnostics differ:\nbuild: {b}\nrun: {r}");
+    b
 }
 
 #[test]
