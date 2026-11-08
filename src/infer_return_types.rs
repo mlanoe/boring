@@ -121,6 +121,71 @@ pub fn check_untyped_returns(program: &Program) -> Result<(), crate::parser::Par
     Ok(())
 }
 
+/// The construction half of D3 (implicit generics, phase 3): an untyped struct field fixed by an
+/// argument that carries no type of its own (`[]`, `{}`, `{=}`, `nil`) can never be resolved,
+/// and rustc's message about it names a generated parameter. Reported here instead, naming the
+/// field. Only direct constructions of a struct declared in this file are looked at.
+pub fn check_untyped_constructions(program: &Program) -> Result<(), crate::parser::ParseError> {
+    let mut structs: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    for item in &program.items {
+        if let Item::Struct(s) = item {
+            let fields = s.fields.iter()
+                .map(|f| (f.name.clone(), matches!(&f.ty, Type::TypeParam(n) if n.starts_with("T_") && s.type_params.contains(n))))
+                .collect::<Vec<_>>();
+            if fields.iter().any(|(_, implicit)| *implicit) {
+                structs.insert(s.name.clone(), fields);
+            }
+        }
+    }
+    if structs.is_empty() {
+        return Ok(());
+    }
+    let mut error: Option<crate::parser::ParseError> = None;
+    let mut check = |e: &mut Expr| {
+        if error.is_some() { return; }
+        let ExprKind::Call(callee, args) = &e.kind else { return };
+        let ExprKind::Var(name) = &callee.kind else { return };
+        let Some(fields) = structs.get(name) else { return };
+        for (i, a) in args.iter().enumerate() {
+            let field = match &a.label {
+                Some(l) => fields.iter().find(|(n, _)| n == l),
+                None => fields.get(i),
+            };
+            let Some((fname, true)) = field else { continue };
+            let typeless = match &a.value.kind {
+                ExprKind::Nil => true,
+                ExprKind::Array(v) | ExprKind::Set(v) => v.is_empty(),
+                ExprKind::Dict(v) => v.is_empty(),
+                _ => false,
+            };
+            if typeless {
+                error = Some(crate::parser::ParseError::Generic {
+                    msg: format!(
+                        "cannot infer the type of `{name}.{fname}`: the value given has no type of its own (an empty collection or `nil`) and the field is untyped — give the field a type in `struct {name}`, or pass a value that has one"
+                    ),
+                    line: a.value.line, col: a.value.col, len: a.value.len.max(1),
+                });
+                return;
+            }
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    let mut items = program.items.clone();
+    for item in &mut items {
+        match item {
+            Item::Fn(f) => Walker { expr: &mut check, stmt: &mut on_stmt }.stmts(&mut f.body),
+            Item::Stmt(s) => Walker { expr: &mut check, stmt: &mut on_stmt }.stmt(s),
+            Item::Let(l) => {
+                if let Some(v) = &mut l.value {
+                    Walker { expr: &mut check, stmt: &mut on_stmt }.expr(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    match error { Some(e) => Err(e), None => Ok(()) }
+}
+
 /// Own `return <value>` statements of `f` (not those of a closure or nested function), as
 /// their expressions. `None` when the answer is ambiguous: a bare `return` mixed with valued
 /// ones, or a `return` inside a block-bearing expression this pass does not model.
@@ -581,6 +646,20 @@ mod tests {
 
     fn n(s: &str) -> Type {
         Type::Named(s.to_string())
+    }
+
+    #[test]
+    fn typeless_argument_for_an_untyped_field_is_an_error() {
+        for v in ["[]", "{}", "{=}", "nil"] {
+            let src = format!("struct R:\n    status\n    payload\n\ndef main():\n    let r = R(status = 1, payload = {v})\n");
+            let e = parse_err(&src).expect("should be rejected");
+            assert!(e.contains("cannot infer the type of `R.payload`"), "{v}: {e}");
+        }
+        let top = "struct R:\n    status\n    payload\n\nlet r = R(status = 1, payload = [])\n";
+        assert!(parse_err(top).expect("top-level let").contains("`R.payload`"));
+        // A typed field, a typed argument, and a positional empty argument for a typed field are fine.
+        let ok = "struct R:\n    status\n    [int] xs\n\ndef main():\n    let r = R(status = 1, xs = [])\n    let q = R(2, [])\n";
+        assert!(parse_err(ok).is_none());
     }
 
     fn parse_err(src: &str) -> Option<String> {

@@ -254,8 +254,10 @@ struct Request:
    - D11 needed no new emitter work: the default expression is already inlined at a construction that omits
      the field, and rustc infers the parameter from it. Only the return-type inference had to learn it
      (`construct_ty`: a field the construction leaves out types its parameter from the default).
-   - **Not built:** `--show-types`, the D3/D4/D5/D6
-     construction errors (an unconstrained `[]`/`nil` is still left to rustc) and a `view` field.
+   - **D3, construction half: built** (`check_untyped_constructions`): an untyped field given `[]`, `{}`,
+     `{=}` or `nil` directly is a Boring error naming `Struct.field`. Only direct constructions of a struct of
+     the same file are seen; an argument that is a variable holding an empty collection is still left to rustc.
+   - **Not built:** `--show-types`, the D4/D5/D6 errors and a `view` field.
 4. *(later)* bound inference; GPU monomorphisation; `boring api --check` (signature snapshot for `@api`).
 
 `@api` itself (attribute parsing, the "complete signature" check, the `pub` requirement) is

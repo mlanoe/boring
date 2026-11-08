@@ -1854,24 +1854,8 @@ pub(crate) fn type_params_str(params: &[String]) -> String {
     }
 }
 
-/// Like `type_params_str` but adds `: Clone` bound to each regular type parameter.
-/// Const generic params (`$N:usize`) are emitted as `const N: usize` without a Clone bound.
-/// Used for `impl<T: Clone> Struct<T>` headers so that method bodies can call `.clone()`.
-pub(crate) fn type_params_impl_str(params: &[String]) -> String {
-    if params.is_empty() { String::new() }
-    else {
-        let bounded: Vec<String> = params.iter()
-            .map(|p| {
-                if p.starts_with('\'') { p.clone() }
-                else if p.starts_with('$') { emit_generic_param(p) }
-                else { format!("{}: Clone", p) }
-            })
-            .collect();
-        format!("<{}>", bounded.join(", "))
-    }
-}
-
-/// [`type_params_impl_str`] plus the bounds of a struct's `where_clause` (`T as Display`, or the
+/// The `impl<T: Clone, ...>` header of a struct (every regular parameter is `Clone` so method bodies
+/// can call `.clone()`; const generics are emitted as `const N: usize`) plus the bounds of its `where_clause` (`T as Display`, or the
 /// bounds read off an untyped field's uses by `infer_param_generics`), so that method bodies can
 /// use the field the way they were written to.
 pub(crate) fn type_params_impl_bounded_str(params: &[String], where_clause: &[(String, String)]) -> String {
