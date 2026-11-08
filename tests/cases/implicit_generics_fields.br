@@ -1,0 +1,28 @@
+# Implicit generics, phase 3: a struct field written without a type is a fresh type parameter
+# of the struct, fixed by each construction. One declaration, several instantiations.
+
+struct Response:
+    status
+    payload
+
+    req string describe():
+        return "{status}"
+
+struct Wrapper:
+    let inner
+
+def fetchGreeting():
+    return Response(status = 200, payload = "hello world")
+
+def fetchScores():
+    return Response(status = 200, payload = [12, 7, 31])
+
+def main():
+    let greeting = fetchGreeting()
+    let scores = fetchScores()
+    print "{greeting.status} {greeting.payload}"
+    print "{scores.status} {scores.payload[1]}"
+    let w = Wrapper(inner = 2.5)
+    print "{w.inner}"
+    let r = Response(status = "ok", payload = true)
+    print "{r.status} {r.payload}"

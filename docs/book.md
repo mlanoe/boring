@@ -4916,6 +4916,26 @@ What does not add a bound, on purpose: passing the parameter to another function
 
 Still an error, with the same message as before: an untyped parameter of a method (`def Type.name(..)`), of a `task`/`stream`/`native` function, or one with a default value.
 
+### Untyped fields
+
+A field of a `struct` can be written without a type: a lone name, with or without `let`/`var`/`mut`. It is then a fresh type parameter of the struct (named `T_<field>` in the generated Rust and in diagnostics), fixed by each construction, so one declaration gives as many instances as it is built with:
+
+```boring
+struct Response:
+    status
+    payload
+
+def fetchGreeting():                       # -> Response<int, string>
+    return Response(status = 200, payload = "hello world")
+
+def fetchScores():                         # -> Response<int, [int]>
+    return Response(status = 200, payload = [12, 7, 31])
+```
+
+It is the same thing as writing `struct Response<S, P>` with `S status` and `P payload`, minus the parameters. As for an [untyped `def` parameter](#untyped-parameters), the bounds come from how the struct's own methods use the field directly (`"{status}"` or `self.status` interpolated or printed gives `Display`, `==` gives `PartialEq`, ...); a use that adds no bound is rejected by rustc, naming it, and writing the field's type is the way out.
+
+Not built yet, so these still need a written type: a field with a default value (`retries = 0`: the default would have to type the field only when the construction does not override it), and a field of a `view`. An instance whose argument has no type of its own (`Response(status = 200, payload = [])`) is left to rustc, which cannot infer it either.
+
 ### `@api` — a signature other projects can rely on
 
 `pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:

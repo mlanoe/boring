@@ -534,7 +534,7 @@ impl Transpiler {
         let prev = self.self_type.replace(s.name.clone());
         let tp_use = type_params_use_str(&s.type_params);
         // Use impl-bounded type params: `impl<T: Clone>` so method bodies can call `.clone()`.
-        let tp_impl = type_params_impl_str(&s.type_params);
+        let tp_impl = type_params_impl_bounded_str(&s.type_params, &s.where_clause);
         // Register the struct's type params as impl-level so that methods
         // with the same type param name don't re-declare them (E0403).
         let prev_impl_type_params = std::mem::replace(&mut self.impl_type_params, s.type_params.clone());

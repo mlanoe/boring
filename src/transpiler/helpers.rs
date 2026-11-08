@@ -1871,6 +1871,27 @@ pub(crate) fn type_params_impl_str(params: &[String]) -> String {
     }
 }
 
+/// [`type_params_impl_str`] plus the bounds of a struct's `where_clause` (`T as Display`, or the
+/// bounds read off an untyped field's uses by `infer_param_generics`), so that method bodies can
+/// use the field the way they were written to.
+pub(crate) fn type_params_impl_bounded_str(params: &[String], where_clause: &[(String, String)]) -> String {
+    if params.is_empty() { return String::new(); }
+    let bounded: Vec<String> = params.iter()
+        .map(|p| {
+            if p.starts_with('\'') { p.clone() }
+            else if p.starts_with('$') { emit_generic_param(p) }
+            else {
+                let extra: Vec<String> = where_clause.iter()
+                    .filter(|(n, b)| n == p && b != "Clone")
+                    .map(|(_, b)| map_trait_bound(b))
+                    .collect();
+                if extra.is_empty() { format!("{}: Clone", p) } else { format!("{}: Clone + {}", p, extra.join(" + ")) }
+            }
+        })
+        .collect();
+    format!("<{}>", bounded.join(", "))
+}
+
 pub(crate) fn type_params_use_str(params: &[String]) -> String {
     if params.is_empty() { String::new() }
     else {

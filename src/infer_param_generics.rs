@@ -41,13 +41,16 @@ pub(crate) fn fresh_name(param: &str) -> String {
 }
 
 /// `(type parameter, bound)` pairs for the untyped parameters `params` (their *parameter* names)
-/// of a function with the given `body`, in the shape of `FnDecl::where_clause`.
+/// of a function with the given `body`, in the shape of `FnDecl::where_clause`. Also used for the
+/// untyped fields of a struct (phase 3), read from its methods, where `x` and `self.x` both count.
 pub(crate) fn bounds(params: &[String], body: &[Stmt]) -> Vec<(String, String)> {
     let mut found: BTreeSet<(String, String)> = BTreeSet::new();
     let mut body = body.to_vec();
     let is_param = |e: &Expr| -> Option<String> {
         match &e.kind {
             ExprKind::Var(n) if params.contains(n) => Some(n.clone()),
+            // `self.field` inside a method of the struct that declares the untyped field.
+            ExprKind::Field(base, n) if params.contains(n) && matches!(&base.kind, ExprKind::Var(s) if s == "self") => Some(n.clone()),
             _ => None,
         }
     };
@@ -151,6 +154,44 @@ mod tests {
     fn unused_parameter_gets_no_bound() {
         let f = first_fn("def ignore(x):\n    print \"hi\"\n");
         assert!(f.where_clause.is_empty());
+    }
+
+    fn first_struct(src: &str) -> StructDecl {
+        let tokens = lex(src).expect("lex");
+        let program = parser::parse(tokens).expect("parse");
+        program.items.iter().find_map(|i| match i {
+            Item::Struct(s) => Some(s.clone()),
+            _ => None,
+        }).expect("a struct")
+    }
+
+    #[test]
+    fn untyped_field_becomes_a_struct_type_parameter() {
+        let s = first_struct("struct Response:\n    status\n    string text\n    let payload\n");
+        assert_eq!(s.type_params, vec!["T_status".to_string(), "T_payload".to_string()]);
+        assert_eq!(s.fields[0].ty, Type::TypeParam("T_status".into()));
+        assert_eq!(s.fields[1].ty, Type::Named("string".into()));
+        assert_eq!(s.fields[2].ty, Type::TypeParam("T_payload".into()));
+    }
+
+    #[test]
+    fn untyped_field_is_bounded_by_its_method_uses() {
+        let s = first_struct("struct B:\n    v\n    w\n\n    req string show():\n        return \"{v}\"\n\n    req bool same():\n        return self.w == self.w\n");
+        assert!(s.where_clause.contains(&("T_v".into(), "Display".into())));
+        assert!(s.where_clause.contains(&("T_w".into(), "PartialEq".into())));
+    }
+
+    #[test]
+    fn untyped_field_with_a_default_still_needs_a_type() {
+        let tokens = lex("struct B:\n    retries = 0\n").expect("lex");
+        let e = parser::parse(tokens).err().expect("rejected").to_string();
+        assert!(e.contains("default value but no type"), "{e}");
+    }
+
+    #[test]
+    fn typed_fields_are_untouched() {
+        let s = first_struct("struct P:\n    int x\n    float y\n");
+        assert!(s.type_params.is_empty());
     }
 
     #[test]

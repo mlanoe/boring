@@ -243,7 +243,17 @@ struct Request:
      cast, arithmetic) — conditions around the return do not matter, only the expression does, so a `void`
      function or a returned call (possibly `void`) is never reported. Functions without untyped
      parameters keep the best-effort, never-an-error behaviour of phase 1.
-3. **Untyped struct fields** as implicit parameters: `FieldDecl` change, parser, emitter, `--show-types`.
+3. **Untyped struct fields** as implicit parameters. **Shipped, without defaults.** No `FieldDecl` change was
+   needed: `parse_field_decl` gives a lone-name field `Type::TypeParam("T_<name>")`, and the struct parser
+   adds it to `type_params` (so the existing generic-struct machinery, phase 1's unification and the
+   emitter do the rest). Findings:
+   - The same bound problem as phase 2: a method using `status` needs `T_status: Display`. The struct's
+     `where_clause` is filled from its methods' direct uses (`infer_param_generics::bounds`, `x` and
+     `self.x`), and the struct `impl` header, which ignored `where_clause`, now emits it
+     (`type_params_impl_bounded_str`).
+   - **Not built:** D11 (a default value types the parameter only when the construction does not override
+     it): an untyped field with a default is a parse error for now. `--show-types`, the D3/D4/D5/D6
+     construction errors (an unconstrained `[]`/`nil` is still left to rustc) and a `view` field.
 4. *(later)* bound inference; GPU monomorphisation; `boring api --check` (signature snapshot for `@api`).
 
 `@api` itself (attribute parsing, the "complete signature" check, the `pub` requirement) is

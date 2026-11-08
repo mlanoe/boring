@@ -2460,6 +2460,31 @@ impl Parser {
             }
         }
         self.eat(&TokenKind::Dedent);
+        // The fresh type parameters of the untyped fields (implicit generics, phase 3).
+        let mut type_params = type_params;
+        let mut untyped_fields: Vec<String> = Vec::new();
+        for f in &fields {
+            let fresh = crate::infer_param_generics::fresh_name(&f.name);
+            let is_fresh = |t: &Type| match t {
+                Type::TypeParam(n) => *n == fresh,
+                Type::Mut(inner) => matches!(&**inner, Type::TypeParam(n) if *n == fresh),
+                _ => false,
+            };
+            if is_fresh(&f.ty) && !type_params.contains(&fresh) {
+                type_params.push(fresh);
+                untyped_fields.push(f.name.clone());
+            }
+        }
+        // A bare type parameter has no operations: bound each one by how the struct's methods use
+        // the field directly (same reading as for an untyped `def` parameter).
+        let mut where_clause = where_clause;
+        if !untyped_fields.is_empty() {
+            for m in &methods {
+                for b in crate::infer_param_generics::bounds(&untyped_fields, &m.body) {
+                    if !where_clause.contains(&b) { where_clause.push(b); }
+                }
+            }
+        }
         Ok(StructDecl {
             name,
             is_pub,

@@ -378,6 +378,8 @@ transpile_test!(api_attribute);
 transpile_test!(infer_return_types);
 // Untyped `def` parameters as fresh type parameters (phase 2 of implicit generics).
 transpile_test!(implicit_generics_params);
+// Untyped struct fields as implicit type parameters (phase 3 of implicit generics).
+transpile_test!(implicit_generics_fields);
 transpile_test!(operators);
 transpile_test!(macros);
 transpile_test!(defer);
