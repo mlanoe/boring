@@ -2,6 +2,11 @@
 examples/*/target/
 # Generated Rust projects from --emit-rust
 tests/cases/*_rust/
+tests/cases/*_metal/
+tests/cases/*_wgpu/
+tests/cases/*_cuda/
+tests/cases/*_rocm/
+tests/cases/*_simd/
 examples/*_rust/
 examples/*_metal/
 examples/*_simd/

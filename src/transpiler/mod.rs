@@ -2698,7 +2698,7 @@ impl Transpiler {
              impl<T> BoringLen for Vec<T> { fn len(&self) -> usize { <[T]>::len(self) } }\n\
              impl<K, V, S> BoringLen for std::collections::HashMap<K, V, S> { fn len(&self) -> usize { std::collections::HashMap::len(self) } }\n\
              impl<T, S> BoringLen for std::collections::HashSet<T, S> { fn len(&self) -> usize { std::collections::HashSet::len(self) } }\n\
-             // `Arc<str>` becomes `Rc<str>` in single-threaded output (the same textual fixup as everywhere), `&str` is a strict-mode literal.\n\
+             // The `Arc` string type is swapped for its single-threaded twin by the textual fixup applied to the whole output; `&str` is a strict-mode literal. (Do not spell the twin out in this prelude: the Metal host reads it as the single-thread marker.)\n\
              impl BoringLen for Arc<str> { fn len(&self) -> usize { self.chars().count() } }\n\
              impl BoringLen for &str { fn len(&self) -> usize { self.chars().count() } }\n\
              \n\

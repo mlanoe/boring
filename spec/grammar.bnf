@@ -224,6 +224,8 @@ qual_chain      ::= IDENT ("'" IDENT)*
 # Valid const types: int, uint, bool (primitives only; float is not valid in Rust const generics).
 const_param     ::= ("int" | "uint" | "bool") IDENT
 type_param      ::= IDENT ("as" (IDENT | "(" IDENT ("," IDENT)* ")"))?
+                  | IDENT "'" IDENT        # qualified generic `T'q`: declares type `T` and the qualifier parameter `q` tied to it
+                                           # (plain form only — no `as` bound, no default; docs/book.md "Qualified generics")
 
 # Generic ARGUMENTS at a use site (call, method turbofish, type position, `ext` header):
 # positional arguments first, then labelled ones in any order, trailing comma allowed.
@@ -837,6 +839,9 @@ postfix         ::= "(" arg_list? ")" trailing_closure?          # call with opt
                   | "?." IDENT                                               # optional chaining — field
                   | "." IDENT "(" arg_list? ")"                             # method call
                   | "." IDENT generic_args "(" arg_list? ")"                    # generic method call: obj.method<T>(args)
+                  | generic_args "." IDENT "(" arg_list? ")"                    # type-level call with type arguments on a type name:
+                                                                             #   Box<int>.of(3)  ≡  Box.of<int>(3)
+                                                                             #   (the `>` must be followed by `.` IDENT `(`, else it is a comparison)
                   | "?." IDENT "(" arg_list? ")"                            # optional chaining — method
                   | "?" "(" arg_list? ")"                                # optional call of a function-typed value: f?(args) — sugar for `if f != nil: f(args) else: nil`; callee must be a variable/field path
                   | "?." IDENT generic_args "(" arg_list? ")"                  # optional chaining — generic method call: obj?.method<T>(args)

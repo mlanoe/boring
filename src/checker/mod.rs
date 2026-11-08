@@ -688,6 +688,10 @@ impl Checker {
             let others = local.iter().map(|f| (*f, true)).chain(imp[..i].iter().map(|f| (*f, false)));
             for (a, is_local) in others {
                 if a.name != b.name { continue; }
+                // The very same signature in two files is a redefinition, not an overload: it is
+                // not an error (a project that duplicates a small helper keeps building); `run`
+                // and `build` both keep the first declaration in load order.
+                if fmt(a) == fmt(b) { continue; }
                 let Some(n) = crate::transpiler::helpers::overloads_conflict(a, b) else { continue };
                 let (line, col) = if is_local { (a.line, a.col) } else { (first_use, 0) };
                 self.errors.push(CheckError::at(format!(
@@ -711,6 +715,10 @@ impl Checker {
                 }
             }
         }
+        let sig = |f: &FnDecl| f.params.iter().map(|p| {
+            let ty = p.ty.as_ref().map(crate::transpiler::helpers::mangle_type_name).unwrap_or_else(|| "_".into());
+            if p.default.is_some() { format!("{ty}=default") } else { ty }
+        }).collect::<Vec<_>>();
         let mut local = Vec::new();
         methods(&program.items, &mut local);
         let mut imp = Vec::new();
@@ -720,6 +728,8 @@ impl Checker {
             let others = local.iter().map(|x| (*x, true)).chain(imp[..i].iter().map(|x| (*x, false)));
             for ((at, a), is_local) in others {
                 if at != *bt || a.name != b.name { continue; }
+                // Same signature in two files: a redefinition, not an error (see above).
+                if sig(a) == sig(b) { continue; }
                 let Some(n) = crate::transpiler::helpers::overloads_conflict(a, b) else { continue };
                 let (line, col) = if is_local { (a.line, a.col) } else { (first_use, 0) };
                 self.errors.push(CheckError::at(format!(

@@ -70,6 +70,18 @@ pub(crate) fn check_alloc_count(n: usize, line: usize) -> Result<(), Signal> {
 ///   def fn(int n, string s = "x"):   # also callable as fn(int)
 ///   def fn(int n):                    # CONFLICT at arity 1
 fn check_overload_conflict_or_exit(a: &FnDecl, b: &FnDecl, _line: usize) {
+    // The very same signature twice (e.g. a helper duplicated in two files) is a redefinition,
+    // not an overload: it is not an error here, as in the checker.
+    let same_sig = a.params.len() == b.params.len()
+        && a.params.iter().zip(b.params.iter()).all(|(pa, pb)| {
+            pa.default.is_some() == pb.default.is_some()
+                && match (&pa.ty, &pb.ty) {
+                    (Some(ta), Some(tb)) => fmt_type(ta) == fmt_type(tb),
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
+    if same_sig { return; }
     let a_min = a.params.iter().filter(|p| p.default.is_none()).count();
     let b_min = b.params.iter().filter(|p| p.default.is_none()).count();
     let a_max = a.params.len();

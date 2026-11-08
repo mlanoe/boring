@@ -5,8 +5,9 @@
 // DIFFERENT files of a project resolve by argument type, like same-file ones, under `boring run`
 // and `boring build`. Before, the entry file's own declaration hid the imported same-named one, so
 // `describe(1)` failed with "argument 1 of describe (parameter 's') expects string, got int".
-// An overload pair that is ambiguous (same parameter types, or a default making a shorter call
-// match both) stays an error in both modes, never a silent pick of one file's version.
+// An overload pair that is ambiguous because a default makes a shorter call match both stays an
+// error in both modes. The very same signature in two files is a redefinition and is accepted
+// (the first declaration in load order is kept, identically by `run` and `build`).
 //
 // Run with:
 //   tools/test.sh --test overload_across_files
@@ -131,18 +132,24 @@ fn same_file_struct_and_ext_overload_keeps_both_methods() {
 }
 
 #[test]
-fn identical_signature_across_files_is_an_error() {
+fn identical_signature_across_files_is_a_redefinition_not_an_error() {
+    // Same name and parameter types in the entry file and an imported one: no error; `run` and
+    // `build` agree on which declaration is kept (the first in load order, here the import's).
     let main = "use a\n\nstring describe(int n):\n    \"main {n}\"\n\ndef main():\n    print describe(1)\n";
     let dir = project("dup_entry", &[("a.br", A_INT), ("main.br", main)]);
-    assert_rejected(&dir, "ambiguous overload for 'describe'");
+    let ran = run_ok(&dir);
+    assert_eq!(ran, build_ok(&dir, "dup_entry"));
+    assert_eq!(ran, "int 1\n", "the imported declaration comes first in load order");
 }
 
 #[test]
-fn identical_signature_in_two_imported_files_is_an_error() {
+fn identical_signature_in_two_imported_files_is_a_redefinition_not_an_error() {
     let b = "string describe(int m):\n    \"b {m}\"\n";
     let main = "use a\nuse b\n\ndef main():\n    print describe(1)\n";
     let dir = project("dup_imported", &[("a.br", A_INT), ("b.br", b), ("main.br", main)]);
-    assert_rejected(&dir, "ambiguous overload for 'describe'");
+    let ran = run_ok(&dir);
+    assert_eq!(ran, build_ok(&dir, "dup_imported"));
+    assert_eq!(ran, "int 1\n", "the first `use`d file comes first in load order");
 }
 
 #[test]
@@ -154,11 +161,12 @@ fn default_parameter_making_a_call_ambiguous_across_files_is_an_error() {
 }
 
 #[test]
-fn identical_ext_signature_across_files_is_an_error() {
+fn identical_ext_signature_across_files_is_a_redefinition_not_an_error() {
     let main = "use a\n\next Box:\n    req string show(int n):\n        \"ext {n}\"\n\n\
                 def main():\n    let b = Box(1)\n    print b.show(1)\n";
     let dir = project("dup_ext", &[("a.br", A_BOX), ("main.br", main)]);
-    assert_rejected(&dir, "ambiguous overload for method 'Box::show'");
+    let ran = run_ok(&dir);
+    assert_eq!(ran, build_ok(&dir, "dup_ext"));
 }
 
 #[test]
