@@ -585,6 +585,7 @@ impl Interpreter {
         match &e.kind {
             ExprKind::Var(n) => {
                 if let Some(t) = env.borrow().get_declared_type(n) { return Some(t); }
+                if let Some(t) = env.borrow().get_inferred_type(n) { return Some(t); }
                 if n != "self" && env.borrow().resolves_to_self_field(n) {
                     let Some(Value::Object(o)) = env.borrow().get("self") else { return None };
                     let pty = o.borrow().type_name.clone();
@@ -597,6 +598,25 @@ impl Interpreter {
                 let pty = o.borrow().type_name.clone();
                 self.struct_field_type(&pty, f)
             }
+            _ => None,
+        }
+    }
+
+    /// The collection type the compiled program gives an untyped binding, when it is evident:
+    /// a collection literal is plain (`Vec<T>`/`HashMap`, element reads copy); a call takes its
+    /// function's declared return type; a name or field takes its own declared/inferred type.
+    pub(crate) fn infer_collection_type(&self, e: &Expr, env: &EnvRef) -> Option<Type> {
+        let plain = || Box::new(Type::Named("\u{1}plain".into()));
+        match &e.kind {
+            ExprKind::Array(_) => Some(Type::Array(plain())),
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Var(f) = &callee.kind else { return None };
+                match self.global.borrow().get(f.as_str()) {
+                    Some(Value::Fn { decl, .. }) => decl.return_ty.clone().filter(|t| matches!(self.resolve_type(t).without_mut(), Type::Array(_) | Type::Dict(..))),
+                    _ => None,
+                }
+            }
+            ExprKind::Var(_) | ExprKind::Field(..) => self.declared_container_type(e, env),
             _ => None,
         }
     }

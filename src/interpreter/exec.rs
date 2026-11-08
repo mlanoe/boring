@@ -73,6 +73,8 @@ impl Interpreter {
                         }
                     } else { coerced }
                 } else { val };
+                let inferred_coll = if s.ty.is_none() { self.infer_collection_type(s_val, &env) } else { None };
+                target_env.borrow_mut().set_inferred_type(&s.name, inferred_coll);
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_ty = s.ty.as_ref().map(|ty| {

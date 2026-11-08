@@ -1212,6 +1212,27 @@ impl Env {
         }
     }
 
+    /// Records the statically known collection type of an untyped binding (`mut arr = [T()]`,
+    /// `mut arr = make()`), or clears a stale one: the compiled program's element-read copy rule
+    /// follows the collection's type, annotated or not. Kept under a key no source name can have.
+    pub fn set_inferred_type(&mut self, name: &str, ty: Option<Type>) {
+        let key = format!("\u{1}t:{name}");
+        match ty {
+            Some(t) => { self.declared_types.insert(key, t); }
+            None => { self.declared_types.remove(&key); }
+        }
+    }
+
+    pub fn get_inferred_type(&self, name: &str) -> Option<Type> {
+        if self.vars.contains_key(name) {
+            self.declared_types.get(&format!("\u{1}t:{name}")).cloned()
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().get_inferred_type(name)
+        } else {
+            None
+        }
+    }
+
     /// Mark a variable as having an Owned qualifier (T') — move semantics when captured by task.
     pub fn mark_owned_var(&mut self, name: &str) {
         if self.vars.contains_key(name) {
@@ -3673,6 +3694,8 @@ impl Interpreter {
                         }
                     } else { coerced }
                 } else { val };
+                let inferred_coll = if stmt.ty.is_none() { self.infer_collection_type(stmt_value, &env) } else { None };
+                env.borrow_mut().set_inferred_type(&stmt.name, inferred_coll);
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_ty = stmt.ty.as_ref().map(|ty| {

@@ -541,7 +541,21 @@ mut [mut Counter'actor] shared = [Counter()]
 mut h = shared[0]
 h.inc()
 print "shared {shared[0].get()} {h.get()}"
-"#)], "plain 0 1\nshared 1 1\n");
+
+mut untyped = [Counter()]
+mut u = untyped[0]
+u.inc()
+print "untyped {untyped[0].get()} {u.get()}"
+
+[mut Counter'actor] mkShared():
+    mut [mut Counter'actor] r = [Counter()]
+    r
+
+mut fromFn = mkShared()
+mut f = fromFn[0]
+f.inc()
+print "fromFn {fromFn[0].get()} {f.get()}"
+"#)], "plain 0 1\nshared 1 1\nuntyped 0 1\nfromFn 1 1\n");
 }
 
 #[test]
