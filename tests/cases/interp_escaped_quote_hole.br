@@ -1,0 +1,6 @@
+string f(string s):
+    return s
+
+print "{f(\"a\")}"
+print "x {f(\"b}c\")} y"
+print "{f("d")}"

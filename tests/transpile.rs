@@ -1104,6 +1104,7 @@ transpile_test!(json_single_letter_type_names);
 // real interpreter-side `fromJson` makes both backends agree byte-for-byte).
 transpile_test!(throws_call_else_default);
 transpile_test!(collection_interp);
+transpile_test!(interp_escaped_quote_hole);
 
 // docs/interpreter-untagged-enum-fromjson-mismatch.md -- `boring run` and `boring build`
 // printed completely different things for `fromJson<T>` on a `@serde(untagged)` enum,

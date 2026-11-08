@@ -1398,9 +1398,26 @@ fn lex_string(chars: &mut CharIter<'_>, line: usize, col: usize) -> Result<Token
                     let mut inner = String::new();
                     let mut depth = 0usize;
                     let mut in_hole_str = false;
+                    // Nested literal written with escaped quotes (`\"a\"`) inside
+                    // the hole of an outer `"..."` string.
+                    let mut in_esc_str = false;
                     loop {
                         match chars.next() {
                             None | Some((_, '\n')) => return Err(LexError::UnterminatedString { line, col }),
+                            Some((_, '\\')) if !in_hole_str && chars.peek().map(|(_, c)| *c) == Some('"') => {
+                                // `\"` in a hole is the outer string's escape for a
+                                // quote of the expression itself: emit a plain `"`.
+                                chars.next();
+                                inner.push('"');
+                                in_esc_str = !in_esc_str;
+                            }
+                            Some((_, '\\')) if in_esc_str => {
+                                inner.push('\\');
+                                if let Some((_, c2)) = chars.next() {
+                                    inner.push(c2);
+                                }
+                            }
+                            Some((_, c)) if in_esc_str => inner.push(c),
                             Some((_, '\\')) if in_hole_str => {
                                 inner.push('\\');
                                 if let Some((_, c2)) = chars.next() {
@@ -2179,5 +2196,16 @@ mod dollar_strings {
         assert!(matches!(lex("let x = $\"abc"), Err(LexError::UnterminatedString { .. })));
         assert!(matches!(lex("let x = $\"\"\"abc"), Err(LexError::UnterminatedString { .. })));
         assert!(matches!(lex("let x = $\"${abc\""), Err(LexError::UnterminatedString { .. })));
+    }
+
+    #[test]
+    fn escaped_quote_inside_hole() {
+        let toks = lex(r#"print "{f(\"a\")}""#).unwrap();
+        let found = toks.iter().any(|t| matches!(&t.kind,
+            TokenKind::StringInterp(p) if p == &vec![RawInterpPart::Hole(r#"f("a")"#.to_string())]));
+        assert!(found, "{:?}", toks);
+        let toks = lex(r#"print "x {g(\"a}b\")} y""#).unwrap();
+        assert!(toks.iter().any(|t| matches!(&t.kind,
+            TokenKind::StringInterp(p) if p[1] == RawInterpPart::Hole(r#"g("a}b")"#.to_string()))));
     }
 }

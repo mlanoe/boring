@@ -712,11 +712,31 @@ struct Lexer:
                         current_lit = ""
                     var inner = ""
                     var depth = 0
+                    var in_hole_str = false
+                    var in_esc_str = false
                     while true:
                         if self.at_end():
                             throw "line {self.line}: unterminated string literal"
                         let ic = self.consume()
-                        if ic == "{{":
+                        if ic == "\n":
+                            throw "line {self.line}: unterminated string literal"
+                        elif ic == "\\" and not in_hole_str and self.match_char("\""):
+                            # `\"` in a hole: escaped quote of a nested literal
+                            self.consume()
+                            inner = inner + "\""
+                            in_esc_str = not in_esc_str
+                        elif ic == "\\" and (in_hole_str or in_esc_str):
+                            inner = inner + ic
+                            if not self.at_end():
+                                inner = inner + self.consume()
+                        elif in_esc_str:
+                            inner = inner + ic
+                        elif ic == "\"":
+                            in_hole_str = not in_hole_str
+                            inner = inner + ic
+                        elif in_hole_str:
+                            inner = inner + ic
+                        elif ic == "{{":
                             depth += 1
                             inner = inner + ic
                         elif ic == "}}":
