@@ -1,0 +1,63 @@
+# Qualified generics (docs/book.md, "Qualified generics"): `<T'q>` declares a type
+# parameter `T` and the qualifier parameter `q` that goes with it. `T = Counter'actor` binds both;
+# a bare construction or call infers `T` from the type of its arguments and `q` from their written
+# qualifier. `res` follows `q`, `fallback` is always inline.
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+    req int get():
+        n
+
+struct Entry<T'q>:
+    var T'q res
+    var T'inline fallback
+
+    req int fallbackValue():
+        fallback.get()
+
+# Two types, each with its own qualifier: `<A'q, B'q>` (one `q` per type, not shared; sharing is `<A, B, 'q>`).
+struct Duo<A'q, B'q>:
+    var A'q first
+    var B'q second
+
+    req int sum():
+        first.get() + second.get()
+
+# `T` is also found inside an array, dict or tuple slot, in a literal or in a declared name.
+struct Group<T'q>:
+    var [T'q] items
+    var {string = T'q} named
+
+    req int size():
+        items.len() + named.len()
+
+# A function generic over a type and its qualifier: `peek_Counter_actor`.
+int peek<T'q>(T'q x, T'inline y):
+    y.get() + 100
+
+def main():
+    let Counter'actor a = Counter(5)
+    # Written out, in the short and the long form: the same instance.
+    let Entry<T = Counter'actor> e1 = Entry<T = Counter'actor>(res = a, fallback = Counter(1))
+    let Entry<T = Counter, q'actor> e2 = Entry<T = Counter, q'actor>(res = a, fallback = Counter(2))
+    # Inferred from the arguments: `T = Counter`, `q = 'actor`.
+    let e3 = Entry(res = a, fallback = Counter(3))
+    print "{e1.fallbackValue()} {e2.fallbackValue()} {e3.fallbackValue()}"
+    let Counter'owned o = Counter(7)
+    let e4 = Entry(res = o, fallback = Counter(4))
+    print "{e4.fallbackValue()}"
+    let Counter'owned o2 = Counter(6)
+    let Counter'owned b = Counter(10)
+    let d = Duo(first = a, second = b)
+    let Duo<A = Counter'actor, B = Counter'owned> d2 = Duo<A = Counter'actor, B = Counter'owned>(first = a, second = Counter(10))
+    print "{d.sum()} {d2.sum()}"
+    let Counter'actor c = Counter(11)
+    let g1 = Group(items = [a, c], named = {"x" = a})
+    let Counter'actor d = Counter(12)
+    let [Counter'actor] xs = [a, d, c]
+    let g2 = Group(items = xs, named = {"y" = c})
+    print "{g1.size()} {g2.size()}"
+    print "{peek(a, Counter(9))} {peek(o2, Counter(8))}"

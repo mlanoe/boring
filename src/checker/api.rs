@@ -10,7 +10,7 @@
 // See the LICENSE file at the project root for the full text.
 
 //! `@api` — marks a `pub` function, struct or enum as part of the surface other
-//! projects rely on (docs/design-notes/implicit-generics-draft.md, D1).
+//! projects rely on (docs/book.md, "Implicit generics: design notes", D1).
 //!
 //! What it enforces:
 //! - It requires `pub` (like `@provide`).
@@ -27,10 +27,9 @@
 //!   would depend on a type free to change. A type declared elsewhere (an imported
 //!   file) is not known here and is never flagged.
 //!
-//! Today the parser still requires an annotation on every `def` parameter and every field,
-//! so the "parameter typed" part of the rule cannot fail yet. It is checked anyway, because
-//! the implicit-generics work will let the parser omit them; `@api` is what keeps that
-//! relaxation from reaching a public signature. The return type is checked now: an `@api`
+//! The parser lets a `def` parameter and a struct field omit its type (it writes the placeholder
+//! `T_<name>`, see `infer_param_generics`); under `@api` that omission is an error, so an inferred
+//! type never becomes part of a public signature. The return type is checked too: an `@api`
 //! function with no written return type whose body says `return <value>` is an error
 //! (`infer_return_types` skips `@api` items, so the type is never silently written back).
 
@@ -38,6 +37,12 @@ use super::*;
 
 /// Keys `@api(...)` accepts; both values are free text.
 const API_KEYS: &[&str] = &["since", "deprecated"];
+
+/// True when `ty` is the placeholder the implicit-generics passes write for an omitted type
+/// (`T_<name>`, see `infer_param_generics`): the user wrote no type there.
+fn is_implicit_param(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::TypeParam(n) if n.strip_prefix("T_") == Some(name))
+}
 
 fn api_attr(attrs: &[Attr]) -> Option<&Attr> {
     attrs.iter().find(|a| a.name == "api")
@@ -115,7 +120,7 @@ impl Checker {
             self.error(
                 format!(
                     "`@api` requires `pub` — {what} is not visible to other projects, so it \
-                     cannot be part of an API (docs/design-notes/implicit-generics-draft.md, D1)"
+                     cannot be part of an API (see `@api` in docs/book.md)"
                 ),
                 attr.line,
                 attr.col,
@@ -169,6 +174,14 @@ impl Checker {
     ) {
         for p in params {
             match &p.ty {
+                Some(t) if is_implicit_param(t, &p.name) => self.error(
+                    format!(
+                        "parameter `{}` of `{owner}` has no type: an `@api` signature must be written out in full",
+                        p.name
+                    ),
+                    p.line,
+                    p.col,
+                ),
                 None if !p.variadic => self.error(
                     format!(
                         "parameter `{}` of `{owner}` has no type: an `@api` signature must be written out in full",
@@ -242,6 +255,17 @@ impl Checker {
         let Some(attr) = api_attr(&s.attrs) else { return };
         self.check_api_attr(attr, s.is_pub, &format!("`{}`", s.name));
         for f in s.fields.iter().filter(|f| f.is_pub) {
+            if is_implicit_param(&f.ty, &f.name) {
+                self.error(
+                    format!(
+                        "field `{}.{}` has no type: an `@api` signature must be written out in full \
+                         (an inferred field type would silently become part of the API)",
+                        s.name, f.name
+                    ),
+                    f.line,
+                    f.col,
+                );
+            }
             self.check_api_exposure(&format!("{}.{}", s.name, f.name), &f.ty, f.line, f.col);
         }
         self.check_api_members(&s.name, &s.methods, &s.type_methods);
@@ -378,6 +402,18 @@ mod tests {
             other => panic!("expected a fn, got {other:?}"),
         }
         assert!(any(&errors(&p), "parameter `x` of `twice` has no type"), "got {:?}", errors(&p));
+    }
+
+    #[test]
+    fn implicit_field_and_parameter_are_rejected_under_api() {
+        let p = program("@api\npub struct R:\n    pub let status\n    pub let int n\n    let hidden\n");
+        let errs = errors(&p);
+        assert!(any(&errs, "field `R.status` has no type"), "got {errs:?}");
+        assert!(!any(&errs, "R.n") && !any(&errs, "R.hidden"), "got {errs:?}");
+        let p = program("@api\npub def show(x):\n    print \"{x}\"\n");
+        assert!(any(&errors(&p), "parameter `x` of `show` has no type"), "got {:?}", errors(&p));
+        let p = program("pub struct R:\n    pub let status\n");
+        assert!(!any(&errors(&p), "has no type"), "got {:?}", errors(&p));
     }
 
     #[test]

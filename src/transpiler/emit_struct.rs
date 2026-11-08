@@ -637,6 +637,7 @@ impl Transpiler {
         for proto in &proto_impl_names {
             {
                 self.blank();
+                let tp = self.trait_impl_generics(s, proto, &tp);
                 self.line(&format!("impl{} {} for {}{} {{", tp, proto, s.name, tp_use));
                 self.indent += 1;
                 // Emit associated type bindings that this trait requires.
@@ -737,6 +738,7 @@ impl Transpiler {
                     && required_type.iter().all(|m| struct_type_method_names.contains(m))
                 {
                     self.blank();
+                    let tp = self.trait_impl_generics(s, trait_name, &tp);
                     self.line(&format!("impl{} {} for {}{} {{", tp, trait_name, s.name, tp_use));
                     self.indent += 1;
                     let prev_in_trait = self.inside_trait_impl;
@@ -1415,6 +1417,21 @@ impl Transpiler {
             }
         }
         None
+    }
+
+    /// The generics of `impl<..> Trait for Generic<..>`: a generic struct's trait implementations
+    /// call its inherent methods, so they carry the inherent impl's bounds (`Clone`, the
+    /// `where_clause` ones), and in multi-threaded output also `Send + Sync` when `Trait` is a
+    /// declared non-generic trait (those have `Send + Sync` supertraits, see `emit_trait`).
+    /// A non-generic struct keeps `plain`.
+    fn trait_impl_generics(&self, s: &StructDecl, trait_name: &str, plain: &str) -> String {
+        if s.type_params.is_empty() {
+            return plain.to_string();
+        }
+        let send_sync = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi)
+            && !trait_name.contains('<')
+            && self.trait_method_names.contains_key(trait_name);
+        type_params_impl_bounded_extra_str(&s.type_params, &s.where_clause, if send_sync { " + Send + Sync" } else { "" })
     }
 
     pub(crate) fn emit_conversion(&mut self, conv: &AsDecl) {

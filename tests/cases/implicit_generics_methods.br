@@ -1,0 +1,24 @@
+# Implicit generics, phase 4 step 3: `len()` on an untyped parameter. Rust has no std `len` trait, so
+# the parameter is bounded by the generated prelude's `BoringLen` (arrays, dicts, sets, strings);
+# the result is a `uint`. `clone` and `to_string` were already allowed.
+
+def size(x):
+    return x.len()
+
+def isEmpty(x):
+    return x.len() == 0
+
+def describe(x):
+    print "{x.len()} items"
+
+struct Bag:
+    items
+
+    req uint count():
+        return items.len()
+
+def main():
+    print "{size([1, 2, 3])} {size({"a" = 1})} {size({1, 2})} {size("héllo")}"
+    print "{isEmpty([1])} {isEmpty("")}"
+    describe([4, 5])
+    print "{Bag(items = [7, 8, 9]).count()} {Bag(items = "ab").count()}"

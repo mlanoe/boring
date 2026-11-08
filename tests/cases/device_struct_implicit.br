@@ -1,0 +1,18 @@
+struct Wrap:
+    v
+    int n
+
+mut [int]'kernel'unified out = [0 for ..<4]
+kernel O:
+    mut [int]'unified out
+    init(mut [int]'unified o):
+        out = o
+    def ():
+        let i = .thread.x
+        let w = Wrap(v = i, n = 2)
+        out[i] = w.v + w.n
+
+mut o = O(out)
+kernel:
+    o(block = 4)
+print "{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}"

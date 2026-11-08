@@ -362,7 +362,7 @@ fn resolve_identity_keys(elems: &mut [ArrayBlockElem], sigs: &Signatures) -> Res
 /// A short, human-readable rendering of `ty` for error messages — deliberately
 /// minimal (this pass only ever needs to name the type it rejected, not emit
 /// valid Boring syntax back).
-fn describe_type(ty: &Type) -> String {
+pub(crate) fn describe_type(ty: &Type) -> String {
     match ty {
         Type::Int => "int".into(),
         Type::Uint => "uint".into(),
@@ -384,7 +384,8 @@ fn describe_type(ty: &Type) -> String {
         Type::Nil => "nil".into(),
         Type::Void => "void".into(),
         Type::Never => "never".into(),
-        Type::Named(n) => n.clone(),
+        Type::Named(n) | Type::TypeParam(n) => n.clone(),
+        Type::Generic(n, args) => format!("{n}<{}>", args.iter().map(describe_type).collect::<Vec<_>>().join(", ")),
         Type::Optional(t) => format!("{}?", describe_type(t)),
         Type::Array(t) => format!("[{}]", describe_type(t)),
         Type::ArrayN(t, n) => format!("[{}, {}]", describe_type(t), n),
@@ -504,6 +505,13 @@ pub fn desugar_array_block_with_imports(
     source_dir: Option<&std::path::Path>,
     deps: &HashMap<String, std::path::PathBuf>,
 ) -> Result<Program, ParseError> {
+    if let Some(dir) = source_dir {
+        if program.items.iter().any(|i| matches!(i, Item::Use(_))) {
+            let imported = crate::infer_return_types::collect_inference_imports(&program.items, dir, deps);
+            crate::infer_return_types::infer_return_types_with_imports(&mut program, &imported);
+            crate::infer_return_types::check_with_imports(&program, &imported)?;
+        }
+    }
     let mut sigs = Signatures::default();
     if let Some(dir) = source_dir {
         let mut visited = HashSet::new();

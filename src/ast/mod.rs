@@ -2633,6 +2633,7 @@ pub type QualChain = Vec<OwnerQual>;
 /// `^` cannot start any other parameter spelling (`T`, `$N:usize`, `'a`).
 pub fn qual_param_decl(p: &str) -> Option<(&str, Vec<QualChain>)> {
     let rest = p.strip_prefix('^')?;
+    let rest = rest.split_once('@').map_or(rest, |(r, _)| r);
     let rest = rest.split_once('=').map_or(rest, |(r, _)| r);
     let (name, bound) = match rest.split_once(':') {
         Some((n, b)) => (n, Some(b)),
@@ -2650,6 +2651,15 @@ pub fn qual_param_default(p: &str) -> Option<QualChain> {
     let rest = p.strip_prefix('^')?;
     OwnerQual::chain_from_name(rest.split_once('=')?.1)
 }
+
+/// The type parameters a qualifier parameter is tied to by the `<T'q>` sugar (`^q@T` -> `[T]`;
+/// `<A'q, B'q>` shares one `q`: `^q@A,B` -> `[A, B]`). `<T, 'q>` written long has none.
+pub fn qual_param_links(p: &str) -> Vec<&str> {
+    p.strip_prefix('^').and_then(|r| r.split_once('@')).map_or_else(Vec::new, |(_, t)| t.split(',').collect())
+}
+
+/// Is the qualifier parameter `p` tied to the type parameter `t`?
+pub fn qual_linked_to(p: &str, t: &str) -> bool { qual_param_links(p).contains(&t) }
 
 /// Label of a qualifier parameter in a `type_params` list (`^elem:..` → `elem`).
 pub fn qual_param_name(p: &str) -> Option<&str> { qual_param_decl(p).map(|(n, _)| n) }

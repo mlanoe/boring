@@ -84,7 +84,9 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     tensor_config.target_warp_width = 32;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
-    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
+    // Type-generic structs / helper functions used in device code become concrete copies first.
+    let (device_generic, device_generic_errors) = crate::transpiler::device_generic::monomorphise_device_generics(&tensor_host.program);
+    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&device_generic));
     let program = &optional_lowered;
     // Program-wide const-generic kernel monomorphisation (shared with Metal/CUDA/ROCm): every
     // `Name<args>(...)` construction, wherever it appears (top level, `req`/`def` bodies, ...),
@@ -179,6 +181,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let mut errors = general_out.errors;
     errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
+    errors.extend(device_generic_errors);
     errors.extend(generic_errors);
     errors.extend(host_errors);
     errors.extend(tensor_host.errors);

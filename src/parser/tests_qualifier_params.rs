@@ -278,3 +278,79 @@ fn a_qualified_pattern_may_name_the_instance() {
     assert!(names.iter().any(|n| n.ends_with("::Full")), "{names:?}");
     assert!(names.iter().any(|n| n.ends_with("::Empty")), "{names:?}");
 }
+
+// ─── `<T'q>`: a type and its qualifier as one parameter (docs/book.md, "Qualified generics")
+
+#[test]
+fn qualified_generic_sugar_declares_a_linked_qualifier_parameter() {
+    let p = parse("struct Entry<T'q>:\n    let T'q res\n    let T'inline fallback\n\ndef main():\n    print \"x\"\n").unwrap();
+    assert_eq!(struct_named(&p, "Entry").type_params, ["T", "^q@T"]);
+    assert_eq!(qual_param_name("^q@T"), Some("q"));
+    assert_eq!(qual_param_links("^q@T"), ["T"]);
+        assert!(qual_param_links("^q").is_empty());
+    let (_, bound) = qual_param_decl("^q@T").unwrap();
+    assert_eq!(bound.len(), OwnerQual::BARE_MEMBERS.len());
+    let p = parse("struct Two<A'p, B'q>:\n    let A'p a\n    let B'q b\n\ndef main():\n    print \"x\"\n").unwrap();
+    assert_eq!(struct_named(&p, "Two").type_params, ["A", "^p@A", "B", "^q@B"]);
+    // `<A'q, B'q>`: each type has its own qualifier (`q.A`, `q.B`), written `A'q` / `B'q` in the body.
+    let p = parse("struct Shared<A'q, B'q>:\n    let A'q a\n    let B'q b\n\ndef main():\n    print \"x\"\n").unwrap();
+    let s = struct_named(&p, "Shared");
+    assert_eq!(s.type_params, ["A", "^q.A@A", "B", "^q.B@B"]);
+    assert!(format!("{:?}", s.fields[0].ty).contains("Param(\"q.A\")"), "{:?}", s.fields[0].ty);
+    assert!(format!("{:?}", s.fields[1].ty).contains("Param(\"q.B\")"), "{:?}", s.fields[1].ty);
+}
+
+#[test]
+fn qualified_generic_sugar_rejects_duplicates_names_bounds() {
+    let e = parse("struct E<A, 'q, B'q>:\n    let A'q a\n    let B'q b\n\ndef main():\n    print \"x\"\n").expect_err("twice");
+    assert!(e.msg().contains("declared twice"), "{}", e.msg());
+    let e = parse("struct E<T'T>:\n    let T x\n\ndef main():\n    print \"x\"\n").expect_err("same name");
+    assert!(e.msg().contains("both as a type parameter and as a qualifier parameter"), "{}", e.msg());
+    let e = parse("struct E<T'actor>:\n    let T x\n\ndef main():\n    print \"x\"\n").expect_err("qualifier word");
+    assert!(e.msg().contains("is a qualifier"), "{}", e.msg());
+    let e = parse("struct E<T'q as Display>:\n    let T'q x\n\ndef main():\n    print \"x\"\n").expect_err("bound");
+    assert!(e.msg().contains("takes no bound or default"), "{}", e.msg());
+}
+
+const ENTRY: &str = "struct Counter:\n    var int n = 0\n\n\
+    struct Entry<T'q>:\n    let T'q res\n    let T'inline fallback\n\n\
+    struct Plain<T>:\n    let T v\n\n\
+    struct Narrow<T, 'q as 'inline|owned>:\n    let T'q v\n\n\
+    struct Shared<A'q, B'q>:\n    let A'q a\n    let B'q b\n\n";
+
+fn entry_args(stmt: &str) -> Result<Vec<Type>, String> {
+    let p = parse(&format!("{ENTRY}def main():\n    {stmt}\n")).map_err(|e| e.msg().to_string())?;
+    let main = p.items.iter().find_map(|i| match i { Item::Fn(f) if f.name == "main" => Some(f), _ => None }).unwrap();
+    let Stmt::Let(l) = &main.body[0] else { panic!() };
+    match l.ty.as_ref().map(|t| t.without_mut()) {
+        Some(Type::Generic(_, args)) => Ok(args.clone()),
+        other => panic!("{stmt}: {other:?}"),
+    }
+}
+
+#[test]
+fn qualified_argument_binds_type_and_qualifier_at_once() {
+    let want = vec![Type::Named("Counter".into()), Type::QualArg(vec![OwnerQual::Actor])];
+    assert_eq!(entry_args("let Entry<T = Counter'actor> e = nil").unwrap(), want);
+    // The long form, and a redundant but agreeing `q`, are the same instance.
+    assert_eq!(entry_args("let Entry<T = Counter, q'actor> e = nil").unwrap(), want);
+    assert_eq!(entry_args("let Entry<T = Counter'actor, q'actor> e = nil").unwrap(), want);
+    // An unbounded `q` does not accept a chain (as for `elem'actor'observed` on `<'elem>`).
+    let e = entry_args("let Entry<T = Counter'actor'observed> e = nil").unwrap_err();
+    assert!(e.contains("outside the bound of `q`"), "{e}");
+}
+
+#[test]
+fn qualified_argument_errors() {
+    let e = entry_args("let Entry<T = Counter'actor, q'owned> e = nil").unwrap_err();
+    assert!(e.contains("conflicting qualifiers for `q`") && e.contains("'actor") && e.contains("'owned"), "{e}");
+    // Without a linked `q` there is nothing to bind: `<T'q>` is the way (a long-form `<T, 'q>` has no link).
+    let e = entry_args("let Plain<T = Counter'actor> p = nil").unwrap_err();
+    assert!(e.contains("no qualifier parameter to bind") && e.contains("<T'q>"), "{e}");
+    let e = entry_args("let Narrow<T = Counter'actor, q'inline> n = nil").unwrap_err();
+    assert!(e.contains("no qualifier parameter to bind"), "{e}");
+    // `<A'q, B'q>`: independent qualifiers, one per type.
+    let want = vec![Type::Named("Counter".into()), Type::QualArg(vec![OwnerQual::Actor]),
+                    Type::Named("Counter".into()), Type::QualArg(vec![OwnerQual::Owned])];
+    assert_eq!(entry_args("let Shared<A = Counter'actor, B = Counter'owned> s = nil").unwrap(), want);
+}

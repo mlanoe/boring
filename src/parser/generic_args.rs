@@ -139,6 +139,18 @@ pub(crate) fn qual_arg_shape(ty: &Type) -> Option<(&str, QualChain)> {
     }
 }
 
+/// `Counter'actor'observed` -> (`Counter`, `[Actor, Observed]`): the base type and the chain written on it.
+fn split_qualified(ty: &Type) -> (Type, QualChain) {
+    let mut chain = Vec::new();
+    let mut t = ty;
+    while let Type::Qualified(inner, q) = t {
+        chain.push(q.clone());
+        t = inner;
+    }
+    chain.reverse();
+    (t.clone(), chain)
+}
+
 /// Words that are qualifiers, so cannot label a qualifier parameter (`'actor` would be ambiguous
 /// with the qualifier it names).
 pub(crate) const QUALIFIER_WORDS: &[&str] = &[
@@ -355,6 +367,8 @@ impl Parser {
         }
         let params = &lists[0];
         let mut slots: Vec<Option<Type>> = vec![None; params.len()];
+        // `T = Counter'actor` on a `<T'q>` declaration also binds `q`: slot -> (chain, position).
+        let mut implied: HashMap<usize, (QualChain, usize, usize, usize, String)> = HashMap::new();
         let mut seen_label = false;
         let mut positional = 0usize;
         for a in items {
@@ -389,6 +403,46 @@ impl Parser {
                     if slots[i].is_some() {
                         return Err(err(a.line, a.col, a.len, format!(
                             "generic parameter `{label}` of {what} is given more than once")));
+                    }
+                    // `<T = Counter'actor>`: the value carries its qualifier (docs/book.md,
+                    // "Qualified generics"); binds `T` and its linked `q`.
+                    if qual_param_decl(&params[i]).is_none() && matches!(a.ty, Type::Qualified(..)) {
+                        let (base, chain) = split_qualified(&a.ty);
+                        match params.iter().position(|p| qual_linked_to(p, label.as_str())) {
+                            Some(j) => {
+                                let (q, bound) = qual_param_decl(&params[j]).expect("linked parameter");
+                                let shown = OwnerQual::chain_name(&chain);
+                                if OwnerQual::pass_through(&chain).is_none() {
+                                    if let Err(m) = OwnerQual::check_chain(&chain) {
+                                        return Err(err(a.line, a.col, a.len, format!(
+                                            "qualifier `'{}` of `{label}` in {what}: {m}", shown.clone().unwrap_or_default())));
+                                    }
+                                    if !bound.contains(&chain) {
+                                        let allowed: Vec<String> = bound.iter().filter_map(|m| OwnerQual::chain_name(m)).collect();
+                                        return Err(err(a.line, a.col, a.len, format!(
+                                            "qualifier `'{}` is outside the bound of `{q}` in {what} (allowed: {})",
+                                            shown.unwrap_or_default(), allowed.join(", "))));
+                                    }
+                                }
+                                // `<A'q, B'q>` shares `q`: two written qualifiers must agree.
+                                if let Some((prev, _, _, _, from)) = implied.get(&j) {
+                                    if *prev != chain {
+                                        let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_default();
+                                        return Err(err(a.line, a.col, a.len, format!(
+                                            "conflicting qualifiers for `{q}` of {what}: `'{}` (written on `{from}`) and `'{}` (written on `{label}`); write one of them",
+                                            shown(prev), shown(&chain))));
+                                    }
+                                }
+                                implied.insert(j, (chain, a.line, a.col, a.len, label.clone()));
+                                slots[i] = Some(base);
+                                continue;
+                            }
+                            // Without a linked `q` the qualifier would be lost on a `T'inline` slot
+                            // (`T` is a plain Rust generic there): declare `<T'q>` instead.
+                            None => return Err(err(a.line, a.col, a.len, format!(
+                                "`{label}` of {what} has no qualifier parameter to bind `'{}`; declare it `<{label}'q>`",
+                                OwnerQual::chain_name(&chain).unwrap_or_default()))),
+                        }
                     }
                     match (qual_param_decl(&params[i]), &a.ty) {
                         // `Board<elem'cells>`: the enclosing declaration's `'cells` is passed on.
@@ -439,6 +493,21 @@ impl Parser {
                     }
                     slots[i] = Some(a.ty);
                 }
+            }
+        }
+        // Reconcile what `T = X'q` implied with an explicit `q'..`: written and different is an error.
+        for (j, (chain, l, c, n, t)) in implied {
+            match &slots[j] {
+                None => slots[j] = Some(Type::QualArg(chain)),
+                Some(Type::QualArg(w)) if *w == chain => {}
+                Some(Type::QualArg(w)) => {
+                    let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_default();
+                    let q = qual_param_name(&params[j]).unwrap_or("?");
+                    return Err(err(l, c, n, format!(
+                        "conflicting qualifiers for `{q}` of {what}: `'{}` (written on `{t}`) and `'{}` (written as `{q}'{}`); write one of them",
+                        shown(&chain), shown(w), shown(w))));
+                }
+                Some(_) => {}
             }
         }
         let mut out = Vec::with_capacity(slots.len());

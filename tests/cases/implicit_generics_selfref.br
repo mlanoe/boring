@@ -1,0 +1,21 @@
+# D8: a struct that names itself shares its own implicit parameters (`Node? next` is
+# `Node<T_value>?`), so a chain is homogeneous.
+struct Node:
+    value
+    Node? next
+
+    req string show():
+        "{value}"
+
+def chain():
+    return Node(value = 1, next = Node(value = 2, next = nil))
+
+def words():
+    return Node(value = "a", next = nil)
+
+def main():
+    let n = chain()
+    print n.show()
+    if let m = n.next:
+        print m.show()
+    print words().show()

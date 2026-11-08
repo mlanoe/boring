@@ -69,6 +69,10 @@ struct QFn {
     qparams: Vec<Option<QParam>>,
     /// Every generic parameter is a qualifier parameter (type arguments are not inferred).
     pure: bool,
+    /// The declared spelling of each generic parameter, and whether every type parameter is tied
+    /// to a qualifier parameter by `<T'q>` (then the call determines the type arguments too).
+    raw: Vec<String>,
+    linked: bool,
     ret: Option<Type>,
 }
 
@@ -76,6 +80,11 @@ struct QualDecl {
     /// One entry per declared parameter: `Some((name, bound))` for a qualifier parameter.
     params: Vec<Option<QParam>>,
     pure: bool,
+    /// The declared spelling of each parameter (`T`, `^q@T`, ...).
+    raw: Vec<String>,
+    /// Every type parameter is tied to a qualifier parameter by `<T'q>`: the construction can then
+    /// determine the type arguments too (docs/book.md, "Qualified generics").
+    linked: bool,
 }
 
 #[derive(Default)]
@@ -109,7 +118,10 @@ fn qfn_of(f: &FnDecl) -> Option<QFn> {
         .collect();
     let pure = qparams.iter().all(Option::is_some);
     let params = f.params.iter().filter_map(|p| p.ty.clone().map(|t| (Some(p.name.clone()), t))).collect::<Params>();
-    Some(QFn { params, qparams, pure, ret: f.return_ty.clone() })
+    let linked = f.type_params.iter().all(|p| {
+        qual_param_name(p).is_some() || f.type_params.iter().any(|o| qual_linked_to(o, p))
+    });
+    Some(QFn { params, qparams, pure, raw: f.type_params.clone(), linked, ret: f.return_ty.clone() })
 }
 
 fn add_unique<V>(map: &mut HashMap<String, Option<V>>, name: &str, v: V) {
@@ -185,9 +197,12 @@ impl Decls {
             .map(|p| qual_param_decl(p).map(|(n, b)| QParam { name: n.to_string(), bound: b, default: qual_param_default(p) }))
             .collect();
         let pure = params.iter().all(Option::is_some);
+        let linked = type_params.iter().all(|p| {
+            qual_param_name(p).is_some() || type_params.iter().any(|o| qual_linked_to(o, p))
+        });
         // Declared twice: not resolvable by name.
         if self.quals.contains_key(name) { self.quals.remove(name); self.ctors.insert(name.to_string(), None); return; }
-        self.quals.insert(name.to_string(), QualDecl { params, pure });
+        self.quals.insert(name.to_string(), QualDecl { params, pure, raw: type_params.to_vec(), linked });
     }
 
     fn of_program(program: &Program) -> Self {
@@ -451,6 +466,74 @@ struct Ctx<'a> {
     inner_returns: RefCell<HashMap<*const Stmt, Option<Type>>>,
 }
 
+/// A declared type split into its base (qualifiers and permissions stripped) and written chain;
+/// only a named or generic base is a type argument.
+fn split_ty(t: &Type) -> Option<(Type, Option<QualChain>)> {
+    let written = written_chain(peel(t));
+    let mut b = peel(t);
+    while let Type::Qualified(i, _) = b { b = peel(i); }
+    match b {
+        Type::Named(_) | Type::Generic(..) => Some((b.clone(), written)),
+        _ => None,
+    }
+}
+
+/// The type parameter a slot is exactly (`T`, `T'q`, `T'inline`), with the qualifier written on it.
+fn direct_param<'a>(slot: &'a Type, raw: &[String]) -> Option<(&'a str, Option<OwnerQual>)> {
+    let (inner, q) = match peel(slot) {
+        Type::Qualified(i, q) => (peel(i), Some(q.clone())),
+        t => (t, None),
+    };
+    let (Type::Named(t) | Type::TypeParam(t)) = inner else { return None };
+    raw.iter().any(|p| p == t).then_some((t.as_str(), q))
+}
+
+/// Records `arg_base` as the type of the parameter `slot` is, after the no-silent-conversion check.
+fn push_direct(base: &str, slot: &Type, raw: &[String], arg_base: Type, written: Option<QualChain>, desc: String, out: &mut Vec<(String, Type, String)>) -> Result<(), String> {
+    let Some((t, slot_q)) = direct_param(slot, raw) else { return Ok(()) };
+    if let (Some(sq), Some(w)) = (&slot_q, &written) {
+        if !matches!(sq, OwnerQual::Param(_)) && w.as_slice() != std::slice::from_ref(sq) {
+            let shown = |c: &[OwnerQual]| OwnerQual::chain_name(&c.to_vec()).unwrap_or_else(|| "?".into());
+            return Err(format!(
+                "`{t}'{}` slot of `{base}` is given an argument written `'{}` ({desc}); no silent conversion, write the argument with `'{}`",
+                shown(std::slice::from_ref(sq)), shown(w), shown(std::slice::from_ref(sq))));
+        }
+    }
+    out.push((t.to_string(), arg_base, desc));
+    Ok(())
+}
+
+/// A slot type against a declared argument type, walked together: `[T'q]` against `[Counter'actor]`,
+/// `Box<T'q>` against `Box<Counter'actor>`.
+fn type_from_ty(base: &str, raw: &[String], slot: &Type, arg: &Type, desc: &str, out: &mut Vec<(String, Type, String)>) -> Result<(), String> {
+    let (s, a) = (peel(slot), peel(arg));
+    if direct_param(s, raw).is_some() {
+        if let Some((b, written)) = split_ty(a) { return push_direct(base, s, raw, b, written, desc.to_string(), out); }
+        return Ok(());
+    }
+    match (s, a) {
+        (Type::Array(x), Type::Array(y)) | (Type::Set(x), Type::Set(y)) => type_from_ty(base, raw, x, y, desc, out),
+        (Type::Dict(k1, v1), Type::Dict(k2, v2)) => {
+            type_from_ty(base, raw, k1, k2, desc, out)?;
+            type_from_ty(base, raw, v1, v2, desc, out)
+        }
+        (Type::Tuple(xs), Type::Tuple(ys)) => {
+            for (x, y) in xs.iter().zip(ys) { type_from_ty(base, raw, x, y, desc, out)?; }
+            Ok(())
+        }
+        (Type::Generic(b1, xs), Type::Generic(b2, ys)) if b1 == b2 && xs.len() == ys.len() => {
+            for (x, y) in xs.iter().zip(ys) { type_from_ty(base, raw, x, y, desc, out)?; }
+            Ok(())
+        }
+        (Type::Qualified(i, _), a) => type_from_ty(base, raw, i, a, desc, out),
+        _ => Ok(()),
+    }
+}
+
+fn show_ty(t: &Type) -> String {
+    match t { Type::Named(n) | Type::TypeParam(n) => n.clone(), other => format!("{other:?}") }
+}
+
 fn has_param(t: &Type) -> bool {
     match t {
         Type::QualArg(q) => q.iter().any(|o| matches!(o, OwnerQual::Param(_))),
@@ -592,19 +675,37 @@ impl Ctx<'_> {
         // qualifier parameters can only be resolved this way: type arguments are not inferred).
         let expected = expected.filter(|a| a.len() == qd.params.len());
         let mut ev = Evidence::new();
-        if qd.pure {
+        // Type arguments of a `<T'q>` declaration, from the arguments feeding a `T` / `T'q` slot.
+        let mut tev: Vec<(String, Type, String)> = Vec::new();
+        let inferable = qd.pure || qd.linked;
+        if inferable {
             if let Some(params) = ctor_params(self.decls, base, shape) {
                 for (arg, ty) in bind_args(shape_args(shape), params) {
                     from_expr(ty, &arg.value, declared, &mut ev);
+                    if qd.linked {
+                        self.type_evidence(base, &qd.raw, ty, &arg.value, declared, &mut tev)?;
+                    }
                 }
             }
         }
-        if !qd.pure && expected.is_none() { return Ok(None); }
+        if !inferable && expected.is_none() { return Ok(None); }
         let mut args = Vec::with_capacity(qd.params.len());
         for (i, p) in qd.params.iter().enumerate() {
             let Some(QParam { name, bound, default }) = p else {
-                // A type parameter: only the expected type can supply it.
-                match expected.and_then(|a| a.get(i)) { Some(t) => { args.push(t.clone()); continue; } None => return Ok(None) }
+                // A type parameter: the expected type, else (`<T'q>`) the type of the arguments.
+                if let Some(t) = expected.and_then(|a| a.get(i)) { args.push(t.clone()); continue; }
+                let tname = qd.raw[i].as_str();
+                let mut found: Option<&(String, Type, String)> = None;
+                for e in tev.iter().filter(|(n, _, _)| n == tname) {
+                    match found {
+                        Some((_, t, d)) if *t != e.1 => return Err(format!(
+                            "conflicting types for `{tname}` of `{base}`: `{}` ({d}) and `{}` ({}); write `{base}<{tname} = ...>` to choose",
+                            show_ty(t), show_ty(&e.1), e.2)),
+                        Some(_) => {}
+                        None => found = Some(e),
+                    }
+                }
+                match found { Some((_, t, _)) => { args.push(t.clone()); continue; } None => return Ok(None) }
             };
             let shown = |c: &QualChain| OwnerQual::chain_name(c).unwrap_or_else(|| "?".into());
             let from_expected = match expected.and_then(|a| a.get(i)) {
@@ -642,6 +743,74 @@ impl Ctx<'_> {
             }
         }
         Ok(Some(args))
+    }
+
+    /// Evidence for the type arguments of a `<T'q>` declaration from one argument feeding `slot`.
+    /// The slot is read by shape: `T`, `T'q`, `T'inline`, and `T` inside an array, set, dict,
+    /// tuple, optional or generic (`[T'q]`, `Box<T'q>`), against a literal's elements or against
+    /// the written type of a declared name. A slot that fixes its own qualifier (`T'inline`) given
+    /// an argument written with another one is an error (no silent conversion).
+    fn type_evidence(&self, base: &str, raw: &[String], slot: &Type, arg: &Expr, declared: &Declared, out: &mut Vec<(String, Type, String)>) -> Result<(), String> {
+        let s = peel(slot);
+        match (&arg.kind, s) {
+            (ExprKind::Array(items) | ExprKind::Set(items), Type::Array(di) | Type::Set(di)) => {
+                for it in items { self.type_evidence(base, raw, di, it, declared, out)?; }
+                return Ok(());
+            }
+            (ExprKind::Dict(pairs), Type::Dict(dk, dv)) => {
+                for (k, v) in pairs {
+                    self.type_evidence(base, raw, dk, k, declared, out)?;
+                    self.type_evidence(base, raw, dv, v, declared, out)?;
+                }
+                return Ok(());
+            }
+            (ExprKind::Tuple(items), Type::Tuple(ds)) => {
+                for (d, it) in ds.iter().zip(items) { self.type_evidence(base, raw, d, it, declared, out)?; }
+                return Ok(());
+            }
+            _ => {}
+        }
+        if direct_param(s, raw).is_some() {
+            if let Some((arg_base, written, desc)) = self.arg_type(arg, declared) {
+                return push_direct(base, s, raw, arg_base, written, desc, out);
+            }
+            return Ok(());
+        }
+        // A declared name against a compound slot: walk the two types together.
+        if matches!(&arg.kind, ExprKind::Var(_) | ExprKind::Field(..)) {
+            if let Some(t) = declared.of_expr(arg) {
+                let desc = match &arg.kind {
+                    ExprKind::Var(n) => format!("declared on `{n}`"),
+                    ExprKind::Field(_, n) => format!("declared on `self.{n}`"),
+                    _ => unreachable!(),
+                };
+                type_from_ty(base, raw, s, t, &desc, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `(base type, written qualifier chain, description)` of an argument expression: a declared
+    /// name (its written type) or a construction of a known, non-generic struct.
+    fn arg_type(&self, e: &Expr, declared: &Declared) -> Option<(Type, Option<QualChain>, String)> {
+        match &e.kind {
+            ExprKind::Var(_) | ExprKind::Field(..) => {
+                let t = declared.of_expr(e)?;
+                let desc = match &e.kind {
+                    ExprKind::Var(n) => format!("declared on `{n}`"),
+                    ExprKind::Field(_, n) => format!("declared on `self.{n}`"),
+                    _ => return None,
+                };
+                let (b, written) = split_ty(t)?;
+                Some((b, written, desc))
+            }
+            ExprKind::Call(c, _) => match &c.kind {
+                ExprKind::Var(n) if matches!(self.decls.ctors.get(n.as_str()), Some(Some(Ctor::Struct { .. }))) && !self.decls.quals.contains_key(n.as_str()) =>
+                    Some((Type::Named(n.clone()), None, format!("the `{n}(..)` argument"))),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// The walk over one function body (or one top-level statement).
@@ -857,16 +1026,39 @@ impl Ctx<'_> {
             _ => "?".into(),
         });
         let fail = |msg: String| { self.out.borrow_mut().diags.insert(pos, msg); None };
-        if !qf.pure {
+        if !qf.pure && !qf.linked {
             return fail(format!("`{name}` also declares type parameters, which are not inferred: write its generic arguments, `{name}<...>`"));
         }
         let mut ev = Evidence::new();
         if let (Some(t), Some(ret)) = (expected, &qf.ret) { from_ty_in(ret, t, "the expected type", true, &mut ev); }
-        for (arg, ty) in bind_args(args, &qf.params) { from_expr_in(ty, &arg.value, declared, true, &mut ev); }
+        let mut tev: Vec<(String, Type, String)> = Vec::new();
+        for (arg, ty) in bind_args(args, &qf.params) {
+            from_expr_in(ty, &arg.value, declared, true, &mut ev);
+            if qf.linked && !qf.pure {
+                if let Err(m) = self.type_evidence(name, &qf.raw, ty, &arg.value, declared, &mut tev) { return fail(m); }
+            }
+        }
         let mut targs: Vec<Type> = Vec::with_capacity(qf.qparams.len());
         let mut missing: Vec<&str> = Vec::new();
-        for p in &qf.qparams {
-            let Some(QParam { name: q, bound, default }) = p else { missing.push("?"); continue };
+        for (i, p) in qf.qparams.iter().enumerate() {
+            let Some(QParam { name: q, bound, default }) = p else {
+                let tname = qf.raw[i].as_str();
+                let mut found: Option<&(String, Type, String)> = None;
+                for e in tev.iter().filter(|(n, _, _)| n == tname) {
+                    match found {
+                        Some((_, t, d)) if *t != e.1 => return fail(format!(
+                            "conflicting types for `{tname}` of `{name}`: `{}` ({d}) and `{}` ({}); write `{name}<{tname} = ...>` to choose",
+                            show_ty(t), show_ty(&e.1), e.2)),
+                        Some(_) => {}
+                        None => found = Some(e),
+                    }
+                }
+                match found {
+                    Some((_, t, _)) => targs.push(t.clone()),
+                    None => return fail(format!("cannot infer type parameter `{tname}` of `{name}`, write `{name}<{tname} = ...>`")),
+                }
+                continue;
+            };
             let mut chosen: Option<(QualChain, String)> = None;
             for (_, c, desc) in ev.iter().filter(|(n, _, _)| n == q) {
                 match &chosen {

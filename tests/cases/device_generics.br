@@ -1,0 +1,41 @@
+struct Pair<T>:
+    T a
+    T b
+
+    req T sum():
+        a + b
+
+struct Holder<T>:
+    Pair<T> inner
+    T bias
+
+T twice<T>(T x):
+    x + x
+
+T mid<T>(Pair<T> p):
+    twice<T>(p.a) + p.b
+
+Pair<T> swap<T>(Pair<T> p):
+    Pair<T>(a = p.b, b = p.a)
+
+mut [int]'kernel'unified out = [0 for ..<4]
+mut [float32]'kernel'unified fout = [0.0 for ..<4]
+kernel O:
+    mut [float32]'unified fout
+    mut [int]'unified out
+    init(mut [float32]'unified f, mut [int]'unified o):
+        fout = f
+        out = o
+    def ():
+        let i = .thread.x
+        let p = Pair<float32>(a = 1.5, b = 2.0)
+        let q = Pair<int>(a = i, b = 3)
+        let r = swap<int>(q)
+        let bx = Holder<int>(inner = r, bias = 100)
+        fout[i] = p.sum() + twice<float32>(0.25)
+        out[i] = q.sum() + mid<int>(q) + bx.inner.a + bx.bias + twice<int>(i)
+mut o = O(fout, out)
+kernel:
+    o(block = 4)
+print "{o.out[0]} {o.out[1]} {o.out[2]} {o.out[3]}"
+print "{o.fout[0]} {o.fout[3]}"

@@ -22,6 +22,8 @@ pub mod fixed_wide_core;
 mod fixed_wide_vectors;
 pub mod parser;
 pub mod infer_param_generics;
+pub mod show_types;
+pub mod api_snapshot;
 pub mod infer_return_types;
 pub mod infer_actor_params;
 pub mod infer_actor_elems;
@@ -1889,6 +1891,17 @@ fn run() {
         Some("update") => {
             parse_update_command(&args[2..]);
         }
+        Some("check") => {
+            let rest = &args[2..];
+            let show = rest.iter().any(|a| a == "--show-types");
+            let Some(path) = rest.iter().find(|a| !a.starts_with("--")) else {
+                eprintln!("usage: boring check [--show-types] <file.br>");
+                process::exit(1);
+            };
+            check_file(path, show);
+        }
+
+        Some("api") => api_command(&args[2..]),
 
         Some(path) => run_file(path, None, &args[2..]),
         None => {
@@ -1914,6 +1927,9 @@ fn print_help() {
     eprintln!("    boring run --locked        Fail instead of creating/updating a boring.lock entry");
     eprintln!("    boring run --show-qualifiers  List the inferred qualifiers: 'kernel'global/'kernel'unified for kernel.tensors operands, plus CPU ownership ('owned/'actor/borrow...) of unannotated params and lets (also on build)");
     eprintln!("    boring run --offline       Never touch the network for a git [deps] dependency");
+    eprintln!("    boring check --show-types <file.br>  Print the headers inferred for untyped parameters/fields (implicit generics)");
+    eprintln!("    boring api <file.br>       Print a snapshot of the file's @api signatures");
+    eprintln!("    boring api --check <snapshot> <file.br>  Fail on a removed/changed @api signature compared with a snapshot");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
     eprintln!("    boring build <file.br>     Emit a Cargo project from a single file");
     eprintln!("    boring build --mode managed              Use managed memory mode (Arc<Mutex> defaults)");
@@ -2397,6 +2413,103 @@ fn run_cargo_build(project_dir: &PathBuf, rust_options: &[String]) {
 }
 
 // â”€â”€â”€ Core: interpret â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// `boring check [--show-types] <file.br>`: lex + parse (every inference pass runs in `parse`),
+/// then print the implicit-generics headers when asked. Does not run the semantic checker.
+fn check_file(path: &str, show_types: bool) {
+    let path = PathBuf::from(path);
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+    let tokens = match lexer::lex_all(&source) {
+        Ok(t) => t,
+        Err(errors) => {
+            report_lex_errors(&path, &source, &errors);
+            process::exit(1);
+        }
+    };
+    infer_actor_params::set_import_context(&path);
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
+            process::exit(1);
+        }
+    };
+    if show_types {
+        // Imported declarations (sibling files, `[deps]`, stdlib) take part, as in `run`/`build`.
+        let deps = find_project_root(&path)
+            .and_then(|root| {
+                let toml_src = std::fs::read_to_string(root.join("boring.toml")).ok()?;
+                BoringToml::parse(&toml_src).resolve_deps(&root).ok()
+            })
+            .unwrap_or_default();
+        let imported = match path.parent() {
+            Some(dir) => infer_return_types::collect_inference_imports(&program.items, dir, &deps),
+            None => Vec::new(),
+        };
+        let out = show_types::render_with_imports(&program, &imported);
+        if !out.is_empty() {
+            println!("{out}");
+        }
+    }
+}
+
+/// `boring api <file.br>` prints the snapshot of the file's `@api` signatures;
+/// `boring api --check <snapshot> <file.br>` compares them with a snapshot taken earlier and exits
+/// non-zero on a breaking change (a removed or changed entry).
+fn api_command(rest: &[String]) {
+    let usage = || {
+        eprintln!("usage: boring api <file.br>");
+        eprintln!("       boring api --check <snapshot> <file.br>");
+        process::exit(1);
+    };
+    let load = |path: &str| -> ast::Program {
+        let path = PathBuf::from(path);
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        });
+        let tokens = match lexer::lex_all(&source) {
+            Ok(t) => t,
+            Err(errors) => {
+                report_lex_errors(&path, &source, &errors);
+                process::exit(1);
+            }
+        };
+        infer_actor_params::set_import_context(&path);
+        match parser::parse(tokens) {
+            Ok(p) => p,
+            Err(e) => {
+                report_error(&path, &source, e.line(), e.col(), e.len(), &e.msg());
+                process::exit(1);
+            }
+        }
+    };
+    match rest {
+        [file] if !file.starts_with("--") => print!("{}", api_snapshot::render(&load(file))),
+        [flag, snapshot, file] if flag == "--check" => {
+            let text = std::fs::read_to_string(snapshot).unwrap_or_else(|e| {
+                eprintln!("error: cannot read '{snapshot}': {e}");
+                process::exit(1);
+            });
+            let old = api_snapshot::parse_snapshot(&text).unwrap_or_else(|e| {
+                eprintln!("error: bad snapshot '{snapshot}': {e}");
+                process::exit(1);
+            });
+            let d = api_snapshot::diff(&old, &api_snapshot::collect(&load(file)));
+            eprint!("{}", api_snapshot::report(&d));
+            if d.breaking() {
+                process::exit(1);
+            }
+        }
+        _ => usage(),
+    }
+}
 
 fn run_file(path: &str, gpu_profile: Option<&str>, script_args: &[String]) {
     // argv[0]-style convention (see interpreter/mod.rs's `args()` doc comment):

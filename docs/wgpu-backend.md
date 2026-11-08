@@ -431,6 +431,7 @@ A construction inside a function that returns a resident array (`[float32]'kerne
 
 - `[T]'actor` (dynamic workgroup memory) is not supported in WGSL — use `[T, N]'actor` with a const generic param instead.
 - A generic kernel with no instantiations in the program emits no WGSL (no code is generated for unused generics).
+- A *type*-generic kernel (`kernel K<T>`) is an error; generic structs and helper functions are supported in device code by explicit instantiation (`Pair<float32>(..)`, `twice<int>(x)`), specialised by `src/transpiler/device_generic.rs` (see [GPU module](gpu-module.html#type-generics-not-on-kernels-yes-on-structs-and-helper-functions)).
 
 ---
 

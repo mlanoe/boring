@@ -376,12 +376,21 @@ transpile_test!(generics);
 transpile_test!(api_attribute);
 // Return types written back from `return <expr>` (phase 1 of implicit generics).
 transpile_test!(infer_return_types);
+transpile_test!(infer_return_types_overloads);
 // Untyped `def` parameters as fresh type parameters (phase 2 of implicit generics).
 transpile_test!(implicit_generics_params);
 // Untyped struct fields as implicit type parameters (phase 3 of implicit generics).
 transpile_test!(implicit_generics_fields);
 // An untyped field with a default value: the default types it unless the construction overrides it.
 transpile_test!(implicit_generics_defaults);
+transpile_test!(implicit_generics_calls);
+transpile_test!(implicit_generics_view);
+transpile_test!(implicit_generics_selfref);
+// Untyped parameters against numeric literals (`n > 0`, `x + 1`), phase 4 step 1.
+transpile_test!(implicit_generics_literals);
+// `len()` on an untyped parameter, bounded by the prelude's BoringLen (phase 4 step 3).
+transpile_test!(implicit_generics_methods);
+transpile_test!(view_generic_multi);
 transpile_test!(operators);
 transpile_test!(macros);
 transpile_test!(defer);
@@ -1669,6 +1678,10 @@ transpile_test!(qualifier_fns_cascade);
 // Methods with a parameter of their own on a non-generic struct, an `ext` block and an enum, and a
 // function mixing a type and a qualifier parameter; see tests/cases/qualifier_fns_methods.br.
 transpile_test!(qualifier_fns_methods);
+
+// Qualified generics `<T'q>`: a type and its qualifier as one parameter, short/long forms and
+// inference at construction and call; see tests/cases/qualified_generics.br.
+transpile_test!(qualified_generics);
 // A `'owned` local passed to a same-typed parameter isn't re-wrapped in managed mode. No
 // managed+multi config: its eager `__p1_mg` lock guard is still alive when the local is
 // moved into the call (E0505) — a separate, pre-existing gap.

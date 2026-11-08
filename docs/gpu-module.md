@@ -92,21 +92,34 @@ kernel GameOfLife<int W, int H>:
         cells[i] = not cells[i]
 ```
 
-- `int`, `uint`, `float`, and `bool` are valid const generic types — the type comes before the name, consistent with all variable declarations.
+- Only `int` and `uint` const parameters are supported, and the argument must be an integer literal (`Blur<3>`; a `bool` parameter takes `0`/`1`, not `true`). A `float` const parameter (`<float Alpha>`) does not parse, and a non-literal argument is an error naming the kernel.
 - Array sizes may be **const-evaluable expressions** involving multiple params (`W * H`, `N + 1`, etc.).
-- All scalar types are accepted: `<int N>`, `<uint N>`, `<float Alpha>`, `<bool Flag>`.
 
-### Type generics and trait bounds
+### Type generics: not on kernels, yes on structs and helper functions
+
+A **kernel cannot be type-generic**: `kernel K<A, B>` / `kernel K<A as Displayable>` and every `K<int>(..)` of one is rejected on all four GPU targets with `generic kernel `K` ...` (a message naming the kernel). Keep the kernel concrete, and put the generic code in a helper function or a struct, which device code does support, per explicit instantiation:
 
 ```boring
-kernel MonKernel<A, B>:
-    ...
+struct Pair<T>:
+    T a
+    T b
 
-kernel ConstrainedKernel<A as Displayable>:
+    req T sum():
+        a + b
+
+T twice<T>(T x):
+    x + x
+
+kernel O:
     ...
+    def ():
+        let p = Pair<float32>(a = 1.5, b = 2.0)   # → struct Pair_float32, scalar-replaced
+        out[i] = twice<int>(i) + Pair<int>(i, 3).sum()
 ```
 
-Type generics follow the same rules as struct generics. See [Section 13 — Generics](book.html#13-generics) for the full generic syntax.
+On `--target metal`, `cuda`, `rocm` and `wgpu` (`src/transpiler/device_generic.rs`, a source-to-source pass that runs before everything else) every `Name<args>(..)` construction, `Name<args>` type and `f<args>(..)` call reachable from device code (kernel fields, `init`s and methods, the free functions they call, the methods of structs they call) becomes one ordinary concrete copy named like the host specialiser names it (`Pair_float32`, `twice_int`, `Pair_int_string`), made by the same substitution. The copies are scanned too, so a generic helper may build generic structs and call other generic helpers. A generic function used by device code only is dropped from the host build.
+
+Never inferred: `twice(1.5)`, `Pair(a = 1, b = 2)` and `let Pair p = ..` in device code are Boring errors (`generic function `twice` is called from device code without type arguments; write `twice<float>(..)``), as is a wrong argument count or a generic function with a const parameter. A struct with untyped fields (implicit generics) is generic too: instantiate it explicitly (`Wrap<int>(v = i, n = 2)`, types in field order); a bare `Wrap(v = i, n = 2)` stays an error. Trait bounds on a device generic (`<T as Num>`) are not checked on the device side: the copy is just typed with the concrete argument, and the shader compiler checks the body (`x + x` on a `float32` or an `int`). The CPU `simd` target is unchanged (it emits ordinary Rust generics).
 
 ### Instantiation
 
@@ -118,7 +131,7 @@ let large = Blur<7>()
 
 Multiple instantiations of the same generic kernel generate **distinct** code objects per backend — for example, `Blur<3>` and `Blur<7>` produce separate WGSL entry points `Blur_3_main` and `Blur_7_main` when building with `--target wgpu`.
 
-On `--target metal`, `--target cuda` and `--target rocm` the same holds, implemented as a source-to-source pass before code generation: every `Name<0>(...)`/`Name<1>(...)` construction found **anywhere** in the program (top level, function and method bodies) yields one ordinary kernel per unique argument list (`Name_0`, `Name_1` — a negative value is spelled `n<abs>`, `Name_n1`), with each use of the const parameter (field types and defaults, `init`/method bodies, `[T, N]` / `[T, W * H]` array sizes) replaced by the literal. The device compiler therefore sees `if 0 == 0` / `if 1 == 0` and folds the dead branch, exactly as for a hand-written constant. A generic kernel with no instantiation emits nothing. Limits on these three targets: only `int`/`uint` const parameters with integer-literal arguments (`Name<D>(...)` inside a generic function, a type parameter `kernel K<T>`, or a `float`/`bool` const parameter is a transpile error naming the kernel).
+On `--target metal`, `--target cuda` and `--target rocm` the same holds, implemented as a source-to-source pass before code generation: every `Name<0>(...)`/`Name<1>(...)` construction found **anywhere** in the program (top level, function and method bodies) yields one ordinary kernel per unique argument list (`Name_0`, `Name_1` — a negative value is spelled `n<abs>`, `Name_n1`), with each use of the const parameter (field types and defaults, `init`/method bodies, `[T, N]` / `[T, W * H]` array sizes) replaced by the literal. The device compiler therefore sees `if 0 == 0` / `if 1 == 0` and folds the dead branch, exactly as for a hand-written constant. A generic kernel with no instantiation emits nothing. Limits: only `int`/`uint` const parameters with integer-literal arguments (`Name<D>(...)` inside a generic function or a type parameter `kernel K<T>` is a transpile error naming the kernel).
 
 ```boring
 kernel FlashDecode<int D>:

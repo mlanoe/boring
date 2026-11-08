@@ -167,6 +167,80 @@ pub fn desugar(program: &Program) -> Program {
     program
 }
 
+/// D6 of the implicit-generics design: a struct with untyped fields is generic, and device code
+/// has no generic structs (the scalar replacement above handles concrete ones only). Left alone,
+/// the kernel kept a raw `Name(..)` constructor call that the shader compiler then rejects far
+/// from the cause. Returns the position and name of the first device-side use of such a struct:
+/// a construction in a kernel body or in a free function a kernel calls, or the struct named in
+/// a kernel field, an `init` parameter or the signature of a reachable function.
+pub(crate) fn implicit_struct_in_device_code(program: &Program) -> Option<(usize, usize, String)> {
+    let implicit: HashSet<String> = program
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Struct(s) if s.type_params.iter().any(|p| p.starts_with("T_")) => Some(s.name.clone()),
+            _ => None,
+        })
+        .collect();
+    if implicit.is_empty() {
+        return None;
+    }
+    fn names_in(t: &Type, implicit: &HashSet<String>) -> Option<String> {
+        match t {
+            Type::Named(n) if implicit.contains(n) => Some(n.clone()),
+            Type::Generic(n, a) => implicit.get(n).cloned().or_else(|| a.iter().find_map(|x| names_in(x, implicit))),
+            Type::Tuple(a) => a.iter().find_map(|x| names_in(x, implicit)),
+            Type::Optional(i) | Type::Array(i) | Type::Set(i) | Type::Mut(i) | Type::Qualified(i, _) => names_in(i, implicit),
+            Type::Dict(k, v) => names_in(k, implicit).or_else(|| names_in(v, implicit)),
+            _ => None,
+        }
+    }
+    fn constructs(body: &[Stmt], implicit: &HashSet<String>) -> Option<(usize, usize, String)> {
+        let mut owned = body.to_vec();
+        let mut hit: Option<(usize, usize, String)> = None;
+        let mut on_expr = |e: &mut Expr| {
+            if hit.is_some() { return; }
+            if let ExprKind::Call(c, _) = &e.kind {
+                if let ExprKind::Var(n) = &c.kind {
+                    if implicit.contains(n) {
+                        hit = Some((e.line, e.col, n.clone()));
+                    }
+                }
+            }
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut owned);
+        hit
+    }
+    let signature = |f: &FnDecl, line: usize, col: usize| -> Option<(usize, usize, String)> {
+        f.params.iter().filter_map(|p| p.ty.as_ref())
+            .chain(f.return_ty.as_ref())
+            .find_map(|t| names_in(t, &implicit))
+            .map(|n| (line, col, n))
+    };
+    for item in &program.items {
+        let Item::Kernel(k) = item else { continue };
+        for f in &k.fields {
+            if let Some(n) = names_in(&f.ty, &implicit) { return Some((f.line, f.col, n)); }
+        }
+        for m in &k.methods {
+            if let Some(hit) = signature(m, m.line, m.col).or_else(|| constructs(&m.body, &implicit)) { return Some(hit); }
+        }
+        for init in &k.inits {
+            if let Some(hit) = constructs(&init.body, &implicit) { return Some(hit); }
+        }
+    }
+    let (reach, _) = device_reachable(program);
+    for item in &program.items {
+        if let Item::Fn(f) = item {
+            if reach.contains(&f.name) {
+                if let Some(hit) = signature(f, f.line, f.col).or_else(|| constructs(&f.body, &implicit)) { return Some(hit); }
+            }
+        }
+    }
+    None
+}
+
 /// Free functions and method names called, transitively, from kernel bodies.
 pub(crate) fn device_reachable(program: &Program) -> (HashSet<String>, HashSet<String>) {
     fn calls(body: &[Stmt], fns: &mut HashSet<String>, methods: &mut HashSet<String>) {

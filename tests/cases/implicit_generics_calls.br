@@ -1,0 +1,24 @@
+# Bounds flow through calls: `describe` and `report` never touch their parameter themselves, they
+# only pass it on, yet the `Display` need of `label` reaches them.
+def label(x):
+    print "item {x}"
+
+def describe(y):
+    label(y)
+
+def report(z):
+    describe(z)
+
+describe(7)
+report("seven")
+report(2.5)
+
+# A function with a written bound (`T as Display`) carries it too.
+string tag<T as Display>(T v):
+    "[{v}]"
+
+def wrap(x):
+    print tag(x)
+
+wrap(5)
+wrap("five")

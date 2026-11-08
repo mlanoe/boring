@@ -16,7 +16,8 @@
 // instantiation is dropped (nothing is emitted for it).
 //
 // Only `int`/`uint` (`$N:i64` / `$N:usize`) parameters are supported; a type parameter
-// or an argument that is not an integer literal is a transpile error.
+// or an argument that is not an integer literal is a transpile error. Type-generic structs and
+// helper functions are `device_generic.rs`'s (they run before this pass).
 
 use std::collections::HashMap;
 
@@ -59,7 +60,7 @@ pub(crate) fn monomorphise_generic_kernels(program: &Program) -> (Program, Vec<T
                     Type::ConstInt(n) => vals.push(*n),
                     _ => {
                         errors.push(TranspileError::at(
-                            format!("generic kernel `{}`: every type argument must be an integer literal (type-generic kernels and non-literal arguments are not supported on this target)", name),
+                            format!("generic kernel `{}`: every argument must be an integer literal -- a type argument (`kernel K<T>`) or a non-literal value is not supported, kernels take `int`/`uint` const parameters only; keep the kernel concrete and put the generic code in a helper function or struct called with explicit type arguments (`f<float>(..)`)", name),
                             e.line, e.col));
                         return;
                     }
@@ -67,7 +68,7 @@ pub(crate) fn monomorphise_generic_kernels(program: &Program) -> (Program, Vec<T
             }
             if vals.len() != decl.type_params.len() || decl.type_params.iter().any(|p| const_param_name(p).is_none()) {
                 errors.push(TranspileError::at(
-                    format!("generic kernel `{}` takes {} const parameter(s) (`int`/`uint` only); type-generic kernels are not supported on this target", name, decl.type_params.len()),
+                    format!("generic kernel `{}` takes {} parameter(s) and only `int`/`uint` const parameters with literal arguments are supported: a type-generic kernel (`kernel {}<T>`), a `float`/`bool` const parameter or a wrong argument count is rejected; keep the kernel concrete and put the generic code in a helper function or struct called with explicit type arguments (`f<float>(..)`)", name, decl.type_params.len(), name),
                     e.line, e.col));
                 return;
             }
@@ -101,7 +102,7 @@ pub(crate) fn monomorphise_generic_kernels(program: &Program) -> (Program, Vec<T
     (out, errors)
 }
 
-fn walk_item(item: &mut Item, w: &mut Walker) {
+pub(crate) fn walk_item(item: &mut Item, w: &mut Walker) {
     match item {
         Item::Fn(f) => w.stmts(&mut f.body),
         Item::Struct(s) => {

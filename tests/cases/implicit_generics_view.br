@@ -1,0 +1,39 @@
+# Untyped view fields (implicit generics): a plain field and a `bind` value is generic over its use,
+# a `state` slot takes the type of its literal default (`env` keeps requiring a type).
+use boring.ui.*
+
+view Badge:
+    bind var label
+    env string theme
+    note
+
+    req string describe():
+        "{label}@{theme}:{note}"
+
+    body():
+        Text("{label}")
+
+view Panel:
+    state title = "Ada"
+    state taps = 0
+    state ratio = 1.5
+
+    def tap():
+        taps += 1
+
+    req string current():
+        "{title}/{taps}/{ratio}"
+
+    body():
+        Badge(label = title, note = 7)
+
+def main():
+    let panel = Panel()
+    mut st = Panel__State()
+    panel.tap(st)
+    print panel.current(st)
+    let badge = Badge(label = st.title, note = 7)
+    let envv = Badge__Env(theme = "dark")
+    print badge.describe(envv)
+    let root = panel.body(st)
+    print "built"

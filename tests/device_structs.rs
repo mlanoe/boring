@@ -184,3 +184,25 @@ fn struct_buffers_run_correctly_on_metal() {
         assert_eq!(stdout, expected);
     }
 }
+
+// A struct with untyped fields is generic (implicit generics, D6): device code has no generic
+// structs, so every GPU backend refuses it with a message naming the struct, not a shader
+// compiler error. Fixture: `tests/cases/device_struct_implicit.br`.
+#[test]
+fn implicit_generic_struct_in_a_kernel_is_rejected_on_every_target() {
+    for target in ["simd", "metal", "wgpu", "cuda", "rocm"] {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("device_structs_implicit_{target}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy("tests/cases/device_struct_implicit.br", dir.join("main.br")).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target, "main.br"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!out.status.success(), "{target}: should be rejected");
+        assert!(stderr.contains("struct `Wrap` has untyped fields"), "{target}: {stderr}");
+    }
+}

@@ -1,0 +1,18 @@
+# An explicitly generic view builds in multi-threaded output too: its `impl View for Card<T>`
+# needs `T: Send + Sync` because `View` has `Send + Sync` supertraits there.
+use boring.ui.*
+
+view Card<T as Display>:
+    T title
+
+    req string describe():
+        "{title}"
+
+    body():
+        Text("{title}")
+
+def main():
+    let c = Card(title = "hi")
+    let c2 = Card(title = 3)
+    print c.describe()
+    print c2.describe()

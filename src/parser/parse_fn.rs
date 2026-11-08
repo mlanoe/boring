@@ -186,6 +186,9 @@ impl Parser {
                     if !type_params.contains(t) { type_params.push(t.clone()); }
                 }
             }
+            if let Some(u) = crate::infer_param_generics::unbounded_use(&names, &body, &[]) {
+                return Err(crate::infer_param_generics::unbounded_error(u, "parameter"));
+            }
             for b in crate::infer_param_generics::bounds(&names, &body) {
                 if !where_clause.contains(&b) { where_clause.push(b); }
             }
@@ -746,10 +749,63 @@ impl Parser {
         } else {
             (false, false, false)
         };
-        let ty = self.parse_type()?;
+        // A field written without a type (`state taps = 0`, `bind name`, `env theme = "x"`),
+        // implicit generics for views. A `bind` value comes from the parent's slot at each use, so
+        // its type is a fresh type parameter of the view, like an untyped struct field. A `state`
+        // slot is seeded by its default and never supplied by the construction (so a type parameter
+        // could not be fixed by anything): its type is exactly that of the default, which must be
+        // a literal. An `env` value has no initializer at all, so it keeps requiring a type.
+        let untyped = matches!(self.peek(), TokenKind::Ident(_))
+            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Newline) | Some(TokenKind::Eq) | Some(TokenKind::Dedent) | Some(TokenKind::Eof));
+        let mut name = String::new();
+        let mut default = None;
+        if untyped && kind == ViewFieldKind::Env {
+            let n = self.expect_ident()?;
+            return Err(ParseError::Generic {
+                msg: format!("`env {n}` needs a written type (`env string {n}`): an env value is resolved from a provider and has no initializer, so nothing at the view could fix its type"),
+                line, col, len: 1,
+            });
+        }
+        let ty = if untyped && kind == ViewFieldKind::Bind {
+            let n = self.expect_ident()?;
+            let t = Type::TypeParam(crate::infer_param_generics::fresh_name(&n));
+            name = n;
+            t
+        } else if untyped {
+            let n = self.expect_ident()?;
+            let (dl, dc) = (self.line(), self.col());
+            if !self.eat(&TokenKind::Eq) {
+                return Err(ParseError::Generic {
+                    msg: format!("`state {n}` has no type and no default: write its type (`state int {n}`) or give it a literal default (`state {n} = 0`)"),
+                    line, col, len: 1,
+                });
+            }
+            let d = self.parse_expr()?;
+            let t = match &d.kind {
+                ExprKind::Int(_) => Type::Named("int".into()),
+                ExprKind::Float(_) => Type::Named("float".into()),
+                ExprKind::Str(_) | ExprKind::StringInterp(_) => Type::Named("string".into()),
+                ExprKind::Bool(_) => Type::Named("bool".into()),
+                ExprKind::UnaryOp(UnaryOp::Neg, i) if matches!(i.kind, ExprKind::Int(_)) => Type::Named("int".into()),
+                ExprKind::UnaryOp(UnaryOp::Neg, i) if matches!(i.kind, ExprKind::Float(_)) => Type::Named("float".into()),
+                _ => return Err(ParseError::Generic {
+                    msg: format!("cannot infer the type of `state {n}` from its default: only a literal (`0`, `1.5`, `\"text\"`, `true`) types it — write the type (`state T {n} = ...`)"),
+                    line: dl, col: dc, len: 1,
+                }),
+            };
+            name = n;
+            default = Some(d);
+            t
+        } else {
+            self.parse_type()?
+        };
         let ty = if wrap_mut { Self::wrap_type_mut(ty) } else { ty };
-        let name = self.expect_ident()?;
-        let default = if self.eat(&TokenKind::Eq) { Some(self.parse_expr()?) } else { None };
+        if name.is_empty() {
+            name = self.expect_ident()?;
+        }
+        if default.is_none() {
+            default = if self.eat(&TokenKind::Eq) { Some(self.parse_expr()?) } else { None };
+        }
         self.expect_newline()?;
         Ok(FieldDecl {
             name, is_pub, mutable, transient: false, view_kind: Some(kind), explicit_perm,

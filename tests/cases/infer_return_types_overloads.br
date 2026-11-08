@@ -1,0 +1,24 @@
+def f(int a):
+    if a > 0:
+        return 1
+    return 2
+
+def f(float a):
+    return 2
+
+def f(string a):
+    return a
+
+def twice(int a):
+    return a * 2
+
+def twice(float a):
+    return a * 2.0
+
+def main():
+    print f(1)
+    print f(-1)
+    print f(1.5)
+    print f("hi")
+    print twice(21)
+    print twice(1.5)

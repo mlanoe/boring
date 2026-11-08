@@ -1,0 +1,33 @@
+# Implicit generics, phase 4 step 1: an untyped parameter compared with or combined with a numeric
+# literal. The literal fixes the operand type (`int` is isize, `float` is f64): `n > 0` bounds the
+# parameter by `PartialOrd<isize>`, `x + 1` by `Add<isize, Output = T>` (plus `Copy`).
+
+def isPositive(n):
+    return n > 0
+
+def next(x):
+    return x + 1
+
+def scaled(x):
+    return x * 2.5 + 0.5
+
+def clampLow(n):
+    if n < 0:
+        return n - n
+    return n
+
+def isZero(n):
+    return n == 0
+
+# Bounds flow through calls, including the arithmetic ones.
+def bump(x):
+    _ = next(x)
+    print "bumped {x}"
+
+def main():
+    print "{isPositive(3)} {isPositive(-3)}"
+    print "{next(41)}"
+    print "{scaled(2.0)}"
+    print "{clampLow(-7)} {clampLow(9)}"
+    print "{isZero(0)} {isZero(5)}"
+    bump(1)

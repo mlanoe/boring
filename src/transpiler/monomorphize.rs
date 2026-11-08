@@ -68,6 +68,10 @@ thread_local! {
     static QUAL_REWRITE: Cell<bool> = const { Cell::new(false) };
     static QUAL_COLLECT: RefCell<Option<Vec<CandidateCall>>> = const { RefCell::new(None) };
     static QUAL_CHECK: RefCell<Option<QualCheck>> = const { RefCell::new(None) };
+    /// Device-code generics (`device_generic.rs`): names of the generic structs whose
+    /// `Name<args>` type uses `substitute_type` replaces by the instance's name, and the uses it
+    /// found (name, concrete arguments), for the pass to instantiate.
+    static DEVICE_GENERIC: RefCell<Option<(HashSet<String>, Vec<(String, Vec<Type>)>)>> = const { RefCell::new(None) };
     /// Declarations whose qualifier parameters all have a default: a bare use in type position
     /// is that instance (`Board` → `Board<elem'inline>`).
     static QUAL_DEFAULTS: RefCell<HashMap<String, Vec<Type>>> = RefCell::new(HashMap::new());
@@ -299,6 +303,7 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
                     if let Some(m) = mangled_name(name, &args) { return Type::Named(m); }
                 }
             }
+            if let Some(m) = device_generic_use(name, &args) { return Type::Named(m); }
             Type::Generic(name.clone(), args)
         }
         Type::AssocOf(base, name) => Type::AssocOf(Box::new(substitute_type(base, subst)), name.clone()),
@@ -307,6 +312,26 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
         // possible type-param reference of their own. Cloned through unchanged.
         other => other.clone(),
     }
+}
+
+/// Switches the device-generic mode of `substitute_type` on for `names` (generic structs) while
+/// `f` runs; returns what `f` returned and the `Name<concrete args>` uses it renamed.
+pub(crate) fn with_device_generic<R>(names: HashSet<String>, f: impl FnOnce() -> R) -> (R, Vec<(String, Vec<Type>)>) {
+    DEVICE_GENERIC.with(|d| *d.borrow_mut() = Some((names, Vec::new())));
+    let r = f();
+    let uses = DEVICE_GENERIC.with(|d| d.borrow_mut().take()).map(|(_, u)| u).unwrap_or_default();
+    (r, uses)
+}
+
+fn device_generic_use(name: &str, args: &[Type]) -> Option<String> {
+    DEVICE_GENERIC.with(|d| {
+        let mut d = d.borrow_mut();
+        let (names, uses) = d.as_mut()?;
+        if !names.contains(name) || args.iter().any(|a| matches!(a, Type::TypeParam(_))) { return None; }
+        let m = mangled_name(name, args)?;
+        uses.push((name.to_string(), args.to_vec()));
+        Some(m)
+    })
 }
 
 fn substitute_type_opt(ty: &Option<Type>, subst: &HashMap<String, Type>) -> Option<Type> {
@@ -693,7 +718,7 @@ fn ordinary_type_param_names(type_params: &[String]) -> Vec<&str> {
 
 /// Builds `decl.type_params`(ordinary only) → `type_args` (positionally zipped,
 /// skipping any `$`-prefixed const-generic param) substitution map.
-fn build_type_subst(type_params: &[String], type_args: &[Type]) -> HashMap<String, Type> {
+pub(crate) fn build_type_subst(type_params: &[String], type_args: &[Type]) -> HashMap<String, Type> {
     let mut subst = HashMap::new();
     let mut arg_iter = type_args.iter();
     for p in type_params {

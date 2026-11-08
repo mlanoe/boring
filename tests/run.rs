@@ -1009,6 +1009,7 @@ interp_test!(qualifier_enclosing_chains);
 interp_test!(qualifier_fns);
 interp_test!(qualifier_fns_cascade);
 interp_test!(qualifier_fns_methods);
+interp_test!(qualified_generics);
 interp_test!(qualifier_gaps_calls);
 interp_test!(qualifier_gaps_enums);
 interp_test!(qualifier_gaps_headers);

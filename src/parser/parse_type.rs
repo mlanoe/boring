@@ -433,6 +433,13 @@ impl Parser {
     /// `Dog'const`   → Qualified(Dog, Const)
     /// `Dog'shared`  → Qualified(Dog, Shared) — Arc<T> (multi) / Rc<T> (single), threading-aware
     /// `Dog'weak`    → Qualified(Dog, Weak)   — Weak<T>, non-owning ref
+    /// `q.A` when `q` was written on the type `A` of a `<A'q, B'q>` declaration.
+    fn own_qual_name(scope: &[String], q: &str, ty: &Type) -> Option<String> {
+        let (Type::TypeParam(base) | Type::Named(base)) = ty else { return None };
+        let own = format!("{q}.{base}");
+        scope.iter().any(|s| *s == own).then_some(own)
+    }
+
     pub(crate) fn parse_type_qualifier(&mut self, ty: Type) -> Result<Type, ParseError> {
         if self.check(&TokenKind::Ampersand) {
             // Peek at the token after `&` without consuming anything yet.
@@ -531,6 +538,12 @@ impl Parser {
             }
             TokenKind::Ident(ref s) => match s.as_str() {
                 // `T'elem` — a qualifier parameter of the enclosing declaration.
+                // `A'q` of `<A'q, B'q>`: the qualifier of the type it follows (`q.A`).
+                p if Self::own_qual_name(&self.qual_scope, p, &ty).is_some() => {
+                    let name = Self::own_qual_name(&self.qual_scope, p, &ty).unwrap();
+                    self.advance();
+                    OwnerQual::Param(name)
+                }
                 p if self.qual_scope.iter().any(|q| q == p) => {
                     let name = p.to_string();
                     self.advance();

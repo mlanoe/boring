@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Mickaël LANOË
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// CLI-level tests for `@api` (docs/design-notes/implicit-generics-draft.md, D1):
+// CLI-level tests for `@api` (docs/book.md, "Implicit generics: design notes", D1):
 // the attribute needs `pub`, takes only free-text `since`/`deprecated`, and is rejected
 // (never silently dropped) on an item it cannot attach to. The positive path (it changes
 // nothing at run time and is never emitted to Rust) is `tests/cases/api_attribute.br`;
@@ -81,4 +81,59 @@ fn api_is_not_emitted_as_a_rust_attribute() {
     assert!(out.status.success(), "got:\n{}", stderr(&out));
     let rust = String::from_utf8_lossy(&out.stdout);
     assert!(!rust.contains("#[api"), "`api` leaked into the generated Rust");
+}
+
+// ─── `boring api` / `boring api --check` (snapshot comparison, phase 4 of the implicit-generics draft)
+
+const V1: &str = "@api\npub int twice(int x):\n    x * 2\n\n@api\npub int zero():\n    0\n";
+
+fn api(args: &[&str], dir: &std::path::Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_boring")).arg("api").args(args).current_dir(dir).output().expect("failed to invoke boring")
+}
+
+#[test]
+fn api_snapshot_then_check_detects_breaking_changes_only() {
+    let dir = fixture_dir();
+    std::fs::write(dir.join("v1.br"), V1).unwrap();
+    let snap = api(&["v1.br"], &dir);
+    assert!(snap.status.success(), "{}", stderr(&snap));
+    std::fs::write(dir.join("api.snapshot"), &snap.stdout).unwrap();
+    assert!(String::from_utf8_lossy(&snap.stdout).contains("twice\tdef twice(int x) -> int"));
+
+    // Unchanged: ok.
+    assert!(api(&["--check", "api.snapshot", "v1.br"], &dir).status.success());
+
+    // Added item: compatible, reported but not an error.
+    std::fs::write(dir.join("v2.br"), format!("{V1}\n@api\npub int one():\n    1\n")).unwrap();
+    let out = api(&["--check", "api.snapshot", "v2.br"], &dir);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("added:    `one`"), "{}", stderr(&out));
+
+    // Changed + removed: breaking, exit code 1.
+    std::fs::write(dir.join("v3.br"), "@api\npub float twice(float x):\n    x * 2.0\n").unwrap();
+    let out = api(&["--check", "api.snapshot", "v3.br"], &dir);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(err.contains("breaking: `twice` changed") && err.contains("breaking: `zero` was removed"), "{err}");
+}
+
+#[test]
+fn api_check_rejects_a_malformed_snapshot() {
+    let dir = fixture_dir();
+    std::fs::write(dir.join("v1.br"), V1).unwrap();
+    std::fs::write(dir.join("bad.snapshot"), "no tab here\n").unwrap();
+    let out = api(&["--check", "bad.snapshot", "v1.br"], &dir);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("bad snapshot"), "{}", stderr(&out));
+}
+
+#[test]
+fn api_view_rejects_an_untyped_pub_prop_but_not_a_private_bind() {
+    let bad = "use boring.ui.*\n\n@api\npub view Badge:\n    pub note\n\n    req string describe():\n        \"{note}\"\n";
+    let out = emit(bad);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("field `Badge.note` has no type"), "{}", stderr(&out));
+    let ok = "use boring.ui.*\n\n@api\npub view Badge:\n    pub string note\n    bind var label\n\n    req string describe():\n        \"{label}:{note}\"\n";
+    let out = emit(ok);
+    assert!(out.status.success(), "{}", stderr(&out));
 }

@@ -9,7 +9,7 @@
 //
 // See the LICENSE file at the project root for the full text.
 
-//! Phase 1 of the implicit-generics design (docs/design-notes/implicit-generics-draft.md):
+//! Phase 1 of the implicit-generics design (docs/book.md, "Implicit generics: design notes"):
 //! a top-level `def` written without a return type whose body says `return <expr>` gets the
 //! type of that expression written back into its `return_ty`, so every later stage sees an
 //! ordinary annotated function.
@@ -40,8 +40,9 @@
 //!   whose return type is written or inferred, and a `type def` factory call. Qualified,
 //!   borrowed and `mut` types are never produced (their rules belong to the qualifier
 //!   inference, not to this pass).
-//! - A call to a function or constructor defined in another file is unknown here (each file
-//!   is parsed on its own), so a return that depends on one is left alone.
+//! - A call to a function or constructor defined in another file is unknown to the run inside
+//!   `parser::parse` (each file is parsed on its own); `infer_return_types_with_imports`
+//!   re-runs the pass from `desugar_array_block_with_imports`, which knows the imports.
 
 use crate::ast::*;
 use crate::ast_walk::Walker;
@@ -55,6 +56,153 @@ pub fn infer_return_types(program: &mut Program) {
     infer_items(&mut program.items);
 }
 
+/// [`infer_return_types`] for a file whose `use`d files' items are known (`imported`, see
+/// `desugar_inject::collect_imported_items`): a call or construction of an imported function or
+/// struct is typed like a local one. Local declarations shadow imports of the same name. Only
+/// the file's own items are rewritten; imported ones were inferred when their own file parsed.
+pub fn infer_return_types_with_imports(program: &mut Program, imported: &[Item]) {
+    if imported.is_empty() {
+        return;
+    }
+    let local: HashSet<String> = program
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some(f.name.clone()),
+            Item::Struct(s) => Some(s.name.clone()),
+            Item::Enum(e) => Some(e.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut combined: Vec<Item> = imported
+        .iter()
+        .filter(|i| match i {
+            Item::Fn(f) => !local.contains(&f.name),
+            Item::Struct(s) => !local.contains(&s.name),
+            Item::Enum(e) => !local.contains(&e.name),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    let n = combined.len();
+    combined.append(&mut program.items);
+    // Bounds flow from imported functions into the local callers (their own were fixed when their
+    // file parsed), before the return types are inferred.
+    crate::infer_param_generics::propagate_in(&mut combined);
+    infer_items(&mut combined);
+    program.items = combined.split_off(n);
+}
+
+/// The functions, structs and enums `infer_return_types_with_imports` can see from `items`'
+/// `use`s, following the import rules of `desugar_array_block_with_imports`: a bare `use name`
+/// (same-project sibling) imports every top-level item, a multi-segment or `[deps]`-qualified one
+/// only the `pub` items (narrowed to the named ones by `use mod(A, B)`), the embedded stdlib
+/// (`use boring.<module>`) is read from its embedded source. Imports are followed transitively
+/// (each file's own `use`s resolve against that file's directory); unreadable or unparsable
+/// files are skipped.
+pub fn collect_inference_imports(
+    items: &[Item],
+    dir: &std::path::Path,
+    deps: &HashMap<String, std::path::PathBuf>,
+) -> Vec<Item> {
+    let mut out = Vec::new();
+    walk_imports(items, dir, deps, &mut HashSet::new(), &mut out);
+    out
+}
+
+fn walk_imports(
+    items: &[Item],
+    dir: &std::path::Path,
+    deps: &HashMap<String, std::path::PathBuf>,
+    visited: &mut HashSet<(std::path::PathBuf, bool)>,
+    out: &mut Vec<Item>,
+) {
+    for item in items {
+        let Item::Use(u) = item else {
+            if let Item::Mod(m) = item { walk_imports(&m.items, dir, deps, visited, out); }
+            continue;
+        };
+        let Some(first) = u.path.first() else { continue };
+        if first == "boring" {
+            let module = u.path.get(1).map(String::as_str).unwrap_or("");
+            if let Some(src) = crate::stdlib_embed::lookup(module) {
+                if visited.insert((crate::stdlib_embed::synthetic_path(module), true)) {
+                    import_src(src, dir, true, &u.items, deps, visited, out);
+                }
+            }
+        } else if let Some(root) = deps.get(first.as_str()) {
+            let rel: std::path::PathBuf = u.path[1..].iter().collect();
+            import_path(&root.join(rel).with_extension("br"), true, &u.items, deps, visited, out);
+        } else {
+            let rel: std::path::PathBuf = u.path.iter().collect();
+            import_path(&dir.join(rel).with_extension("br"), u.path.len() > 1, &u.items, deps, visited, out);
+        }
+    }
+}
+
+fn import_path(
+    path: &std::path::Path,
+    pub_only: bool,
+    only: &[String],
+    deps: &HashMap<String, std::path::PathBuf>,
+    visited: &mut HashSet<(std::path::PathBuf, bool)>,
+    out: &mut Vec<Item>,
+) {
+    let Ok(path) = path.canonicalize() else { return };
+    if !visited.insert((path.clone(), pub_only)) { return; }
+    let Ok(src) = std::fs::read_to_string(&path) else { return };
+    let Some(file_dir) = path.parent() else { return };
+    import_src(&src, file_dir, pub_only, only, deps, visited, out);
+}
+
+fn import_src(
+    src: &str,
+    dir: &std::path::Path,
+    pub_only: bool,
+    only: &[String],
+    deps: &HashMap<String, std::path::PathBuf>,
+    visited: &mut HashSet<(std::path::PathBuf, bool)>,
+    out: &mut Vec<Item>,
+) {
+    let Ok(tokens) = crate::lexer::lex_all(src) else { return };
+    let Ok(file) = crate::parser::parse(tokens) else { return };
+    fn take(items: &[Item], ok: &dyn Fn(&str, bool) -> bool, out: &mut Vec<Item>) {
+        for it in items {
+            match it {
+                Item::Mod(m) => take(&m.items, ok, out),
+                Item::Fn(f) if ok(&f.name, f.is_pub) => out.push(it.clone()),
+                Item::Struct(s) if ok(&s.name, s.is_pub) => out.push(it.clone()),
+                Item::Enum(e) if ok(&e.name, e.is_pub) => out.push(it.clone()),
+                _ => {}
+            }
+        }
+    }
+    take(&file.items, &|name, is_pub| (!pub_only || is_pub) && (only.is_empty() || only.iter().any(|n| n == name)), out);
+    walk_imports(&file.items, dir, deps, visited, out);
+}
+
+/// The checks of `parse` that look at the declarations a call or construction refers to
+/// ([`check_untyped_constructions`], [`check_homogeneous_arrays`]), re-run with the imported
+/// ones visible. Imported items only supply declarations; every body checked here is the file's
+/// own, since an imported file was already checked when it was parsed.
+pub fn check_with_imports(program: &Program, imported: &[Item]) -> Result<(), crate::parser::ParseError> {
+    if imported.is_empty() {
+        return Ok(());
+    }
+    let local: Vec<&Item> = program.items.iter().collect();
+    let shadowed = |i: &Item| match i {
+        Item::Fn(f) => local.iter().any(|l| matches!(l, Item::Fn(g) if g.name == f.name)),
+        Item::Struct(s) => local.iter().any(|l| matches!(l, Item::Struct(g) if g.name == s.name)),
+        Item::Enum(e) => local.iter().any(|l| matches!(l, Item::Enum(g) if g.name == e.name)),
+        _ => false,
+    };
+    let mut items: Vec<Item> = imported.iter().filter(|i| !shadowed(i)).cloned().collect();
+    let skip = items.len();
+    items.extend(program.items.iter().cloned());
+    check_constructions_in(&items, skip)?;
+    check_arrays_in(&items, skip)
+}
+
 /// One scope's worth of [`infer_return_types`]; a `mod` is its own scope (names resolve
 /// against its own members only), so each is handled by recursion.
 fn infer_items(items: &mut Vec<Item>) {
@@ -63,7 +211,10 @@ fn infer_items(items: &mut Vec<Item>) {
             infer_items(&mut m.items);
         }
     }
-    let found: HashMap<String, Type> = {
+    // A name declared once is inferred by name; an overloaded one (resolved by argument type)
+    // per declaration, each body typed with its own parameters. A call to an overloaded name
+    // from another body stays untyped (`fn_ret` refuses it), so such a return is left alone.
+    let (found, per_overload): (HashMap<String, Type>, HashMap<usize, Type>) = {
         let cx = Ctx::new(items);
         let names: Vec<String> = cx
             .fns
@@ -71,23 +222,69 @@ fn infer_items(items: &mut Vec<Item>) {
             .filter(|(_, v)| v.len() == 1 && omitted(v[0]))
             .map(|(k, _)| k.clone())
             .collect();
-        names
+        let found = names
             .into_iter()
             .filter_map(|n| cx.fn_ret(&n).map(|t| (n, t)))
-            .collect()
+            .collect();
+        let mut per = HashMap::new();
+        for (i, item) in items.iter().enumerate() {
+            if let Item::Fn(f) = item {
+                let overloaded = cx.fns.get(&f.name).is_some_and(|v| v.len() > 1);
+                if overloaded && omitted(f) && eligible(f) {
+                    if let Some(t) = cx.infer_fn(f) {
+                        per.insert(i, t);
+                    }
+                }
+            }
+        }
+        (found, per)
     };
-    if found.is_empty() {
+    if found.is_empty() && per_overload.is_empty() {
         return;
     }
-    for item in items.iter_mut() {
+    for (i, item) in items.iter_mut().enumerate() {
         if let Item::Fn(f) = item {
             if omitted(f) && eligible(f) {
-                if let Some(t) = found.get(&f.name) {
+                if let Some(t) = per_overload.get(&i).or_else(|| found.get(&f.name)) {
                     f.return_ty = Some(t.clone());
                 }
             }
         }
     }
+}
+
+/// An overloaded function (one name, several declarations) with no written return type whose
+/// body returns a value [`infer_return_types`] could not type, per overload, is the error
+/// `write the return type`, as for a recursive function ([`check_recursive_returns`]): left
+/// alone it silently became `void`. Run after [`infer_return_types`].
+pub fn check_overloaded_returns(program: &Program) -> Result<(), crate::parser::ParseError> {
+    check_overloads_in(&program.items)
+}
+
+fn check_overloads_in(scope: &[Item]) -> Result<(), crate::parser::ParseError> {
+    for item in scope {
+        if let Item::Mod(m) = item {
+            check_overloads_in(&m.items)?;
+        }
+    }
+    let fns: Vec<&FnDecl> = scope.iter().filter_map(|i| match i { Item::Fn(f) => Some(f), _ => None }).collect();
+    for f in &fns {
+        let overloaded = fns.iter().filter(|g| g.name == f.name && g.qualifier.is_none()).count() > 1;
+        if !overloaded || !omitted(f) || f.is_native || f.task || f.stream || f.qualifier.is_some() {
+            continue;
+        }
+        let Some(returns) = valued_returns(&f.body) else { continue };
+        if let Some(bad) = returns.iter().find(|e| certainly_valued(e)) {
+            return Err(crate::parser::ParseError::Generic {
+                msg: format!(
+                    "`{0}` is overloaded and returns a value whose type cannot be inferred, so its return type must be written — put it before the name, e.g. `<type> {0}(...)`",
+                    f.name
+                ),
+                line: bad.line, col: bad.col, len: bad.len.max(1),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Whether `e` certainly produces a value, so that a function returning it cannot be a `void`
@@ -102,6 +299,75 @@ fn certainly_valued(e: &Expr) -> bool {
         ExprKind::BinOp(op, ..) => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem),
         _ => false,
     }
+}
+
+/// D4 of the implicit-generics design: a recursive function (directly, or through other functions
+/// of its scope) whose return type was left out and could not be inferred must have it written.
+/// Inference would need a fixpoint over the cycle; without it the function silently became
+/// `void` (`boring run` then failed far from the cause, `boring run` of `even`/`odd` printed
+/// `void`). As elsewhere, only a returned expression that certainly produces a value counts
+/// ([`certainly_valued`]), so a recursive `void` function is never reported. Run after
+/// [`infer_return_types`]: a recursive function that did get its type is no longer omitted.
+pub fn check_recursive_returns(program: &Program) -> Result<(), crate::parser::ParseError> {
+    check_recursion_in(&program.items)
+}
+
+fn check_recursion_in(scope: &[Item]) -> Result<(), crate::parser::ParseError> {
+    for item in scope {
+        if let Item::Mod(m) = item {
+            check_recursion_in(&m.items)?;
+        }
+    }
+    let fns: Vec<&FnDecl> = scope.iter().filter_map(|i| match i { Item::Fn(f) => Some(f), _ => None }).collect();
+    let mut edges: HashMap<&str, HashSet<String>> = HashMap::new();
+    for f in &fns {
+        let mut callees: HashSet<String> = HashSet::new();
+        let mut body = f.body.clone();
+        {
+            let mut on_expr = |e: &mut Expr| {
+                if let ExprKind::Call(c, _) = &e.kind {
+                    if let ExprKind::Var(n) = &c.kind {
+                        callees.insert(n.clone());
+                    }
+                }
+            };
+            let mut on_stmt = |_: &mut Stmt| {};
+            Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
+        }
+        edges.entry(f.name.as_str()).or_default().extend(callees);
+    }
+    let recursive = |start: &str| -> bool {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = edges.get(start).map(|s| s.iter().map(String::as_str).collect()).unwrap_or_default();
+        while let Some(n) = stack.pop() {
+            if n == start { return true; }
+            if seen.insert(n) {
+                if let Some(next) = edges.get(n) {
+                    stack.extend(next.iter().map(String::as_str));
+                }
+            }
+        }
+        false
+    };
+    for f in &fns {
+        // An overloaded name (resolved by argument type) merges several functions in `edges`: a
+        // cycle through it may not be one, so it is left alone.
+        let overloaded = fns.iter().filter(|g| g.name == f.name).count() > 1;
+        if !omitted(f) || f.is_native || f.task || f.stream || f.qualifier.is_some() || overloaded || !recursive(&f.name) {
+            continue;
+        }
+        let Some(returns) = valued_returns(&f.body) else { continue };
+        if let Some(bad) = returns.iter().find(|e| certainly_valued(e)) {
+            return Err(crate::parser::ParseError::Generic {
+                msg: format!(
+                    "`{0}` is recursive and returns a value, so its return type cannot be inferred — write it before the name, e.g. `<type> {0}(...)`",
+                    f.name
+                ),
+                line: bad.line, col: bad.col, len: bad.len.max(1),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The "cannot infer" error for a function whose parameters are untyped (implicit generics,
@@ -140,13 +406,85 @@ fn check_untyped_returns_in(items: &[Item]) -> Result<(), crate::parser::ParseEr
     Ok(())
 }
 
+/// D8 of the implicit-generics design: an array is homogeneous, so a literal mixing two instances
+/// of one implicit-parameter struct (`[a(), b()]` with `Response<int, string>` and
+/// `Response<int, int>`) is a Boring error, not a rustc mismatch on generated code. Only elements
+/// whose type is certain count (a constructor or a call this pass can type); run after
+/// [`infer_return_types`] so the written-back return types are visible.
+pub fn check_homogeneous_arrays(program: &Program) -> Result<(), crate::parser::ParseError> {
+    check_arrays_in(&program.items, 0)
+}
+
+/// The first `skip` items only supply declarations (imported ones): their bodies are not checked.
+fn check_arrays_in(scope: &[Item], skip: usize) -> Result<(), crate::parser::ParseError> {
+    for item in scope {
+        if let Item::Mod(m) = item {
+            check_arrays_in(&m.items, 0)?;
+        }
+    }
+    let cx = Ctx::new(scope);
+    let implicit = |n: &str| cx.structs.get(n).is_some_and(|s| s.type_params.iter().any(|p| p.starts_with("T_")));
+    let mut error: Option<crate::parser::ParseError> = None;
+    let mut on_expr = |e: &mut Expr| {
+        if error.is_some() { return; }
+        let ExprKind::Array(elems) = &e.kind else { return };
+        let mut first: Option<(String, Type, usize, usize)> = None;
+        for el in elems {
+            let Some(t) = cx.ty_of(el, &Env::new()) else { continue };
+            let Type::Generic(n, _) = &t else { continue };
+            let n = n.clone();
+            if !implicit(&n) { continue; }
+            match &first {
+                None => first = Some((n, t, el.line, el.col)),
+                Some((fname, ft, fline, fcol)) if *fname == n && *ft != t => {
+                    error = Some(crate::parser::ParseError::Generic {
+                        msg: format!(
+                            "an array holds one type, but this one mixes `{}` (line {fline}:{fcol}) and `{}` (here) — the untyped fields of `{n}` are fixed by each construction, so two constructions with different field types are different types",
+                            crate::desugar_array_block::describe_type(ft), crate::desugar_array_block::describe_type(&t)
+                        ),
+                        line: el.line, col: el.col, len: el.len.max(1),
+                    });
+                    return;
+                }
+                _ => {}
+            }
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    let mut items = scope[skip..].to_vec();
+    for item in &mut items {
+        match item {
+            Item::Fn(f) => Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut f.body),
+            Item::Stmt(s) => Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmt(s),
+            Item::Let(l) => {
+                if let Some(v) = &mut l.value {
+                    Walker { expr: &mut on_expr, stmt: &mut on_stmt }.expr(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    match error { Some(e) => Err(e), None => Ok(()) }
+}
+
 /// The construction half of D3 (implicit generics, phase 3): an untyped struct field fixed by an
 /// argument that carries no type of its own (`[]`, `{}`, `{=}`, `nil`) can never be resolved,
 /// and rustc's message about it names a generated parameter. Reported here instead, naming the
 /// field. Only direct constructions of a struct declared in this file are looked at.
 pub fn check_untyped_constructions(program: &Program) -> Result<(), crate::parser::ParseError> {
+    check_constructions_in(&program.items, 0)
+}
+
+/// One scope (the file, or one `mod`): its own structs, and the constructions of its own items.
+/// The first `skip` items only supply declarations (imported ones): their bodies are not checked.
+fn check_constructions_in(scope: &[Item], skip: usize) -> Result<(), crate::parser::ParseError> {
+    for item in scope {
+        if let Item::Mod(m) = item {
+            check_constructions_in(&m.items, 0)?;
+        }
+    }
     let mut structs: HashMap<String, Vec<(String, bool)>> = HashMap::new();
-    for item in &program.items {
+    for item in scope {
         if let Item::Struct(s) = item {
             let fields = s.fields.iter()
                 .map(|f| (f.name.clone(), matches!(&f.ty, Type::TypeParam(n) if n.starts_with("T_") && s.type_params.contains(n))))
@@ -189,7 +527,7 @@ pub fn check_untyped_constructions(program: &Program) -> Result<(), crate::parse
         }
     };
     let mut on_stmt = |_: &mut Stmt| {};
-    let mut items = program.items.clone();
+    let mut items = scope[skip..].to_vec();
     for item in &mut items {
         match item {
             Item::Fn(f) => Walker { expr: &mut check, stmt: &mut on_stmt }.stmts(&mut f.body),
@@ -440,18 +778,17 @@ impl<'a> Ctx<'a> {
         result
     }
 
-    fn infer_fn(&self, f: &FnDecl) -> Option<Type> {
-        let returns = valued_returns(&f.body)?;
-        if returns.is_empty() {
-            return None;
-        }
+    /// The flat environment of one body: its parameters, then each `let` in source order
+    /// (a name bound twice with different types is unknown).
+    fn body_env(&self, f: Option<&FnDecl>, stmts: &[Stmt]) -> Env {
         let mut env: Env = HashMap::new();
-        for p in &f.params {
-            let t = p.ty.clone().filter(|t| is_plain(t) || own_param(f, t));
-            bind(&mut env, &p.name, t);
+        if let Some(f) = f {
+            for p in &f.params {
+                let t = p.ty.clone().filter(|t| is_plain(t) || own_param(f, t));
+                bind(&mut env, &p.name, t);
+            }
         }
-        // Local bindings, in source order; a name bound twice with different types is unknown.
-        let mut body = f.body.clone();
+        let mut body = stmts.to_vec();
         {
             let mut on_expr = |_: &mut Expr| {};
             let mut on_stmt = |s: &mut Stmt| {
@@ -466,6 +803,15 @@ impl<'a> Ctx<'a> {
             };
             Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
         }
+        env
+    }
+
+    fn infer_fn(&self, f: &FnDecl) -> Option<Type> {
+        let returns = valued_returns(&f.body)?;
+        if returns.is_empty() {
+            return None;
+        }
+        let env = self.body_env(Some(f), &f.body);
         let mut result: Option<Type> = None;
         for r in &returns {
             let t = self.ty_of(r, &env)?;
@@ -507,6 +853,10 @@ impl<'a> Ctx<'a> {
                 | BinOp::GtEq | BinOp::And | BinOp::Or | BinOp::Is | BinOp::IsNot => Some(named("bool")),
                 _ => {
                     let (lt, rt) = (self.ty_of(l, env)?, self.ty_of(r, env)?);
+                    // `x + 1` on an untyped parameter: its `Add<isize, Output = T>` bound keeps the type.
+                    if matches!(lt, Type::TypeParam(_)) && matches!(r.kind, ExprKind::Int(_) | ExprKind::Float(_)) {
+                        return Some(lt);
+                    }
                     let text_add = *op == BinOp::Add && lt == named("string");
                     (lt == rt && (is_numeric(&lt) || text_add || matches!(lt, Type::TypeParam(_)))).then_some(lt)
                 }
@@ -528,6 +878,9 @@ impl<'a> Ctx<'a> {
                 }
                 _ => None,
             },
+            // `x.len()` on an untyped parameter: its `BoringLen` bound returns a `uint`.
+            ExprKind::MethodCall(recv, method, a)
+                if method == "len" && a.is_empty() && matches!(self.ty_of(recv, env), Some(Type::TypeParam(_))) => Some(named("uint")),
             ExprKind::MethodCall(recv, method, _) => self.type_member_ty(recv, method),
             _ => None,
         }
@@ -573,8 +926,15 @@ impl<'a> Ctx<'a> {
     }
 
     fn construct_ty(&self, s: &StructDecl, args: &[Arg], env: &Env) -> Option<Type> {
+        self.construct_detail(s, args, env).map(|(t, _)| t)
+    }
+
+    /// [`Self::construct_ty`], plus the parameters that were fixed by a field's default value
+    /// because the construction left that field out (D11), for `--show-types`.
+    fn construct_detail(&self, s: &StructDecl, args: &[Arg], env: &Env) -> Option<(Type, HashSet<String>)> {
+        let mut from_default: HashSet<String> = HashSet::new();
         if s.type_params.is_empty() {
-            return Some(named(&s.name));
+            return Some((named(&s.name), from_default));
         }
         if !s.type_params.iter().all(|p| is_simple_param(p)) || !s.inits.is_empty() {
             return None;
@@ -589,6 +949,10 @@ impl<'a> Ctx<'a> {
                 None => s.fields.get(i)?,
             };
             if mentions(&field.ty, &s.type_params) {
+                // `nil` for an optional field binds nothing (D4): the other fields decide.
+                if matches!(arg.value.kind, ExprKind::Nil) && matches!(field.ty, Type::Optional(_)) {
+                    continue;
+                }
                 let at = self.ty_of(&arg.value, env)?;
                 if !is_plain(&at) || !unify(&field.ty, &at, &s.type_params, &mut bindings) {
                     return None;
@@ -607,13 +971,15 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             let dt = self.ty_of(default, &Env::new())?;
+            let before: HashSet<String> = bindings.keys().cloned().collect();
             if !is_plain(&dt) || !unify(&field.ty, &dt, &s.type_params, &mut bindings) {
                 return None;
             }
+            from_default.extend(bindings.keys().filter(|k| !before.contains(*k)).cloned());
         }
         let targs: Vec<Type> =
             s.type_params.iter().map(|p| bindings.get(p).cloned()).collect::<Option<Vec<_>>>()?;
-        Some(Type::Generic(s.name.clone(), targs))
+        Some((Type::Generic(s.name.clone(), targs), from_default))
     }
 }
 
@@ -647,6 +1013,96 @@ fn bind(env: &mut Env, name: &str, ty: Option<Type>) {
     }
 }
 
+/// One construction of a struct with untyped fields, with the type each of them was fixed to
+/// (`Response<status = int, payload = string>`), for `boring check --show-types` (D7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instantiation {
+    pub line: usize,
+    pub col: usize,
+    pub text: String,
+}
+
+/// Every construction of an implicit-parameter struct whose parameters can be determined, in
+/// source order. Same typing as the return-type inference: a construction it cannot type is
+/// left out. A `mod` is its own scope.
+pub fn instantiations(program: &Program) -> Vec<Instantiation> {
+    instantiations_with_imports(program, &[])
+}
+
+/// [`instantiations`] for a file whose `use`d files' items are known (see
+/// [`collect_inference_imports`]): a construction of an imported struct is typed too. Local
+/// declarations shadow imports of the same name; only the file's own bodies are listed.
+pub fn instantiations_with_imports(program: &Program, imported: &[Item]) -> Vec<Instantiation> {
+    let mut out = Vec::new();
+    instantiations_in(&program.items, imported, "", &mut out);
+    out.sort_by_key(|i| (i.line, i.col));
+    out
+}
+
+fn instantiations_in(items: &[Item], imported: &[Item], prefix: &str, out: &mut Vec<Instantiation>) {
+    let local: HashSet<String> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some(f.name.clone()),
+            Item::Struct(s) => Some(s.name.clone()),
+            Item::Enum(e) => Some(e.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut scope: Vec<Item> = imported
+        .iter()
+        .filter(|i| match i {
+            Item::Fn(f) => !local.contains(&f.name),
+            Item::Struct(s) => !local.contains(&s.name),
+            Item::Enum(e) => !local.contains(&e.name),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    scope.extend(items.iter().cloned());
+    let cx = Ctx::new(&scope);
+    let mut found = |cx: &Ctx, f: Option<&FnDecl>, body: &[Stmt]| {
+        let env = cx.body_env(f, body);
+        let mut body = body.to_vec();
+        let mut on_stmt = |_: &mut Stmt| {};
+        let mut on_expr = |e: &mut Expr| {
+            let ExprKind::Call(callee, args) = &e.kind else { return };
+            let ExprKind::Var(name) = &callee.kind else { return };
+            let Some(s) = cx.structs.get(name) else { return };
+            if !s.type_params.iter().any(|p| p.starts_with("T_")) {
+                return;
+            }
+            let Some((Type::Generic(_, targs), defaulted)) = cx.construct_detail(s, args, &env) else { return };
+            let parts: Vec<String> = s
+                .type_params
+                .iter()
+                .zip(&targs)
+                .map(|(p, t)| {
+                    let mark = if defaulted.contains(p) { " (default)" } else { "" };
+                    format!("{} = {}{mark}", p.strip_prefix("T_").unwrap_or(p), crate::show_types::describe_type(t))
+                })
+                .collect();
+            out.push(Instantiation { line: e.line, col: e.col, text: format!("{prefix}{name}<{}>", parts.join(", ")) });
+        };
+        Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
+    };
+    let mut top: Vec<Stmt> = Vec::new();
+    for item in items {
+        match item {
+            Item::Fn(f) if f.qualifier.is_none() => found(&cx, Some(f), &f.body),
+            Item::Stmt(s) => top.push(s.clone()),
+            Item::Let(l) => top.push(Stmt::Let(l.clone())),
+            _ => {}
+        }
+    }
+    found(&cx, None, &top);
+    for item in items {
+        if let Item::Mod(m) = item {
+            instantiations_in(&m.items, &[], &format!("{prefix}{}.", m.name), out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +1121,12 @@ mod tests {
 
     fn n(s: &str) -> Type {
         Type::Named(s.to_string())
+    }
+
+    #[test]
+    fn typeless_argument_is_also_caught_inside_a_mod() {
+        let src = "mod m:\n    struct R:\n        payload\n\n    def make():\n        return R(payload = nil)\n";
+        assert!(parse_err(src).expect("should be rejected").contains("`R.payload`"));
     }
 
     #[test]
@@ -687,11 +1149,48 @@ mod tests {
 
     #[test]
     fn untyped_params_with_an_untypable_value_return_are_an_error() {
+        let larger = "def larger(a, b):\n    if a < b:\n        return b\n    return a\n";
+        let e = parse_err(larger).expect("should be rejected");
+        assert!(e.contains("cannot infer the return type of `larger`"), "{e}");
+        // `a + b` mixes two separate types: the operator check (D5) rejects it first.
         let e = parse_err("def add(a, b):\n    return a + b\n").expect("should be rejected");
-        assert!(e.contains("cannot infer the return type of `add`"), "{e}");
-        // Inline body form too, and with a condition around the return.
-        assert!(parse_err("def add(a, b): a + b\n").is_some());
-        assert!(parse_err("def larger(a, b):\n    if a < b:\n        return b\n    return a\n").is_some());
+        assert!(e.contains("another untyped parameter"), "{e}");
+    }
+
+    #[test]
+    fn recursive_functions_with_a_value_need_a_written_return_type() {
+        let e = parse_err("def fact(int n):\n    if n < 2:\n        return 1\n    return n * fact(n - 1)\n").expect("rejected");
+        assert!(e.contains("`fact` is recursive"), "{e}");
+        // Mutual recursion.
+        let e = parse_err("def even(int n):\n    if n == 0:\n        return true\n    return odd(n - 1)\n\ndef odd(int n):\n    if n == 0:\n        return false\n    return even(n - 1)\n").expect("rejected");
+        assert!(e.contains("is recursive"), "{e}");
+        // Written return type, a void recursive function, and a non-recursive one are fine.
+        assert!(parse_err("int fact(int n):\n    if n < 2:\n        return 1\n    return n * fact(n - 1)\n").is_none());
+        assert!(parse_err("def countdown(int n):\n    if n > 0:\n        print n\n        countdown(n - 1)\n").is_none());
+        assert!(parse_err("def one(int n):\n    return 1\n").is_none());
+    }
+
+    #[test]
+    fn overloaded_names_are_not_taken_for_recursion() {
+        let src = "def f(int a):\n    if a > 0:\n        return 1\n    return f(1.5)\n\ndef f(float a):\n    return 2\n";
+        // Not a recursion error; the untypable `f(1.5)` makes it the overload one.
+        let e = parse_err(src).expect("rejected");
+        assert!(e.contains("is overloaded") && !e.contains("recursive"), "{e}");
+        // Written on the overload that calls the other, it is fine.
+        let ok = "int f(int a):\n    if a > 0:\n        return 1\n    return f(1.5)\n\ndef f(float a):\n    return 2\n";
+        assert!(parse_err(ok).is_none());
+    }
+
+    #[test]
+    fn an_array_cannot_mix_two_instances_of_an_implicit_struct() {
+        let base = "struct R:\n    status\n    payload\n\ndef a():\n    return R(status = 1, payload = \"x\")\n\ndef b():\n    return R(status = 1, payload = 2)\n\n";
+        let e = parse_err(&format!("{base}let xs = [a(), b()]\n")).expect("rejected");
+        assert!(e.contains("mixes `R<int, string>` (line 11:") && e.contains("`R<int, int>` (here)"), "{e}");
+        let e = parse_err(&format!("{base}let ys = [R(status = 1, payload = 2), R(status = 1, payload = \"y\")]\n")).expect("rejected");
+        assert!(e.contains("an array holds one type"), "{e}");
+        // The same instance twice, and one instance with an unknown call, are fine.
+        assert!(parse_err(&format!("{base}let xs = [a(), a()]\n")).is_none());
+        assert!(parse_err(&format!("{base}let zs = [a(), unknown()]\n")).is_none());
     }
 
     #[test]
@@ -706,10 +1205,10 @@ mod tests {
 
     #[test]
     fn mod_members_get_the_same_checks() {
-        let e = parse_err("mod m:\n    def add(a, b):\n        return a + b\n\nprint m.add(1, 2)\n").expect("should be rejected");
-        assert!(e.contains("cannot infer the return type of `add`"), "{e}");
+        let e = parse_err("mod m:\n    def pick(a, b):\n        if a < b:\n            return b\n        return a\n\nprint m.pick(1, 2)\n").expect("should be rejected");
+        assert!(e.contains("cannot infer the return type of `pick`"), "{e}");
         // Nested mod too.
-        assert!(parse_err("mod a:\n    mod b:\n        def add(a, b): a + b\n").is_some());
+        assert!(parse_err("mod a:\n    mod b:\n        def pick(a, b):\n            if a < b:\n                return b\n            return a\n").is_some());
         // Typable and void ones inside a mod are fine (and get inferred).
         assert!(parse_err("mod m:\n    def keep(x):\n        return x\n    def log(x):\n        print x\n").is_none());
         let p = parse(lex("mod m:\n    def keep(x):\n        return x\n").unwrap()).unwrap();
@@ -822,8 +1321,10 @@ mod tests {
 
     #[test]
     fn recursion_keeps_its_type_unwritten() {
+        // Not inferred, and (D4) an error as soon as a returned expression certainly has a value.
         let src = "def f(int n):\n    if n == 0:\n        return 0\n    return f(n - 1)\n";
-        assert_eq!(inferred(src, "f"), None);
+        assert!(parse_err(src).expect("rejected").contains("`f` is recursive"));
+        // Only calls to each other: nothing certainly valued, left alone.
         let mutual = "def a():\n    return b()\n\ndef b():\n    return a()\n";
         assert_eq!(inferred(mutual, "a"), None);
         assert_eq!(inferred(mutual, "b"), None);
@@ -868,5 +1369,49 @@ mod tests {
     fn shadowed_binding_with_two_types_is_unknown() {
         let src = "def f(bool c):\n    if c:\n        let x = 1\n    else:\n        let x = \"a\"\n    return x\n";
         assert_eq!(inferred(src, "f"), None);
+    }
+
+    fn overload_types(src: &str, fn_name: &str) -> Vec<Option<Type>> {
+        let program = parse(lex(src).expect("lex error")).expect("parse error");
+        program
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Fn(f) if f.name == fn_name => Some(f.return_ty.clone().filter(|t| *t != Type::Void)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_overload_is_inferred_from_its_own_parameters() {
+        let src = "def f(int a):\n    return a\n\ndef f(string a):\n    return a\n\ndef f(float a):\n    return 2.5\n";
+        assert_eq!(overload_types(src, "f"), vec![Some(n("int")), Some(n("string")), Some(n("float"))]);
+    }
+
+    #[test]
+    fn overload_with_early_return_is_inferred() {
+        let src = "def f(int a):\n    if a > 0:\n        return 1\n    return 2\n\ndef f(float a):\n    return 2\n";
+        assert_eq!(overload_types(src, "f"), vec![Some(n("int")), Some(n("int"))]);
+    }
+
+    #[test]
+    fn untypable_overload_return_is_an_error() {
+        let src = "def f(int a):\n    return a\n\ndef f(a, b):\n    return a\n\ndef f(float a):\n    return a.x\n";
+        let e = parse_err(src).expect("should be rejected");
+        assert!(e.contains("`f` is overloaded"), "{e}");
+    }
+
+    #[test]
+    fn overload_returning_a_call_or_nothing_is_never_reported() {
+        let src = "def f(int a):\n    print a\n\ndef f(float a):\n    return g(a)\n";
+        assert!(parse_err(src).is_none());
+        assert_eq!(overload_types(src, "f"), vec![None, None]);
+    }
+
+    #[test]
+    fn overload_with_conflicting_returns_is_an_error() {
+        let src = "def f(int a):\n    if a > 0:\n        return 1\n    return \"x\"\n\ndef f(float a):\n    return 2\n";
+        assert!(parse_err(src).expect("should be rejected").contains("`f` is overloaded"));
     }
 }

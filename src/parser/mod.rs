@@ -115,9 +115,13 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     }
     generic_args::check_bare_qual_uses(&program)?;
     // Before the actor passes: they (and everything after) must see the written-back return types.
+    crate::infer_param_generics::propagate_bounds(&mut program);
     crate::infer_return_types::infer_return_types(&mut program);
+    crate::infer_return_types::check_recursive_returns(&program)?;
+    crate::infer_return_types::check_overloaded_returns(&program)?;
     crate::infer_return_types::check_untyped_returns(&program)?;
     crate::infer_return_types::check_untyped_constructions(&program)?;
+    crate::infer_return_types::check_homogeneous_arrays(&program)?;
     crate::infer_actor_params::infer_actor_params(&mut program);
     crate::infer_actor_elems::infer_actor_elems(&mut program);
     Ok(program)
@@ -1779,6 +1783,8 @@ impl Parser {
         }
         let mut params = Vec::new();
         let mut where_clause = Vec::new();
+        // `<T'q>` sugar: qualifier name -> the types written with it.
+        let mut sugar_types: HashMap<String, Vec<String>> = HashMap::new();
         self.skip_newlines_and_indent();
         loop {
             // Qualifier parameter: `'elem`, `'elem as 'new` (docs/book.md "Qualifier parameters").
@@ -1860,6 +1866,48 @@ impl Parser {
                 _ => break,
             };
             params.push(name.clone());
+
+            // `<T'q>`: sugar for `<T, 'q>`, with `q` tied to `T` (docs/book.md, "Qualified generics").
+            // Plain form only: bounds and defaults of `q` need the long form.
+            if self.check(&TokenKind::Tick) && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+                self.advance();
+                let (ql, qc, qn) = (self.line(), self.col(), self.tok_len());
+                let TokenKind::Ident(q) = self.peek().clone() else { unreachable!() };
+                self.advance();
+                if crate::parser::generic_args::QUALIFIER_WORDS.contains(&q.as_str()) {
+                    self.pending_err.get_or_insert(ParseError::Generic {
+                        msg: format!("`'{q}` is a qualifier, it cannot name the qualifier parameter of `{name}'...`"),
+                        line: ql, col: qc, len: qn });
+                } else if params.iter().any(|p| qual_param_name(p) == Some(q.as_str()) && qual_param_links(p).is_empty()) {
+                    // A `q` declared on its own (`<A, 'q, B'q>`) cannot also be linked.
+                    self.pending_err.get_or_insert(ParseError::Generic {
+                        msg: format!("qualifier parameter `{q}` is declared twice; `{name}'{q}` would clash with it, write `<A, B, '{q}>` to share one"),
+                        line: ql, col: qc, len: qn });
+                } else {
+                    // `<A'q, B'q>`: each type has its own qualifier, `q` only says "the qualifier
+                    // of this type". Internally they are `q.A` and `q.B` (a lone `q` keeps its name);
+                    // `parse_type_qualifier` resolves `A'q` against the base type it follows.
+                    let others: Vec<String> = sugar_types.get(&q).cloned().unwrap_or_default();
+                    if others.len() == 1 {
+                        let first = &others[0];
+                        if let Some(at) = params.iter().position(|p| *p == format!("^{q}@{first}")) {
+                            params[at] = format!("^{q}.{first}@{first}");
+                        }
+                    }
+                    if others.is_empty() {
+                        params.push(format!("^{q}@{name}"));
+                    } else {
+                        params.push(format!("^{q}.{name}@{name}"));
+                    }
+                    sugar_types.entry(q.clone()).or_default().push(name.clone());
+                }
+                if matches!(self.peek(), TokenKind::As | TokenKind::Eq) {
+                    let (l, c, n) = (self.line(), self.col(), self.tok_len());
+                    self.pending_err.get_or_insert(ParseError::Generic {
+                        msg: format!("`{name}'{q}` takes no bound or default; write `<{name}, '{q} as ...>` to give `{q}` one"),
+                        line: l, col: c, len: n });
+                }
+            }
 
             if self.eat(&TokenKind::As) {
                 if let TokenKind::Ident(trait_name) = self.peek().clone() {
@@ -2481,9 +2529,33 @@ impl Parser {
         let mut where_clause = where_clause;
         if !untyped_fields.is_empty() {
             for m in &methods {
+                let own: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
+                if let Some(u) = crate::infer_param_generics::unbounded_use(&untyped_fields, &m.body, &own) {
+                    return Err(crate::infer_param_generics::unbounded_error(u, "field"));
+                }
                 for b in crate::infer_param_generics::bounds(&untyped_fields, &m.body) {
                     if !where_clause.contains(&b) { where_clause.push(b); }
                 }
+            }
+        }
+        // D8: inside a struct whose parameters are all implicit, a bare mention of the struct itself
+        // (`Node? next`) shares its parameters: it is `Node<T_value>`, never a fresh instance.
+        let mut fields = fields;
+        let mut inits = inits;
+        let mut methods = methods;
+        if !untyped_fields.is_empty() && type_params.iter().all(|p| p.starts_with("T_")) {
+            let args: Vec<Type> = type_params.iter().map(|p| Type::TypeParam(p.clone())).collect();
+            for f in &mut fields { crate::infer_param_generics::share_self_params(&mut f.ty, &name, &args); }
+            for i in &mut inits {
+                for p in &mut i.params {
+                    if let Some(t) = &mut p.ty { crate::infer_param_generics::share_self_params(t, &name, &args); }
+                }
+            }
+            for m in &mut methods {
+                for p in &mut m.params {
+                    if let Some(t) = &mut p.ty { crate::infer_param_generics::share_self_params(t, &name, &args); }
+                }
+                if let Some(t) = &mut m.return_ty { crate::infer_param_generics::share_self_params(t, &name, &args); }
             }
         }
         Ok(StructDecl {

@@ -127,7 +127,9 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
         tensor_config.single_launch_float_linear = true;
     }
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
-    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&tensor_host.program));
+    // Type-generic structs / helper functions used in device code become concrete copies first.
+    let (device_generic, device_generic_errors) = crate::transpiler::device_generic::monomorphise_device_generics(&tensor_host.program);
+    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&device_generic));
     let program = &optional_lowered;
     let (generic_lowered, generic_errors) = crate::transpiler::kernel_generic::monomorphise_generic_kernels(program);
     let program = &generic_lowered;
@@ -263,6 +265,7 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let warnings = general_out.warnings;
     let mut errors = general_out.errors;
     errors.extend(device_errors);
+    errors.extend(device_generic_errors);
     errors.extend(generic_errors);
     errors.extend(struct_errors);
     errors.extend(tensor_host.errors);

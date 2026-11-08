@@ -1,5 +1,5 @@
 # A top-level `def` with no return type whose body says `return <expr>` gets that expression's
-# type written back (docs/design-notes/implicit-generics-draft.md, phase 1). Everything below
+# type written back (docs/book.md, "Implicit generics: design notes", phase 1). Everything below
 # is unannotated; `boring run` and `boring build` must agree, which they only can if the
 # inferred types are real: one generic struct, two different instantiations.
 

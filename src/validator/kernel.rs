@@ -835,9 +835,11 @@ impl KernelValidator {
                 .filter_map(|c| OwnerQual::chain_name(c).map(|n| format!("'{n}")))
                 .collect();
             if unsafe_members.is_empty() { continue; }
+            // `<T'q>` has no bound of its own: its long form `<T, 'q as 'inline|owned>` has.
+            let linked = crate::ast::qual_param_links(p).first().map(|t| format!(" (written `{t}'{name}`; use `<{t}, '{name} as 'inline|owned>`)")).unwrap_or_default();
             self.error(line, format!(
                 "qualifier parameters whose bound allows {} (`{name}` of `{owner}`) are not supported on the Rust-for-Linux Linux target — \
-                 only `'inline` and `'owned` can be specialised there; bound it with `as 'inline|owned`",
+                 only `'inline` and `'owned` can be specialised there; bound it with `as 'inline|owned`{linked}",
                 unsafe_members.join(", ")));
         }
     }

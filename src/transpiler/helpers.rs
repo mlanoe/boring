@@ -1859,17 +1859,25 @@ pub(crate) fn type_params_str(params: &[String]) -> String {
 /// bounds read off an untyped field's uses by `infer_param_generics`), so that method bodies can
 /// use the field the way they were written to.
 pub(crate) fn type_params_impl_bounded_str(params: &[String], where_clause: &[(String, String)]) -> String {
+    type_params_impl_bounded_extra_str(params, where_clause, "")
+}
+
+/// [`type_params_impl_bounded_str`] with `extra` (` + Send + Sync`, or empty) appended to the
+/// bounds of every regular type parameter. Used for a generic type's trait implementations: they
+/// call the inherent methods, so they need the same bounds, and in multi-threaded output a
+/// declared trait carries `Send + Sync` supertraits (see `emit_trait`).
+pub(crate) fn type_params_impl_bounded_extra_str(params: &[String], where_clause: &[(String, String)], extra: &str) -> String {
     if params.is_empty() { return String::new(); }
     let bounded: Vec<String> = params.iter()
         .map(|p| {
             if p.starts_with('\'') { p.clone() }
             else if p.starts_with('$') { emit_generic_param(p) }
             else {
-                let extra: Vec<String> = where_clause.iter()
+                let extra_bounds: Vec<String> = where_clause.iter()
                     .filter(|(n, b)| n == p && b != "Clone")
                     .map(|(_, b)| map_trait_bound(b))
                     .collect();
-                if extra.is_empty() { format!("{}: Clone", p) } else { format!("{}: Clone + {}", p, extra.join(" + ")) }
+                if extra_bounds.is_empty() { format!("{}: Clone{}", p, extra) } else { format!("{}: Clone + {}{}", p, extra_bounds.join(" + "), extra) }
             }
         })
         .collect();

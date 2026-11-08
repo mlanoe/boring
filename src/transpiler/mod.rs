@@ -41,6 +41,7 @@ mod last_use;
 mod promote_atomic;
 pub(crate) mod monomorphize;
 pub(crate) mod kernel_generic;
+pub(crate) mod device_generic;
 pub(crate) mod helpers;
 pub(crate) mod fixed_gpu;
 pub(crate) use helpers::*;
@@ -380,6 +381,15 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
         } else {
             t.emit_program(program);
         }
+    } else if let Some((line, col, name)) = crate::desugar_gpu_struct::implicit_struct_in_device_code(program) {
+        t.push_error(
+            line, col,
+            format!(
+                "struct `{name}` has untyped fields, so it is generic, and device code only has concrete structs \
+                 -- write the types of its fields (`int v`), instantiate it explicitly (`{name}<int>(..)`, \
+                 the types in field order), or use a concrete struct in the kernel"
+            ),
+        );
     } else {
         t.emit_program(program);
     }
@@ -2682,6 +2692,16 @@ impl Transpiler {
              \x20       self.iter().nth(i).cloned().expect(\"get_at index out of range\")\n\
              \x20   }\n\
              }\n\n\
+             // BoringLen — the `len()` an untyped parameter (`def size(x): x.len()`) is bounded by.\n\
+             #[allow(dead_code)]\n\
+             trait BoringLen { fn len(&self) -> usize; }\n\
+             impl<T> BoringLen for Vec<T> { fn len(&self) -> usize { <[T]>::len(self) } }\n\
+             impl<K, V, S> BoringLen for std::collections::HashMap<K, V, S> { fn len(&self) -> usize { std::collections::HashMap::len(self) } }\n\
+             impl<T, S> BoringLen for std::collections::HashSet<T, S> { fn len(&self) -> usize { std::collections::HashSet::len(self) } }\n\
+             // `Arc<str>` becomes `Rc<str>` in single-threaded output (the same textual fixup as everywhere), `&str` is a strict-mode literal.\n\
+             impl BoringLen for Arc<str> { fn len(&self) -> usize { self.chars().count() } }\n\
+             impl BoringLen for &str { fn len(&self) -> usize { self.chars().count() } }\n\
+             \n\
              // BoringFmt — displays Vec<T: Display> as [a, b, c] (no debug quotes on strings).\n\
              struct BoringFmt<'a, T: std::fmt::Display>(pub &'a [T]);\n\
              impl<'a, T: std::fmt::Display> std::fmt::Display for BoringFmt<'a, T> {\n\
