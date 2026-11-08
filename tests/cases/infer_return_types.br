@@ -1,0 +1,49 @@
+# A top-level `def` with no return type whose body says `return <expr>` gets that expression's
+# type written back (docs/design-notes/implicit-generics-draft.md, phase 1). Everything below
+# is unannotated; `boring run` and `boring build` must agree, which they only can if the
+# inferred types are real: one generic struct, two different instantiations.
+
+struct Response<S, P>:
+    S status
+    P payload
+
+enum Level:
+    Low
+    High
+
+def fetchGreeting():
+    return Response(status = 200, payload = "hello world")
+
+def fetchScores():
+    return Response(status = 200, payload = [12, 7, 31])
+
+# A chain: the type flows through another inferred function and a field read.
+def greeting():
+    return fetchGreeting().payload
+
+def next(int n):
+    return n + 1
+
+def isBig(int n):
+    return n > 100
+
+def severity():
+    return Level.High
+
+def pick(bool first):
+    if first:
+        return 1
+    return 2
+
+let g = fetchGreeting()
+print g.status
+print g.payload
+let s = fetchScores()
+print s.payload[1]
+print greeting()
+print next(41)
+print isBig(7)
+match severity():
+    Low: print "low"
+    High: print "high"
+print pick(false)

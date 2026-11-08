@@ -207,9 +207,20 @@ struct Request:
 
 ## Phases (each shippable alone, each its own task)
 
-1. **Return types, existing generics.** Infer `return_ty` for private non-recursive `def`s from the
-   body, using today's `struct Box<T>` constructors. Smallest visible win (`def mk()` stops returning
-   `()`); builds the unifier. No parser change.
+1. **Return types, existing generics. Shipped** (`src/infer_return_types.rs`, called from `parser::parse`
+   before the actor passes, so every entry point and every file gets it). Infers `return_ty` for
+   non-recursive top-level `def`s from explicit `return <expr>` statements, using today's
+   `struct Box<T>` constructors. Findings that shaped it:
+   - The parser gives every `def` without a written type `Some(Void)`, so "omitted" and a written
+     `void` are indistinguishable; the pass acts only when the body returns a value.
+   - A closure cannot contain `return` in Boring, so only nested `def`s need excluding.
+   - It is best effort and **never reports an error** (an expression it cannot type may be a valid
+     `void` call); the "cannot infer" error of D3 waits for a stage that knows every call.
+   - A trailing expression is not used for inference. Boring does return the last expression when a
+     return type is written, but with none the function is `void`; inferring from the last expression
+     would change the signature of every function ending on a call (decision: only `return <expr>`).
+   - Methods, imported callees, qualified/borrowed/`mut` types are out of scope; `@api` functions are
+     skipped and now error when they return a value with no written type.
 2. **Untyped `def` parameters** as fresh generics (`impl`-style), parser change in `require_typed_params`.
 3. **Untyped struct fields** as implicit parameters: `FieldDecl` change, parser, emitter, `--show-types`.
 4. *(later)* bound inference; GPU monomorphisation; `boring api --check` (signature snapshot for `@api`).

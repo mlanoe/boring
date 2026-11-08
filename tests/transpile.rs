@@ -374,6 +374,8 @@ transpile_test!(with_stmt);
 transpile_test!(generics);
 // `@api` is a Boring-side marker: it must never reach the generated Rust as an attribute.
 transpile_test!(api_attribute);
+// Return types written back from `return <expr>` (phase 1 of implicit generics).
+transpile_test!(infer_return_types);
 transpile_test!(operators);
 transpile_test!(macros);
 transpile_test!(defer);

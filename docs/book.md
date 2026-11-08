@@ -4860,6 +4860,39 @@ The body is parsed once, then expanded **in the parser** into `if fmt == 8: ... 
 - Control flow is that of the ladder: an arm that does not `return` falls through to the code after the `dispatch`.
 - `dispatch` is a contextual keyword: it only starts a statement when followed by `IDENT in`, so existing variables and functions named `dispatch` are unaffected.
 
+### Inferred return types
+
+A top-level `def` written without a return type, whose body says `return <expr>`, gets the type of that expression:
+
+```boring
+struct Response<S, P>:
+    S status
+    P payload
+
+def fetchGreeting():                       # -> Response<int, string>
+    return Response(status = 200, payload = "hello world")
+
+def fetchScores():                         # -> Response<int, [int]>
+    return Response(status = 200, payload = [12, 7, 31])
+
+def next(int n):                           # -> int
+    return n + 1
+```
+
+One generic struct, two instantiations, nothing written. The rewritten signature is what the checker, the interpreter and the generated Rust see, so `boring run` and `boring build` agree.
+
+What it can type: literals, typed parameters and `let` bindings, arithmetic and comparisons, a cast, arrays and tuples of those, a struct built with `Name(...)` (a generic struct's parameters are unified from the argument types), an enum variant, a field read, a call to another function whose return type is written or itself inferred, and a `type def` factory call.
+
+It is **best effort and never an error**. If the type of any returned expression cannot be determined (an unknown or imported function, a method call, an empty `[]` that nothing constrains, two `return`s of different types), the function is left exactly as written. Not typed this way, on purpose:
+
+- A trailing expression is not turned into a return value. With a written return type the last expression is already the result; with none, the function stays `void` and the expression stays a discarded statement. Inferring a type from it would change the signature of every existing function that ends on a call, so only an explicit `return <expr>` counts.
+- Recursive functions, mutually recursive ones, generic functions, methods (`def Type.name()` and struct/enum/`ext` members), `task`/`stream`/`native` functions, `def mut`, and functions inside a `mod` block.
+- Qualified, borrowed and `mut` types: they belong to the qualifier inference.
+- Anything that depends on a declaration in another file: each file is inferred on its own.
+- An `@api` function: its signature must be written, and `@api` reports a returned value with no written return type.
+
+A written `void` return type cannot be told from an omitted one, so a body that says `return <value>` under an explicit `void` is rewritten too instead of being reported (it was a contradiction before and still is when the value's type cannot be determined).
+
 ### `@api` — a signature other projects can rely on
 
 `pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:
@@ -4881,7 +4914,7 @@ pub def int double(int x):
 ```
 
 - **It requires `pub`** (`@api requires pub`), like `@provide`.
-- **The signature must be written out in full.** Every parameter typed, every qualifier parameter declared (`<'q>`, not introduced by its first use), and a `pub type let`/`type var` of an `@api` type needs its type written rather than inferred from its value. Inside the body, inference is unaffected. Today the parser already requires an annotation on every parameter and field, so the rule is mostly about what the language will later let you omit: an `@api` item keeps its explicit signature when those relaxations arrive.
+- **The signature must be written out in full.** A function that returns a value has its return type written (the [return-type inference](#inferred-return-types) skips `@api` items, and an `@api` function with a `return <value>` and no written type is an error), every parameter typed, every qualifier parameter declared (`<'q>`, not introduced by its first use), and a `pub type let`/`type var` of an `@api` type needs its type written rather than inferred from its value. Inside the body, inference is unaffected. Today the parser already requires an annotation on every parameter and field, so the rule is mostly about what the language will later let you omit: an `@api` item keeps its explicit signature when those relaxations arrive.
 - **On a `struct` or `enum` it covers every `pub` member** (fields, methods, `type` members, setters, conversions): the attribute is not repeated on each one. Non-`pub` members are not part of the API.
 - **Arguments are free text.** `since = "..."` and `deprecated = "..."` are documentation for readers and tooling; they are never parsed or compared with `boring.toml`'s `version`, and never emitted to Rust. Any other argument, a non-string value or a repeated key is an error.
 - **Exposure warning.** An `@api` signature that mentions a type declared in the same program without `@api` produces a warning (the equivalent of Rust's private-in-public lint): the API would depend on a type free to change. A type declared in an imported file is not known to the checker and is never flagged.

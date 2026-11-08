@@ -27,12 +27,12 @@
 //!   would depend on a type free to change. A type declared elsewhere (an imported
 //!   file) is not known here and is never flagged.
 //!
-//! Today the parser already requires an annotation on every `def` parameter and every
-//! field, and a function without a return type is `void`, so the "parameter typed" and
-//! "return type written" parts of the rule cannot fail yet. They are checked anyway,
-//! because the implicit-generics work will let the parser omit them; `@api` is what keeps
-//! that relaxation from reaching a public signature. The return type is the one piece
-//! not checked yet (it needs the return-type inference to tell "omitted" from "void").
+//! Today the parser still requires an annotation on every `def` parameter and every field,
+//! so the "parameter typed" part of the rule cannot fail yet. It is checked anyway, because
+//! the implicit-generics work will let the parser omit them; `@api` is what keeps that
+//! relaxation from reaching a public signature. The return type is checked now: an `@api`
+//! function with no written return type whose body says `return <value>` is an error
+//! (`infer_return_types` skips `@api` items, so the type is never silently written back).
 
 use super::*;
 
@@ -162,6 +162,7 @@ impl Checker {
         owner: &str,
         params: &[Param],
         return_ty: &Option<Type>,
+        body: &[Stmt],
         implicit_quals: &[(String, usize)],
         line: usize,
         col: usize,
@@ -180,8 +181,24 @@ impl Checker {
                 None => {}
             }
         }
-        if let Some(t) = return_ty {
-            self.check_api_exposure(owner, t, line, col);
+        match return_ty {
+            // The parser gives an omitted return type `Some(Void)`. `void` (written or not) with a
+            // `return <value>` in the body means the type was left out, and the implicit
+            // return-type inference deliberately skips `@api` items.
+            None | Some(Type::Void)
+                if crate::infer_return_types::valued_returns(body).is_some_and(|r| !r.is_empty()) =>
+            {
+                self.error(
+                    format!(
+                        "`{owner}` returns a value but has no written return type: an `@api` \
+                         signature must be written out in full"
+                    ),
+                    line,
+                    col,
+                );
+            }
+            Some(t) => self.check_api_exposure(owner, t, line, col),
+            None => {}
         }
         for (q, _) in implicit_quals {
             self.error(
@@ -203,18 +220,18 @@ impl Checker {
         let Some(attr) = api_attr(&f.attrs) else { return };
         let what = format!("function `{}`", f.name);
         self.check_api_attr(attr, f.is_pub, &what);
-        self.check_api_sig(&f.name, &f.params, &f.return_ty, &f.implicit_quals, f.line, f.col);
+        self.check_api_sig(&f.name, &f.params, &f.return_ty, &f.body, &f.implicit_quals, f.line, f.col);
     }
 
     /// The members an `@api` type covers: every `pub` method and `type` method.
     fn check_api_members(&mut self, owner: &str, methods: &[FnDecl], type_methods: &[TypeMethod]) {
         for m in methods.iter().filter(|m| m.is_pub) {
             let name = format!("{owner}.{}", m.name);
-            self.check_api_sig(&name, &m.params, &m.return_ty, &m.implicit_quals, m.line, m.col);
+            self.check_api_sig(&name, &m.params, &m.return_ty, &m.body, &m.implicit_quals, m.line, m.col);
         }
         for m in type_methods.iter().filter(|m| m.is_pub) {
             let name = format!("{owner}.{}", m.name);
-            self.check_api_sig(&name, &m.params, &m.return_ty, &[], m.line, m.col);
+            self.check_api_sig(&name, &m.params, &m.return_ty, &m.body, &[], m.line, m.col);
         }
     }
 
@@ -328,6 +345,28 @@ mod tests {
     fn duplicate_argument_is_rejected() {
         let p = program("@api(since = \"1\", since = \"2\")\npub def int one():\n    return 1\n");
         assert!(any(&errors(&p), "more than once"), "got {:?}", errors(&p));
+    }
+
+    #[test]
+    fn api_function_returning_a_value_needs_a_written_return_type() {
+        let p = program("@api\npub def one():\n    return 1\n");
+        assert!(any(&errors(&p), "returns a value but has no written return type"), "got {:?}", errors(&p));
+    }
+
+    #[test]
+    fn api_function_without_a_returned_value_is_void_and_fine() {
+        let p = program("@api\npub def hello():\n    print 1\n");
+        assert!(errors(&p).is_empty(), "unexpected errors: {:?}", errors(&p));
+    }
+
+    #[test]
+    fn non_api_function_returning_a_value_gets_its_type_inferred_not_an_error() {
+        let p = program("pub def one():\n    return 1\n");
+        assert!(errors(&p).is_empty(), "unexpected errors: {:?}", errors(&p));
+        match &p.items[0] {
+            Item::Fn(f) => assert_eq!(f.return_ty, Some(Type::Named("int".into())), "expected an inferred return type"),
+            other => panic!("expected a fn, got {other:?}"),
+        }
     }
 
     #[test]

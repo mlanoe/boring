@@ -21,6 +21,7 @@ pub mod fixed_wide_core;
 #[cfg(test)]
 mod fixed_wide_vectors;
 pub mod parser;
+pub mod infer_return_types;
 pub mod infer_actor_params;
 pub mod infer_actor_elems;
 pub mod qual_infer;
