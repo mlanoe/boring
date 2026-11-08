@@ -2361,16 +2361,26 @@ buttons in a subtree; corresponding providers exist for other component categori
 wins over an inherited provider, which wins over the theme default. Neither form changes
 `ButtonRole` or any semantic behavior.
 
-**Status (2026-11-06): painter styles shipped, view-subtree styles not.** `ControlStyle` (src/theme.br) is a trait with `kind()` ("Button",
-"Toggle" or "TextField"), `name()` and `paint(StyleContext)`, plus defaulted `markWidth`, `textColor` and `focusRing`. A style paints the control's
-presentation as display-list commands (`FillRect`, `StrokeRect`, `DrawLine`, ...) over the context's bounds instead of returning a `<View>` subtree: the
-display list is the paint abstraction that exists, and a view-returning style would need the controls to mount a presentation subtree. The host
-keeps the label or text, caret, selection, focus, events and accessibility, so a style still cannot change what a control does.
+**Status (2026-11-09): painter styles shipped, view-subtree styles not.** `ControlStyle` (boring-ui `src/theme.br`) is a trait with `kind()`
+("Button", "Toggle", "TextField" or "List"), `name()` and `paint(StyleContext)`, plus defaulted `markWidth`, `textColor` and `focusRing`. A style
+paints the control's presentation as display-list commands (`FillRect`, `StrokeRect`, `DrawLine`, ...) over the context's bounds instead of
+returning a `<View>` subtree: the display list is the paint abstraction that exists, and a view-returning style would need the controls to mount
+a presentation subtree. The host keeps the label or text, caret, selection, focus, events and accessibility, so a style still cannot change what
+a control does. `StyleContext` carries the kind, node, bounds (a toggle's: the mark's box), label, button role, toggle value and the hovered,
+focused and pressed state (pressed = the control that took the press while the pointer is still over it). A `List` / `MultiList` style is called
+once per visible row (the row's box, its key as the label, `on` = selected) in place of the built-in selection band.
 `Theme.withStyle(style)` installs one style per kind (a `ControlStyle'shared` array in the theme; `name()` identifies it and its parameters for
-`sameTheme`). `Styled(style = X):` (src/controls.br) installs a style for its subtree: over one control it is the per-control style, over a
-container the inherited provider; the nearest wins. The draft's method form `.style(...)` and the `.buttonStyle(...)` names are not available (a
-`Button` has a `style` field, and method-form modifiers only resolve views declared in the calling file). Not done: the pressed state in the context,
-`ListStyle`, styles that return views. The built-in named styles (`controlStyle`) stay as they are; an installed `ControlStyle` takes precedence for its kind.
+`sameTheme`); `Styled(style = X):` (boring-ui `src/styled.br`) installs one for a subtree: over one control it is the per-control style, over a
+container the inherited provider; the nearest wins. The built-in `Underlined` text field and `Switch` toggle are themselves `ControlStyle`s
+(`UnderlinedField`, `SwitchToggle`), and an installed style for a kind outranks them; the button styles (`Primary`, `Secondary`, `Plain`, ...) are
+still named values the painter reads. Platform themes ship as overrides on the built-in base with light and dark variants (`macThemeOn`,
+`fluentThemeOn`, `adwaitaThemeOn`), selected from `SystemSettings` (dark, contrast, accent, text scale, platform) by `platformThemeFromSystem`; the
+system accent is applied as light and dark variant overrides because a variant override outranks an every-variant one.
+Method-form modifiers (`Button(...).styled(...)`) now also resolve views imported from another file (compiler commit `9ea0b443`); boring-ui has
+not switched to it yet. The draft's `.style(...)` name is still not available (a `Button` has a `style` field) and neither are the
+`.buttonStyle(...)` provider names. Not done: styles that return views (`<View> body(Context)`), a text-scale preference read from the system,
+and a live update when the system appearance changes (that needs the delayed wake of the wgpu host, `screen.requestRedrawAfter`, which is being
+added).
 
 #### Theme validation and fallback
 
