@@ -1113,6 +1113,8 @@ let empty_map: HashMap<isize, isize> = HashMap::new();
 
 `mut` on the **value** position — `{K = mut V}` — is the dict analogue of `[mut T]`: it controls whether `def` calls work on values fetched via `d[k]` or iteration, independent of `mut {K=V} d` (structural `d[k]=v`/insertion/removal on the dict itself). Keys never accept `mut` — mutating one in place would invalidate the hash table, for either Boring or the underlying Rust `HashMap`.
 
+**Pointer qualifiers on the element of a literal (`'actor`, `'guard`, `'shared`, `'owned`, `'inline`).** The qualifier is written on the element, value or slot type and applies to every literal kind: `[mut Counter'guard] a = [...]`, `{string = mut Counter'actor} d = {...}`, `(mut Counter'shared, int) t = (...)`, `{Counter'owned} s = {...}`. Each element is built as that type: a fresh value is wrapped (`Arc<Mutex>`, `Arc<RwLock>`, `Arc`, `Box`, or the bare value for `'inline`), and a field that already is a lock handle of the *same* flavour is shared into the collection rather than copied, so a `def` call through `a[0]`, `d["k"]` or `t.0` mutates the field itself. A `def` call through such an element or tuple slot goes through its lock; add `mut` on the element for that (see above). A set cannot hold `'actor`/`'guard` elements (a lock has no `Hash`/`Eq`), which is a compile error, and a set of managed-mode `'owned` values is not supported for the same reason (an `'owned` value is a lock cell there). `[T'inline]`, `'shared` and strict-mode `'owned` sets need `#derive(Eq, Hash)` on `T`. Tests: `tests/qualified_collection_literals.rs`.
+
 #### Dictionary methods
 
 A dictionary subscript has two context-dependent forms. A plain value read,
@@ -4893,8 +4895,6 @@ It is **best effort and never an error**. If the type of any returned expression
 
 A written `void` return type cannot be told from an omitted one, so a body that says `return <value>` under an explicit `void` is rewritten too instead of being reported (it was a contradiction before and still is when the value's type cannot be determined).
 
-### `@api` — a signature other projects can rely on
-
 ### Untyped parameters
 
 A parameter of a top-level `def` can be written without a type. It is then a fresh type parameter of that function (named `T_<parameter>` in the generated Rust and in diagnostics), and each untyped parameter is its own parameter:
@@ -4915,6 +4915,8 @@ The bounds are read off the *direct* uses of the parameter in the body, because 
 What does not add a bound, on purpose: passing the parameter to another function, a method call on it, and `x + 1`. The generated Rust is then rejected by rustc with the missing bound named, and writing the parameter's type is the way out. Two untyped parameters are independent, so `def larger(a, b)` returning either one cannot be typed (it needs `a` and `b` to share one type: write `T larger(T a, T b)`). Such a function is an error, `cannot infer the return type of `larger``, instead of silently becoming `void`. The error is raised only when a returned expression certainly produces a value (a literal, a variable, a field or index read, an array or tuple, a cast, arithmetic), whatever the conditions around it, so a `void` function (`def log(x): print x`) or one returning a call it cannot see through is never reported.
 
 Still an error, with the same message as before: an untyped parameter of a method (`def Type.name(..)`), of a `task`/`stream`/`native` function, or one with a default value.
+
+### `@api` — a signature other projects can rely on
 
 `pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:
 

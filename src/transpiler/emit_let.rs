@@ -1757,10 +1757,14 @@ impl Transpiler {
             let elem = match (dty, &v.kind) {
                 (Type::Dict(_, vt), ExprKind::Dict(_)) => Some(&**vt),
                 (Type::Array(et), ExprKind::Array(_)) => Some(&**et),
+                (Type::Set(et), ExprKind::Set(_)) => Some(&**et),
                 _ => None,
             };
             if elem.is_some_and(|e| matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor))) {
                 self.actor_elem_lits.borrow_mut().insert((v.line, v.col));
+            }
+            if let Some(e) = elem.filter(|e| Self::wraps_declared_elem(e)) {
+                self.declared_lock_lits.borrow_mut().insert((v.line, v.col), e.without_mut().clone());
             }
         }
         // Untyped `let hit = dict[key]` whose name is later tested against `nil` is an
@@ -3255,7 +3259,19 @@ impl Transpiler {
                 if let ExprKind::Tuple(elems) = &value.kind {
                     let parts: Vec<String> = elems.iter().enumerate().map(|(i, e)| {
                         let slot_ty = elem_tys.get(i);
-                        self.emit_let_value(slot_ty, e)
+                        // A lock-handle field in a slot declared with the same handle flavour is
+                        // the shared handle the declaration asked for, not a copy of its value.
+                        if let Some((guard, task)) = slot_ty.and_then(|t| Self::lock_flavour(t)) {
+                            if let Some(h) = self.existing_lock_handle(e, task, guard) { return h; }
+                        }
+                        let v = self.emit_let_value(slot_ty, e);
+                        // A lock-handle slot owns its handle: the call-argument form `&Arc::new(..)`
+                        // `emit_let_value` produces for it is not an owned tuple member.
+                        if slot_ty.and_then(|t| Self::lock_flavour(t)).is_some() {
+                            if let Some(owned) = v.strip_prefix("&Arc::new(").map(|r| format!("Arc::new({r}"))
+                                .or_else(|| v.strip_prefix("&Rc::new(").map(|r| format!("Rc::new({r}"))) { return owned; }
+                        }
+                        v
                     }).collect();
                     format!("({})", parts.join(", "))
                 } else {

@@ -2102,7 +2102,8 @@ impl Transpiler {
                 };
                 // A lock field reached through anything but a plain local/`self` (`svcs[0].stats`,
                 // `make().stats`) has no dedicated dispatch: call through its guard here.
-                let via_handle = !matches!(&obj.kind, ExprKind::Field(..)) || self.is_managed_owned_user(r.field_ty.without_mut())
+                // (`r.key` is empty for an element/tuple-slot handle, which is the lock itself.)
+                let via_handle = !matches!(&obj.kind, ExprKind::Field(..)) || r.key.is_empty() || self.is_managed_owned_user(r.field_ty.without_mut())
                     || matches!(&obj.kind, ExprKind::Field(inner, _) if matches!(&inner.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..) | ExprKind::Call(..)));
                 if via_handle && held.as_deref().is_some_and(|n| self.is_known_user_type(n)) {
                     let mut args_s: Vec<String> = self.emit_user_method_args(held.as_deref(), method, args);
@@ -7179,6 +7180,21 @@ impl Transpiler {
             {
                 (self.self_type.clone()?, v.clone(), "self".to_string())
             }
+            // `t.0` where slot 0 of the tuple `t` is declared `'actor`/`'guard`: the slot is itself
+            // the lock handle, locked in place like an indexed element.
+            ExprKind::Field(inner, f) if f.parse::<usize>().is_ok()
+                && matches!(self.resolve_expr_type(inner).as_ref().map(|t| t.without_mut()),
+                    Some(Type::Tuple(ts)) if ts.get(f.parse::<usize>().unwrap_or(usize::MAX)).is_some_and(|t| Self::lock_flavour(t).is_some() || self.is_managed_owned_user(t.without_mut()))) =>
+            {
+                let Some(Type::Tuple(ts)) = self.resolve_expr_type(inner) else { return None };
+                let slot = ts[f.parse::<usize>().ok()?].without_mut().clone();
+                let rwlock = Self::lock_flavour(&slot).is_some_and(|(guard, _)| guard);
+                let old = self.in_lhs_assign.replace(true);
+                let rendered = self.emit_expr(obj);
+                self.in_lhs_assign.set(old);
+                let handle = rendered.strip_suffix(".clone()").unwrap_or(&rendered).to_string();
+                return Some(LockFieldRef { key: String::new(), handle, rwlock, field_ty: slot });
+            }
             ExprKind::Field(inner, f) => {
                 // A receiver that is itself a lock handle is not a plain struct place.
                 if let ExprKind::Var(v) = &inner.kind {
@@ -7472,7 +7488,9 @@ impl Transpiler {
             out: String::new(),
             errors: std::cell::RefCell::new(Vec::new()),
             hoisted_ext_arrays: Default::default(),
+            copied_literal_demand: self.copied_literal_demand.clone(),
             actor_elem_lits: Default::default(),
+            declared_lock_lits: Default::default(),
             warnings: std::cell::RefCell::new(Vec::new()),
             indent: self.indent,
             in_throws: self.in_throws,
@@ -7498,7 +7516,6 @@ impl Transpiler {
             enum_variant_fields: self.enum_variant_fields.clone(),
             enum_variant_field_types: self.enum_variant_field_types.clone(),
             optional_vars: self.optional_vars.clone(),
-            copied_literal_demand: self.copied_literal_demand.clone(),
             nil_tested_vars: self.nil_tested_vars.clone(),
             fn_defaults: self.fn_defaults.clone(),
             struct_fields: self.struct_fields.clone(),

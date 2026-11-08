@@ -26,6 +26,45 @@ fn demands_handle(ty: &Type) -> bool {
 }
 
 impl Transpiler {
+    /// `(guard, task)` of a lock-handle element type (`'actor`, `'actor'task`, `'guard`, `'guard'task`).
+    pub(crate) fn lock_flavour(ty: &Type) -> Option<(bool, bool)> {
+        match ty.without_mut() {
+            Type::Qualified(_, OwnerQual::Actor) => Some((false, false)),
+            Type::Qualified(_, OwnerQual::ActorTask) => Some((false, true)),
+            Type::Qualified(_, OwnerQual::Guard) => Some((true, false)),
+            Type::Qualified(_, OwnerQual::GuardTask) => Some((true, true)),
+            _ => None,
+        }
+    }
+
+    /// Whether a declared element type needs each literal element wrapped or shared to match it
+    /// (`'inline` elements are plain values and need nothing).
+    pub(crate) fn wraps_declared_elem(ty: &Type) -> bool {
+        Self::lock_flavour(ty).is_some()
+            || matches!(ty.without_mut(), Type::Qualified(_, q) if matches!(q, OwnerQual::Shared) || q.is_owned_or_new())
+    }
+
+    /// An element of a literal whose declared element type is a pointer qualifier, emitted as that
+    /// type: a lock-handle field of the same flavour is shared, anything else is wrapped.
+    pub(crate) fn declared_elem_value(&self, lit: &Expr, e: &Expr) -> Option<String> {
+        let ty = self.declared_lock_lits.borrow().get(&(lit.line, lit.col))?.clone();
+        if let Some((guard, task)) = Self::lock_flavour(&ty) {
+            if let Some(h) = self.existing_lock_handle(e, task, guard) { return Some(h); }
+        }
+        let v = self.emit_let_value(Some(&ty), e);
+        // The call-argument form of a lock-handle value (`&Arc::new(..)`, `&local`) is not an
+        // owned element.
+        if Self::lock_flavour(&ty).is_some() && v.starts_with('&') {
+            let rest = &v[1..];
+            if rest.starts_with("Arc::new(") || rest.starts_with("Rc::new(") { return Some(rest.to_string()); }
+            if rest.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let clone_fn = if matches!(self.config.threading, crate::transpiler::ThreadingMode::Single) { "Rc::clone" } else { "Arc::clone" };
+                return Some(format!("{clone_fn}(&{rest})"));
+            }
+        }
+        Some(v)
+    }
+
     /// A lock-handle field placed in a literal with no declared element type: the `run`
     /// interpreter copies it, so the build must not silently share it (same message for arrays,
     /// dicts and tuples).

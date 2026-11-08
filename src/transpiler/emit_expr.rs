@@ -522,6 +522,7 @@ impl Transpiler {
                     // A field read (`[self.font]`) is by value: moving a non-Copy field (an
                     // array, dict, struct...) out of `&self` is E0507, so it takes the same
                     // clone `emit_expr_owned` gives every other by-value field read.
+                    if let Some(v) = self.declared_elem_value(expr, e) { return v; }
                     if let Some(h) = self.lock_handle_clone_any(e) {
                         self.reject_lock_handle_copy(e, "an array literal", "`[Counter'actor] xs = [...]`");
                         return h;
@@ -595,6 +596,7 @@ impl Transpiler {
                     let has_f16 = pairs.iter().any(|(_, v)| self.infer_float_width(v) == Some("f16"));
                     let ps: Vec<String> = pairs.iter()
                         .map(|(k, v)| {
+                            if let Some(h) = self.declared_elem_value(expr, v) { return format!("({}, {})", self.emit_expr_owned(k), h); }
                             self.reject_lock_handle_copy(v, "a dict literal", "`{string=Counter'actor} d = {...}`");
                             let vs = if has_f16 && matches!(&v.kind, ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)) {
                                 format!("half::f16::from_f32(({}) as f32)", self.emit_expr(v))
@@ -617,7 +619,7 @@ impl Transpiler {
                             Self::expr_path_text(e)
                         ));
                     }
-                    let es: Vec<String> = elems.iter().map(|e| self.emit_expr(e)).collect();
+                    let es: Vec<String> = elems.iter().map(|e| self.declared_elem_value(expr, e).unwrap_or_else(|| self.emit_expr(e))).collect();
                     format!("HashSet::from([{}])", es.join(", "))
                 }
             }

@@ -485,10 +485,11 @@ struct Transpiler {
     /// Position of an array/dict literal initializing a declared `[mut T'actor]` / `{K = mut V'actor}`
     /// binding: its fresh struct-constructor elements are wrapped in the actor constructor.
     pub(crate) actor_elem_lits: std::cell::RefCell<std::collections::HashSet<(usize, usize)>>,
-    /// Array/dict literals whose declared element type is a lock handle, by position, with the
-    /// handle's flavour `(guard, task)`: a lock-handle field written in one is the shared handle
-    /// the declaration asked for, not an implicit copy.
-    pub(crate) declared_lock_lits: std::cell::RefCell<std::collections::HashMap<(usize, usize), (bool, bool)>>,
+    /// Array/dict/set literals, by position, whose declared element type carries a pointer
+    /// qualifier (`'actor`, `'guard`, `'shared`, `'owned`, task variants): each element is wrapped
+    /// to that type, and a lock-handle field of the same flavour is the shared handle the
+    /// declaration asked for, not an implicit copy.
+    pub(crate) declared_lock_lits: std::cell::RefCell<std::collections::HashMap<(usize, usize), Type>>,
     pub(crate) warnings: std::cell::RefCell<Vec<TranspileError>>,
     pub(crate) indent: usize,
     /// Are we inside a `throws` function body? (return values need Ok() wrapping)
