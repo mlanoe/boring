@@ -3221,6 +3221,27 @@ impl Transpiler {
                 return format!("{} = {}", target_s, lit);
             }
         }
+        // `xs[i] = v` into a `[Trait'shared]` / `[Trait'owned]` slot: wrap a concrete value (or
+        // alias an existing shared pointer) exactly as `push` does.
+        if let ExprKind::Index(recv, idx) = &target.kind {
+            if !matches!(idx.kind, ExprKind::SliceRange { .. }) {
+                let elem = self.resolve_expr_type(recv).and_then(|t| match t.without_mut() {
+                    Type::Array(inner) => Some(inner.without_mut().clone()),
+                    _ => None,
+                }).filter(|e| match e {
+                    Type::Qualified(i, OwnerQual::Shared | OwnerQual::Owned) =>
+                        matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())),
+                    _ => false,
+                });
+                if let Some(elem) = elem {
+                    let rhs = self.emit_let_value(Some(&elem), value);
+                    self.in_lhs_assign.set(true);
+                    let target_s = self.emit_expr(target);
+                    self.in_lhs_assign.set(false);
+                    return format!("{target_s} = {rhs}");
+                }
+            }
+        }
         // `_ = arr.pop()` discards the result: emit the raw `Option<T>` so `T`
         // needs no `Default` (map_method's default `.unwrap_or_default()` would).
         if matches!(&target.kind, ExprKind::Var(n) if n == "_") && is_bare_pop_call(value) {

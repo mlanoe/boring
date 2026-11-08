@@ -5046,6 +5046,9 @@ impl Transpiler {
                 args.iter().map(|a| self.emit_qualified_struct_store(elem, &a.value).unwrap_or_else(|| self.emit_collection_elem_arg(obj, &a.value))).collect()
             } else if let (Some(elem), "push") = (&shared_elem, method) {
                 args.iter().map(|a| self.emit_let_value(Some(elem), &a.value)).collect()
+            } else if let (Some(elem), "insert", 2) = (&shared_elem, method, args.len()) {
+                // `xs.insert(i, v)` into a `[Trait'shared]`: only the element is wrapped.
+                vec![self.emit_collection_elem_arg(obj, &args[0].value), self.emit_let_value(Some(elem), &args[1].value)]
             } else {
             match trait_name {
                 Some(tn) => args.iter().map(|a| self.box_if_trait_typed(&a.value, tn.as_str())).collect(),

@@ -1,0 +1,45 @@
+pub trait Style:
+    req string kind()
+
+pub struct A as Style:
+    pub req string kind(): "A"
+
+pub struct B as Style:
+    pub req string kind(): "B"
+
+def [Style'shared] pick(bool a, [Style'shared] installed):
+    mut found = []
+    for e in installed:
+        found.push(e)
+    if found.length == 0 and a:
+        found.push(A())
+    found
+
+def [Style'shared] lit():
+    let [Style'shared] x = [A(), B()]
+    x
+
+def [Style'shared] typed():
+    mut found = [] as [Style'shared]
+    found.push(A())
+    found.push(B())
+    found
+
+def [Style'shared] idx():
+    mut found = [] as [Style'shared]
+    found.push(A())
+    found.insert(0, B())
+    found[1] = B()
+    found
+
+def main():
+    for s in pick(true, []):
+        print s.kind()
+    for s in pick(true, [B()]):
+        print s.kind()
+    for s in lit():
+        print s.kind()
+    for s in typed():
+        print s.kind()
+    for s in idx():
+        print s.kind()

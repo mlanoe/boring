@@ -1,0 +1,26 @@
+# A closure stored in a function-typed field, created inside a method, that calls a mutating
+# (`def`) method of the same struct: the `self` snapshot (`__self`) must be declared `mut`
+# (E0596 otherwise) — in every sibling closure alike. The writes go through a shared `'actor`
+# handle, so they stay visible through the snapshot.
+struct Cell:
+    var int value = 0
+
+struct Button:
+    Fn(int) onTap
+
+struct Root:
+    Cell'actor cell
+
+    def pick(int i):
+        cell.value += i
+
+    def [Button] build():
+        [Button(onTap = (i): self.pick(i)), Button(onTap = (i): self.pick(i * 10))]
+
+def main():
+    let c = Cell()
+    mut r = Root(cell = c)
+    let bs = r.build()
+    bs[0].onTap(1)
+    bs[1].onTap(2)
+    print r.cell.value

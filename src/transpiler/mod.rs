@@ -36,6 +36,7 @@ mod infer_field_scan;
 mod copied_field_literals;
 pub use infer_qualifiers::{note_inferred_actor_param, take_cpu_decisions, CpuDecision};
 mod infer_trait_borrow;
+mod infer_shared_elems;
 mod share_dyn_traits;
 mod last_use;
 mod promote_atomic;
@@ -2510,6 +2511,12 @@ impl Transpiler {
             share_dyn_traits::rewrite_program(&mut cloned, &self.shared_dyn_traits, view.as_ref());
             owned_program_sd = cloned;
             &owned_program_sd
+        };
+        // `mut found = []` filled by later `Trait'shared` pushes: spell the element type out.
+        let owned_program_se;
+        let program: &Program = match infer_shared_elems::rewrite_program(program) {
+            Some(p) => { owned_program_se = p; &owned_program_se }
+            None => program,
         };
         let owned_program2;
         let program: &Program = match self.borrow_noclone_struct_params(program) {

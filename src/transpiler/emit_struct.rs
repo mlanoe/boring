@@ -3516,7 +3516,22 @@ impl Transpiler {
             }
         }
         let mut raw = self.emit_expr(value);
-        if alias_self { raw = rename_self_token(&raw, "__self"); }
+        if alias_self {
+            raw = rename_self_token(&raw, "__self");
+            // The snapshot is a plain owned local: a closure that calls one of this struct's
+            // mutating (`def`, `&mut self`) methods through it needs the binding declared `mut`
+            // (E0596 otherwise). Decided per closure from the emitted body, so sibling closures
+            // stay consistent.
+            if let Some(sn) = &self.self_type {
+                let calls_mutating = self.struct_method_names.get(sn).is_some_and(|ms| {
+                    ms.iter().any(|m| !self.method_is_req_or_task(sn, m)
+                        && raw.contains(&format!("__self.{m}(")))
+                });
+                if calls_mutating {
+                    prelude = prelude.replacen("let __self = self.clone(); ", "let mut __self = self.clone(); ", 1);
+                }
+            }
+        }
         // The clone is a plain owned local, no longer the `&mut` parameter it was copied from:
         // an emitted reborrow (`&mut *v`, `&*v`) of it becomes a plain borrow.
         for v in &cloned_locals {
