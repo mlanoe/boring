@@ -257,6 +257,14 @@ impl Transpiler {
                     {
                         self.var_struct_types.insert(s.name.clone(), type_name.to_string());
                     }
+                }                // An alias of a lock-handle field/element (`mut m = h.memory`): the held struct type
+                // comes from the declared qualified type, so `m.lookUp()` keeps the `def` name.
+                if !self.var_struct_types.contains_key(&s.name) {
+                    if let Type::Named(n) = inner.without_mut() {
+                        if self.struct_fields.contains_key(n.as_str()) {
+                            self.var_struct_types.insert(s.name.clone(), n.clone());
+                        }
+                    }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
                 let name = escape_rust_keyword(&s.name);
@@ -312,6 +320,14 @@ impl Transpiler {
                             || self.enum_variant_fields.keys().any(|k| k.starts_with(&format!("{}::", type_name))))
                     {
                         self.var_struct_types.insert(s.name.clone(), type_name.to_string());
+                    }
+                }                // An alias of a lock-handle field/element (`mut m = h.memory`): the held struct type
+                // comes from the declared qualified type, so `m.lookUp()` keeps the `def` name.
+                if !self.var_struct_types.contains_key(&s.name) {
+                    if let Type::Named(n) = inner.without_mut() {
+                        if self.struct_fields.contains_key(n.as_str()) {
+                            self.var_struct_types.insert(s.name.clone(), n.clone());
+                        }
                     }
                 }
                 let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
