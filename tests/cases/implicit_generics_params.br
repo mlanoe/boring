@@ -1,0 +1,28 @@
+# Implicit generics, phase 2: a parameter written without a type is a fresh type parameter of
+# the function. Bounds are read off the direct uses of the parameter in the body.
+
+def keep(x):
+    return x
+
+def show(label, value):
+    print "{label}: {value}"
+
+def twice(n):
+    return n + n
+
+def isBefore(a, b):
+    return a < b
+
+def label(int n, tag):
+    return "{tag}#{n}"
+
+def main():
+    print "{keep(41) + 1}"
+    print keep("same")
+    show("int", 7)
+    show("string", "seven")
+    show("float", 2.5)
+    print "{twice(21)}"
+    print "{twice(1.25)}"
+    print "{isBefore(3, 9)} {isBefore(2.5, 1.5)}"
+    print label(4, "item")

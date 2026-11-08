@@ -116,6 +116,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     generic_args::check_bare_qual_uses(&program)?;
     // Before the actor passes: they (and everything after) must see the written-back return types.
     crate::infer_return_types::infer_return_types(&mut program);
+    crate::infer_return_types::check_untyped_returns(&program)?;
     crate::infer_actor_params::infer_actor_params(&mut program);
     crate::infer_actor_elems::infer_actor_elems(&mut program);
     Ok(program)

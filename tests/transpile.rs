@@ -376,6 +376,8 @@ transpile_test!(generics);
 transpile_test!(api_attribute);
 // Return types written back from `return <expr>` (phase 1 of implicit generics).
 transpile_test!(infer_return_types);
+// Untyped `def` parameters as fresh type parameters (phase 2 of implicit generics).
+transpile_test!(implicit_generics_params);
 transpile_test!(operators);
 transpile_test!(macros);
 transpile_test!(defer);

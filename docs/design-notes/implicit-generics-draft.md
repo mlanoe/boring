@@ -221,7 +221,28 @@ struct Request:
      would change the signature of every function ending on a call (decision: only `return <expr>`).
    - Methods, imported callees, qualified/borrowed/`mut` types are out of scope; `@api` functions are
      skipped and now error when they return a value with no written type.
-2. **Untyped `def` parameters** as fresh generics (`impl`-style), parser change in `require_typed_params`.
+2. **Untyped `def` parameters** as fresh generics. **Shipped** (`src/infer_param_generics.rs`, wired in
+   `parse_fn_decl`, which replaces the missing type by `Type::TypeParam("T_<name>")` and adds the bounds
+   once the body is parsed, so `mod` members and nested `def`s are covered the same way). Findings:
+   - A generic function today only gets `T: Clone`: `x + x` or `"{x}"` on a `T` is rejected by rustc.
+     Phase 2 was therefore useless beyond pass-through without a first slice of bound inference, which
+     it carries: `Display` (print/interpolation), `PartialEq`/`PartialOrd` (comparisons),
+     `Add`/`Sub`/`Mul`/`Div`/`Rem` with `Output = T` plus `Copy` (same parameter on both sides). The
+     rest of phase 4's bound inference (through calls into other generic functions, `x + 1`, methods)
+     is still open; those uses fail in rustc with the bound named.
+   - Each untyped parameter is its own type parameter, so `def larger(a, b)` returning either cannot be
+     typed. This is the real cost of "no `T` written": relating two parameters needs the `T`.
+   - `infer_return_types` accepts the function's own `T_*` parameters (a parameter's type, `n + n`), and
+     a callee's own parameter never leaks into a caller (`fn_ret(..).filter(is_plain)`).
+   - Methods, `task`/`stream`/`native` and defaulted parameters keep the written-type requirement.
+   - The old interpreter test asserting `def add(a, b): a + b` is a parse error was rewritten. Note that
+     `add(a, b)` (two parameters) parses, but its return type stays unwritten (`T_a + T_b` has no
+     known output), so `boring run` yielded nil and `boring build` failed. Fixed by `check_untyped_returns`
+     (D3, narrowly): for a function with untyped parameters whose return stayed unwritten, an error when a
+     returned expression *certainly produces a value* (literal, variable, field/index read, array, tuple,
+     cast, arithmetic) — conditions around the return do not matter, only the expression does, so a `void`
+     function or a returned call (possibly `void`) is never reported. Functions without untyped
+     parameters keep the best-effort, never-an-error behaviour of phase 1.
 3. **Untyped struct fields** as implicit parameters: `FieldDecl` change, parser, emitter, `--show-types`.
 4. *(later)* bound inference; GPU monomorphisation; `boring api --check` (signature snapshot for `@api`).
 

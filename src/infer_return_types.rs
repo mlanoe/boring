@@ -79,6 +79,48 @@ pub fn infer_return_types(program: &mut Program) {
     }
 }
 
+/// Whether `e` certainly produces a value, so that a function returning it cannot be a `void`
+/// one that the pass merely failed to type: a literal, a variable, a field or index read, an
+/// array or tuple, a cast, arithmetic. (A call may be a perfectly valid `void` call.)
+fn certainly_valued(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::StringInterp(_) | ExprKind::Bool(_)
+        | ExprKind::Var(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Array(_) | ExprKind::Tuple(_)
+        | ExprKind::Cast(..) => true,
+        ExprKind::UnaryOp(UnaryOp::Neg, _) => true,
+        ExprKind::BinOp(op, ..) => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem),
+        _ => false,
+    }
+}
+
+/// The "cannot infer" error for a function whose parameters are untyped (implicit generics,
+/// phase 2): such a function is never `void` by accident, and without this check a return the
+/// pass could not type (`def add(a, b): a + b` — two independent parameters, so no known output)
+/// silently becomes `void`: `boring run` yields nil, `boring build` fails in rustc. Only a
+/// return whose expression certainly produces a value counts ([`certainly_valued`]), so a
+/// `void` function such as `def log(x): print x` is never reported. Run after
+/// [`infer_return_types`]; a function that got its type there no longer has an omitted one.
+pub fn check_untyped_returns(program: &Program) -> Result<(), crate::parser::ParseError> {
+    for item in &program.items {
+        let Item::Fn(f) = item else { continue };
+        let implicit = f.params.iter().any(|p| matches!(&p.ty, Some(Type::TypeParam(n)) if n.starts_with("T_") && f.type_params.contains(n)));
+        if !implicit || !omitted(f) || f.is_native || f.task || f.stream || f.qualifier.is_some() {
+            continue;
+        }
+        let Some(returns) = valued_returns(&f.body) else { continue };
+        if let Some(bad) = returns.iter().find(|e| certainly_valued(e)) {
+            return Err(crate::parser::ParseError::Generic {
+                msg: format!(
+                    "cannot infer the return type of `{}`: it returns a value whose type is not determined by its untyped parameters (each untyped parameter is a separate type) — write the return type, e.g. `def T {}(T x, ...)`",
+                    f.name, f.name
+                ),
+                line: bad.line, col: bad.col, len: bad.len.max(1),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Own `return <value>` statements of `f` (not those of a closure or nested function), as
 /// their expressions. `None` when the answer is ambiguous: a bare `return` mixed with valued
 /// ones, or a `return` inside a block-bearing expression this pass does not model.
@@ -136,7 +178,9 @@ pub(crate) fn omitted(f: &FnDecl) -> bool {
 fn eligible(f: &FnDecl) -> bool {
     omitted(f)
         && f.qualifier.is_none()
-        && f.type_params.is_empty()
+        // Only the fresh parameters of untyped parameters (`infer_param_generics`): the rest of a
+        // generic function's signature is the author's.
+        && f.type_params.iter().all(|p| p.starts_with("T_"))
         && f.implicit_quals.is_empty()
         && !f.is_native
         && !f.task
@@ -158,6 +202,11 @@ fn is_numeric(t: &Type) -> bool {
 
 /// A type built only from names, generics, arrays, sets, dicts, optionals and tuples: nothing
 /// this pass would have to reason about ownership for.
+/// A bare type parameter of the function itself (the fresh one of an untyped parameter).
+fn own_param(f: &FnDecl, t: &Type) -> bool {
+    matches!(t, Type::TypeParam(n) if f.type_params.contains(n))
+}
+
 fn is_plain(t: &Type) -> bool {
     match t {
         Type::Named(_) => true,
@@ -289,7 +338,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let f = cands[0];
-        if !f.type_params.is_empty() || f.qualifier.is_some() {
+        if f.type_params.iter().any(|p| !p.starts_with("T_")) || f.qualifier.is_some() {
             return None;
         }
         if let (false, Some(t)) = (omitted(f), &f.return_ty) {
@@ -314,7 +363,7 @@ impl<'a> Ctx<'a> {
         }
         let mut env: Env = HashMap::new();
         for p in &f.params {
-            let t = p.ty.clone().filter(is_plain);
+            let t = p.ty.clone().filter(|t| is_plain(t) || own_param(f, t));
             bind(&mut env, &p.name, t);
         }
         // Local bindings, in source order; a name bound twice with different types is unknown.
@@ -342,7 +391,7 @@ impl<'a> Ctx<'a> {
                 Some(_) => return None,
             }
         }
-        result.filter(is_plain)
+        result.filter(|t| is_plain(t) || own_param(f, t))
     }
 
     fn ty_of(&self, e: &Expr, env: &Env) -> Option<Type> {
@@ -375,14 +424,15 @@ impl<'a> Ctx<'a> {
                 _ => {
                     let (lt, rt) = (self.ty_of(l, env)?, self.ty_of(r, env)?);
                     let text_add = *op == BinOp::Add && lt == named("string");
-                    (lt == rt && (is_numeric(&lt) || text_add)).then_some(lt)
+                    (lt == rt && (is_numeric(&lt) || text_add || matches!(lt, Type::TypeParam(_)))).then_some(lt)
                 }
             },
             ExprKind::Field(base, field) => self.field_ty(base, field, env),
             ExprKind::Call(callee, args) => match &callee.kind {
                 ExprKind::Var(name) => match self.structs.get(name) {
                     Some(s) => self.construct_ty(s, args, env),
-                    None => self.fn_ret(name),
+                    // A callee's own type parameter means nothing in the caller.
+                    None => self.fn_ret(name).filter(is_plain),
                 },
                 _ => None,
             },
@@ -515,6 +565,34 @@ mod tests {
 
     fn n(s: &str) -> Type {
         Type::Named(s.to_string())
+    }
+
+    fn parse_err(src: &str) -> Option<String> {
+        parse(lex(src).expect("lex error")).err().map(|e| e.to_string())
+    }
+
+    #[test]
+    fn untyped_params_with_an_untypable_value_return_are_an_error() {
+        let e = parse_err("def add(a, b):\n    return a + b\n").expect("should be rejected");
+        assert!(e.contains("cannot infer the return type of `add`"), "{e}");
+        // Inline body form too, and with a condition around the return.
+        assert!(parse_err("def add(a, b): a + b\n").is_some());
+        assert!(parse_err("def larger(a, b):\n    if a < b:\n        return b\n    return a\n").is_some());
+    }
+
+    #[test]
+    fn typable_or_void_untyped_functions_are_not_reported() {
+        assert!(parse_err("def keep(x):\n    return x\n").is_none());
+        assert!(parse_err("def twice(n):\n    return n + n\n").is_none());
+        assert!(parse_err("def log(x):\n    print x\n").is_none());
+        assert!(parse_err("def log(x): print x\n").is_none());
+        // A call may be void: not reported.
+        assert!(parse_err("def g(x):\n    print x\n\ndef f(x):\n    return g(x)\n").is_none());
+    }
+
+    #[test]
+    fn typed_functions_are_never_reported() {
+        assert!(parse_err("def f(int a, int b):\n    return a + b\n").is_none());
     }
 
     const BOX: &str = "struct Box<T>:\n    let T v\n\n";

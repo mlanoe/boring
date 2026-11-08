@@ -251,12 +251,10 @@ let _result = apply(double, 21)
 
 #[test]
 fn test_fn_inferred() {
-    // `def add(a, b):` — omitting both param types and return type is now a parse error.
-    // Only closures may omit types.
-    let src = "def add(a, b): a + b\nlet _result = add(3, 4)";
-    let tokens = crate::lexer::lex(src).expect("lex");
-    let result = crate::parser::parse(tokens);
-    assert!(result.is_err(), "def without types should be a parse error");
+    // `def twice(a):` — untyped parameters are fresh type parameters (implicit generics,
+    // phase 2), so this parses and runs; the interpreter does not look at types.
+    let src = "def twice(a): a + a\nlet _result = twice(21)";
+    assert_eq!(run_src(src), Value::Int(42));
 }
 
 #[test]

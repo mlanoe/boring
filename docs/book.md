@@ -4895,6 +4895,27 @@ A written `void` return type cannot be told from an omitted one, so a body that 
 
 ### `@api` — a signature other projects can rely on
 
+### Untyped parameters
+
+A parameter of a top-level `def` can be written without a type. It is then a fresh type parameter of that function (named `T_<parameter>` in the generated Rust and in diagnostics), and each untyped parameter is its own parameter:
+
+```boring
+def show(label, value):                    # <T_label, T_value>, both Display
+    print "{label}: {value}"
+
+def twice(n):                              # <T_n>: Add + Copy, returns T_n
+    return n + n
+
+show("count", 3)                           # T_label = string, T_value = int
+show(1, 2.5)                               # T_label = int,    T_value = float
+```
+
+The bounds are read off the *direct* uses of the parameter in the body, because a bare type parameter has no operations: printed or interpolated (`print x`, `"{x}"`) gives `Display`; `==`/`!=` between two untyped parameters gives `PartialEq`, `<`/`>`/`<=`/`>=` gives `PartialOrd` (`PartialOrd<T_b>` when the two sides are different parameters); `n + n`, `-`, `*`, `/`, `%` with the same parameter on both sides gives the operator trait with `Output = T_n`, and `Copy`. The return type is inferred as in [Inferred return types](#inferred-return-types) and may be the parameter's own type (`def keep(x): return x` is `T_x`).
+
+What does not add a bound, on purpose: passing the parameter to another function, a method call on it, and `x + 1`. The generated Rust is then rejected by rustc with the missing bound named, and writing the parameter's type is the way out. Two untyped parameters are independent, so `def larger(a, b)` returning either one cannot be typed (it needs `a` and `b` to share one type: write `T larger(T a, T b)`). Such a function is an error, `cannot infer the return type of `larger``, instead of silently becoming `void`. The error is raised only when a returned expression certainly produces a value (a literal, a variable, a field or index read, an array or tuple, a cast, arithmetic), whatever the conditions around it, so a `void` function (`def log(x): print x`) or one returning a call it cannot see through is never reported.
+
+Still an error, with the same message as before: an untyped parameter of a method (`def Type.name(..)`), of a `task`/`stream`/`native` function, or one with a default value.
+
 `pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:
 
 ```boring

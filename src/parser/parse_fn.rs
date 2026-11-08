@@ -91,9 +91,21 @@ impl Parser {
             });
         }
 
-        let params = self.parse_params()?;
-        // All parameters in a `def`/`req` declaration must have explicit type annotations.
-        // Unannotated params produce invalid Rust when using `boring build`.
+        let mut params = self.parse_params()?;
+        // A parameter without a type is a fresh type parameter of the function (implicit
+        // generics, phase 2: `infer_param_generics`), except where that cannot work: methods
+        // (`def Type.name(..)`), `task`/`stream` functions, and a parameter with a default value
+        // (its type would be a guess). Those keep the written-type requirement. A `native`
+        // function is checked after its body is known.
+        let mut implicit_params: Vec<usize> = Vec::new();
+        if qualifier.is_none() && !prefix_task && !prefix_stream {
+            for (i, p) in params.iter_mut().enumerate() {
+                if p.ty.is_none() && !p.variadic && p.default.is_none() {
+                    p.ty = Some(Type::TypeParam(crate::infer_param_generics::fresh_name(&p.name)));
+                    implicit_params.push(i);
+                }
+            }
+        }
         Self::require_typed_params(&params, &format!("def {}", name))?;
         // Auto-collect implicit generic/const params from param types and return type
         // when no explicit `<...>` was written. E.g. `def T get(Matrix<T, uint N> m):`
@@ -155,6 +167,27 @@ impl Parser {
                 if let Some(ref ty) = param.ty {
                     Self::collect_type_params_from_ty(ty, &mut type_params);
                 }
+            }
+        }
+
+        // The fresh type parameters of the untyped parameters, bounded by how the body uses them.
+        let mut where_clause = where_clause;
+        if !implicit_params.is_empty() {
+            if is_native {
+                let p = &params[implicit_params[0]];
+                return Err(ParseError::Generic {
+                    msg: format!("parameter '{}' in 'def {}' has no type annotation — a native function needs written types", p.name, name),
+                    line: p.line, col: p.col, len: 1,
+                });
+            }
+            let names: Vec<String> = implicit_params.iter().map(|&i| params[i].name.clone()).collect();
+            for &i in &implicit_params {
+                if let Some(Type::TypeParam(t)) = &params[i].ty {
+                    if !type_params.contains(t) { type_params.push(t.clone()); }
+                }
+            }
+            for b in crate::infer_param_generics::bounds(&names, &body) {
+                if !where_clause.contains(&b) { where_clause.push(b); }
             }
         }
 
