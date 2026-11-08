@@ -1838,8 +1838,102 @@ fn parse_update_command(args: &[String]) {
     }
 }
 
+/// Usage text for `boring <sub> --help`. Every flag the matching parser accepts must be named
+/// here; `tests/cli_subcommand_help.rs` extracts the flags from the parser source and checks it.
+fn subcommand_help(sub: &str) -> Option<&'static str> {
+    Some(match sub {
+        "build" => "\
+Usage: boring build [flags] [file.br]
+
+Emit a Cargo project from boring.toml (project mode, no file) or from a single file.
+
+Flags:
+    --target <t>            Backend: cuda, rocm, metal, wgpu, simd
+    --linux                 Emit a Linux kernel (Rust-for-Linux, no_std) project
+    --mode <m>              Memory mode: strict (default) or managed
+    --threading <t>         multi (default) or single
+    --output-dir <dir>      Directory to write the generated project into
+    --inline-auto-bytes <n> Size threshold for automatic 'inline qualifier inference
+    --instrument            Instrument functions (coverage + trace journals)
+    --emit-rust             Print generated Rust to stdout (no project created)
+    --compile               Transpile, then run cargo build in the generated project
+    --rust-options \"<f>\"   Extra flags for cargo build (implies --compile)
+    --sanitize <s>          Sanitizer: address, thread or memory (nightly toolchain)
+    --locked                Fail instead of creating/updating a boring.lock entry
+    --offline               Never touch the network for a git [deps] dependency
+    --show-qualifiers       List the inferred ownership qualifiers
+    --env <name>            Environment name for @provide(env = \"...\")
+    -h, --help              Print this help
+",
+        "run" => "\
+Usage: boring run [flags] [file.br] [-- script args]
+
+Run a single file, or the project in the current directory (boring.toml) when no file is given.
+
+Flags:
+    --gpu <profile>         GPU simulation profile (built-in name or path/to/profile.toml)
+    --target <t>            Check the GPU profile can use backend t (cuda, rocm, metal, wgpu, ...)
+    --locked                Fail instead of creating/updating a boring.lock entry
+    --offline               Never touch the network for a git [deps] dependency
+    --show-qualifiers       List the inferred ownership qualifiers
+    --env <name>            Environment name for @provide(env = \"...\")
+    --                      Everything after is passed to the script (args())
+    -h, --help              Print this help
+",
+        "check" => "\
+Usage: boring check [--show-types] <file.br>
+
+Type-check a file without running it.
+
+Flags:
+    --show-types            Print the headers inferred for untyped parameters/fields
+    -h, --help              Print this help
+",
+        "api" => "\
+Usage: boring api <file.br>
+       boring api --check <snapshot> <file.br>
+
+Print a snapshot of the file's @api signatures, or compare against a snapshot.
+
+Flags:
+    --check <snapshot>      Fail on a removed/changed @api signature
+    -h, --help              Print this help
+",
+        "update" => "\
+Usage: boring update [<name>]
+
+Refresh every git [deps] dependency (or just <name>) and re-pin boring.lock.
+
+Flags:
+    -h, --help              Print this help
+",
+        "new" => "\
+Usage: boring new <name>
+
+Create a new project directory with a boring.toml and main.br.
+
+Flags:
+    -h, --help              Print this help
+",
+        _ => return None,
+    })
+}
+
 fn run() {
     let args: Vec<String> = std::env::args().collect();
+
+    // `boring <sub> --help` / `-h`: print that subcommand's usage on stdout, exit 0.
+    // Only flags before a `--` separator count (after it they belong to the script).
+    if let Some(sub) = args.get(2).and(args.get(1)) {
+        if let Some(text) = subcommand_help(sub) {
+            let wants_help = args[2..].iter().take_while(|a| a.as_str() != "--")
+                .any(|a| a == "--help" || a == "-h");
+            if wants_help {
+                print!("{text}");
+                process::exit(0);
+            }
+        }
+    }
 
     match args.get(1).map(|s| s.as_str()) {
         Some("--help") | Some("-h") => {
