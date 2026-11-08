@@ -4942,8 +4942,8 @@ A field of a `struct` can be written without a type: a lone name, with or withou
 
 ```boring
 struct Response:
-    status
-    payload
+    status              # no keyword: same as `let status`, immutable
+    var payload         # `var`/`mut` work as on a typed field, the type stays generic
 
 def fetchGreeting():                       # -> Response<int, string>
     return Response(status = 200, payload = "hello world")
@@ -4966,7 +4966,7 @@ An array holds one type, so `[a(), b()]` where `a()` is a `Response<int, string>
 
 A `view` accepts untyped fields too, with one rule per kind of field:
 
-```
+```boring
 view Badge:
     bind var label        # generic: fixed by what the parent hands over (`T_label`)
     note                  # a plain prop: generic over the construction, like a struct field
@@ -4983,7 +4983,7 @@ A generic view and its trait implementations now carry the bounds of the view's 
 
 An untyped parameter or field is a bare type parameter: it can be printed, compared with another untyped one, combined with itself by arithmetic, and compared with or combined with a **numeric literal on its right**. Any other use is an error that names it, instead of a rustc failure on generated code:
 
-```
+```boring
 def size(x):
     return x.len()        # error: cannot use the untyped parameter `x` with the method call `.len()`
 def inc(x):

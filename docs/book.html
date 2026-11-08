@@ -3036,8 +3036,8 @@ T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, 
 <h3 id="untyped-fields">Untyped fields</h3>
 <p>A field of a <code>struct</code> can be written without a type: a lone name, with or without <code>let</code>/<code>var</code>/<code>mut</code>. It is then a fresh type parameter of the struct (named <code>T_&lt;field&gt;</code> in the generated Rust and in diagnostics), fixed by each construction, so one declaration gives as many instances as it is built with:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Response:
-    status
-    payload
+    status              <span class="co"># no keyword: same as `let status`, immutable</span>
+    <span class="kw">var</span> payload         <span class="co"># `var`/`mut` work as on a typed field, the type stays generic</span>
 
 <span class="kw">def</span> <span class="fn">fetchGreeting</span>():                       <span class="co"># -&gt; Response&lt;int, string&gt;</span>
     <span class="kw">return</span> <span class="fn">Response</span>(status = <span class="nb">200</span>, payload = <span class="s">"hello world"</span>)
@@ -3051,22 +3051,22 @@ T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, 
 <p>An array holds one type, so <code>[a(), b()]</code> where <code>a()</code> is a <code>Response&lt;int, string&gt;</code> and <code>b()</code> a <code>Response&lt;int, int&gt;</code> is an error naming both instances, not a rustc mismatch. Only elements whose type is certain count (a constructor, or a call whose return type is known).</p>
 <h3 id="untyped-fields-of-a-view">Untyped fields of a view</h3>
 <p>A <code>view</code> accepts untyped fields too, with one rule per kind of field:</p>
-<div class="code-block"><pre><code>view Badge:
-    bind var label        # generic: fixed by what the parent hands over (`T_label`)
-    note                  # a plain prop: generic over the construction, like a struct field
-    state taps = 0        # `int`: a state slot has the type of its literal default
-    state ratio = 1.5     # `float`; `&quot;text&quot;` is `string`, `true` is `bool`, `-2` is `int`
-    env string theme      # an env value still needs its type</code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">view</span> Badge:
+    <span class="kw">bind</span> <span class="kw">var</span> label        <span class="co"># generic: fixed by what the parent hands over (`T_label`)</span>
+    note                  <span class="co"># a plain prop: generic over the construction, like a struct field</span>
+    <span class="kw">state</span> taps = <span class="nb">0</span>        <span class="co"># `int`: a state slot has the type of its literal default</span>
+    <span class="kw">state</span> ratio = <span class="nb">1.5</span>     <span class="co"># `float`; `&quot;text&quot;` is `string`, `true` is `bool`, `-2` is `int`</span>
+    <span class="kw">env</span> <span class="kt">string</span> theme      <span class="co"># an env value still needs its type</span></code></pre></div>
 <p>A <code>state</code> slot is seeded by its default and never supplied from outside, and an <code>env</code> value comes from a provider and has no initializer, so no construction could fix a type parameter for them: <code>state</code> takes the type of its default, which must be a literal (<code>cannot infer the type of </code>state taps<code> from its default</code> otherwise, <code>has no type and no default</code> with none), and <code>env</code> keeps requiring a written type (<code></code> <code>env theme</code> needs a written type <code></code>). A <code>bind</code> value generic over its use still needs its permission written (<code>bind var</code>, <code>bind mut</code>, <code>bind var mut</code>), as for an explicit <code>bind T name</code>, since the mutation surface of a generic value cannot be classified. The same limits as for a struct apply to the field&#x27;s uses (<code>label.len()</code> is an error, printing and comparing are fine).</p>
 <p>A generic view and its trait implementations now carry the bounds of the view&#x27;s own <code>impl</code> (<code>Clone</code>, the inferred or written <code>where</code> ones), plus <code>Send + Sync</code> in multi-threaded output because <code>View</code> has those supertraits there. Before, an explicitly generic view (<code>view Card&lt;T as Display&gt;</code>) failed in rustc in several configurations.</p>
 <h3 id="what-an-untyped-parameter-or-field-cannot-do">What an untyped parameter or field cannot do</h3>
 <p>An untyped parameter or field is a bare type parameter: it can be printed, compared with another untyped one, combined with itself by arithmetic, and compared with or combined with a <strong>numeric literal on its right</strong>. Any other use is an error that names it, instead of a rustc failure on generated code:</p>
-<div class="code-block"><pre><code>def size(x):
-    return x.len()        # error: cannot use the untyped parameter `x` with the method call `.len()`
-def inc(x):
-    return 1 + x          # error: ... with a literal on its left (write the parameter first: `x + literal`)
-def add(a, b):
-    return a + b          # error: ... with `b`, another untyped parameter (a separate type; to share one type write `T f(T a, T b)`)</code></pre></div>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">size</span>(x):
+    <span class="kw">return</span> x.<span class="fn">len</span>()        <span class="co"># error: cannot use the untyped parameter `x` with the method call `.len()`</span>
+<span class="kw">def</span> <span class="fn">inc</span>(x):
+    <span class="kw">return</span> <span class="nb">1</span> + x          <span class="co"># error: ... with a literal on its left (write the parameter first: `x + literal`)</span>
+<span class="kw">def</span> <span class="fn">add</span>(a, b):
+    <span class="kw">return</span> a + b          <span class="co"># error: ... with `b`, another untyped parameter (a separate type; to share one type write `T f(T a, T b)`)</span></code></pre></div>
 <p><strong>Literals.</strong> <code>n &gt; 0</code>, <code>n == 1</code>, <code>x + 1</code>, <code>x * 2.5 - 0.5</code> are accepted: the literal fixes the operand type (<code>int</code> literals are <code>isize</code>, <code>float</code> literals <code>f64</code>), and the parameter gets the bound that says so (<code>PartialOrd&lt;isize&gt;</code>, <code>Add&lt;isize, Output = T_x&gt;</code> plus <code>Copy</code>; the result of the arithmetic is the parameter&#x27;s own type again, so <code>return x + 1</code> types the function). <code>def isPositive(n): return n &gt; 0</code> is therefore callable with an <code>int</code>, and <code>def scaled(x): return x * 2.5</code> with a <code>float</code>; calling the first with a <code>float</code> is a type error in the generated Rust, exactly as passing a <code>float</code> to <code>isize</code>-bounded code would be (<code>boring run</code>, being dynamic, would accept it: write the type, or a generic, when both numeric types must work). A literal on the <em>left</em> (<code>0 &lt; n</code>, <code>1 + x</code>) would need the bound on the literal&#x27;s type, not on the parameter, so it is an error with the fix named: put the parameter first. These bounds also flow through calls (a bound that names only the callee&#x27;s own parameter, such as <code>Add&lt;Output = T_n&gt;</code>, is carried over to the caller&#x27;s parameter).</p>
 <p><strong>Other files.</strong> Bounds flow through a call into a function of another file too: a bare sibling <code>use</code>, a <code>pub</code> function of a selective or qualified <code>use</code>, a <code>[deps]</code> project and the embedded stdlib (<code>use boring.&lt;module&gt;</code>) all count, resolved like the return-type inference sees them; a local function of the same name shadows the import. The imported function&#x27;s bounds are the ones fixed when its own file parsed.</p>
 <p><strong><code>len()</code>.</strong> <code>x.len()</code> (no arguments) is allowed on an untyped parameter or field: Rust has no std <code>len</code> trait, so the parameter is bounded by <code>BoringLen</code>, a small trait in the generated prelude implemented for arrays, dicts, sets and strings (scalar-value count, like <code>string.len()</code>). The result is a <code>uint</code> (as for a known array or dict), so <code>def size(x): return x.len()</code> is typed <code>uint</code>; any type that is not one of those collections fails in the generated Rust naming <code>BoringLen</code>.</p>
@@ -5744,7 +5744,7 @@ Database<span class="lf">&#x27;shared</span> <span class="fn">replicaDb</span>()
 AuditLogger<span class="lf">&#x27;shared</span> <span class="fn">auditLogger</span>(): <span class="fn">FileAuditLogger</span>()   <span class="co"># the default — every build not overridden below</span>
 
 <span class="co"># --- test file ---</span>
-<span class="at">@provide</span>(env = <span class="s">"test"</span>)
+<span class="at">@provide</span>(<span class="kw">env</span> = <span class="s">"test"</span>)
 AuditLogger<span class="lf">&#x27;shared</span> <span class="fn">testAuditLogger</span>(): <span class="fn">MockAuditLogger</span>()</code></pre></div>
 <p>An <code>env</code>-matching provider outranks a plain, env-less one for the same <code>(type, id)</code>; two candidates at the same rank (two plain providers, or two matching the same <code>env</code> string) still hit the ordinary ambiguous-provider error. This is a compile-time swap of the registry for that build, not a runtime ambient override — no push/pop scope stack, nothing active only &quot;during one test.&quot; The compiler learns the current environment from a <code>--env &lt;value&gt;</code> flag, accepted by both <code>boring build</code> and <code>boring run</code>, independent of Cargo/Rust build profiles or <code>#[cfg(test)]</code>.</p>
 <h3 id="7-transitive-resolution-and-cycles">7. Transitive resolution and cycles</h3>

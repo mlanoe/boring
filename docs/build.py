@@ -15,6 +15,7 @@ BORING_KW = {
     "break","continue","guard","try","catch","throw","throws","defer","task",
     "stream","yield","channel","sync","kernel","with",
     "nil","true","false","as","and","or","not","is","self","void","pass","init",
+    "view","bind","state","env",
 }
 BORING_TYPES = {
     "int","uint","float","bool","string","str","Self",
