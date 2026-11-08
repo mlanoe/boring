@@ -1751,22 +1751,7 @@ impl Transpiler {
         }
         // `let [mut T'actor] a = [T(..)]` / `{K = mut V'actor}`: each fresh constructor element is
         // wrapped in the actor constructor when the literal is emitted.
-        if let (Some(ty), Some(v)) = (&s.ty, &s.value) {
-            let mut dty = ty.without_mut();
-            while let Type::Qualified(inner, _) = dty { dty = inner.without_mut(); }
-            let elem = match (dty, &v.kind) {
-                (Type::Dict(_, vt), ExprKind::Dict(_)) => Some(&**vt),
-                (Type::Array(et), ExprKind::Array(_)) => Some(&**et),
-                (Type::Set(et), ExprKind::Set(_)) => Some(&**et),
-                _ => None,
-            };
-            if elem.is_some_and(|e| matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor))) {
-                self.actor_elem_lits.borrow_mut().insert((v.line, v.col));
-            }
-            if let Some(e) = elem.filter(|e| Self::wraps_declared_elem(e)) {
-                self.declared_lock_lits.borrow_mut().insert((v.line, v.col), e.without_mut().clone());
-            }
-        }
+        if let (Some(ty), Some(v)) = (&s.ty, &s.value) { self.register_elem_wrap_lits(ty, v); }
         // Untyped `let hit = dict[key]` whose name is later tested against `nil` is an
         // optional lookup (`HashMap::get(..).cloned()`), not the panicking read.
         if s.ty.is_none() && self.nil_tested_vars.contains(s.name.as_str()) {
@@ -2745,7 +2730,28 @@ impl Transpiler {
         false
     }
 
+    /// A collection literal built where `ty` is expected (`let [mut T'actor] a = [T()]`, a return
+    /// under `[mut T'actor]`, ...): every fresh element is wrapped in the lock constructor when
+    /// the literal is emitted.
+    pub(crate) fn register_elem_wrap_lits(&self, ty: &Type, v: &Expr) {
+        let mut dty = ty.without_mut();
+        while let Type::Qualified(inner, _) = dty { dty = inner.without_mut(); }
+        let elem = match (dty, &v.kind) {
+            (Type::Dict(_, vt), ExprKind::Dict(_)) => Some(&**vt),
+            (Type::Array(et), ExprKind::Array(_)) => Some(&**et),
+            (Type::Set(et), ExprKind::Set(_)) => Some(&**et),
+            _ => None,
+        };
+        if elem.is_some_and(|e| matches!(e.without_mut(), Type::Qualified(_, OwnerQual::Actor))) {
+            self.actor_elem_lits.borrow_mut().insert((v.line, v.col));
+        }
+        if let Some(e) = elem.filter(|e| Self::wraps_declared_elem(e)) {
+            self.declared_lock_lits.borrow_mut().insert((v.line, v.col), e.without_mut().clone());
+        }
+    }
+
     pub(crate) fn emit_let_value(&self, declared_ty: Option<&Type>, value: &Expr) -> String {
+        if let Some(t) = declared_ty { self.register_elem_wrap_lits(t, value); }
         // `let q = coll[i]` over a managed-mode `'owned` element (a bare lock cell, not a shareable
         // handle): `q` is an independent copy of the held value, like the `Box<T>` clone of strict mode.
         if matches!(&value.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..)) {

@@ -548,8 +548,7 @@ u.inc()
 print "untyped {untyped[0].get()} {u.get()}"
 
 [mut Counter'actor] mkShared():
-    mut [mut Counter'actor] r = [Counter()]
-    r
+    [Counter()]
 
 mut fromFn = mkShared()
 mut f = fromFn[0]
