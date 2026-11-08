@@ -252,6 +252,19 @@ over 10 s, 60 fps): a gradient kernel + `screen.present` + `requestRedraw()` eve
 figure while redrawing continuously is spending it in its own loop body (the Todo window redrawing unconditionally
 spends it in layout/encode allocation and cloning, not in the host); request a redraw only while something animates.
 
+**Delayed and cross-thread wake-ups (`requestRedrawAfter`, `wake`).** Redrawing every frame to notice a timer is the
+expensive way. `screen.requestRedrawAfter(ms)` (a statement; `ms` an int or float, milliseconds) schedules one frame
+`ms` from now and the loop sleeps until then (wgpu: `ControlFlow::WaitUntil(deadline)`, a frame when it is reached);
+a clock, an auto-dismissing toast, a cursor blink or a debounce calls it once per frame while it is pending.
+Several calls keep the **earliest** deadline; a deadline is spent by the frame that reaches it, so the body schedules
+the next one itself, and `screen.time` in that frame includes the wait. Input events still redraw at once and leave the
+deadline in place. `screen.wake()` (a statement) schedules a frame like `requestRedraw`, but is callable from any
+thread (it goes through the window handle, not the loop's state), e.g. from a system-preference watcher or a network
+task. Measured (wgpu, macOS, `examples/screen_redraw_after.br`, `requestRedrawAfter(1000)` once per frame): a frame
+about every 1.00 s, 0.0 % CPU in between. On the Metal/CUDA/ROCm/SIMD hosts, whose demand loop has no timer,
+`requestRedrawAfter` is accepted and behaves as `requestRedraw` (a frame sooner than asked, never later; the body must
+still stop calling it when nothing is pending) and `wake()` is accepted and ignored. Both are no-ops in continuous mode.
+
 
 ### HiDPI
 
@@ -375,6 +388,8 @@ field assignment in the render loop, and in `redraw = "demand"` mode every input
 | `for k in screen.key_events:` / `screen.key_up_events` | statement | every key-down (**including auto-repeats**) / key-up event of the frame as a canonical name, **in arrival order and with duplicates** — the event queue; nothing is lost when a frame is slow. `k` is a `string`; `break` inside is not supported |
 | `screen.setImeArea(x, y, w, h)` | statement | tell the input method where the text caret is (buffer coordinates, scaled like the mouse) so its candidate window opens next to it. winit 0.30 (wgpu) passes the rectangle; the winit 0.28 hosts pass the point just below it |
 | `screen.safeTop`, `.safeLeft`, `.safeBottom`, `.safeRight` | `int` | the insets, in physical pixels, of the part of the window a notch, rounded corners or the home indicator cover (the safe area; the wgpu host reads them from winit on iOS, the software keyboard is not included; every other target reports 0). Divide by `screen.scale` for points |
+| `screen.requestRedrawAfter(ms)` | statement | in a `redraw = "demand"` window, schedule a frame `ms` milliseconds (int or float) from now; the earliest pending deadline wins. wgpu sleeps in `WaitUntil`; the other hosts treat it as `requestRedraw`. See "Delayed and cross-thread wake-ups" |
+| `screen.wake()` | statement | schedule a frame from any thread (wgpu); accepted and ignored on the other hosts |
 | `screen.setImeAllowed(on)` | statement | whether the window takes input-method events (a program passes "a text field has focus"). On the wgpu host on iOS/Android this is what shows and hides the soft keyboard, which starts hidden there; desktop wgpu windows start with it on. The other hosts accept the call and ignore it (their windows are desktop windows whose input method is always on) |
 | `screen.clipboard` | `string` | the system clipboard's text, `""` when it is empty, not text or unavailable. Read lazily: the clipboard is queried only when this expression is evaluated, not every frame |
 | `screen.setClipboard(s)` | statement | replace the system clipboard's text with `s` (a literal or a `string`). Failures are ignored |

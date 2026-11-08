@@ -1314,6 +1314,7 @@ impl<'a> HostEmitter<'a> {
         self.line("    __start_time: std::time::Instant,");
         self.line("    __frame: isize,");
         self.line("    __redraw: bool,");
+        self.line("    __wake_at: Option<std::time::Instant>,");
         if uses_ax {
             self.line("    __ax: Option<accesskit_winit::Adapter>,");
             self.line("    __ax_proxy: Option<winit::event_loop::EventLoopProxy<__AxEvent>>,");
@@ -1377,6 +1378,12 @@ impl<'a> HostEmitter<'a> {
         self.line("        self.__blit_dim_buf = Some(dim_buf);");
         self.line("    }");
         self.line("}");
+        self.blank();
+        // `screen.wake()`: the window, reachable from any thread, so a timer/watcher/network thread can wake a demand-mode loop.
+        self.line("#[allow(dead_code)]");
+        self.line("static __BORING_WAKE_WINDOW: std::sync::Mutex<Option<std::sync::Arc<Window>>> = std::sync::Mutex::new(None);");
+        self.line("#[allow(dead_code)]");
+        self.line("fn __boring_wake() { if let Ok(g) = __BORING_WAKE_WINDOW.lock() { if let Some(w) = g.as_ref() { w.request_redraw(); } } }");
         self.blank();
         // iOS: the UIScene life cycle (a no-op everywhere else).
         for l in IOS_SCENE_RS.lines() { self.line(l); }
@@ -1495,6 +1502,7 @@ impl<'a> HostEmitter<'a> {
         self.line("            multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,");
         self.line("        });");
         self.line("        self.window = Some(window.clone());");
+        self.line("        if let Ok(mut g) = __BORING_WAKE_WINDOW.lock() { *g = Some(window.clone()); }");
         self.line("        self.surface = Some(surface);");
         self.line("        self.__blit_pipeline = Some(blit_pipeline);");
         self.line("        self.__blit_bg = Some(blit_bg);");
@@ -1520,6 +1528,13 @@ impl<'a> HostEmitter<'a> {
             self.line("            accesskit_winit::WindowEvent::AccessibilityDeactivated => { self.__ax_active = false; self.__ax_last = None; return; }");
             self.line("        }");
             self.line("        if let Some(w) = &self.window { w.request_redraw(); }");
+            self.line("    }");
+            self.blank();
+        }
+        if on_demand {
+            // `screen.requestRedrawAfter(ms)`: the loop sleeps in `ControlFlow::WaitUntil(deadline)`; reaching it wakes a frame.
+            self.line("    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {");
+            self.line("        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) { if let Some(w) = &self.window { w.request_redraw(); } }");
             self.line("    }");
             self.blank();
         }
@@ -1606,6 +1621,8 @@ impl<'a> HostEmitter<'a> {
         self.line("            }");
         self.line("            WindowEvent::RedrawRequested => {");
         self.line("                self.__update_safe();");
+        // A deadline this frame has reached is spent; the body may schedule the next one.
+        self.line("                if self.__wake_at.is_some_and(|t| t <= std::time::Instant::now()) { self.__wake_at = None; }");
         // Render loop body with self. prefix
         self.in_method = true;
         let w = width.clone();
@@ -1623,6 +1640,7 @@ impl<'a> HostEmitter<'a> {
             // On-demand: only schedule another frame when the body asked for one
             // (`screen.requestRedraw()`); input/resize/expose events schedule their own.
             self.line("                if std::mem::take(&mut self.__redraw) { if let Some(w) = &self.window { w.request_redraw(); } }");
+            self.line("                event_loop.set_control_flow(match self.__wake_at { Some(t) => winit::event_loop::ControlFlow::WaitUntil(t), None => winit::event_loop::ControlFlow::Wait });");
         } else {
             self.line("                self.__redraw = false;");
             self.line("                if let Some(w) = &self.window { w.request_redraw(); }");
@@ -1745,7 +1763,7 @@ impl<'a> HostEmitter<'a> {
         self.line(&format!("        __win_w: ({width}) as isize, __win_h: ({height}) as isize, __resized: false, __ime_on: cfg!(not(any(target_os = \"ios\", target_os = \"android\"))), __safe: [0; 4], __scale: 1.0,"));
         self.line(&format!("        __buf_w: ({width}) as f64, __buf_h: ({height}) as f64, __surface_cfg: None,"));
         self.line("        __start_time: std::time::Instant::now(),");
-        self.line("        __frame: 0, __redraw: false,");
+        self.line("        __frame: 0, __redraw: false, __wake_at: None,");
         if uses_ax { self.line("        __ax: None, __ax_proxy: None, __ax_active: false, __ax_last: None, __ax_requests: Vec::new(),"); }
         self.line("        window: None, surface: None,");
         self.line("        __blit_pipeline: None, __blit_bg: None, __blit_dim_buf: None,");
@@ -1848,6 +1866,10 @@ impl<'a> HostEmitter<'a> {
                 } else if let Some(s) = self.try_emit_set_clipboard(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_request_redraw(e) {
+                    self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_request_redraw_after(e) {
+                    self.line(&format!("{indent}{s}"));
+                } else if let Some(s) = self.try_emit_wake(e) {
                     self.line(&format!("{indent}{s}"));
                 } else if let Some(s) = self.try_emit_set_accessibility(e) {
                     self.line(&format!("{indent}{s}"));
@@ -2134,6 +2156,25 @@ impl<'a> HostEmitter<'a> {
         if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") { return None; }
         let pfx = if self.in_method { "self." } else { "" };
         Some(format!("{pfx}__redraw = true;"))
+    }
+
+    /// `screen.requestRedrawAfter(ms)` -- schedule a frame `ms` milliseconds from now when the window redraws on
+    /// demand; the earliest pending deadline wins, and the next frame's `screen.time` reflects the wait.
+    fn try_emit_request_redraw_after(&self, e: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
+        if method != "requestRedrawAfter" || args.len() != 1 { return None; }
+        if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") || !self.in_method { return None; }
+        Some(format!(
+            "{{ let __d = std::time::Instant::now() + std::time::Duration::from_secs_f64((({}) as f64 / 1000.0).clamp(0.0, 31_536_000.0)); self.__wake_at = Some(match self.__wake_at {{ Some(t) if t < __d => t, _ => __d }}); }}",
+            self.host_expr(&args[0].value)))
+    }
+
+    /// `screen.wake()` -- wake the render loop from any thread (it schedules a frame like `requestRedraw`).
+    fn try_emit_wake(&self, e: &Expr) -> Option<String> {
+        let ExprKind::MethodCall(obj, method, args) = &e.kind else { return None };
+        if method != "wake" || !args.is_empty() { return None; }
+        if !matches!(&obj.kind, ExprKind::Var(n) if n == "screen") { return None; }
+        Some("__boring_wake();".to_string())
     }
 
     fn try_emit_render_dispatch(&self, e: &Expr, width: &str, height: &str) -> Option<String> {
@@ -2512,7 +2553,12 @@ impl<'a> HostEmitter<'a> {
                 format!("({o}{})", self.host_expr(inner))
             }
             ExprKind::If(ifs) if ifs.else_body.is_some() => {
+                // A branch that is a bare integer literal outside `i32` (`0xFF3060C0`) would be inferred `i32` when every
+                // branch is a literal: pin it to `i64` (the surrounding `as` / assignment converts it).
+                let all_lits = std::iter::once(ifs.else_body.as_ref().unwrap()).chain(ifs.branches.iter().map(|(_, b)| b))
+                    .all(|b| matches!(b.last(), Some(Stmt::Expr(Expr { kind: ExprKind::Int(_), .. }))));
                 let val = |b: &Vec<Stmt>| b.last().map(|st| match st {
+                    Stmt::Expr(Expr { kind: ExprKind::Int(n), .. }) if all_lits && i32::try_from(*n).is_err() => format!("{n}i64"),
                     Stmt::Expr(e) => self.host_expr(e),
                     _ => self.unsupported_expr(e, "a statement other than a plain value as the last line of an `if` expression branch"),
                 }).unwrap_or_default();
@@ -2566,6 +2612,22 @@ impl<'a> HostEmitter<'a> {
                         } else {
                             format!("half::f16::from_f32(({}) as f32)", inner)
                         };
+                    }
+                    // `int(x)`, `uint(x)`, `int32(x)`, ...: a numeric conversion (`as` truncates a float toward zero).
+                    if args.len() == 1 && args[0].label.is_none() {
+                        if let Some(t) = match n.as_str() {
+                            "int" => Some("isize"), "uint" => Some("usize"),
+                            "int8" => Some("i8"), "int16" => Some("i16"), "int32" => Some("i32"), "int64" => Some("i64"),
+                            "uint8" => Some("u8"), "uint16" => Some("u16"), "uint32" => Some("u32"), "uint64" => Some("u64"),
+                            _ => None,
+                        } {
+                            let inner = self.host_expr(&args[0].value);
+                            return if crate::transpiler::host_types::gpu_host_expr_is_float16(&args[0].value) {
+                                format!("(f32::from({inner}) as {t})")
+                            } else {
+                                format!("(({inner}) as {t})")
+                            };
+                        }
                     }
                     if (n == "float32" || n == "float" || n == "float64") && args.len() == 1 {
                         let inner = self.host_expr(&args[0].value);

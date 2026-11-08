@@ -1,0 +1,37 @@
+# Delayed redraw — screen.requestRedrawAfter(ms) in a `redraw = "demand"` window.
+# The loop sleeps (near-zero CPU) and wakes about once a second to flip the square's colour;
+# input events still redraw immediately. screen.wake() lets another thread do the same.
+#
+# Run: boring build examples/screen_redraw_after.br --target wgpu
+#      cd examples/screen_redraw_after_wgpu && cargo run --release
+
+let width  = 320
+let height = 240
+let screen = Screen(Dimension(width, height), title = "requestRedrawAfter — boring", redraw = "demand")
+
+kernel Fill:
+    mut [uint]'surface pixels
+    let Dimension dim
+    var int mode
+
+    init(Dimension d):
+        pixels = [0xFF101010 for ..<d.width * d.height]
+        dim    = d
+        mode   = 0
+
+    def ():
+        let col = .block.x * .block_dim.x + .thread.x
+        let row = .block.y * .block_dim.y + .thread.y
+        if col < dim.width and row < dim.height:
+            pixels[row * dim.width + col] = if mode == 0: 0xFF3060C0 else 0xFFC06030
+
+var mut fill = Fill(Dimension(width, height))
+
+kernel:
+    loop:
+        fill.mode = screen.frame % 2
+        fill(block = (16, 16))
+        screen.present(fill.pixels)
+        screen.requestRedrawAfter(1000)
+        if screen.key("\x1B"):
+            break

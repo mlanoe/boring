@@ -194,6 +194,10 @@ impl Screen {
     // for an input/resize event. A no-op in the default continuous mode.
     // (`screen.requestRedraw()` in Boring source; method names are snake_cased on this target.)
     fn request_redraw(&mut self) { self.redraw_requested = true; }
+    // `screen.requestRedrawAfter(ms)`: this loop only checks `redraw_requested` between waits, so a delayed redraw is
+    // "redraw soon" (earlier than asked is allowed). `screen.wake()` is accepted and ignored.
+    fn request_redraw_after<T>(&mut self, _ms: T) { self.redraw_requested = true; }
+    fn wake(&self) {}
     // `screen.setImeArea(x, y, w, h)`: where the input method may put its candidate window, in window
     // (= buffer) pixels.
     fn set_ime_area(&self, x: isize, y: isize, w: isize, h: isize) {

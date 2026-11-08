@@ -1569,6 +1569,24 @@ impl HostEmitter {
                         self.line(&format!("let _ = {on};"));
                         return;
                     }
+                    // `screen.requestRedrawAfter(ms)`: this host spins one frame per iteration while dirty, so a delayed
+                    // redraw is simply "redraw soon" (earlier than asked is allowed, never later). `screen.wake()` (another thread
+                    // waking the loop) is accepted and ignored: this loop never sleeps.
+                    if method == "requestRedrawAfter"
+                        && margs.len() == 1
+                        && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
+                    {
+                        let ms = self.expr(&margs[0].value);
+                        self.line(&format!("let _ = {ms};"));
+                        self.line("boring_dirty = true;");
+                        return;
+                    }
+                    if method == "wake"
+                        && margs.is_empty()
+                        && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())
+                    {
+                        return;
+                    }
                     if method == "requestRedraw"
                         && margs.is_empty()
                         && matches!(&obj.kind, ExprKind::Var(v) if Some(v.as_str()) == self.screen_var.as_deref())

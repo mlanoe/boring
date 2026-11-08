@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **wgpu `Screen` render-loop bodies: `int(x)`, `uint(x)`, `int32(x)`... and integer literals outside `i32` in an `if` expression.** `k.mode = int(screen.time) % 2` emitted a call to a non-existent Rust `int(...)` function, and `if c: 0xFF3060C0 else 0xFFC06030` was inferred `i32` by rustc (`literal out of range`). The integer conversions now emit `as isize`/`usize`/`i8`..`u64`, and an `if` whose branches are all integer literals pins the out-of-range ones to `i64`. Test: `tests/screen_input_events.rs`.
+
+### Added
+
+- **`screen.requestRedrawAfter(ms)` and `screen.wake()` for `redraw = "demand"` windows.** The only way to wake a demand-mode loop without input was `requestRedraw()`, which runs at the display rate. On the wgpu host `requestRedrawAfter(ms)` (`ms` an int or float) now schedules one frame `ms` milliseconds ahead, keeping the earliest deadline, and the loop sleeps in `ControlFlow::WaitUntil` meanwhile (measured: a frame per second, 0.0 % CPU between); `screen.wake()` wakes the loop from any thread through a process-wide window handle. Metal, CUDA, ROCm and SIMD accept both (`requestRedrawAfter` behaves as `requestRedraw`, `wake` is ignored). Example: `examples/screen_redraw_after.br`. Tests: `tests/screen_input_events.rs`. Reference: `docs/gpu-display.md`, "Delayed and cross-thread wake-ups".
+
 ---
 
 ## [0.9.13] — 2026-11-08 *(cargo test: 4989/4989 passing across 163 suites, 4 ignored · clippy: 24 warnings (not clean) · self-hosted interpreter functional: 186/186)*

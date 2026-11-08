@@ -552,6 +552,78 @@ kernel:
     }
 }
 
+const DELAYED_LOOP: &str = r#"
+        screen.requestRedrawAfter(1000)
+        screen.requestRedrawAfter(screen.time * 0.0 + 250.5)
+        screen.wake()
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+
+fn demand_events(body: &str) -> String {
+    events(&format!("kernel:\n    loop:{body}")).replace("title = \"input\")", "title = \"input\", redraw = \"demand\")")
+}
+
+/// `screen.requestRedrawAfter(ms)` keeps the earliest deadline, the loop sleeps in `WaitUntil`, a reached
+/// deadline wakes a frame, and `screen.wake()` reaches the window from any thread (wgpu).
+#[test]
+fn wgpu_request_redraw_after_and_wake() {
+    let src = demand_events(DELAYED_LOOP);
+    let (project, rs) = build("wgpu", "redraw_after", &src);
+    assert!(rs.contains("Some(t) if t < __d => t, _ => __d"), "earliest deadline wins:\n{rs}");
+    assert!(rs.contains("ControlFlow::WaitUntil(t)"), "{rs}");
+    assert!(rs.contains("fn new_events(&mut self"), "{rs}");
+    assert!(rs.contains("StartCause::ResumeTimeReached"), "{rs}");
+    assert!(rs.contains("self.__wake_at = None;"), "a reached deadline is spent before the body runs:\n{rs}");
+    assert!(rs.contains("fn __boring_wake()"), "{rs}");
+    assert!(rs.contains("__boring_wake();"), "{rs}");
+    cargo_check(&project, "wgpu");
+}
+
+/// A render-loop body converts with `int(x)` / `uint32(x)` and may pick between integer literals outside `i32`
+/// (colours such as `0xFF3060C0`): both used to stop the generated crate compiling (wgpu).
+#[test]
+fn wgpu_loop_int_casts_and_large_literal_branches() {
+    let src = events(r#"
+kernel:
+    loop:
+        k.tick = int(screen.time) % 2
+        k.mode = int(uint32(screen.time * 2.0))
+        k.scroll = float32(if screen.frame % 2 == 0: 0xFF3060C0 else 0xFFC06030)
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#);
+    let (project, rs) = build("wgpu", "int_casts", &src);
+    assert!(rs.contains("as isize)"), "{rs}");
+    assert!(rs.contains("as u32)"), "{rs}");
+    assert!(rs.contains("4281360576i64"), "{rs}");
+    cargo_check(&project, "wgpu");
+}
+
+/// The other hosts accept both calls (`requestRedrawAfter` as `requestRedraw`, `wake` ignored).
+#[test]
+fn other_targets_accept_request_redraw_after_and_wake() {
+    let src = demand_events(DELAYED_LOOP);
+    for target in ["simd", "metal", "cuda", "rocm"] {
+        let (project, rs) = build(target, "redraw_after_other", &src);
+        match target {
+            "simd" => {
+                assert!(rs.contains("fn request_redraw_after<T>(&mut self, _ms: T)"), "{rs}");
+                assert!(rs.contains("screen.request_redraw_after("), "{rs}");
+                assert!(rs.contains("screen.wake()"), "{rs}");
+            }
+            _ => assert!(rs.contains("boring_dirty = true;"), "[{target}] {rs}"),
+        }
+        if target != "metal" || cfg!(target_os = "macos") {
+            cargo_check(&project, target);
+        }
+    }
+}
+
 /// A kernel built by the program's setup code from real constructor arguments is rebuilt, for the
 /// new window size, by a generated function (wgpu).
 #[test]
