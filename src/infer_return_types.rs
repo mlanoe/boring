@@ -52,8 +52,19 @@ type Env = HashMap<String, Option<Type>>;
 
 /// Rewrites every eligible top-level `def` of `program` that has no return type.
 pub fn infer_return_types(program: &mut Program) {
+    infer_items(&mut program.items);
+}
+
+/// One scope's worth of [`infer_return_types`]; a `mod` is its own scope (names resolve
+/// against its own members only), so each is handled by recursion.
+fn infer_items(items: &mut Vec<Item>) {
+    for item in items.iter_mut() {
+        if let Item::Mod(m) = item {
+            infer_items(&mut m.items);
+        }
+    }
     let found: HashMap<String, Type> = {
-        let cx = Ctx::new(program);
+        let cx = Ctx::new(items);
         let names: Vec<String> = cx
             .fns
             .iter()
@@ -68,7 +79,7 @@ pub fn infer_return_types(program: &mut Program) {
     if found.is_empty() {
         return;
     }
-    for item in &mut program.items {
+    for item in items.iter_mut() {
         if let Item::Fn(f) = item {
             if omitted(f) && eligible(f) {
                 if let Some(t) = found.get(&f.name) {
@@ -101,7 +112,15 @@ fn certainly_valued(e: &Expr) -> bool {
 /// `void` function such as `def log(x): print x` is never reported. Run after
 /// [`infer_return_types`]; a function that got its type there no longer has an omitted one.
 pub fn check_untyped_returns(program: &Program) -> Result<(), crate::parser::ParseError> {
-    for item in &program.items {
+    check_untyped_returns_in(&program.items)
+}
+
+fn check_untyped_returns_in(items: &[Item]) -> Result<(), crate::parser::ParseError> {
+    for item in items {
+        if let Item::Mod(m) = item {
+            check_untyped_returns_in(&m.items)?;
+            continue;
+        }
         let Item::Fn(f) = item else { continue };
         let implicit = f.params.iter().any(|p| matches!(&p.ty, Some(Type::TypeParam(n)) if n.starts_with("T_") && f.type_params.contains(n)));
         if !implicit || !omitted(f) || f.is_native || f.task || f.stream || f.qualifier.is_some() {
@@ -362,7 +381,7 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(program: &'a Program) -> Self {
+    fn new(items: &'a [Item]) -> Self {
         let mut cx = Ctx {
             structs: HashMap::new(),
             enums: HashMap::new(),
@@ -371,7 +390,7 @@ impl<'a> Ctx<'a> {
             in_progress: RefCell::new(HashSet::new()),
         };
         let mut duplicates: HashSet<String> = HashSet::new();
-        for item in &program.items {
+        for item in items {
             match item {
                 Item::Struct(s) => {
                     if cx.structs.insert(s.name.clone(), s).is_some() {
@@ -683,6 +702,20 @@ mod tests {
         assert!(parse_err("def log(x): print x\n").is_none());
         // A call may be void: not reported.
         assert!(parse_err("def g(x):\n    print x\n\ndef f(x):\n    return g(x)\n").is_none());
+    }
+
+    #[test]
+    fn mod_members_get_the_same_checks() {
+        let e = parse_err("mod m:\n    def add(a, b):\n        return a + b\n\nprint m.add(1, 2)\n").expect("should be rejected");
+        assert!(e.contains("cannot infer the return type of `add`"), "{e}");
+        // Nested mod too.
+        assert!(parse_err("mod a:\n    mod b:\n        def add(a, b): a + b\n").is_some());
+        // Typable and void ones inside a mod are fine (and get inferred).
+        assert!(parse_err("mod m:\n    def keep(x):\n        return x\n    def log(x):\n        print x\n").is_none());
+        let p = parse(lex("mod m:\n    def keep(x):\n        return x\n").unwrap()).unwrap();
+        let Item::Mod(m) = &p.items[0] else { panic!() };
+        let Item::Fn(f) = &m.items[0] else { panic!() };
+        assert!(!matches!(f.return_ty, None | Some(Type::Void)));
     }
 
     #[test]
