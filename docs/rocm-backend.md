@@ -14,7 +14,7 @@ CUDA requires an NVIDIA GPU and the CUDA toolkit; ROCm is AMD's equivalent stack
 
 ## Device-side mapping
 
-HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__global__`/`__device__`/`__constant__`/`__shared__` qualifiers, `threadIdx`/`blockIdx`/`blockDim`/`gridDim`, `atomicAdd` and friends, `__syncthreads()`, and device-side `printf` all carry the exact same names and semantics. The device-code emitter (`src/transpiler/rocm/device.rs`) is therefore a near-verbatim clone of the CUDA one — same tables as [`cuda-module.md`](cuda-module.html)'s "CUDA C mapping" section apply unchanged, with `#include <hip/hip_runtime.h>` in place of `#include <cuda_runtime.h>`.
+HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__global__`/`__device__`/`__constant__`/`__shared__` qualifiers, `threadIdx`/`blockIdx`/`blockDim`/`gridDim`, `atomicAdd` and friends, `__syncthreads()`, and device-side `printf` all carry the exact same names and semantics. The device-code emitter is therefore a near-verbatim clone of the CUDA one — same tables as [`cuda-module.md`](cuda-module.html)'s "CUDA C mapping" section apply unchanged, with `#include <hip/hip_runtime.h>` in place of `#include <cuda_runtime.h>`.
 
 | Boring | CUDA C | HIP C++ |
 |---|---|---|
@@ -46,7 +46,7 @@ HIP C++'s kernel-side syntax is source-compatible with CUDA C by design: `__glob
 
 ## Naming restrictions
 
-Same reserved-word collision as CUDA C — see [cuda-module.md](cuda-module.html)'s "Naming restrictions" section, which applies unchanged: HIP C++'s builtin scalar/vector types and real C++14 keywords occupy the same identifier namespace as ordinary variables, so a kernel field/local/loop-var/parameter named e.g. `half` is automatically mangled by `c_gpu_safe_ident` (`src/transpiler/helpers.rs`), the same shared function CUDA's device emitter uses (`rocm::device` is a near-verbatim clone of `cuda::device`, per this file's "Device-side mapping" section above). Verification here has the identical hardware gap CUDA's doc calls out (no local NVIDIA/AMD toolchain), covered instead by `tests/rocm_codegen.rs`'s equivalent three tests.
+Same reserved-word collision as CUDA C — see [cuda-module.md](cuda-module.html)'s "Naming restrictions" section, which applies unchanged: HIP C++'s builtin scalar/vector types and real C++14 keywords occupy the same identifier namespace as ordinary variables, so a kernel field/local/loop-var/parameter named e.g. `half` is automatically mangled, the same way CUDA's device emitter does (`rocm::device` is a near-verbatim clone of `cuda::device`, per this file's "Device-side mapping" section above). Verification here has the identical hardware gap CUDA's doc calls out (no local NVIDIA/AMD toolchain), covered instead by equivalent codegen tests.
 
 ---
 
@@ -64,7 +64,7 @@ There is no mature, widely-used safe Rust crate for ROCm/HIP analogous to `cudar
 | `.launch_builder()` / `.arg()` / `.launch()` | same names — `.arg()` takes a small `BoringKernelArg` trait implemented for `&mut DeviceBuffer<T>` (pushes the device pointer's own address) and for scalar/`Dimension` types (pushes the value's address directly) |
 | PTX loaded via `nvrtc`/`Ptx::from_src` | a precompiled HIP code object, embedded via `include_bytes!` and loaded with `hipModuleLoadData` |
 
-Keeping the same method names/shapes as cudarc means the ~1300 lines of Boring-AST-to-Rust statement/expression codegen shared with the CUDA backend (`emit_fn`/`emit_stmt`/`expr`/pattern matching/dict handling/GPU-residency tracking) carry over with only mechanical type-name substitutions, instead of re-deriving that whole pipeline from scratch.
+Keeping the same method names/shapes as cudarc means the ~1300 lines of Boring-AST-to-Rust statement/expression codegen shared with the CUDA backend (expressions, statements, pattern matching, dictionaries, GPU-residency tracking) carry over with only mechanical type-name substitutions, instead of re-deriving that whole pipeline from scratch.
 
 ### Compilation pipeline
 
@@ -113,8 +113,8 @@ section):
    sibling `Dimension` field needs a genuinely 2D dispatch grid — the
    existing 1D length-based auto-grid fallback (`grid_dim.y` stuck at `1`)
    silently computed only the first few rows. Fixed by adding a
-   `Dimension`-aware branch to `emit_boring_launch`'s grid-size inference
-   (mirrors a formula the Metal backend's `emit_boring_launch` already had —
+   `Dimension`-aware branch to the grid-size inference
+   (mirrors a formula the Metal backend already had —
    Metal was never affected because its `'surface` buffers are truly
    host-visible `MTLBuffer`s dispatched through the same MSL path
    regardless).
@@ -156,7 +156,7 @@ reallocated automatically on resize.
 4. **Host→GPU upload never triggered for a fixed-shape ctor parameter** — `kernel_ctor_buffer_flags` had the identical `LabeledArray`-blind-spot, so a host `Vec<f32>` was passed directly where a `DeviceBuffer<f32>` was expected (`error[E0308]`).
 5. **`__boring_launch`'s generated signature and its call site disagreed on `grid_dim`'s type** for a fixed-shape kernel — the signature (correctly) used `.as_labeled_array()` to decide `Option<(u32,u32,u32)>` vs. a bare tuple; three separate call-site `auto_grid` checks did not, and passed a bare tuple against the `Option<...>`-typed parameter (`error[E0308]`).
 6. **Silent stream-synchronization race producing wrong (near-zero) output**, not a compile error: a kernel instance's own `__stream` field (used by its `read_{field}()` readback accessor) was a brand-new, independently-created HIP stream (`__ctx.default_stream()`), with no ordering relationship to the *different* cached per-priority stream every other operation (uploads, the actual kernel dispatch) used — so a D2H readback could complete before the kernel it was reading from had. Every buffer-allocation/upload site in the constructor had the same issue. Fixed by routing all of it through the same cached-per-priority stream (`boring_new_stream_with_priority`), matching this file's own documented stream design. Also found and fixed alongside it: an unassigned fixed-shape field's default zero-fill allocation was hardcoded to a 1-element buffer regardless of its actual shape (`error: index out of bounds` at readback).
-7. **A `Screen` program's window only ever showed its top `block_dim.1` rows (e.g. 16px) of the image, the rest black** — a kernel's `'surface` field paired with a sibling `Dimension` field needs a genuinely 2D dispatch grid; the existing 1D length-based auto-grid fallback left `grid_dim.y` at `1`, so only the first few rows were ever computed. Fixed by adding a `Dimension`-aware branch to `emit_boring_launch`'s grid-size inference — the Metal backend already had the equivalent formula (its `'surface` buffers are host-visible `MTLBuffer`s dispatched through the same MSL path either way, so it was never affected).
+7. **A `Screen` program's window only ever showed its top `block_dim.1` rows (e.g. 16px) of the image, the rest black** — a kernel's `'surface` field paired with a sibling `Dimension` field needs a genuinely 2D dispatch grid; the existing 1D length-based auto-grid fallback left `grid_dim.y` at `1`, so only the first few rows were ever computed. Fixed by adding a `Dimension`-aware branch to the grid-size inference — the Metal backend already had the equivalent formula (its `'surface` buffers are host-visible `MTLBuffer`s dispatched through the same MSL path either way, so it was never affected).
 8. **A `Screen` window painted correctly only in a small top-left region on a >100%-DPI-scaled display** — `winit`'s `LogicalSize` (used for the window's `with_inner_size`) gets scaled by the monitor's DPI factor into a *different* physical window/surface size than what `softbuffer`'s `resize()` was told (the kernel's own unscaled `width`/`height`) — the OS compositor requires the two to match exactly. Fixed by switching to `winit::dpi::PhysicalSize`, which is exactly `width x height` physical pixels regardless of the display's scale factor.
 
 ---

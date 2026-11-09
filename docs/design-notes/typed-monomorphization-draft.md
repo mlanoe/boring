@@ -521,3 +521,22 @@ target).
   specialised copies: the copies exist in `mono` but carry no comment yet.
 - Idempotence is not guaranteed everywhere (`trait X: pass` followed by a top-level `pass` gains a line
   per reprint, `trait_scenarios_4`); the corpus has one such case.
+
+### Decision on the transpiler's monomorphizer in `mono` (2026-11-09)
+
+`mono` stays without `src/transpiler/monomorphize.rs`: it is the AST right after `parser::parse`, so it
+includes the specialisation of `src/specialize_untyped.rs` but not the instances the transpiler's
+monomorphizer makes (`Entry<Counter'actor>` appears as written, generic). It is added later, not now.
+How, in the order of preference:
+
+1. **With the two-phase compiler** (section 11 level 3). The whole program's AST exists after phase 1,
+   the monomorphizer runs on the desugared AST, and the instances of an imported generic are written
+   where they are used. The `.bri` is faithful by construction, with no placement rule to invent.
+2. **Before that**, a rule that puts the instances of imported generics into the `.bri` of the file that
+   uses them. Possible, but it makes a `.bri` that is not the image of one source file.
+
+Three obstacles found by the first attempt (it broke 14 of 609 cases): the monomorphizer needs the
+desugared AST (it panics on `labeled_array`), the instances of an imported generic live in the declaring
+file (a per-file `.bri` would call `Stack_int` without declaring it), and it substitutes `mut` onto
+scalars. The last one is a defect of the monomorphizer itself, independent of the `.bri`, to fix on its
+own.

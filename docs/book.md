@@ -527,7 +527,7 @@ println!("Name: {}, Age: {}", name, age);
 println!("Next year: {}", age + 1);
 ```
 
-**Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type and recurses through nested arrays/dicts/sets, tuples (`([1], [a])`) and optionals (`nil` when absent), including `for` loop variables over collections; a hole whose type it cannot resolve falls back to Rust's `{:?}` (strings quoted). Regression: `tests/cases/collection_interp.br`.
+**Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type and recurses through nested arrays/dicts/sets, tuples (`([1], [a])`) and optionals (`nil` when absent), including `for` loop variables over collections; a hole whose type it cannot resolve falls back to Rust's `{:?}` (strings quoted).
 
 ### Multi-line strings — `"""..."""`
 
@@ -1113,7 +1113,7 @@ let empty_map: HashMap<isize, isize> = HashMap::new();
 
 `mut` on the **value** position — `{K = mut V}` — is the dict analogue of `[mut T]`: it controls whether `def` calls work on values fetched via `d[k]` or iteration, independent of `mut {K=V} d` (structural `d[k]=v`/insertion/removal on the dict itself). Keys never accept `mut` — mutating one in place would invalidate the hash table, for either Boring or the underlying Rust `HashMap`.
 
-**Pointer qualifiers on the element of a literal (`'actor`, `'guard`, `'shared`, `'owned`, `'inline`).** The qualifier is written on the element, value or slot type and applies to every literal kind: `[mut Counter'guard] a = [...]`, `{string = mut Counter'actor} d = {...}`, `(mut Counter'shared, int) t = (...)`, `{Counter'owned} s = {...}`. Each element is built as that type: a fresh value is wrapped (`Arc<Mutex>`, `Arc<RwLock>`, `Arc`, `Box`, or the bare value for `'inline`), and a field that already is a lock handle of the *same* flavour is shared into the collection rather than copied, so a `def` call through `a[0]`, `d["k"]` or `t.0` mutates the field itself. A `def` call through such an element or tuple slot goes through its lock; add `mut` on the element for that (see above). A set cannot hold `'actor`/`'guard` elements (a lock has no `Hash`/`Eq`), which is a compile error, and a set of managed-mode `'owned` values is not supported for the same reason (an `'owned` value is a lock cell there). `[T'inline]`, `'shared` and strict-mode `'owned` sets need `#derive(Eq, Hash)` on `T`. Tests: `tests/qualified_collection_literals.rs`.
+**Pointer qualifiers on the element of a literal (`'actor`, `'guard`, `'shared`, `'owned`, `'inline`).** The qualifier is written on the element, value or slot type and applies to every literal kind: `[mut Counter'guard] a = [...]`, `{string = mut Counter'actor} d = {...}`, `(mut Counter'shared, int) t = (...)`, `{Counter'owned} s = {...}`. Each element is built as that type: a fresh value is wrapped (`Arc<Mutex>`, `Arc<RwLock>`, `Arc`, `Box`, or the bare value for `'inline`), and a field that already is a lock handle of the *same* flavour is shared into the collection rather than copied, so a `def` call through `a[0]`, `d["k"]` or `t.0` mutates the field itself. A `def` call through such an element or tuple slot goes through its lock; add `mut` on the element for that (see above). A set cannot hold `'actor`/`'guard` elements (a lock has no `Hash`/`Eq`), which is a compile error, and a set of managed-mode `'owned` values is not supported for the same reason (an `'owned` value is a lock cell there). `[T'inline]`, `'shared` and strict-mode `'owned` sets need `#derive(Eq, Hash)` on `T`.
 
 #### Dictionary methods
 
@@ -3578,7 +3578,7 @@ Calling `request`/`modify`/`call` on an `isCallable: false` `Method` throws a cl
 
 > **Limitation — literal `FieldValue` arguments.** Building `request`/`modify`/`set` call arguments (`FieldValue.Str("hi")`) with a string LITERAL directly runs into an auto-promotion mismatch: a literal argument to any Boring-declared-type call is auto-promoted to `Arc<str>`/`Rc<str>`, which doesn't always line up cleanly with what the receiving parameter expects. Route the value through a variable first when in doubt.
 >
-> **`boring run` — skip `FieldValue` entirely for arguments.** Every example below that constructs a `FieldValue.Int(...)`/`FieldValue.Str(...)` value to pass into `set`/`modify`/`call` is `boring build`-only for that construction — `FieldValue` is a transpiler-only Rust type (see `emit_introspect_prelude`) with no interpreter equivalent, so `FieldValue.Int(100)` is an "undefined variable" error under `boring run`. The interpreter's `get`/`request`/etc. work with plain runtime values directly instead (`f.set(instance, 100)`, `m.request(instance, [5])` — no wrapper), matching how `get()`'s *return* value is already a plain value there too (see "On enums" and the phases covered by `src/interpreter/tests.rs`'s `test_introspect_struct_set_and_request`).
+> **`boring run` — skip `FieldValue` entirely for arguments.** Every example below that constructs a `FieldValue.Int(...)`/`FieldValue.Str(...)` value to pass into `set`/`modify`/`call` is `boring build`-only for that construction — `FieldValue` is a transpiler-only Rust type with no interpreter equivalent, so `FieldValue.Int(100)` is an "undefined variable" error under `boring run`. The interpreter's `get`/`request`/etc. work with plain runtime values directly instead (`f.set(instance, 100)`, `m.request(instance, [5])` — no wrapper), matching how `get()`'s *return* value is already a plain value there too (see "On enums").
 >
 > **`boring run` — an `isCallable: false` call is a hard error, not a catchable `throw`.** Under `boring build`, `request`/`modify`/`call` on a non-callable `Method` returns a real `IntrospectError` through the normal `Result`/`?` machinery — catchable with `try`/`try?` like any other thrown error. The interpreter's equivalent check raises a genuine interpreter runtime error instead (the same kind raised for e.g. "no field '…' on instance"), which **cannot** be caught with `try`/`try?`/`catch` — it stops the program. A `throws`-method's own thrown error, in contrast, propagates as a normal catchable throw on both backends (see the example below).
 
@@ -3613,7 +3613,7 @@ def main() throws:
 
 (`FieldValue.Int(...)` above is `boring build`-only, per the callout above — under `boring run`, pass `[5]`/`[0]` directly instead; both were verified with a real `cargo build`+run and `boring run` before being written here.)
 
-**Rust equivalent** (abridged — see `src/transpiler/mod.rs`'s `emit_introspect_prelude` for the full generated prelude)
+**Rust equivalent** (abridged)
 ```rust
 enum FieldValue { Int(isize), Float(f64), Bool(bool), Str(Arc<str>), Other(String) }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4402,21 +4402,20 @@ print "{p.first} / {p.second}"   # 10 / hello
 struct Pair<T, U> { first: T, second: U }
 ```
 
-A `mut`-qualified type argument (`Container<mut Point>` for `struct Container<T>: T item`) propagating into the field's own permission check is still unimplemented for the *inferred* (no-turbofish) generic-instantiation path — that remains separate, unimplemented design work, not a corollary of ordinary `mut Type` field support ([Mutable fields](#mutable-fields)). It IS handled for an explicit, fully-concrete turbofish construction site (`Container<mut Point>(...)`): the Boring-side monomorphizer (`src/transpiler/monomorphize.rs`) specializes a non-generic clone with `T` substituted by the concrete `mut Point` directly as the field's own type, so `c.item.move_to(...)` compiles through ordinary `mut Type` field support on that specialized copy — see `tests/cases/monomorphize_mut_arg.br`.
 
-### Turbofish monomorphization
+### Explicit type arguments (turbofish)
 
-An explicit, fully-concrete turbofish call site — `Struct<T>(...)`, `fn<T>(...)`, or `obj.method<T>(...)` — gets a specialized, non-generic Rust clone alongside the existing, unmodified `impl<T: Clone> ...` generic-emission path (which every other, non-turbofish use of the same generic still flows through unchanged). This works same-file or cross-file (across `use` and `[deps]` boundaries) with no extra re-parse.
+A call that names its type arguments, `Struct<T>(...)`, `fn<T>(...)` or `obj.method<T>(...)`, gets its own specialised copy (`identity_int`); any other use stays an ordinary generic, with the type argument inferred.
 
 ```boring
 def T identity(T x):
     x
 
-print identity<int>(42)      # → identity_int(42), a specialized non-generic clone
-print identity(42)           # unaffected — still ordinary inferred generic Rust
+print identity<int>(42)      # the specialised identity_int
+print identity(42)           # unchanged: ordinary inferred generic
 ```
 
-**Generic method calls** — `obj.method<T>(...)` — extend this to a method that introduces its own type parameter, separate from anything its declaring struct declares:
+A method can introduce a type parameter of its own, separate from its struct's, and be called the same way:
 
 ```boring
 struct Box<T>:
@@ -4426,50 +4425,10 @@ struct Box<T>:
         extra
 
 mut b = Box<int>(5)
-print b.describe<string>("hello")   # → b.describe_string("hello")
+print b.describe<string>("hello")
 ```
 
-Resolution here is deliberately **name-only** — the receiver's own resolved type is never tracked. A method call site is specialized only when its bare method name (`describe` above) is unique among every generic method reachable from the whole file graph; if two or more declarations anywhere declare a method with the same name and its own type parameter, the call site is left as ordinary generic Rust (`obj.method::<T>(args)`) instead — a safe, silent fallback, not an error.
-
-This same name-uniqueness rule covers a method's declaring item regardless of whether it's a `struct`, an `ext` block, or an `enum` — a method with its own type parameter declared inside an `ext TypeName:` block, or directly on an `enum`, is specialized exactly like a struct method:
-
-```boring
-struct Wrapper:
-    var int value = 0
-
-ext Wrapper:
-    def U convert<U>(U x):
-        x
-
-mut w = Wrapper(5)
-print w.convert<int>(42)   # → w.convert_int(42)
-
-enum Shape:
-    Circle(float radius)
-
-    def U convert2<U>(U x):
-        x
-
-let s = Shape.Circle(1.0)
-print s.convert2<int>(42)  # → s.convert2_int(42)
-```
-
-The ambiguity check spans all three kinds together: a struct's own-generic `convert<T>` and an unrelated `ext` block's own-generic `convert<T>` sharing the same bare name anywhere in the reachable file graph makes `convert` ambiguous, and every call site naming it — on either type — falls back to ordinary generic Rust, exactly as if two structs had collided.
-
-**Optional chaining** — `obj?.method<T>(...)` — is also supported, with the same name-uniqueness restriction and the same silent-fallback behavior on an ambiguous method name:
-
-```boring
-struct OConverter:
-    var int value = 0
-
-    def T2 convert<T2>(T2 x):
-        x
-
-let OConverter'owned? c = OConverter(5)
-print c?.convert<int>(42)   # → c.clone().map(|mut __v| __v.convert_int(42))
-```
-
-The short-circuit (nil-propagating) semantics of `?.` are preserved exactly — only the method name resolved by the turbofish gets swapped for its specialized clone.
+How a method call is matched (by name), the `ext` and `enum` cases, optional chaining (`obj?.method<T>(...)`) and `mut` type arguments are in [Advanced — Explicit type arguments in depth](#advanced--explicit-type-arguments-in-depth).
 
 ### Trait constraints — `as`
 
@@ -4553,33 +4512,6 @@ bool same_size<T as Drawable>(T a, T b):
 
 > **Rule of thumb:** use `<Trait>` for the common single-use case. Switch to `Trait` (bare) only when you need to collect or store values of *different* concrete types at runtime. Use explicit `T<T as Trait>` when the same type must appear in multiple positions.
 
-### Lifetime and bound arguments at use sites
-
-When *calling* a generic function or annotating a variable, you can supply type arguments that include bare lifetimes and trait bounds for documentation purposes:
-
-```boring
-# Definition — constraint is declared here
-copy_items<T as Clone>(Container<T> src, Container<T> dst):
-    for item in src.items:
-        print "copying: {item}"
-
-# Use site — just pass the concrete type, no constraint needed
-copy_items<int>(src, dst)
-
-# Variable declaration with lifetime in type argument
-var Container<&a, string> buf = Container(items = ["x", "y"])
-```
-
-**Rules:**
-- `&a` in a type argument position becomes `'a` in the emitted Rust.
-- Constraints (`as Bound`) belong only on the **definition** — never repeat them at call sites.
-
-**Rust equivalent**
-```rust
-copy_items::<isize>(src, dst);           // bound already on fn, not repeated at call site
-let buf: Container<'a, Arc<str>>;   // lifetime preserved
-```
-
 ### Labelled generic arguments
 
 A generic argument can name the parameter it is for: `Pair<K = int, V = string>`, `Grid<N = 4>`. The label is the parameter's declared name, and the list is written the same way everywhere an argument list appears — constructor/function call, method turbofish, type position, `ext` header.
@@ -4631,150 +4563,14 @@ mut b = Board<elem'inline>()            # plain values: no lock, an element read
 
 This is the use-site answer to "One qualifier per declared type" (see *Element mutability*): `Board<elem'actor>` and `Board<elem'inline>` are two distinct, plain, non-generic types in the generated Rust (`Board_actor`, `Board_inline`, named like `Pair_int_string`), each with its methods and `ext` blocks, so the Rust stays readable and no "plain or locked" generic exists.
 
-**Declaration**
+**In short**
 
-| Form | `elem` ranges over |
-|---|---|
-| `struct Board<'elem>` | every qualifier a bare `T` may take: `'inline`, `'owned`, `'shared`, `'actor`, `'guard` |
-| `struct Board<'elem as 'new>` | the indirection set of `T'new`: `'owned`, `'shared`, `'actor`, `'guard` |
-| `struct Board<'elem as 'inline\|owned>` | the listed qualifiers (`'one` = `inline\|owned`, `'many` = `shared\|actor\|guard` work too) |
-| `struct Cache<T, 'q as 'new>` | mixes with type (`T`), const (`uint N`) and lifetime (`&a`) parameters |
-| `struct Board<'elem = 'inline>` | the full set, with a default (see "Default value") |
-| `struct Cache<'q as 'inline\|owned = 'inline>` | the listed qualifiers, with a default that belongs to them |
-| `struct Watched<'q as 'actor\|'actor'observed>` | members may be chains (see "Chained qualifiers") |
+- **Declare** `<'elem>` (it ranges over every qualifier a bare `T` may take), narrow it with `as` (`<'elem as 'inline|owned>`) and give it a default (`= 'inline`). **Pass** it as `Board<elem'actor>`: a qualifier parameter has no positional form.
+- **A bare construction needs no `<...>`** when the written qualifier of an argument (`Board(cells = [a, b])` with `a` declared `Point'actor`) or the expected type (`let Board<elem'actor> b = Board()`) determines it. Otherwise it is an error, ``cannot infer qualifier parameter `elem` of `Board`, write `Board<elem'...>` ``, unless every parameter has a default.
+- **Functions and methods** declare their own: `int count<'q>(Board<elem'q> b)` is specialised once per instance it is called with.
+- `boring run` ignores qualifiers; `boring build` specialises.
 
-A qualifier argument outside the bound is an error, and so is a default outside it, and so is a label that is a qualifier word (`'actor`) or that equals a type parameter's name. `mut` stays on the element (`[mut Point'elem]`), it is not part of the parameter. Inside the declaration `'elem` is accepted wherever a written qualifier is (`T'elem`, `[T'elem]`, `{K = mut V'elem}`, `T'elem?`); not as a chained qualifier (`T'elem'observed`), and not in a struct that does not declare it. The `<...>` list of a declaration may span several lines (struct, enum, `ext`, function, method): every tick in it is a qualifier tick, so `struct Pair<` / `    'a as 'actor|guard,` / `    'b` / `>:` reads as expected.
-
-**Use.** A use names its arguments with `<...>`, or leaves them to the construction when it determines them (see "Inference at construction"), or to the parameter's default (see "Default value"). The argument is one qualifier (`'inline`, `'owned`, `'shared`, `'actor` or `'guard`, optionally chained, see "Chained qualifiers"), written glued to the label, and a qualifier parameter has no positional form:
-
-```boring
-mut a = Board<elem'actor>()                     # constructor
-let Board<elem'actor> a = Board()               # binding: the constructor on the right takes the declared instance
-def int fill(var Board<elem'actor> b): ...      # parameter, return type, field, ...
-let c = Cache<T = int, q'shared>(1)             # next to a labelled type argument
-```
-
-- A bare construction (`Board()`, `Board(cells = [a, b])`, `Slot.Full(p)`) needs no `<...>` when the construction determines every parameter, see "Inference at construction" below. Otherwise, and when no default applies, it is an error: ``cannot infer qualifier parameter `elem` of `Board`, write `Board<elem'...>```. A bare *type* (`let Board b`) is that error too, unless every parameter of `Board` has a default.
-- `Board<elem'actor>` in a function signature just names a concrete type. It says how `Board` stores its elements *internally* and imposes nothing on the function, which stays an ordinary, non-generic function (and is unrelated to the qualifier of the parameter itself: `Board<elem'actor>'shared b`, `mut Board<elem'actor> b`, ... are inferred as for any struct). A function that wants to stay generic over the element qualifier is not part of this version.
-- `Container<T'actor>` keeps its ordinary meaning (type argument `T`, qualified `'actor`) unless `Container` declares a qualifier parameter named `T`, in which case it is that parameter's argument. A declaration cannot have a type parameter and a qualifier parameter of the same name, so the reading is never ambiguous.
-
-**Inference at construction.** Like the constructor of a generic type in other languages, `<...>` is only written when the construction does not determine the parameter. The evidence, in order (two pieces of evidence that disagree are an error, never a guess):
-
-1. explicit arguments, `Board<elem'actor>(...)`: used as written;
-2. the expected type: `let Board<elem'actor> b = Board()`, a field default, a function/constructor parameter, an argument of a method call whose receiver has a written type (`h.put(Board())` reads the parameter of `put`; an unknown receiver proves nothing), a return type or the tail expression of a function (a `return` inside a nested function is read against that function's own type), or the left side of an assignment, whose type is written as a known `Board<...>`;
-3. the *written* qualifier of the arguments that feed a `T'elem` slot (`T'elem`, `[mut T'elem]`, `{K = mut V'elem}`, in a field, an `init` or an enum variant payload): a binding, parameter or field declared `Point'actor`, directly or as the elements of an array/dict/set literal;
-4. nothing determines it: the error above.
-
-```boring
-let Point'actor a = Point(1)
-let Point'actor b = Point(2)
-let board = Board(cells = [a, b])               # Board<elem'actor>
-mut Board<elem'inline> empty = Board()          # from the expected type
-let s = Slot.Full(q)                            # q declared Point'inline: Slot<elem'inline>
-```
-
-Only a qualifier that is *written* counts: `let p = Point(1)` (its qualifier is itself inferred) and a fresh literal (`Board(cells = [Point(1)])`) give no evidence, so those constructions still need `<...>` or an expected type. There is no inference from how the value is used afterwards (`let b = Board()` followed by `b.add(actorPoint)` stays an error). The result is exactly the explicit instance: `Board(cells = [a, b])` and `Board<elem'actor>(cells = [a, b])` are the same `Board_actor`. Evidence outside the declared bound is a bound error, and a conflict (`[a, b]` with `a'actor` and `b'inline`, or an expected `Board<elem'actor>` with an `'inline` argument) reports both sources: ``conflicting qualifiers for `elem` of `Board`: `'actor` (declared on `a`) and `'inline` (declared on `b`); write `Board<elem'...>` to choose``. A declaration that mixes unlinked type and qualifier parameters (`Cache<T, 'q>`) is only resolved through an expected type that names all of its arguments (a plain `<T>`, see "A type argument carries its qualifier", infers it from a variable written with a qualifier): the specialiser has no type-argument inference (it specialises explicit `<...>` sites only, and the type of an argument expression is not known at that stage), so `Cache(5)` cannot tell `T`, which is also why its qualifier evidence is not used; a function receiving `Board<elem'actor>` is not affected by how its argument was inferred.
-
-**Default value.** A qualifier parameter may declare a default after its optional bound, `= 'qualifier`:
-
-```boring
-struct Board<'elem = 'inline>:                       # no bound: the full set, default 'inline
-    var [mut Point'elem] cells = []
-
-struct Cache<'elem as 'inline|owned = 'inline>:      # bound, then default
-
-mut a = Board()                                      # Board<elem'inline>
-mut Board b = Board()                                # bare type: the same instance
-let Point'actor p = Point(1)
-mut c = Board(cells = [p])                           # evidence wins: Board<elem'actor>
-mut Board<elem'actor> d = Board()                    # so does an explicit argument or expected type
-```
-
-The default is a declared, explicit choice, so it is not a guess: it is the **last** step of the evidence order, after explicit arguments, the expected type and the written qualifier of the arguments, and before the "cannot infer" error. It never overrides evidence and never takes part in a conflict (`Board(cells = [actorPoint])` is `Board_actor` even though the default is `'inline`), and evidence outside the bound stays an error (the default does not rescue it). A default must belong to the bound. A parameter may be defaulted independently of the others, and a defaulted one may be followed by one without a default (all arguments are labelled). A bare `Board`, as a construction or in a type position (field, parameter, return type, `let`), is valid when **every** parameter has a default, and means the default instance: the same specialisation, with the same name (`Board_inline`), as the explicit `Board<elem'inline>`. Two caveats: a bare *type* annotation is the default instance, so `let Board b = Board(cells = [actorPoint])` is a type mismatch (write `Board<elem'actor>`, or drop the annotation), and a bare `Board` inside `Board`'s own declaration is the default instance too, not "myself". The default is not read by the inference of an unparameterised `[mut T]` field (`infer_actor_elems`).
-
-**Chained qualifiers.** An argument, a bound member and a default are *chains*: a base qualifier optionally followed by one composable suffix (`'observed`, `'weak`; `'actor'task` and `'guard'task` are bases), exactly the chains valid on a type:
-
-```boring
-mut a = Board<elem'actor'observed>()
-struct Watched<'q as 'actor|'actor'observed|'inline'observed = 'actor'observed>:
-    mut Point'q pt = Point()
-```
-
-The validity rules are those of the same chain written on a type: `'shared'observed` is an error (a bound or default that spells it is rejected at the declaration, an argument at the use), `'weak` needs `'shared`/`'actor`/`'guard`. **Membership in the bound is by whole chain**: `as 'actor` does not admit `'actor'observed`, write `as 'actor|'actor'observed` (there is no wildcard). A use site substitutes the whole chain, `Point'elem` becomes `Point'actor'observed`, and the instance name joins the chain with `_` so it cannot collide with a plain qualifier instance: `Board_actor_observed`. The written qualifier of an argument that is itself a chain (`Point'actor'observed p`) is evidence as a whole chain. A chain is not accepted for the parameter use (`T'elem'observed`; to add a suffix when *passing* the parameter on, see below). The interpreter has no `'observed`, so `boring run` erases the chain like any qualifier; the runtime support of `'observed` in the generated Rust is emitted when an instance with an `'observed` chain exists, even if only a `use`d file spells it. An `'observed` element inside an enum variant payload is not supported by `'observed` itself yet.
-
-**Passing the parameter to an enclosing struct.** A struct that holds a qualifier-generic struct can hand its own parameter on, written explicitly: `elem'cells` inside a declaration of `'cells` reads "my `cells` is `Board`'s `elem`". The two names are independent.
-
-```boring
-struct Board<'elem = 'inline>:
-    var [mut Point'elem] cells = []
-
-struct Game<'cells = 'inline>:
-    var mut Board<elem'cells> board = Board<elem'cells>()   # Game's 'cells is Board's 'elem
-    var int turn = 0
-
-let Game<cells'actor> g = Game()        # Game_actor holds Board_actor holds Point'actor
-let Game g2 = Game()                    # Game_inline / Board_inline (the defaults)
-let Board<elem'actor> b = Board()
-let g3 = Game(board = b)                # cells = actor, read off the written qualifier of b
-```
-
-- **Always explicit.** A `Board` or `Board()` written with no argument in a field of `Game` takes **`Board`'s own default**, never `Game`'s parameter; there is no implicit propagation and no invisible generic. A field typed `Board<elem'cells>` whose value is a bare `Board()` is an error (```Board` here takes its own default for `elem`, not `cells` of the enclosing declaration; write `Board<elem'cells>` to pass it on``).
-- **Cascade.** A specialised enclosing declaration specialises what it holds, through struct fields, `init`s, method signatures and bodies, enum payloads and `ext` blocks, chains included: `Game<cells'actor'observed>` holds `Board<elem'actor'observed>` (`Game_actor_observed`, `Board_actor_observed`). A struct that holds itself (`Node<q'q>?`) or two structs that hold each other resolve without instantiating forever: instances are tracked by `(declaration, chain)`, a pair already seen is not specialised again.
-- **A concrete value freezes the instance.** `var Board<elem'actor> b` in a struct fixes `Board_actor`; that struct needs no parameter of its own.
-- **The names are checked at the declaration.** The passed name must be a parameter of the enclosing struct, enum or `ext` (``unknown qualifier parameter `cells` ``, with the position), and the enclosing **bound must fit inside the receiving one**: `struct G<'c>` (full bound) cannot pass `c` to `Cell<'q as 'new>`, `'c as 'actor|'inline` can pass it only to a parameter whose bound contains both `actor` and `inline`. A default applies to a parameter only when it is not passed on.
-- **Inference extends.** `Game(board = b)` takes `cells` from the written qualifier of `b` (a `Board<elem'actor>` binding, parameter or field, or an explicit `Board<elem'actor>()`), with the usual conflict rule; a construction under an expected `Game<cells'actor>` makes its `board` argument a `Board<elem'actor>`.
-- **A suffix added on the way.** `Held<q'c'observed>` inside `struct Holder<'c as 'actor|'guard>` passes the value of `c` followed by `'observed`: `Holder<c'actor>` holds `Held<q'actor'observed>`. The chain rules are unchanged (`'shared'observed` and two suffixes are errors) and are checked for **every member of the enclosing bound** at the declaration, with membership of each resulting chain in the receiving bound, so `struct Bad<'c>` (which allows `'shared`) cannot add `'observed`: narrow it, ``'c as 'actor|'guard``. A suffix can therefore never accumulate along a cycle (`grow<q'q'observed>` in `grow` is the same error).
-- **Not covered**: a qualifier-generic trait. A plain function takes the concrete instance (`def f(Game<cells'actor> g)`); one that should stay generic over the qualifier declares its own parameter, see the next section.
-
-**Functions and methods generic over a qualifier.** A function or a method can declare a qualifier parameter of its own, so that it works for any instance of a qualifier-generic struct instead of one `Board<elem'actor>`. The parameter is **visible in the signature**: it is declared with `<'q>` (bound and default as on a struct), or introduced by its first occurrence in the signature.
-
-```boring
-int count<'q>(Board<elem'q> b):                  # declared
-    b.cells.len()
-
-int count2(Board<elem'q> b):                     # introduced by its use: no `<'q>` written
-    count(b)                                     # passed on, inferred
-
-def add<'q as 'inline|owned = 'inline>(mut Board<elem'q> b, Point'q p):   # bound, then default
-    b.cells.push(p)
-
-struct Game<'cells = 'inline>:
-    var mut Board<elem'cells> board = Board<elem'cells>()
-    var int turns = 0
-
-    def merge<'q>(Board<elem'q> other):          # the method's own parameter, distinct from 'cells
-        turns += count(other)
-
-let Board<elem'actor> a = Board()
-count(a)                                         # q = actor, read off the written qualifier of a
-count<q'owned>(Board<elem'owned>())              # explicit
-```
-
-- **One specialised, non-generic copy per instance**, named like a type instance with the chain joined by `_`: `count_actor`, `count_owned`, `count_actor_observed`. There is no generic Rust function (no Rust generic over "plain or locked"), so each call is resolved at compile time.
-- **Declaration is optional, and only in a signature.** A qualifier identifier that appears in the parameters or the return type without being declared, and is not one of the qualifier words (`'shared`, `'actor`, `'guard`, `'inline`, `'owned`, `'new`, `'weak`, `'task`, `'observed`, `'static`, `'atomic`, the GPU and kernel qualifiers, the groups...), is introduced by its first occurrence. A declaration with `<'q ...>` is **required as soon as the parameter needs a bound or a default**. The omission does not extend to a struct, enum, `ext` or trait (there the `<'cells>` is part of the type's contract: `var Board<elem'q> b` in a struct is ``unknown qualifier parameter `q` ``), nor to the body (a `'q` the signature does not introduce is an error). A parameter named like one of the enclosing struct's is an error for a method (`'cells` is the struct's). A parameter introduced implicitly that is written **once** in the whole function, signature and body, relates to nothing and is most likely a typo for another name: a warning (``qualifier parameter `q` is never related to another use``), never an error; declare it with `<'q>` to silence it.
-- **The bound is checked at the declaration.** `<'q as 'inline|owned = 'inline>` follows the struct rules: the default must belong to the bound, and a parameter passed on (`Board<elem'q>`) must have a bound that fits inside the receiving one (``the bound of `q` ... is not within the bound of `elem` in `Board` ``). A call whose evidence leaves the bound is an error naming the source of the evidence.
-- **Calls infer the parameter from written qualifiers only**, in the order of "Inference at construction": explicit arguments (`count<q'owned>(..)`), the expected type against the return type (`let Board<elem'actor> b = fresh()`), the *written* qualifier of the arguments that feed a `T'q` or `Board<elem'q>` slot, then the declared default. Two pieces of evidence that disagree are a conflict (both are named, `write add<q'...> to choose`), a piece outside the bound is a bound error, and when nothing determines the parameter the call reports ``cannot infer qualifier parameter `q` of `count`, write `count<q'...>` ``. A binding whose qualifier is itself inferred, a fresh construction or a bare `Board` is no evidence: there is no inference by usage. A function that also declares unlinked type parameters (`def f<T, 'q>(..)`) is called with its generic arguments written out (`f<T = int, q'actor>(1, b)`), type arguments are not inferred; a plain `<T>` whose argument is a variable written with a qualifier infers it (see "A type argument carries its qualifier").
-- **The parameter is passed on.** Inside the body `Board<elem'q>` names the same parameter (locals, constructions: `Board<elem'q>()`), and a call to another qualifier-generic function either names it, `g<q'q>(b)`, or lets it be inferred from an argument written `Board<elem'q>`. The specialisation cascades through bodies: `count2_actor` calls `count_actor`, and a function that calls itself with its own parameter (polymorphic recursion) or two functions calling each other resolve to the instances reachable from the calls actually written. The set is finite by construction: an argument is a written chain or a parameter passed on whole, never built from another one (`q'q'observed` is rejected), so no instance can grow.
-- **Methods: one instance per method instance, only for the calls that exist.** A method (of a struct, an enum or an `ext` block, generic or not) may declare its own parameter next to the ones of its type. `g.merge(o)` and `g.merge(a)` with `o` and `a` of two different instances create `merge_owned` and `merge_actor`, nothing else; they are attached to every instance of the type that exists (`Game_actor`, and `Game_inline` if the program also builds it). The method's receiver is read from its written type (`self` inside the type itself); a call whose receiver type is not written and whose name is shared with another method must name the parameter: ``write `merge<q'...>` ``. A trait method cannot declare a qualifier parameter (qualifier-generic traits are not covered).
-- **Cross-file.** A function declared in a `use`d file or a `[deps]` project is specialised for the instances every file asks for, emitted once by the file that declares it.
-- **Known limits.** A string interpolation is parsed on its own, without the declarations of the file: an explicit `count<q'owned>(..)` or a `Board<elem'owned>()` written *inside* `"{...}"` is not resolved, bind it to a name first. An error found while inferring a call inside an interpolation is reported at the start of the string.
-- **Targets.** `boring run` ignores qualifiers (same diagnostics, same output); `boring build` specialises; the GPU host emitters share the general emission; `--linux` accepts a declaration whose bound is `'inline|owned` and rejects any other, with or without a call (see "Targets" below).
-
-**Enums and `ext` blocks.** `enum Slot<'elem as 'new>: Full(Point'elem)` is specialised the same way (`Slot_inline`). `ext Board<'elem>:` adds its methods to **every** instance; `ext Board<elem'actor>:` only to that instance (it is dropped if the program never uses it). A bare constructor takes its instance from the same evidence as a struct: `Slot.Full(p)` from the written qualifier of `p`, an expected type (`let Slot<elem'inline> s = Slot.Full(Point(1))`, a parameter, a field), or the declared default (`Slot.Empty` of `enum Slot<'elem = 'inline>`). A pattern is read the same way: `Slot.Full(p):` follows the written type of the match subject (a declared name, or a call of a function that declares its return type), or the instance of the subject the compiler resolved for it; `Slot<elem'inline>.Full(p):` names the instance itself (checked against the bound and the subject's written type) and takes concrete arguments only. The unqualified `Full(p):` keeps working.
-
-**What is checked, and when.** Everything about the *arguments* (unknown label, argument given twice, outside the bound, positional use, bare use, name clashes) is reported while parsing, with a position, so `boring run` and `boring build` give the same diagnostic. The *body* of a qualifier-generic declaration is checked once, unspecialised, where `'elem` is unresolved: checks that depend on the element qualifier are left to rustc for the specialised copy. In particular the "cannot store the `mut` parameter" diagnostic (a lent `mut` parameter pushed into a member) is not raised inside such a declaration, and the `'actor` promotion of such a parameter is not applied to the copies (`infer_actor_params` and `infer_actor_elems` run before specialisation and skip a declaration with qualifier parameters). Declare the parameter `Point'elem p` instead of `mut Point p`, as above: it then follows the instance.
-
-**Targets.** (Defaults and chains change nothing here.) `boring run` ignores qualifiers, so it runs the unspecialised program; `boring build` (standard, single-threaded, managed) specialises, across files too (`[deps]` and `use`d files; one `Board_actor` is emitted by the file that declares `Board`, however many files ask for it). The GPU host emitters (`--target metal|cuda|rocm|wgpu`) reuse the general emission and get the same specialised copies. `--linux` (the `no_std` emitter, which has no lock-aware element access) accepts a qualifier parameter whose **whole bound is kernel-safe**, `'inline` and `'owned` (`struct Board<'elem as 'inline|owned>`), and specialises it before emission (`Board_inline`, `Board_owned`, `count_owned`, ...); a bound that also allows `'actor`, `'guard`, `'shared` or a chain is rejected, naming them (``qualifier parameters whose bound allows 'actor, ... are not supported on the Rust-for-Linux Linux target``): narrow it with `as 'inline|owned`.
-
-**Considered and not built.**
-- **Invisible parameters** (a struct with a field whose qualifier inference leaves open would be implicitly generic over it, like an elided Rust lifetime). Rejected: *contagion* (a `def f(MonPoint m)` would need the hidden parameter too, contradicting "a `Board<elem'actor>` imposes nothing on the function that receives it"), *instance explosion* (one instance per field is N^k copies, and recursive structs need a fixed point), *whole-program inference* (the choice at each construction would depend on how the value is used far away), and a *hidden representation* (editing a distant function body would change the instance built, with nothing visible). If it is ever built: one parameter per struct, never per field, and no contagion. Until then an explicit `Board<elem'actor>` is the only selection mechanism.
-- **Inference from usage** (`let b = Board()` followed by `b.add(actorPoint)`): only a *written* qualifier is evidence, see "Inference at construction". The inferred instance cannot be displayed on request either (`--explain-inference` was designed, not built).
-- **Type-argument inference for a mixed `Cache<T, 'q>`** (the unlinked long form; a plain `<T>` takes a qualified argument instead, see "A type argument carries its qualifier"): the monomorphizer specialises explicit turbofish sites only (every other generic use stays on the generic-Rust path, where rustc infers `T`), and a qualifier-generic declaration has no such fallback. Inferring `T` would need expression typing (literals, calls, fields, coercions), a second mechanism rather than an extension of the first. An expected type naming every argument (`let Cache<T = int, q'shared> c = Cache(1)`) resolves it.
-- **A chain on the use** (`T'elem'observed`): the suffix is added when the parameter is passed on, see "A suffix added on the way".
-
-**Rust equivalent**: two plain structs, `struct Board_actor { cells: Vec<Arc<Mutex<Point>>> }` and `struct Board_inline { cells: Vec<Point> }`, plus their `impl` blocks. A `boring run` of a program that relies on the copy semantics of `'inline` (`let q = b.cells[0]; q.x = 9`) sees an alias, as it does for every `'inline` today.
-
----
+Bounds with `as`, defaults, chains (`'observed`), passing a parameter on to an enclosing struct, enums and `ext` blocks, the exact order of the inference and the errors are in [Advanced — Qualifier parameters in depth](#advanced--qualifier-parameters-in-depth).
 
 **A type argument carries its qualifier.** A plain `<T>` takes a qualified type as its argument: `T = Counter'actor` binds `T` to `Counter'actor` itself, and the declaration is specialised for it (`Entry_Counter_actor`), so what a use of `T` emits (the lock of an `'actor`, the plain access of an `'owned`) follows the argument:
 
@@ -4788,12 +4584,11 @@ var mut Entry<Counter'actor> f = Entry<Counter'actor>(c)    # written out
 e.value.inc()                                               # takes the lock
 ```
 
-- **Inference.** A bare construction or call of a generic struct or function infers `T` from a variable whose type is *written* with a qualifier (`let Counter'actor c`), and only then: any other call stays on the ordinary generic path (rustc infers it), and an argument whose qualifier is not written gives no evidence. Every type parameter must be determined this way, otherwise the call is left generic.
-- **A qualifier written on a slot is a constraint.** `def show<T>(T'owned a)` and, for an untyped parameter, `def show(a'owned)` refuse an argument written with another qualifier, naming both (``the parameter `a'owned` of `show` expects that qualifier, but this argument is written `'actor` ``). An argument whose qualifier is not written is not refused. The qualifier compared is the one written directly on the base type (`Counter'actor'weak` is `'actor`).
-- **One parameter, one qualifier.** Because `T` carries its qualifier, a slot `T'inline` next to a slot `T` cannot hold a `T` given as `Counter'actor`. A declaration that needs a field to follow a qualifier while another stays fixed declares the qualifier parameter separately: `struct Entry<T, 'q>` with `let T'q res` and `let T'inline fallback`, instantiated `Entry<T = Counter, q'actor>`. Its type argument is not inferred (see above): an expected type naming every argument resolves it.
-- **`<T'q>` is not a form.** The old sugar that tied a type and its qualifier into one parameter is an error naming the two forms to write: `<T>` (the qualifier travels with the type) or `<T, 'q>` (a qualifier parameter of its own).
-- **Specialisation** is per concrete type argument, qualifier included: `Entry_Counter_actor`, `Entry_Counter_owned`, like any generic instance. Under `boring run` qualifiers are ignored, so the same program runs unspecialised.
-- **Why not a hidden parameter.** An untyped field (`struct Response: payload`) stays a type parameter only, its qualifier following the inference for bare fields; it does not get an invisible qualifier parameter (see "Considered and not built" above: contagion, instance explosion). A qualifier travels with the type it was written on.
+- **Inference.** A bare construction or call infers `T` from a variable whose type is *written* with a qualifier (`let Counter'actor c`), and only then; any other call stays on the ordinary generic path.
+- **A qualifier written on a slot is a constraint.** `def show<T>(T'owned a)` and `def show(a'owned)` refuse an argument written with another qualifier, naming both.
+- **A field that follows a qualifier while another stays fixed** needs a qualifier parameter of its own: `struct Entry<T, 'q>` (`<T'q>` is not a form).
+
+More in [Advanced — Qualifier parameters in depth](#advanced--qualifier-parameters-in-depth).
 
 ### Const generics — `<uint N>`
 
@@ -4971,130 +4766,7 @@ def both(Response a, Response b):     # two independent instances
 
 The bounds are read off the uses of `r.field` in the body with the rules of [untyped parameters](#untyped-parameters), each `r.field` counting as an untyped parameter of its own (printed gives `Display`, `r.status > 0` gives `PartialOrd<isize>`, ...); a use that cannot be bounded is an error naming it (`cannot use the untyped parameter `r.status` with the method call `.foo()``). A method call on `r` (`r.summary()`) also brings the struct's own bounds. Only a top-level `def` or one in a `mod`, and only a struct of the same file or `mod` whose parameters are all implicit; a `task`/`stream`/`native` function, a method (`def Type.f`), a parameter with a default value, `Response?`/`[Response]`, a return type, a field and a `let` annotation keep the error above (write `Response<int, string>`). A struct imported from another file is not handled yet either.
 
-### A struct that names itself, and arrays of instances
-
-Inside a struct whose parameters are all implicit, a bare mention of the struct is the struct with its own parameters: in `struct Node: value / Node? next`, `next` is `Node<T_value>?`, so a chain is homogeneous (`Node(value = 1, next = Node(value = 2, next = nil))` is a `Node<int>`). The same goes for the struct's method signatures and `init` parameters. `nil` for an optional field binds nothing, the other fields decide. A mention that already carries arguments (`Node<int>? next`) keeps them, and an explicit annotation always wins over inference.
-
-An array holds one type, so `[a(), b()]` where `a()` is a `Response<int, string>` and `b()` a `Response<int, int>` is an error naming both instances, not a rustc mismatch. Only elements whose type is certain count (a constructor, or a call whose return type is known).
-
-### Untyped fields of a view
-
-A `view` accepts untyped fields too, with one rule per kind of field:
-
-```boring
-view Badge:
-    bind var label        # generic: fixed by what the parent hands over (`T_label`)
-    note                  # a plain prop: generic over the construction, like a struct field
-    state taps = 0        # `int`: a state slot has the type of its literal default
-    state ratio = 1.5     # `float`; `"text"` is `string`, `true` is `bool`, `-2` is `int`
-    env string theme      # an env value still needs its type
-```
-
-A `state` slot is seeded by its default and never supplied from outside, and an `env` value comes from a provider and has no initializer, so no construction could fix a type parameter for them: `state` takes the type of its default, which must be a literal (`cannot infer the type of `state taps` from its default` otherwise, `has no type and no default` with none), and `env` keeps requiring a written type (`` `env theme` needs a written type ``). A `bind` value generic over its use still needs its permission written (`bind var`, `bind mut`, `bind var mut`), as for an explicit `bind T name`, since the mutation surface of a generic value cannot be classified. The same limits as for a struct apply to the field's uses (`label.len()` is an error, printing and comparing are fine).
-
-A generic view and its trait implementations now carry the bounds of the view's own `impl` (`Clone`, the inferred or written `where` ones), plus `Send + Sync` in multi-threaded output because `View` has those supertraits there. Before, an explicitly generic view (`view Card<T as Display>`) failed in rustc in several configurations.
-
-### What an untyped parameter or field cannot do
-
-An untyped parameter or field is a bare type parameter: it can be printed, compared with another untyped one, combined with itself by arithmetic, and compared with or combined with a **numeric literal on its right**. Any other use is an error that names it, instead of a rustc failure on generated code:
-
-```boring
-def size(x):
-    return x.len()        # error: cannot use the untyped parameter `x` with the method call `.len()`
-def inc(x):
-    return 1 + x          # error: ... with a literal on its left (write the parameter first: `x + literal`)
-def add(a, b):
-    return a + b          # error: ... with `b`, another untyped parameter (a separate type; to share one type write `T f(T a, T b)`)
-```
-
-**Literals.** `n > 0`, `n == 1`, `x + 1`, `x * 2.5 - 0.5` are accepted: the literal fixes the operand type (`int` literals are `isize`, `float` literals `f64`), and the parameter gets the bound that says so (`PartialOrd<isize>`, `Add<isize, Output = T_x>` plus `Copy`; the result of the arithmetic is the parameter's own type again, so `return x + 1` types the function). `def isPositive(n): return n > 0` is therefore callable with an `int`, and `def scaled(x): return x * 2.5` with a `float`; calling the first with a `float` is a type error in the generated Rust, exactly as passing a `float` to `isize`-bounded code would be (`boring run`, being dynamic, would accept it: write the type, or a generic, when both numeric types must work). A literal on the *left* (`0 < n`, `1 + x`) would need the bound on the literal's type, not on the parameter, so it is an error with the fix named: put the parameter first. These bounds also flow through calls (a bound that names only the callee's own parameter, such as `Add<Output = T_n>`, is carried over to the caller's parameter).
-
-**Other files.** Bounds flow through a call into a function of another file too: a bare sibling `use`, a `pub` function of a selective or qualified `use`, a `[deps]` project and the embedded stdlib (`use boring.<module>`) all count, resolved like the return-type inference sees them; a local function of the same name shadows the import. The imported function's bounds are the ones fixed when its own file parsed.
-
-**`len()`.** `x.len()` (no arguments) is allowed on an untyped parameter or field: Rust has no std `len` trait, so the parameter is bounded by `BoringLen`, a small trait in the generated prelude implemented for arrays, dicts, sets and strings (scalar-value count, like `string.len()`). The result is a `uint` (as for a known array or dict), so `def size(x): return x.len()` is typed `uint`; any type that is not one of those collections fails in the generated Rust naming `BoringLen`.
-
-**Not done, on purpose.** There is no bound for any other method call (`push`, `abs`, a user method: no trait to name, write the type), and two separate untyped parameters are never related (`def larger(a, b)` returning either: each parameter is its own type, so no sound return type exists without a shared `T`).
-
-The reported uses are a method call (`clone`, `to_string` and `len()` are allowed; `to_string` adds `Display`, `len()` adds `BoringLen`), a field read, an index, and an operator whose other operand is neither the same parameter nor (on its right) a numeric literal. A name that the body binds again (a `let`, a loop variable, a closure parameter) is not the parameter and is never reported; for a struct field, neither is a method parameter of the same name. Write the type (`[int] x`, `int x`, `T x`) to use the value further.
-
-A **recursive** function (directly, or through other functions of its scope) that returns a value needs its return type written: `int fact(int n)`. Inferring it would need a fixpoint over the cycle, and without the check such a function silently became `void`. A recursive function that returns nothing is unaffected.
-
-A **struct with untyped fields is generic**, and device code only has concrete structs: building one bare in a kernel, in a function a kernel calls, or naming it in a kernel field or a reachable signature is an error on every GPU backend (`simd`, `metal`, `wgpu`, `cuda`, `rocm`). Write the field types (`int v`), instantiate it explicitly (`Wrap<int>(v = i, n = 2)`, the types in field order; `metal`/`wgpu`/`cuda`/`rocm` specialise it like any generic struct, see [GPU module](gpu-module.html#type-generics-not-on-kernels-yes-on-structs-and-helper-functions)), or use a concrete struct there. Trait method signatures keep requiring written types.
-
-### Reading the inferred headers
-
-`boring check --show-types file.br` prints the signature each untyped parameter or field turned into, one line per declaration, so that a header nobody wrote can still be read:
-
-```
-def describe<y>(y) where y: Display
-def keep<x>(x) -> x
-struct Request<url, retries>
-    url
-    retries
-```
-
-After the declarations, `uses:` lists each construction of such a struct with the types it was fixed to (`line:column`, the field name standing for its parameter), so one struct with two instantiations reads as two lines:
-
-```
-uses:
-  6:16  Response<status = int, payload = string>
-  9:16  Response<status = int, payload = [int]>
-```
-
-A construction whose parameters cannot be determined (an unknown callee, a typeless `[]`) is left out, exactly as in the return-type inference. A struct declared in a `use`d file (sibling, `[deps]`, stdlib) is typed too; its own declaration is listed by the file that declares it.
-
-Only declarations with an implicit type parameter are listed. An implicit parameter is shown under the name of the parameter or field it comes from (`<x>` for `def keep(x)`, `<url, retries>` for `Request`; the generated Rust calls it `T_x`, which never appears here), and a parameter or field with no written type is shown bare. An inferred return type shows after `->`, and the bounds read off the body after `where`. In `uses:`, a parameter fixed by a field's default value, because the construction left the field out, is marked `(default)` (`Request<url = string, retries = int (default)>`). It parses the file and runs the inference passes but not the semantic checker, and it lists the declarations of that file only.
-
-### `@api` — a signature other projects can rely on
-
-`pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:
-
-```boring
-@api(since = "1.0")
-pub struct Counter:
-    var int n = 0
-
-    pub def inc():
-        n += 1
-
-    pub req int get():
-        n
-
-@api
-pub def int double(int x):
-    return x * 2
-```
-
-- **It requires `pub`** (`@api requires pub`), like `@provide`.
-- **The signature must be written out in full.** A function that returns a value has its return type written (the [return-type inference](#inferred-return-types) skips `@api` items, and an `@api` function with a `return <value>` and no written type is an error), every parameter typed, every qualifier parameter declared (`<'q>`, not introduced by its first use), and a `pub type let`/`type var` of an `@api` type needs its type written rather than inferred from its value. Inside the body, inference is unaffected. An untyped parameter or a `pub` field without a type (see [untyped parameters](#untyped-parameters) and fields) is an error under `@api`: an inferred type would silently become part of the API. Non-`pub` fields stay free to infer.
-- **On a `struct` or `enum` it covers every `pub` member** (fields, methods, `type` members, setters, conversions): the attribute is not repeated on each one. Non-`pub` members are not part of the API.
-- **Arguments are free text.** `since = "..."` and `deprecated = "..."` are documentation for readers and tooling; they are never parsed or compared with `boring.toml`'s `version`, and never emitted to Rust. Any other argument, a non-string value or a repeated key is an error.
-- **Exposure warning.** An `@api` signature that mentions a type declared in the same program without `@api` produces a warning (the equivalent of Rust's private-in-public lint): the API would depend on a type free to change. A type declared in an imported file is not known to the checker and is never flagged.
-- **Where it applies.** `def`/`req` functions, `struct`, `enum` and `view`. On a `trait`, `ext`, `mod` or any other item it is a compile error rather than a silent no-op.
-- **It guarantees form; `boring api` guarantees stability.** `@api` alone does not notice that a signature changed between two versions. `boring api <file.br>` prints a snapshot of every `@api` entry (the item, each `pub` field, method, variant and `type` member, one `key<TAB>signature` line each, sorted); keep it in version control. `boring api --check <snapshot> <file.br>` compares the current signatures with it: a removed or changed entry is **breaking** (exit code 1), a new one is only reported (`added:`). `since`/`deprecated` take no part. The comparison is deliberately conservative (any change to a signature counts, even one that would be compatible in Rust). It reads one file; an `@api` item declared in another file is not seen. In `boring run` and `boring build` the attribute changes nothing else: it never reaches the generated Rust.
-
-### Implicit generics: design notes
-
-The sections above are the reference; this is why they are the way they are, and what is deliberately left out.
-
-- **The invariant.** An omitted type becomes an ordinary generic parameter, and every member must be fully typed at each construction, so an instantiation is never partial. A value that constrains nothing (`Response(status = 200, payload = [])`, `payload = nil`) is an error, not a guess. After inference every binding has one concrete type, exactly as if written: there is no dynamic typing and `boring run` and `boring build` agree (apart from numeric literals, see below).
-- **Mechanism.** The parser writes a placeholder `T_<name>` for each omitted parameter or field type and adds it to the declaration's type parameters; small passes (`infer_param_generics` for bounds, `infer_return_types` for return types and for the parameters of a construction) then write the missing annotations back before the checker and the transpiler run. Everything after them sees plain explicit generics, so the interpreter, checker and transpiler are untouched. There is no general unifier: Boring has no type variables, and rustc still resolves what happens *inside* a body.
-- **Why `@api` is per item.** Stability could have been inferred from "library" (no `main`, or a `boring.toml` key), but a library may grow a demo `main`, and no heuristic can say which of a project's `pub` items other projects use. `pub` already means visibility only, so a marker on the item says it where the code is. `@api` guarantees *form* (a written signature); `boring api --check` guarantees *stability*.
-- **Defaults and ambiguity.** Literals default (`42` is `int`, `1.0` is `float`); two pieces of evidence that disagree are an error, never a pick. A default value types a parameter only when the construction leaves the field out; a supplied argument always wins, and there is no implicit numeric coercion (`retries = 1` against `let retries = 0.5` binds `int`). `--show-types` marks the ones that came from a default.
-- **Where omission is allowed.** Struct fields, `view` props (not `env`), `def` parameters and return types. Not trait/protocol method signatures (they are the contract), not methods, and a recursive function must write its return type (inference would need a fixpoint with polymorphic recursion). `nil` for an optional field binds nothing.
-- **Bounds stay minimal.** An implicit parameter gets the blanket `Clone` plus what the body shows directly (printing, comparison, same-parameter or literal arithmetic, `len`, and whatever flows through calls, including into other files). Anything else is a Boring error naming the use, not a rustc error on generated code. A literal fixes its operand type (`isize`/`f64`), so `boring run`, being dynamic, accepts `isPositive(2.5)` where `build` rejects it.
-- **Names.** The user never wrote `T_x`, so diagnostics and `--show-types` show an implicit parameter by the parameter or field it comes from (`Response<status = int, payload = string>`).
-- **Qualifiers.** Type parameters only: an omitted type never introduces a hidden qualifier. A qualifier travels with the type it is written on ("A type argument carries its qualifier").
-- **GPU.** Generic structs and helper functions are monomorphised in device code by explicit instantiation (`Pair<float32>`, `twice<int>`); a bare construction of an untyped-field struct, an uninstantiated generic call and `kernel K<T>` stay Boring errors.
-
-Known limits, by design or not yet solved:
-
-- Two untyped parameters are two independent types, so `def larger(a, b)` returning either cannot be typed: relating them needs a written `T`.
-- Method calls on an untyped parameter other than `len`, `clone` and `to_string` are errors.
-- A variable holding an empty collection passed to an untyped field (`let e = []; R(payload = e)`) is left to rustc, because a later `push` can legitimately type it; only a directly written `[]`, `{}`, `{=}` or `nil` is reported.
-- `boring check --show-types` and `boring api` read one file (`--show-types` follows `use` for the types of constructions, not for declarations); `boring api --check` compares signatures conservatively, any change counts.
-
----
+A struct that names itself, a view's fields and what an untyped parameter or field cannot do are in [Advanced — A struct that names itself, and arrays of instances](#advanced--a-struct-that-names-itself-and-arrays-of-instances), [Advanced — Untyped fields of a view](#advanced--untyped-fields-of-a-view) and [Advanced — What an untyped parameter or field cannot do](#advanced--what-an-untyped-parameter-or-field-cannot-do).
 
 ## 14. Closures and Higher-Order Functions
 
@@ -5713,19 +5385,14 @@ for, in order:
 3. `BORING_PATH` entries — same caveat as step 2, `boring run`/GPU targets
    only.
 
-Three independently-written codepaths implement this (not one shared
-resolver), but all follow the same rule above:
+The search differs a little by command:
 
-- `boring run` — the interpreter's `exec_use`/`bind_module_items`, with
-  search paths assembled in `run_file` (file's own directory, then the
-  project's `src/`, then `BORING_PATH`).
-- The GPU targets — `parse_and_merge_program`/`merge_into` in `src/main.rs`
-  merge every reachable sibling file into one flat `Program` before
-  transpiling, using the same three-step search order.
-- Plain `boring build`/`--emit-rust` — the transpiler's `emit_use`/
-  `inline_boring_use`, resolving only against the current file's directory
-  (`TranspileConfig::source_dir`) — no project `src/` fallback, no
-  `BORING_PATH`.
+- `boring run` searches the file's own directory, then the project's `src/`,
+  then `BORING_PATH`.
+- The GPU targets merge every reachable sibling file into one flat program
+  before transpiling, using the same three-step search order.
+- Plain `boring build`/`--emit-rust` resolves only against the current file's
+  directory: no project `src/` fallback, no `BORING_PATH`.
 
 **Every top-level item is imported unconditionally, `pub` or not.** Unlike
 the multi-segment forms above (where `pub` gates which names a selective
@@ -7157,7 +6824,7 @@ declaration site — a field's real "usage" spans arbitrary external call sites
 across the whole program, and a parameter's/return's spans every caller — so
 rather than build three new cross-body/cross-call-site inference passes, a bare
 `'observed` field/parameter/return type resolves straight to the shared,
-lockable `'actor'observed` base (`Transpiler::resolve_bare_observed`). This is
+lockable `'actor'observed` base. This is
 directionally the same choice the local pipeline's own multi-owner signal makes,
 just applied unconditionally instead of only on a detected signal — fields,
 parameters, and return types are exactly the shapes most likely to cross an
@@ -7166,8 +6833,7 @@ ownership boundary in the first place.
 **Construction.** A field's own `= expr` default (or an explicit `init` param's
 assignment `self.field = param`) initializes both `value` and a fresh, empty
 subscriber list, the same as a local `'observed let`'s initializer — this falls
-out of `Transpiler::wrap_observed_base`, a helper factored out of the local-
-binding construction path and reused for field defaults, labeled-arg struct-
+out of the same construction path as a local binding, reused for field defaults, labeled-arg struct-
 literal construction (`Container(model = FormModel())`), and return-type
 wrapping alike. Passing an *already*-`'observed`-typed value into a matching
 field/parameter (the `@ObservedObject` case above: `View(m)` where `m` is already
@@ -7198,7 +6864,7 @@ pre-existing exclusion for a plain `'actor`/`'guard` field in that same mode —
 **Known gaps, not covered by this pass** (see the codebase's own tracked
 follow-ups): field-level `mut`/`var mut` permission for a `def` call reached
 through `self.field` (`'actor`/`'guard`/`'observed` alike) IS now enforced —
-`Transpiler::check_field_def_call_mut_gate` (src/transpiler/emit_methods.rs)
+the compiler
 closes what used to be a gap here, pushing the same "not declared `mut`"
 diagnostic a local binding's own permission check already produced. Dispatch
 through a field is still scoped to `self.field`; an arbitrary
@@ -7302,7 +6968,7 @@ instantiations of the generic struct exist. A field whose type **does**
 depend on the type parameter is rejected outright — a Rust `static` cannot
 be generic, so there is no single instance to share across
 instantiations — **unless** a concrete turbofish specialization of the
-struct exists somewhere in the program (see "Turbofish monomorphization"
+struct exists somewhere in the program (see "Explicit type arguments (turbofish)"
 earlier in this chapter): the specialized, non-generic copy has no type parameter left to
 depend on, so the field compiles fine *for that copy*, while the struct's
 still-generic form keeps rejecting it.
@@ -8292,6 +7958,34 @@ struct Config:
 Both are equivalent to stacking the same attributes one per line — same-line chaining is purely a formatting choice.
 
 ---
+
+### `@api` — a signature other projects can rely on
+
+`pub` says an item is visible; it says nothing about whether other projects may depend on it staying the same. `@api` says that, and the compiler holds the item to it:
+
+```boring
+@api(since = "1.0")
+pub struct Counter:
+    var int n = 0
+
+    pub def inc():
+        n += 1
+
+    pub req int get():
+        n
+
+@api
+pub def int double(int x):
+    return x * 2
+```
+
+- **It requires `pub`** (`@api requires pub`), like `@provide`.
+- **The signature must be written out in full.** A function that returns a value has its return type written (the [return-type inference](#inferred-return-types) skips `@api` items, and an `@api` function with a `return <value>` and no written type is an error), every parameter typed, every qualifier parameter declared (`<'q>`, not introduced by its first use), and a `pub type let`/`type var` of an `@api` type needs its type written rather than inferred from its value. Inside the body, inference is unaffected. An untyped parameter or a `pub` field without a type (see [untyped parameters](#untyped-parameters) and fields) is an error under `@api`: an inferred type would silently become part of the API. Non-`pub` fields stay free to infer.
+- **On a `struct` or `enum` it covers every `pub` member** (fields, methods, `type` members, setters, conversions): the attribute is not repeated on each one. Non-`pub` members are not part of the API.
+- **Arguments are free text.** `since = "..."` and `deprecated = "..."` are documentation for readers and tooling; they are never parsed or compared with `boring.toml`'s `version`, and never emitted to Rust. Any other argument, a non-string value or a repeated key is an error.
+- **Exposure warning.** An `@api` signature that mentions a type declared in the same program without `@api` produces a warning (the equivalent of Rust's private-in-public lint): the API would depend on a type free to change. A type declared in an imported file is not known to the checker and is never flagged.
+- **Where it applies.** `def`/`req` functions, `struct`, `enum` and `view`. On a `trait`, `ext`, `mod` or any other item it is a compile error rather than a silent no-op.
+- **It guarantees form; `boring api` guarantees stability.** `@api` alone does not notice that a signature changed between two versions. `boring api <file.br>` prints a snapshot of every `@api` entry (the item, each `pub` field, method, variant and `type` member, one `key<TAB>signature` line each, sorted); keep it in version control. `boring api --check <snapshot> <file.br>` compares the current signatures with it: a removed or changed entry is **breaking** (exit code 1), a new one is only reported (`added:`). `since`/`deprecated` take no part. The comparison is deliberately conservative (any change to a signature counts, even one that would be compatible in Rust). It reads one file; an `@api` item declared in another file is not seen. In `boring run` and `boring build` the attribute changes nothing else: it never reaches the generated Rust.
 
 ## 25. Format Specifiers
 
@@ -9356,14 +9050,13 @@ compile (`E0308: expected Arc<str>, found &'static str`) when the signature take
 owned `Arc<str>`/`Rc<str>` — which does happen, e.g. a hand-written type that stores the
 value or hands it to another owned-`Arc<str>` API.
 
-**Why**: the promotion from a bare literal to `Arc::<str>::from("...")` (`emit_expr_owned`,
-used e.g. for arguments to a Boring-declared function/method, where the callee's `string`
+**Why**: the promotion from a bare literal to `Arc::<str>::from("...")` (used e.g. for arguments to a Boring-declared function/method, where the callee's `string`
 parameter type is known from its own signature) only happens where the transpiler has an
 actual Boring-level parameter type to coerce toward. A call into an external type has, by
 definition, no such signature for Boring to consult — there is no way to distinguish "this
 external method wants `&str`" from "this external method wants `Arc<str>`" from the `.br`
 source alone, so the argument falls back to the same representation as any other bare
-expression (`emit_expr`, not `emit_expr_owned`).
+expression.
 
 **This is not going to become a safe default to change**: emitting `Arc::<str>::from(...)`
 unconditionally for every literal argument to an external call would fix the `Arc<str>`-
@@ -9688,6 +9381,334 @@ let msg = format!("{} + {} = {}", 1, 2, add(1, 2));
 
 ---
 
+### Advanced — Qualifier parameters in depth
+
+The short version is in "Qualifier parameters" (Generics): declare `<'elem>`, pass `Board<elem'actor>`, let the construction infer it. This section holds the rules behind it: bounds, defaults, chains, passing a parameter on, functions, enums, targets and what was rejected.
+
+**Declaration**
+
+| Form | `elem` ranges over |
+|---|---|
+| `struct Board<'elem>` | every qualifier a bare `T` may take: `'inline`, `'owned`, `'shared`, `'actor`, `'guard` |
+| `struct Board<'elem as 'new>` | the indirection set of `T'new`: `'owned`, `'shared`, `'actor`, `'guard` |
+| `struct Board<'elem as 'inline\|owned>` | the listed qualifiers (`'one` = `inline\|owned`, `'many` = `shared\|actor\|guard` work too) |
+| `struct Cache<T, 'q as 'new>` | mixes with type (`T`), const (`uint N`) and lifetime (`&a`) parameters |
+| `struct Board<'elem = 'inline>` | the full set, with a default (see "Default value") |
+| `struct Cache<'q as 'inline\|owned = 'inline>` | the listed qualifiers, with a default that belongs to them |
+| `struct Watched<'q as 'actor\|'actor'observed>` | members may be chains (see "Chained qualifiers") |
+
+A qualifier argument outside the bound is an error, and so is a default outside it, and so is a label that is a qualifier word (`'actor`) or that equals a type parameter's name. `mut` stays on the element (`[mut Point'elem]`), it is not part of the parameter. Inside the declaration `'elem` is accepted wherever a written qualifier is (`T'elem`, `[T'elem]`, `{K = mut V'elem}`, `T'elem?`); not as a chained qualifier (`T'elem'observed`), and not in a struct that does not declare it. The `<...>` list of a declaration may span several lines (struct, enum, `ext`, function, method): every tick in it is a qualifier tick, so `struct Pair<` / `    'a as 'actor|guard,` / `    'b` / `>:` reads as expected.
+
+**Use.** A use names its arguments with `<...>`, or leaves them to the construction when it determines them (see "Inference at construction"), or to the parameter's default (see "Default value"). The argument is one qualifier (`'inline`, `'owned`, `'shared`, `'actor` or `'guard`, optionally chained, see "Chained qualifiers"), written glued to the label, and a qualifier parameter has no positional form:
+
+```boring
+mut a = Board<elem'actor>()                     # constructor
+let Board<elem'actor> a = Board()               # binding: the constructor on the right takes the declared instance
+def int fill(var Board<elem'actor> b): ...      # parameter, return type, field, ...
+let c = Cache<T = int, q'shared>(1)             # next to a labelled type argument
+```
+
+- A bare construction (`Board()`, `Board(cells = [a, b])`, `Slot.Full(p)`) needs no `<...>` when the construction determines every parameter, see "Inference at construction" below. Otherwise, and when no default applies, it is an error: ``cannot infer qualifier parameter `elem` of `Board`, write `Board<elem'...>```. A bare *type* (`let Board b`) is that error too, unless every parameter of `Board` has a default.
+- `Board<elem'actor>` in a function signature just names a concrete type. It says how `Board` stores its elements *internally* and imposes nothing on the function, which stays an ordinary, non-generic function (and is unrelated to the qualifier of the parameter itself: `Board<elem'actor>'shared b`, `mut Board<elem'actor> b`, ... are inferred as for any struct). A function that wants to stay generic over the element qualifier is not part of this version.
+- `Container<T'actor>` keeps its ordinary meaning (type argument `T`, qualified `'actor`) unless `Container` declares a qualifier parameter named `T`, in which case it is that parameter's argument. A declaration cannot have a type parameter and a qualifier parameter of the same name, so the reading is never ambiguous.
+
+**Inference at construction.** Like the constructor of a generic type in other languages, `<...>` is only written when the construction does not determine the parameter. The evidence, in order (two pieces of evidence that disagree are an error, never a guess):
+
+1. explicit arguments, `Board<elem'actor>(...)`: used as written;
+2. the expected type: `let Board<elem'actor> b = Board()`, a field default, a function/constructor parameter, an argument of a method call whose receiver has a written type (`h.put(Board())` reads the parameter of `put`; an unknown receiver proves nothing), a return type or the tail expression of a function (a `return` inside a nested function is read against that function's own type), or the left side of an assignment, whose type is written as a known `Board<...>`;
+3. the *written* qualifier of the arguments that feed a `T'elem` slot (`T'elem`, `[mut T'elem]`, `{K = mut V'elem}`, in a field, an `init` or an enum variant payload): a binding, parameter or field declared `Point'actor`, directly or as the elements of an array/dict/set literal;
+4. nothing determines it: the error above.
+
+```boring
+let Point'actor a = Point(1)
+let Point'actor b = Point(2)
+let board = Board(cells = [a, b])               # Board<elem'actor>
+mut Board<elem'inline> empty = Board()          # from the expected type
+let s = Slot.Full(q)                            # q declared Point'inline: Slot<elem'inline>
+```
+
+Only a qualifier that is *written* counts: `let p = Point(1)` (its qualifier is itself inferred) and a fresh literal (`Board(cells = [Point(1)])`) give no evidence, so those constructions still need `<...>` or an expected type. There is no inference from how the value is used afterwards (`let b = Board()` followed by `b.add(actorPoint)` stays an error). The result is exactly the explicit instance: `Board(cells = [a, b])` and `Board<elem'actor>(cells = [a, b])` are the same `Board_actor`. Evidence outside the declared bound is a bound error, and a conflict (`[a, b]` with `a'actor` and `b'inline`, or an expected `Board<elem'actor>` with an `'inline` argument) reports both sources: ``conflicting qualifiers for `elem` of `Board`: `'actor` (declared on `a`) and `'inline` (declared on `b`); write `Board<elem'...>` to choose``. A declaration that mixes unlinked type and qualifier parameters (`Cache<T, 'q>`) is only resolved through an expected type that names all of its arguments (a plain `<T>`, see "A type argument carries its qualifier", infers it from a variable written with a qualifier): the specialiser has no type-argument inference (it specialises explicit `<...>` sites only, and the type of an argument expression is not known at that stage), so `Cache(5)` cannot tell `T`, which is also why its qualifier evidence is not used; a function receiving `Board<elem'actor>` is not affected by how its argument was inferred.
+
+**Default value.** A qualifier parameter may declare a default after its optional bound, `= 'qualifier`:
+
+```boring
+struct Board<'elem = 'inline>:                       # no bound: the full set, default 'inline
+    var [mut Point'elem] cells = []
+
+struct Cache<'elem as 'inline|owned = 'inline>:      # bound, then default
+
+mut a = Board()                                      # Board<elem'inline>
+mut Board b = Board()                                # bare type: the same instance
+let Point'actor p = Point(1)
+mut c = Board(cells = [p])                           # evidence wins: Board<elem'actor>
+mut Board<elem'actor> d = Board()                    # so does an explicit argument or expected type
+```
+
+The default is a declared, explicit choice, so it is not a guess: it is the **last** step of the evidence order, after explicit arguments, the expected type and the written qualifier of the arguments, and before the "cannot infer" error. It never overrides evidence and never takes part in a conflict (`Board(cells = [actorPoint])` is `Board_actor` even though the default is `'inline`), and evidence outside the bound stays an error (the default does not rescue it). A default must belong to the bound. A parameter may be defaulted independently of the others, and a defaulted one may be followed by one without a default (all arguments are labelled). A bare `Board`, as a construction or in a type position (field, parameter, return type, `let`), is valid when **every** parameter has a default, and means the default instance: the same specialisation, with the same name (`Board_inline`), as the explicit `Board<elem'inline>`. Two caveats: a bare *type* annotation is the default instance, so `let Board b = Board(cells = [actorPoint])` is a type mismatch (write `Board<elem'actor>`, or drop the annotation), and a bare `Board` inside `Board`'s own declaration is the default instance too, not "myself".
+
+**Chained qualifiers.** An argument, a bound member and a default are *chains*: a base qualifier optionally followed by one composable suffix (`'observed`, `'weak`; `'actor'task` and `'guard'task` are bases), exactly the chains valid on a type:
+
+```boring
+mut a = Board<elem'actor'observed>()
+struct Watched<'q as 'actor|'actor'observed|'inline'observed = 'actor'observed>:
+    mut Point'q pt = Point()
+```
+
+The validity rules are those of the same chain written on a type: `'shared'observed` is an error (a bound or default that spells it is rejected at the declaration, an argument at the use), `'weak` needs `'shared`/`'actor`/`'guard`. **Membership in the bound is by whole chain**: `as 'actor` does not admit `'actor'observed`, write `as 'actor|'actor'observed` (there is no wildcard). A use site substitutes the whole chain, `Point'elem` becomes `Point'actor'observed`, and the instance name joins the chain with `_` so it cannot collide with a plain qualifier instance: `Board_actor_observed`. The written qualifier of an argument that is itself a chain (`Point'actor'observed p`) is evidence as a whole chain. A chain is not accepted for the parameter use (`T'elem'observed`; to add a suffix when *passing* the parameter on, see below). The interpreter has no `'observed`, so `boring run` erases the chain like any qualifier; the runtime support of `'observed` in the generated Rust is emitted when an instance with an `'observed` chain exists, even if only a `use`d file spells it. An `'observed` element inside an enum variant payload is not supported by `'observed` itself yet.
+
+**Passing the parameter to an enclosing struct.** A struct that holds a qualifier-generic struct can hand its own parameter on, written explicitly: `elem'cells` inside a declaration of `'cells` reads "my `cells` is `Board`'s `elem`". The two names are independent.
+
+```boring
+struct Board<'elem = 'inline>:
+    var [mut Point'elem] cells = []
+
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()   # Game's 'cells is Board's 'elem
+    var int turn = 0
+
+let Game<cells'actor> g = Game()        # Game_actor holds Board_actor holds Point'actor
+let Game g2 = Game()                    # Game_inline / Board_inline (the defaults)
+let Board<elem'actor> b = Board()
+let g3 = Game(board = b)                # cells = actor, read off the written qualifier of b
+```
+
+- **Always explicit.** A `Board` or `Board()` written with no argument in a field of `Game` takes **`Board`'s own default**, never `Game`'s parameter; there is no implicit propagation and no invisible generic. A field typed `Board<elem'cells>` whose value is a bare `Board()` is an error (```Board` here takes its own default for `elem`, not `cells` of the enclosing declaration; write `Board<elem'cells>` to pass it on``).
+- **Cascade.** A specialised enclosing declaration specialises what it holds, through struct fields, `init`s, method signatures and bodies, enum payloads and `ext` blocks, chains included: `Game<cells'actor'observed>` holds `Board<elem'actor'observed>` (`Game_actor_observed`, `Board_actor_observed`). A struct that holds itself (`Node<q'q>?`) or two structs that hold each other resolve without instantiating forever: instances are tracked by `(declaration, chain)`, a pair already seen is not specialised again.
+- **A concrete value freezes the instance.** `var Board<elem'actor> b` in a struct fixes `Board_actor`; that struct needs no parameter of its own.
+- **The names are checked at the declaration.** The passed name must be a parameter of the enclosing struct, enum or `ext` (``unknown qualifier parameter `cells` ``, with the position), and the enclosing **bound must fit inside the receiving one**: `struct G<'c>` (full bound) cannot pass `c` to `Cell<'q as 'new>`, `'c as 'actor|'inline` can pass it only to a parameter whose bound contains both `actor` and `inline`. A default applies to a parameter only when it is not passed on.
+- **Inference extends.** `Game(board = b)` takes `cells` from the written qualifier of `b` (a `Board<elem'actor>` binding, parameter or field, or an explicit `Board<elem'actor>()`), with the usual conflict rule; a construction under an expected `Game<cells'actor>` makes its `board` argument a `Board<elem'actor>`.
+- **A suffix added on the way.** `Held<q'c'observed>` inside `struct Holder<'c as 'actor|'guard>` passes the value of `c` followed by `'observed`: `Holder<c'actor>` holds `Held<q'actor'observed>`. The chain rules are unchanged (`'shared'observed` and two suffixes are errors) and are checked for **every member of the enclosing bound** at the declaration, with membership of each resulting chain in the receiving bound, so `struct Bad<'c>` (which allows `'shared`) cannot add `'observed`: narrow it, ``'c as 'actor|'guard``. A suffix can therefore never accumulate along a cycle (`grow<q'q'observed>` in `grow` is the same error).
+- **Not covered**: a qualifier-generic trait. A plain function takes the concrete instance (`def f(Game<cells'actor> g)`); one that should stay generic over the qualifier declares its own parameter, see the next section.
+
+**Functions and methods generic over a qualifier.** A function or a method can declare a qualifier parameter of its own, so that it works for any instance of a qualifier-generic struct instead of one `Board<elem'actor>`. The parameter is **visible in the signature**: it is declared with `<'q>` (bound and default as on a struct), or introduced by its first occurrence in the signature.
+
+```boring
+int count<'q>(Board<elem'q> b):                  # declared
+    b.cells.len()
+
+int count2(Board<elem'q> b):                     # introduced by its use: no `<'q>` written
+    count(b)                                     # passed on, inferred
+
+def add<'q as 'inline|owned = 'inline>(mut Board<elem'q> b, Point'q p):   # bound, then default
+    b.cells.push(p)
+
+struct Game<'cells = 'inline>:
+    var mut Board<elem'cells> board = Board<elem'cells>()
+    var int turns = 0
+
+    def merge<'q>(Board<elem'q> other):          # the method's own parameter, distinct from 'cells
+        turns += count(other)
+
+let Board<elem'actor> a = Board()
+count(a)                                         # q = actor, read off the written qualifier of a
+count<q'owned>(Board<elem'owned>())              # explicit
+```
+
+- **One specialised, non-generic copy per instance**, named like a type instance with the chain joined by `_`: `count_actor`, `count_owned`, `count_actor_observed`. There is no generic Rust function (no Rust generic over "plain or locked"), so each call is resolved at compile time.
+- **Declaration is optional, and only in a signature.** A qualifier identifier that appears in the parameters or the return type without being declared, and is not one of the qualifier words (`'shared`, `'actor`, `'guard`, `'inline`, `'owned`, `'new`, `'weak`, `'task`, `'observed`, `'static`, `'atomic`, the GPU and kernel qualifiers, the groups...), is introduced by its first occurrence. A declaration with `<'q ...>` is **required as soon as the parameter needs a bound or a default**. The omission does not extend to a struct, enum, `ext` or trait (there the `<'cells>` is part of the type's contract: `var Board<elem'q> b` in a struct is ``unknown qualifier parameter `q` ``), nor to the body (a `'q` the signature does not introduce is an error). A parameter named like one of the enclosing struct's is an error for a method (`'cells` is the struct's). A parameter introduced implicitly that is written **once** in the whole function, signature and body, relates to nothing and is most likely a typo for another name: a warning (``qualifier parameter `q` is never related to another use``), never an error; declare it with `<'q>` to silence it.
+- **The bound is checked at the declaration.** `<'q as 'inline|owned = 'inline>` follows the struct rules: the default must belong to the bound, and a parameter passed on (`Board<elem'q>`) must have a bound that fits inside the receiving one (``the bound of `q` ... is not within the bound of `elem` in `Board` ``). A call whose evidence leaves the bound is an error naming the source of the evidence.
+- **Calls infer the parameter from written qualifiers only**, in the order of "Inference at construction": explicit arguments (`count<q'owned>(..)`), the expected type against the return type (`let Board<elem'actor> b = fresh()`), the *written* qualifier of the arguments that feed a `T'q` or `Board<elem'q>` slot, then the declared default. Two pieces of evidence that disagree are a conflict (both are named, `write add<q'...> to choose`), a piece outside the bound is a bound error, and when nothing determines the parameter the call reports ``cannot infer qualifier parameter `q` of `count`, write `count<q'...>` ``. A binding whose qualifier is itself inferred, a fresh construction or a bare `Board` is no evidence: there is no inference by usage. A function that also declares unlinked type parameters (`def f<T, 'q>(..)`) is called with its generic arguments written out (`f<T = int, q'actor>(1, b)`), type arguments are not inferred; a plain `<T>` whose argument is a variable written with a qualifier infers it (see "A type argument carries its qualifier").
+- **The parameter is passed on.** Inside the body `Board<elem'q>` names the same parameter (locals, constructions: `Board<elem'q>()`), and a call to another qualifier-generic function either names it, `g<q'q>(b)`, or lets it be inferred from an argument written `Board<elem'q>`. The specialisation cascades through bodies: `count2_actor` calls `count_actor`, and a function that calls itself with its own parameter (polymorphic recursion) or two functions calling each other resolve to the instances reachable from the calls actually written. The set is finite by construction: an argument is a written chain or a parameter passed on whole, never built from another one (`q'q'observed` is rejected), so no instance can grow.
+- **Methods: one instance per method instance, only for the calls that exist.** A method (of a struct, an enum or an `ext` block, generic or not) may declare its own parameter next to the ones of its type. `g.merge(o)` and `g.merge(a)` with `o` and `a` of two different instances create `merge_owned` and `merge_actor`, nothing else; they are attached to every instance of the type that exists (`Game_actor`, and `Game_inline` if the program also builds it). The method's receiver is read from its written type (`self` inside the type itself); a call whose receiver type is not written and whose name is shared with another method must name the parameter: ``write `merge<q'...>` ``. A trait method cannot declare a qualifier parameter (qualifier-generic traits are not covered).
+- **Cross-file.** A function declared in a `use`d file or a `[deps]` project is specialised for the instances every file asks for, emitted once by the file that declares it.
+- **Known limits.** A string interpolation is parsed on its own, without the declarations of the file: an explicit `count<q'owned>(..)` or a `Board<elem'owned>()` written *inside* `"{...}"` is not resolved, bind it to a name first. An error found while inferring a call inside an interpolation is reported at the start of the string.
+- **Targets.** `boring run` ignores qualifiers (same diagnostics, same output); `boring build` specialises; the GPU host emitters share the general emission; `--linux` accepts a declaration whose bound is `'inline|owned` and rejects any other, with or without a call (see "Targets" below).
+
+**Enums and `ext` blocks.** `enum Slot<'elem as 'new>: Full(Point'elem)` is specialised the same way (`Slot_inline`). `ext Board<'elem>:` adds its methods to **every** instance; `ext Board<elem'actor>:` only to that instance (it is dropped if the program never uses it). A bare constructor takes its instance from the same evidence as a struct: `Slot.Full(p)` from the written qualifier of `p`, an expected type (`let Slot<elem'inline> s = Slot.Full(Point(1))`, a parameter, a field), or the declared default (`Slot.Empty` of `enum Slot<'elem = 'inline>`). A pattern is read the same way: `Slot.Full(p):` follows the written type of the match subject (a declared name, or a call of a function that declares its return type), or the instance of the subject the compiler resolved for it; `Slot<elem'inline>.Full(p):` names the instance itself (checked against the bound and the subject's written type) and takes concrete arguments only. The unqualified `Full(p):` keeps working.
+
+**What is checked, and when.** Everything about the *arguments* (unknown label, argument given twice, outside the bound, positional use, bare use, name clashes) is reported while parsing, with a position, so `boring run` and `boring build` give the same diagnostic. The *body* of a qualifier-generic declaration is checked once, unspecialised, where `'elem` is unresolved: checks that depend on the element qualifier are left to rustc for the specialised copy. In particular the "cannot store the `mut` parameter" diagnostic (a lent `mut` parameter pushed into a member) is not raised inside such a declaration, and the `'actor` promotion of such a parameter is not applied to the copies. Declare the parameter `Point'elem p` instead of `mut Point p`, as above: it then follows the instance.
+
+**Targets.** (Defaults and chains change nothing here.) `boring run` ignores qualifiers, so it runs the unspecialised program; `boring build` (standard, single-threaded, managed) specialises, across files too (`[deps]` and `use`d files; one `Board_actor` is emitted by the file that declares `Board`, however many files ask for it). The GPU host emitters (`--target metal|cuda|rocm|wgpu`) reuse the general emission and get the same specialised copies. `--linux` (the `no_std` emitter, which has no lock-aware element access) accepts a qualifier parameter whose **whole bound is kernel-safe**, `'inline` and `'owned` (`struct Board<'elem as 'inline|owned>`), and specialises it before emission (`Board_inline`, `Board_owned`, `count_owned`, ...); a bound that also allows `'actor`, `'guard`, `'shared` or a chain is rejected, naming them (``qualifier parameters whose bound allows 'actor, ... are not supported on the Rust-for-Linux Linux target``): narrow it with `as 'inline|owned`.
+
+**Considered and not built.**
+- **Invisible parameters** (a struct with a field whose qualifier inference leaves open would be implicitly generic over it, like an elided Rust lifetime). Rejected: *contagion* (a `def f(MonPoint m)` would need the hidden parameter too, contradicting "a `Board<elem'actor>` imposes nothing on the function that receives it"), *instance explosion* (one instance per field is N^k copies, and recursive structs need a fixed point), *whole-program inference* (the choice at each construction would depend on how the value is used far away), and a *hidden representation* (editing a distant function body would change the instance built, with nothing visible). If it is ever built: one parameter per struct, never per field, and no contagion. Until then an explicit `Board<elem'actor>` is the only selection mechanism.
+- **Inference from usage** (`let b = Board()` followed by `b.add(actorPoint)`): only a *written* qualifier is evidence, see "Inference at construction". The inferred instance cannot be displayed on request either (`--explain-inference` was designed, not built).
+- **Type-argument inference for a mixed `Cache<T, 'q>`** (the unlinked long form; a plain `<T>` takes a qualified argument instead, see "A type argument carries its qualifier"): the monomorphizer specialises explicit turbofish sites only (every other generic use stays on the generic-Rust path, where rustc infers `T`), and a qualifier-generic declaration has no such fallback. Inferring `T` would need expression typing (literals, calls, fields, coercions), a second mechanism rather than an extension of the first. An expected type naming every argument (`let Cache<T = int, q'shared> c = Cache(1)`) resolves it.
+- **A chain on the use** (`T'elem'observed`): the suffix is added when the parameter is passed on, see "A suffix added on the way".
+
+**Rust equivalent**: two plain structs, `struct Board_actor { cells: Vec<Arc<Mutex<Point>>> }` and `struct Board_inline { cells: Vec<Point> }`, plus their `impl` blocks. A `boring run` of a program that relies on the copy semantics of `'inline` (`let q = b.cells[0]; q.x = 9`) sees an alias, as it does for every `'inline` today.
+
+**A type argument carries its qualifier, in depth.** The example and the three main rules are in "Qualifier parameters" (Generics); the details:
+
+- **Inference.** A bare construction or call of a generic struct or function infers `T` from a variable whose type is *written* with a qualifier (`let Counter'actor c`), and only then: any other call stays on the ordinary generic path (rustc infers it), and an argument whose qualifier is not written gives no evidence. Every type parameter must be determined this way, otherwise the call is left generic.
+- **A qualifier written on a slot is a constraint.** `def show<T>(T'owned a)` and, for an untyped parameter, `def show(a'owned)` refuse an argument written with another qualifier, naming both (``the parameter `a'owned` of `show` expects that qualifier, but this argument is written `'actor` ``). An argument whose qualifier is not written is not refused. The qualifier compared is the one written directly on the base type (`Counter'actor'weak` is `'actor`).
+- **One parameter, one qualifier.** Because `T` carries its qualifier, a slot `T'inline` next to a slot `T` cannot hold a `T` given as `Counter'actor`. A declaration that needs a field to follow a qualifier while another stays fixed declares the qualifier parameter separately: `struct Entry<T, 'q>` with `let T'q res` and `let T'inline fallback`, instantiated `Entry<T = Counter, q'actor>`. Its type argument is not inferred (see above): an expected type naming every argument resolves it.
+- **`<T'q>` is not a form.** The old sugar that tied a type and its qualifier into one parameter is an error naming the two forms to write: `<T>` (the qualifier travels with the type) or `<T, 'q>` (a qualifier parameter of its own).
+- **Specialisation** is per concrete type argument, qualifier included: `Entry_Counter_actor`, `Entry_Counter_owned`, like any generic instance. Under `boring run` qualifiers are ignored, so the same program runs unspecialised.
+- **Why not a hidden parameter.** An untyped field (`struct Response: payload`) stays a type parameter only, its qualifier following the inference for bare fields; it does not get an invisible qualifier parameter (see "Considered and not built" above: contagion, instance explosion). A qualifier travels with the type it was written on.
+
+### Advanced — Explicit type arguments in depth
+
+The short version is in "Explicit type arguments (turbofish)" (Generics).
+
+Resolution here is deliberately **name-only** — the receiver's own resolved type is never tracked. A method call site is specialized only when its bare method name (`describe` in the example of "Explicit type arguments (turbofish)") is unique among every generic method reachable from the whole file graph; if two or more declarations anywhere declare a method with the same name and its own type parameter, the call site is left as ordinary generic Rust (`obj.method::<T>(args)`) instead — a safe, silent fallback, not an error.
+
+This same name-uniqueness rule covers a method's declaring item regardless of whether it's a `struct`, an `ext` block, or an `enum` — a method with its own type parameter declared inside an `ext TypeName:` block, or directly on an `enum`, is specialized exactly like a struct method:
+
+```boring
+struct Wrapper:
+    var int value = 0
+
+ext Wrapper:
+    def U convert<U>(U x):
+        x
+
+mut w = Wrapper(5)
+print w.convert<int>(42)   # → w.convert_int(42)
+
+enum Shape:
+    Circle(float radius)
+
+    def U convert2<U>(U x):
+        x
+
+let s = Shape.Circle(1.0)
+print s.convert2<int>(42)  # → s.convert2_int(42)
+```
+
+The ambiguity check spans all three kinds together: a struct's own-generic `convert<T>` and an unrelated `ext` block's own-generic `convert<T>` sharing the same bare name anywhere in the reachable file graph makes `convert` ambiguous, and every call site naming it — on either type — falls back to ordinary generic Rust, exactly as if two structs had collided.
+
+**Optional chaining** — `obj?.method<T>(...)` — is also supported, with the same name-uniqueness restriction and the same silent-fallback behavior on an ambiguous method name:
+
+```boring
+struct OConverter:
+    var int value = 0
+
+    def T2 convert<T2>(T2 x):
+        x
+
+let OConverter'owned? c = OConverter(5)
+print c?.convert<int>(42)   # → c.clone().map(|mut __v| __v.convert_int(42))
+```
+
+The short-circuit (nil-propagating) semantics of `?.` are preserved exactly — only the method name resolved by the turbofish gets swapped for its specialized clone.
+
+**`mut` type arguments.** `Container<mut Point>` for `struct Container<T>: T item` works for an explicit, fully concrete call (`Container<mut Point>(...)`): `c.item.move_to(...)` is checked with the field typed `mut Point`. Propagating a `mut` type argument into the field's permission check is not implemented for the *inferred* generic path (no turbofish), see [Mutable fields](#mutable-fields).
+
+### Advanced — Lifetime and bound arguments at use sites
+
+When *calling* a generic function or annotating a variable, you can supply type arguments that include bare lifetimes and trait bounds for documentation purposes:
+
+```boring
+# Definition — constraint is declared here
+copy_items<T as Clone>(Container<T> src, Container<T> dst):
+    for item in src.items:
+        print "copying: {item}"
+
+# Use site — just pass the concrete type, no constraint needed
+copy_items<int>(src, dst)
+
+# Variable declaration with lifetime in type argument
+var Container<&a, string> buf = Container(items = ["x", "y"])
+```
+
+**Rules:**
+- `&a` in a type argument position becomes `'a` in the emitted Rust.
+- Constraints (`as Bound`) belong only on the **definition** — never repeat them at call sites.
+
+**Rust equivalent**
+```rust
+copy_items::<isize>(src, dst);           // bound already on fn, not repeated at call site
+let buf: Container<'a, Arc<str>>;   // lifetime preserved
+```
+
+### Advanced — Reading the inferred headers
+
+`boring check --show-types file.br` prints the signature each untyped parameter or field turned into, one line per declaration, so that a header nobody wrote can still be read:
+
+```
+def describe<y>(y) where y: Display
+def keep<x>(x) -> x
+struct Request<url, retries>
+    url
+    retries
+```
+
+After the declarations, `uses:` lists each construction of such a struct with the types it was fixed to (`line:column`, the field name standing for its parameter), so one struct with two instantiations reads as two lines:
+
+```
+uses:
+  6:16  Response<status = int, payload = string>
+  9:16  Response<status = int, payload = [int]>
+```
+
+A construction whose parameters cannot be determined (an unknown callee, a typeless `[]`) is left out, exactly as in the return-type inference. A struct declared in a `use`d file (sibling, `[deps]`, stdlib) is typed too; its own declaration is listed by the file that declares it.
+
+Only declarations with an implicit type parameter are listed. An implicit parameter is shown under the name of the parameter or field it comes from (`<x>` for `def keep(x)`, `<url, retries>` for `Request`; the generated Rust calls it `T_x`, which never appears here), and a parameter or field with no written type is shown bare. An inferred return type shows after `->`, and the bounds read off the body after `where`. In `uses:`, a parameter fixed by a field's default value, because the construction left the field out, is marked `(default)` (`Request<url = string, retries = int (default)>`). It parses the file and runs the inference passes but not the semantic checker, and it lists the declarations of that file only.
+
+### Advanced — A struct that names itself, and arrays of instances
+
+Inside a struct whose parameters are all implicit, a bare mention of the struct is the struct with its own parameters: in `struct Node: value / Node? next`, `next` is `Node<T_value>?`, so a chain is homogeneous (`Node(value = 1, next = Node(value = 2, next = nil))` is a `Node<int>`). The same goes for the struct's method signatures and `init` parameters. `nil` for an optional field binds nothing, the other fields decide. A mention that already carries arguments (`Node<int>? next`) keeps them, and an explicit annotation always wins over inference.
+
+An array holds one type, so `[a(), b()]` where `a()` is a `Response<int, string>` and `b()` a `Response<int, int>` is an error naming both instances, not a rustc mismatch. Only elements whose type is certain count (a constructor, or a call whose return type is known).
+
+### Advanced — Untyped fields of a view
+
+A `view` accepts untyped fields too, with one rule per kind of field:
+
+```boring
+view Badge:
+    bind var label        # generic: fixed by what the parent hands over (`T_label`)
+    note                  # a plain prop: generic over the construction, like a struct field
+    state taps = 0        # `int`: a state slot has the type of its literal default
+    state ratio = 1.5     # `float`; `"text"` is `string`, `true` is `bool`, `-2` is `int`
+    env string theme      # an env value still needs its type
+```
+
+A `state` slot is seeded by its default and never supplied from outside, and an `env` value comes from a provider and has no initializer, so no construction could fix a type parameter for them: `state` takes the type of its default, which must be a literal (`cannot infer the type of `state taps` from its default` otherwise, `has no type and no default` with none), and `env` keeps requiring a written type (`` `env theme` needs a written type ``). A `bind` value generic over its use still needs its permission written (`bind var`, `bind mut`, `bind var mut`), as for an explicit `bind T name`, since the mutation surface of a generic value cannot be classified. The same limits as for a struct apply to the field's uses (`label.len()` is an error, printing and comparing are fine).
+
+A generic view and its trait implementations now carry the bounds of the view's own `impl` (`Clone`, the inferred or written `where` ones), plus `Send + Sync` in multi-threaded output because `View` has those supertraits there. Before, an explicitly generic view (`view Card<T as Display>`) failed in rustc in several configurations.
+
+### Advanced — What an untyped parameter or field cannot do
+
+An untyped parameter or field is a bare type parameter: it can be printed, compared with another untyped one, combined with itself by arithmetic, and compared with or combined with a **numeric literal on its right**. Any other use is an error that names it, instead of a rustc failure on generated code:
+
+```boring
+def size(x):
+    return x.len()        # error: cannot use the untyped parameter `x` with the method call `.len()`
+def inc(x):
+    return 1 + x          # error: ... with a literal on its left (write the parameter first: `x + literal`)
+def add(a, b):
+    return a + b          # error: ... with `b`, another untyped parameter (a separate type; to share one type write `T f(T a, T b)`)
+```
+
+**Literals.** `n > 0`, `n == 1`, `x + 1`, `x * 2.5 - 0.5` are accepted: the literal fixes the operand type (`int` literals are `isize`, `float` literals `f64`), and the parameter gets the bound that says so (`PartialOrd<isize>`, `Add<isize, Output = T_x>` plus `Copy`; the result of the arithmetic is the parameter's own type again, so `return x + 1` types the function). `def isPositive(n): return n > 0` is therefore callable with an `int`, and `def scaled(x): return x * 2.5` with a `float`; calling the first with a `float` is a type error in the generated Rust, exactly as passing a `float` to `isize`-bounded code would be (`boring run`, being dynamic, would accept it: write the type, or a generic, when both numeric types must work). A literal on the *left* (`0 < n`, `1 + x`) would need the bound on the literal's type, not on the parameter, so it is an error with the fix named: put the parameter first. These bounds also flow through calls (a bound that names only the callee's own parameter, such as `Add<Output = T_n>`, is carried over to the caller's parameter).
+
+**Other files.** Bounds flow through a call into a function of another file too: a bare sibling `use`, a `pub` function of a selective or qualified `use`, a `[deps]` project and the embedded stdlib (`use boring.<module>`) all count, resolved like the return-type inference sees them; a local function of the same name shadows the import. The imported function's bounds are the ones fixed when its own file parsed.
+
+**`len()`.** `x.len()` (no arguments) is allowed on an untyped parameter or field: Rust has no std `len` trait, so the parameter is bounded by `BoringLen`, a small trait in the generated prelude implemented for arrays, dicts, sets and strings (scalar-value count, like `string.len()`). The result is a `uint` (as for a known array or dict), so `def size(x): return x.len()` is typed `uint`; any type that is not one of those collections fails in the generated Rust naming `BoringLen`.
+
+**Not done, on purpose.** There is no bound for any other method call (`push`, `abs`, a user method: no trait to name, write the type), and two separate untyped parameters are never related (`def larger(a, b)` returning either: each parameter is its own type, so no sound return type exists without a shared `T`).
+
+The reported uses are a method call (`clone`, `to_string` and `len()` are allowed; `to_string` adds `Display`, `len()` adds `BoringLen`), a field read, an index, and an operator whose other operand is neither the same parameter nor (on its right) a numeric literal. A name that the body binds again (a `let`, a loop variable, a closure parameter) is not the parameter and is never reported; for a struct field, neither is a method parameter of the same name. Write the type (`[int] x`, `int x`, `T x`) to use the value further.
+
+A **recursive** function (directly, or through other functions of its scope) that returns a value needs its return type written: `int fact(int n)`. Inferring it would need a fixpoint over the cycle, and without the check such a function silently became `void`. A recursive function that returns nothing is unaffected.
+
+A **struct with untyped fields is generic**, and device code only has concrete structs: building one bare in a kernel, in a function a kernel calls, or naming it in a kernel field or a reachable signature is an error on every GPU backend (`simd`, `metal`, `wgpu`, `cuda`, `rocm`). Write the field types (`int v`), instantiate it explicitly (`Wrap<int>(v = i, n = 2)`, the types in field order; `metal`/`wgpu`/`cuda`/`rocm` specialise it like any generic struct, see [GPU module](gpu-module.html#type-generics-not-on-kernels-yes-on-structs-and-helper-functions)), or use a concrete struct there. Trait method signatures keep requiring written types.
+
+### Advanced — Implicit generics: design notes
+
+The sections above are the reference; this is why they are the way they are, and what is deliberately left out.
+
+- **The invariant.** An omitted type becomes an ordinary generic parameter, and every member must be fully typed at each construction, so an instantiation is never partial. A value that constrains nothing (`Response(status = 200, payload = [])`, `payload = nil`) is an error, not a guess. After inference every binding has one concrete type, exactly as if written: there is no dynamic typing and `boring run` and `boring build` agree (apart from numeric literals, see below).
+- **Mechanism.** The parser writes a placeholder `T_<name>` for each omitted parameter or field type and adds it to the declaration's type parameters; small inference steps (one for bounds, one for return types and for the parameters of a construction) then write the missing annotations back before the checker and the transpiler run. Everything after them sees plain explicit generics, so the interpreter, checker and transpiler are untouched. There is no general unifier: Boring has no type variables, and rustc still resolves what happens *inside* a body.
+- **Why `@api` is per item.** Stability could have been inferred from "library" (no `main`, or a `boring.toml` key), but a library may grow a demo `main`, and no heuristic can say which of a project's `pub` items other projects use. `pub` already means visibility only, so a marker on the item says it where the code is. `@api` guarantees *form* (a written signature); `boring api --check` guarantees *stability*.
+- **Defaults and ambiguity.** Literals default (`42` is `int`, `1.0` is `float`); two pieces of evidence that disagree are an error, never a pick. A default value types a parameter only when the construction leaves the field out; a supplied argument always wins, and there is no implicit numeric coercion (`retries = 1` against `let retries = 0.5` binds `int`). `--show-types` marks the ones that came from a default.
+- **Where omission is allowed.** Struct fields, `view` props (not `env`), `def` parameters and return types. Not trait/protocol method signatures (they are the contract), not methods, and a recursive function must write its return type (inference would need a fixpoint with polymorphic recursion). `nil` for an optional field binds nothing.
+- **Bounds stay minimal.** An implicit parameter gets the blanket `Clone` plus what the body shows directly (printing, comparison, same-parameter or literal arithmetic, `len`, and whatever flows through calls, including into other files). Anything else is a Boring error naming the use, not a rustc error on generated code. A literal fixes its operand type (`isize`/`f64`), so `boring run`, being dynamic, accepts `isPositive(2.5)` where `build` rejects it.
+- **Names.** The user never wrote `T_x`, so diagnostics and `--show-types` show an implicit parameter by the parameter or field it comes from (`Response<status = int, payload = string>`).
+- **Qualifiers.** Type parameters only: an omitted type never introduces a hidden qualifier. A qualifier travels with the type it is written on ("A type argument carries its qualifier").
+- **GPU.** Generic structs and helper functions are monomorphised in device code by explicit instantiation (`Pair<float32>`, `twice<int>`); a bare construction of an untyped-field struct, an uninstantiated generic call and `kernel K<T>` stay Boring errors.
+
+Known limits, by design or not yet solved:
+
+- Two untyped parameters are two independent types, so `def larger(a, b)` returning either cannot be typed: relating them needs a written `T`.
+- Method calls on an untyped parameter other than `len`, `clone` and `to_string` are errors.
+- A variable holding an empty collection passed to an untyped field (`let e = []; R(payload = e)`) is left to rustc, because a later `push` can legitimately type it; only a directly written `[]`, `{}`, `{=}` or `nil` is reported.
+- `boring check --show-types` and `boring api` read one file (`--show-types` follows `use` for the types of constructions, not for declarations); `boring api --check` compares signatures conservatively, any change counts.
+
+---
+
 ### Advanced — kernel placement and the `'new` qualifier
 
 Ordinary construction has no placement operator: write `Counter()` and use an
@@ -9901,7 +9922,7 @@ A function's own **return type**, when written bare, is a distinct case from a
 parameter or local variable: it has no per-use-site signal to narrow at all (a
 return position has exactly one "use" — the value flowing out), so this inference
 pass never runs on it directly. It still gets the same size-based fallback,
-applied separately: `promote_bare_return_ty` (`src/transpiler/emit_top.rs`)
+applied separately: the compiler
 rewrites a bare return type naming a struct over `--inline-auto-bytes` (strict
 mode only) to `Type::Qualified(_, OwnerQual::Owned)` before the signature is
 rendered, so the emitted `Box<T>` return and the function's body (`return`
@@ -9930,7 +9951,7 @@ A **storage signal** (field assignment, task capture, return with ownership qual
 
 This applies to every user struct/enum in a **free function** parameter, including structs with dynamic fields (arrays, dicts, sets) of unknown size — a by-value parameter there would force a deep `.clone()` at every call site. Two exceptions stay by value: types that some function returns as `T'actor`/`T'guard` (bare `T` params of those default to `'actor` propagation), and the method cases below. Write `T&` explicitly if you need the borrow regardless.
 
-**Method parameters.** A bare, read-only struct/enum/array/dict/set parameter of a `req` or `def` method of a struct or enum is resolved by the same inference (`req float sum(Point p)` is `fn sum(&self, p: &Point)`; call sites emit `&p`, in any order and across files). A `def` call whose argument overlaps its receiver (`self.addAll(self.items)`) is passed a copy (`&self.items.clone()`), exactly what by-value passing did, because a borrow would conflict with `&mut self`. A call site cannot always know its receiver's type, so for such a receiver the signature is found by method *name*: every method bearing that name must be a plain struct/enum method and all must borrow the same positions (a free function of the same name does not matter). The name need *not* be unique: `peek(Point p)` declared on two structs, both read-only, is `&Point` on both, for resolved and unresolved receivers alike. Otherwise — one same-named method needs ownership, takes a different set of borrowed positions, or is a trait method, field, piped/bare value or labeled call target — every parameter of every method of that name stays by value, at every call site, *including* calls whose receiver type is known (`Counter.take` loses its borrow because `Other.take` needs its parameter owned). Pinned by `tests/method_param_borrow_name_rule.rs`. A method that implements a trait method keeps by-value parameters (it must match the trait's signature), as do overloaded, generic or `task`/`stream` methods and any method called with labeled arguments. A parameter stored into a field, returned, captured, matched on, or otherwise needing ownership stays by value exactly as in a free function. Write `T&` explicitly to force the borrow.
+**Method parameters.** A bare, read-only struct/enum/array/dict/set parameter of a `req` or `def` method of a struct or enum is resolved by the same inference (`req float sum(Point p)` is `fn sum(&self, p: &Point)`; call sites emit `&p`, in any order and across files). A `def` call whose argument overlaps its receiver (`self.addAll(self.items)`) is passed a copy (`&self.items.clone()`), exactly what by-value passing did, because a borrow would conflict with `&mut self`. A call site cannot always know its receiver's type, so for such a receiver the signature is found by method *name*: every method bearing that name must be a plain struct/enum method and all must borrow the same positions (a free function of the same name does not matter). The name need *not* be unique: `peek(Point p)` declared on two structs, both read-only, is `&Point` on both, for resolved and unresolved receivers alike. Otherwise — one same-named method needs ownership, takes a different set of borrowed positions, or is a trait method, field, piped/bare value or labeled call target — every parameter of every method of that name stays by value, at every call site, *including* calls whose receiver type is known (`Counter.take` loses its borrow because `Other.take` needs its parameter owned). A method that implements a trait method keeps by-value parameters (it must match the trait's signature), as do overloaded, generic or `task`/`stream` methods and any method called with labeled arguments. A parameter stored into a field, returned, captured, matched on, or otherwise needing ownership stays by value exactly as in a free function. Write `T&` explicitly to force the borrow.
 
 | Parameter | Signals | Emitted form |
 |---|---|---|
@@ -9941,7 +9962,7 @@ This applies to every user struct/enum in a **free function** parameter, includi
 
 The same rule applies to generic parameters: `T c` without signals infers `&T`; `mut T c` infers `&mut T`. Optionals (`Counter? c`), `'new` parameters (`Counter'new c`), `var` parameters, explicit qualifier groups, and the method parameters excluded above are not candidates for universal borrow inference. The explicit forms `Counter& c` and `mut Counter& c` lock in the behavior regardless of future body changes. (A `mut Counter c` method parameter needs no annotation: it is lent as `&mut Counter` unconditionally, see "`mut` vs `var` on a struct parameter".)
 
-**A universal borrow is never subject to size-based auto-boxing.** Because it resolves as a *pre-fallback*, before the size-based chain (`docs/transpilation-modes.md`'s "Size-based auto-boxing") even runs, a struct over `--inline-auto-bytes` still renders as a plain `&Counter`/`&mut Counter` when it resolves to a universal borrow — never `&Box<Counter>`/`&mut Box<Counter>`. (`emit_type`'s `OwnerQual::Borrow`/`OwnerQual::BorrowMut` rendering, `src/transpiler/emit_top.rs`, suppresses the size-based fallback on its `Named` inner the same way the `'owned` qualifier's own branch already does — see `tests/cases/oversized_param_borrow_stays_unboxed.br`.)
+**A universal borrow is never subject to size-based auto-boxing.** Because it resolves as a *pre-fallback*, before the size-based chain (`docs/transpilation-modes.md`'s "Size-based auto-boxing") even runs, a struct over `--inline-auto-bytes` still renders as a plain `&Counter`/`&mut Counter` when it resolves to a universal borrow — never `&Box<Counter>`/`&mut Box<Counter>`.
 
 ### Cross-function propagation
 
@@ -9962,7 +9983,7 @@ The same pre-pass covers the methods of structs, enums and `ext` blocks: `first(
 
 A qualifier written by the user is never overwritten; only parameters left bare are refined. For methods, propagation reaches a call only when the receiver's type is statically known where the call is read: `self`, a local of known type (including a `let t = s` alias), a constructor call `Type(..)`, or a `self.field` / `local.field` chain over declared fields. A call on a receiver whose type the pass cannot see (a method's return value, an element of an array, a generic value) is not propagated, and neither is a method name overloaded within one type (a single declaration is needed to know which signature applies); the callee's own signature is still correct, but the caller keeps its plain parameter. Annotate the caller's parameter explicitly (`Counter'actor c`) in those cases.
 
-The fixed point also covers mutual recursion between free functions, between methods that call each other (`self.ping(c)` / `self.pong(c)`, pinned by `tests/method_qualifier_propagation.rs`) and across files. A `mut` struct parameter of a method is lent as `&mut T` unless its body hands it to something that demands a lock handle: then the pre-pass resolves it to `'actor`/`'guard` like a free function's (`first(mut Counter c): self.second(c)` with `second` forwarding to `bump(Counter'actor)`).
+The fixed point also covers mutual recursion between free functions, between methods that call each other (`self.ping(c)` / `self.pong(c)`) and across files. A `mut` struct parameter of a method is lent as `&mut T` unless its body hands it to something that demands a lock handle: then the pre-pass resolves it to `'actor`/`'guard` like a free function's (`first(mut Counter c): self.second(c)` with `second` forwarding to `bump(Counter'actor)`).
 
 ### Struct field inference
 
@@ -10001,7 +10022,7 @@ What is **not** followed, and why (each is a deliberate consequence of Boring's 
 - A field returned from a function whose return type is bare (`Counter pick(Service s): s.stats`), and an rvalue handed to a parameter that demands a lock (`bump(pick(svc))`): when the field is a lock handle the build is rejected with the fix in the message (declare the return type `Counter'actor pick(..)` and the field is inferred from it); an rvalue is a by-value copy, wrapped into a fresh lock at the call.
 - A local bound more than once, or shadowed by a loop variable, pattern or closure parameter of the same name, is never treated as an alias: it could hold something else.
 
-A task that captures a lock-handle (or `'shared`) field of `self` clones the handle before the spawn (`let __self_stats = self.stats.clone();` and the body uses the clone), since a `'static` future cannot borrow `self`. A struct with a lock-handle field does not derive `Eq`/`Hash`, and reading such a field through a local of the struct in another file locks it, like inside the struct (`inferred_lock_field_builds_and_runs_in_every_config`, `tests/field_lock_flows.rs`).
+A task that captures a lock-handle (or `'shared`) field of `self` clones the handle before the spawn (`let __self_stats = self.stats.clone();` and the body uses the clone), since a `'static` future cannot borrow `self`. A struct with a lock-handle field does not derive `Eq`/`Hash`, and reading such a field through a local of the struct in another file locks it, like inside the struct.
 
 ### The `mut` binding keyword
 

@@ -114,7 +114,7 @@ The two levels are therefore:
 
 Conceptually, the hierarchy `var` ≥ `mut` ≥ `let` is intended to apply: a caller should be able to pass down the hierarchy but never up (e.g. a `let`-bound caller value passed into a `var` parameter would let the callee rebind something the caller declared non-rebindable). For `'shared`, `mut` on a parameter is likewise meant to be rejected, mirroring the binding-level rule above.
 
-**This hierarchy is not currently enforced by the compiler.** There is no cross-check today between a caller's binding kind (`let`/`mut`/`var`) and the callee's parameter binding kind — neither the checker (`src/checker` is presently a minimal stub) nor the transpiler/interpreter validate this. Treat the tables below as the intended convention/design target, not a guarantee backed by a compile error at present:
+**This hierarchy is not currently enforced by the compiler.** There is no cross-check today between a caller's binding kind (`let`/`mut`/`var`) and the callee's parameter binding kind — neither the checker nor the transpiler/interpreter validate this. Treat the tables below as the intended convention/design target, not a guarantee backed by a compile error at present:
 
 | Caller | Param `let` | Param `mut` | Param `var` |
 |---|---|---|---|

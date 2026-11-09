@@ -149,11 +149,11 @@ The constant array is uploaded once via `cudaMemcpyToSymbol` before launch.
 
 Unlike Rust, CUDA C's builtin scalar type names (`half`, `float`, `int`, `long`, `size_t`, ...), its builtin vector types from `<vector_types.h>`/`<cuda_fp16.h>` (`float4`, `uchar2`, `half2`, ...), and its real C++14 keywords (`class`, `template`, `namespace`, ...) live in the *same identifier namespace* as ordinary variables — declaring a variable literally named `half` is a genuine CUDA C parse error, not merely a style warning.
 
-A kernel field, a `def()`-body local, a for-loop variable, or a function/method parameter that collides with one of these reserved words is automatically renamed (a trailing `_` appended) by `c_gpu_safe_ident` (`src/transpiler/helpers.rs`, shared with the ROCm/HIP backend below), consistently at both its declaration and every later reference — this is transparent and requires no action from Boring source. Mirrors the Metal backend's identical `msl_safe_ident` fix (see [metal-backend.md](metal-backend.html)'s own "Naming restrictions" section) — `half` is the same motivating real-world case there.
+A kernel field, a `def()`-body local, a for-loop variable, or a function/method parameter that collides with one of these reserved words is automatically renamed (a trailing `_` appended), consistently at both its declaration and every later reference — this is transparent and requires no action from Boring source. Mirrors the Metal backend's identical fix (see [metal-backend.md](metal-backend.html)'s own "Naming restrictions" section) — `half` is the same motivating real-world case there.
 
 Without this, the failure would be especially confusing: `boring build --target cuda` transpiles successfully with no warning, since this backend never parses the CUDA C it emits — the collision only surfaces later, when the generated `.cu` file is compiled by a separate `nvcc` invocation, as a wall of unrelated-looking parse errors cascading from the single bad declaration.
 
-**Verification note**: unlike Metal (whose MSL compiles at *runtime* via `newLibraryWithSource` and was verified end-to-end on this machine's own Apple Silicon GPU), exercising this fix against a real `nvcc` needs NVIDIA hardware and the CUDA toolchain, neither of which this development machine has. Verified as far as generated-text snapshot assertions allow (`tests/cuda_codegen.rs`'s `device_field_named_half_is_mangled_not_left_colliding_with_cuda_builtin_type`, `device_local_let_named_half_is_mangled`, `device_for_loop_var_named_half_is_mangled`) — the same honest caveat this backend's docs already carry elsewhere for untestable-locally codegen.
+**Verification note**: unlike Metal (whose MSL compiles at *runtime* via `newLibraryWithSource` and was verified end-to-end on this machine's own Apple Silicon GPU), exercising this fix against a real `nvcc` needs NVIDIA hardware and the CUDA toolchain, neither of which this development machine has. Verified as far as generated-text snapshot assertions allow — the same honest caveat this backend's docs already carry elsewhere for untestable-locally codegen.
 
 ---
 
@@ -174,7 +174,7 @@ All dispatch parameters are passed inside a `kernel:` block as labeled args to t
 - Fixed-shape `[T, width=W, height=H]` labeled-array field (`'unified`/`'global`/`'actor'global`/`'actor'unified`) → `grid = (ceil(W/block.x), ceil(H/block.y), 1)`, generalized to 3 axes
 - Otherwise, if `grid` is omitted, the transpiler defaults to `grid = (1, 1, 1)` — always pass `grid` explicitly unless relying on array/labeled-array inference.
 
-Passing `grid` explicitly always overrides inference, on every backend — `k(block = (16, 16, 1), grid = (4, 4, 1))` dispatches exactly the requested `(4, 4, 1)` grid, whether or not the kernel has a 1D auto-grid-capable field. (An earlier version of the CUDA/ROCm codegen silently dropped an explicit `grid` argument and always substituted the inferred/default value instead — confirmed via a real generated project, fixed by threading the caller's `grid` through to `__boring_launch` the same way `metal::host` already did.)
+Passing `grid` explicitly always overrides inference, on every backend — `k(block = (16, 16, 1), grid = (4, 4, 1))` dispatches exactly the requested `(4, 4, 1)` grid, whether or not the kernel has a 1D auto-grid-capable field. (An earlier version of the CUDA/ROCm codegen silently dropped an explicit `grid` argument and always substituted the inferred/default value instead — confirmed via a real generated project, fixed by threading the caller's `grid` through to `__boring_launch` the same way the Metal host already did.)
 
 **Ownership qualifier restriction:** a kernel struct instance dispatched via `kernel:` must be declared with no wrapping ownership qualifier — `'shared`/`'actor`(`'task`)/`'guard`(`'task`) are rejected at compile time (semantic checker), since `kernel:` dispatch needs direct, exclusive ownership on the host side, not an `Rc`/`Arc`/`RefCell`/`Mutex`/`RwLock` handle.
 
@@ -373,7 +373,7 @@ Sequential simulation hides data races. A kernel correct in simulation may be in
 
 The built-in [`KernelError`](gpu-module.html#gpu-error-handling) enum exists (`LaunchError`/`OutOfMemory`/`IllegalAccess`/`StackOverflow`/`Timeout`/`DeviceLost`), but **isn't catchable by variant on this backend** — `catch KernelError.OutOfMemory:` needs the `BoringError`-downcast machinery, which lives in the general transpiler pipeline this backend's own small, kernel-only host transpiler doesn't share (same prerequisite gap `scoped-access-blocks.md` documents for `with`). What CUDA does do: `__boring_cuda_classify_error` inspects the real `cudarc::driver::DriverError`'s underlying `CUresult` code at kernel launch and both stream-sync points, and prefixes cudarc's own message (already real — it calls `cuGetErrorName`/`cuGetErrorString` internally) with a short classified category (`"GPU out of memory: ..."`, `"GPU illegal memory access: ..."`, etc.) — still a plain `Box<dyn std::error::Error + Send + Sync>`, not a `KernelError` a `catch`/`match` could branch on, just a more informative message than the bare cudarc error used to be on its own.
 
-**Block size is validated here, at runtime, by design — not at compile time.** An oversized `block =` (exceeding the device's, or this specific kernel's, max threads per block) makes `cuLaunchKernel` itself reject the launch with `CUDA_ERROR_INVALID_VALUE`, classified as `"GPU launch configuration invalid (e.g. block size exceeds device limits)"`. Neither `src/validator/kernel.rs` nor the interpreter (`src/interpreter/eval_gpu.rs`) duplicates that check — there's no hardcoded "max threads per block" constant to keep in sync with real hardware (which varies by compute capability) or to silently drift out of date; the real launch call is always the ground truth, and now surfaces a real, classified error instead of the caller needing to guess why a dispatch failed.
+**Block size is validated here, at runtime, by design — not at compile time.** An oversized `block =` (exceeding the device's, or this specific kernel's, max threads per block) makes `cuLaunchKernel` itself reject the launch with `CUDA_ERROR_INVALID_VALUE`, classified as `"GPU launch configuration invalid (e.g. block size exceeds device limits)"`. Neither the kernel validator nor the interpreter duplicates that check — there's no hardcoded "max threads per block" constant to keep in sync with real hardware (which varies by compute capability) or to silently drift out of date; the real launch call is always the ground truth, and now surfaces a real, classified error instead of the caller needing to guess why a dispatch failed.
 
 That said, cudarc's own two observation points still apply, mirroring the two phases a real CUDA launch can fail at:
 
@@ -466,8 +466,7 @@ straight into the softbuffer surface with no per-pixel conversion.
 A `Screen` program keeps its entire top-level on this backend's own custom
 emitter (mirrors bare top-level kernel dispatch's existing
 `top_level_kernel_touching` carve-out — see this module's top-of-file doc
-comment): window + softbuffer context/surface creation happens once
-(`emit_screen_setup`), and `kernel: loop:` becomes a winit `run_return` event
+comment): window + softbuffer context/surface creation happens once, and `kernel: loop:` becomes a winit `run_return` event
 loop instead of a bare Rust `loop {}`. `screen.key(k)`/`screen.time`/
 `.frame`/`.width`/`.height`/`.resized`/`.closed` map to local state variables
 maintained by the event handlers, identically to the Metal backend's
@@ -488,7 +487,7 @@ back into on every call; an `Option`'s `.take()`/`Some(..)` reassignment can.
   `nvidia-smi` and a filesystem search). This feature ships as a mechanical,
   by-symmetry port of the identical, real-hardware-verified ROCm
   implementation (see [`rocm-backend.md`](rocm-backend.html)'s Screen
-  section) plus the codegen snapshot tests in `tests/cuda_codegen.rs` — not a
+  section) plus codegen snapshot tests — not a
   real build/run. If you have a CUDA toolchain and GPU, `boring build
   --target cuda examples/plasma_metal.br` / `examples/game_of_life.br` are
   the two example programs to try it against.
@@ -513,4 +512,4 @@ The following features are not yet implemented:
 
 ## Lints in generated host code
 
-The generated `src/main.rs` (CUDA, ROCm, Metal and wgpu hosts) starts with a crate-level `#![allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_imports, unused_parens, non_snake_case, non_camel_case_types, non_upper_case_globals, unexpected_cfgs)]` (`GENERATED_HOST_LINT_ALLOW` in `src/transpiler/helpers.rs`). The code is machine-written, so these lints (unused kernel-field locals, camelCase Boring names, helpers emitted whether or not they are called) are only noise in `cargo build`; rustc errors are unaffected.
+The generated `src/main.rs` (CUDA, ROCm, Metal and wgpu hosts) starts with a crate-level `#![allow(dead_code, unused_variables, unused_assignments, unused_mut, unused_imports, unused_parens, non_snake_case, non_camel_case_types, non_upper_case_globals, unexpected_cfgs)]`. The code is machine-written, so these lints (unused kernel-field locals, camelCase Boring names, helpers emitted whether or not they are called) are only noise in `cargo build`; rustc errors are unaffected.

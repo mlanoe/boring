@@ -102,7 +102,7 @@ are ordinary code that runs once before the window opens. A kernel built there w
 (`var mut k = TileKernel(frame.f, ...)`) runs its `init(...)` on every host (array uploads, scalar fields,
 `Dimension` sizing); the render loop then reads the kernel and any host values it uses. On wgpu this code is
 the synthesized `fn __boring_screen_setup()`. Module-level constants of imported modules are emitted as
-module-level `const`s, visible to the functions that use them. Covered by `tests/screen_setup.rs`.
+module-level `const`s, visible to the functions that use them.
 
 ### Pixel format
 
@@ -228,9 +228,8 @@ array's length, CUDA/ROCm a fresh device buffer (`Arc`-wrapped for a `let` field
 field's width. `a.x = b.y` with a *kernel* on the right stays the zero-copy buffer handoff. `screen.frame` is
 readable in loop expressions on every target. Re-uploading a `'surface` field this way works on wgpu only (it reallocates the blit too, see [Resizing](#resizing)); on the other hosts reassign the kernel instead. `.count`/`.length` on a value whose struct type declares a real field or method of that name (typed
 locals/params, `fn`/method return types, struct field chains, and `self`) reads that member on every backend
-(Metal/CUDA/ROCm/wgpu share a receiver-type resolver, `src/transpiler/host_types.rs`); only a receiver whose type is not
-resolvable as a user struct (or a real array) still gets the array-length builtin. Pinned by
-`tests/struct_count_field_receiver.rs`.
+; only a receiver whose type is not
+resolvable as a user struct (or a real array) still gets the array-length builtin.
 
 ### On-demand redraw
 
@@ -242,7 +241,7 @@ With `redraw = "demand"` the loop body runs once at start and afterwards only wh
 keyboard, mouse or resize event, or `screen.requestRedraw()` called in the body (to schedule one more frame, e.g.
 for an animation). The loop otherwise sleeps (wgpu `ControlFlow::Wait`; Metal/CUDA/ROCm `Wait` with `Poll` only
 while a redraw is pending; SIMD blocks inside `screen.present` on a condition variable). `screen.requestRedraw()`
-is a no-op in the default continuous mode. Regression tests: `tests/screen_render_loop_arrays.rs`.
+is a no-op in the default continuous mode.
 
 **Frame pacing / CPU cost (wgpu, macOS).** A body that calls `screen.requestRedraw()` every frame runs at the display
 rate: each frame's `surface.get_current_texture()` blocks on the vsync (`PresentMode::Fifo`; a `sample` shows the thread
@@ -278,7 +277,7 @@ window is created with a `LogicalSize`, while the pixel buffer, `screen.width`/`
 coordinates stay in **physical pixels** (= logical x `screen.scale`). The first frame (and every scale-factor change)
 sets `screen.resized`, so the usual `if screen.resized:` reallocation picks up the physical size; multiply a
 points-based layout by `screen.scale` when drawing. Without `hidpi` nothing changes. Other hosts ignore the flag and
-report `screen.scale == 1.0`. Regression test: `tests/screen_render_loop_arrays.rs`.
+report `screen.scale == 1.0`.
 
 
 ### Dispatch grid
@@ -367,8 +366,7 @@ writeup. Summary:
 
 ## Input (simd, Metal, CUDA, ROCm, wgpu)
 
-Examples: `examples/screen_input.br` (mouse + key edges); the members below are exercised by
-`tests/screen_input_events.rs` on every target.
+Examples: `examples/screen_input.br` (mouse + key edges); the members below work on every target.
 
 **Model.** Events accumulate between frames and the frame body sees them as a *per-frame snapshot*: held state
 (`key`, `mouse.*` buttons, modifiers, `focused`, `marked`) is the state when the frame starts, and edge/event
@@ -551,7 +549,7 @@ Other hosts (simd, Metal, CUDA, ROCm): the API is accepted and ignored -- `scree
 `for r in screen.accessibilityRequests:` loops are removed before code generation, so no request ever arrives and the
 tree expression is not evaluated.
 
-Verification: the wgpu crate (and every other host's) is `cargo check`ed by `tests/screen_accessibility.rs`; the tree
+Verification: the wgpu crate (and every other host's) is `cargo check`ed; the tree
 builder was additionally run against `accesskit_consumer` (the consumer the platform adapters use) to check that it yields
 a valid tree (roles, labels, bounds scaled, focus, orphan dropped). No assistive technology was driven from an automated
 test.
@@ -572,8 +570,7 @@ generated `Cargo.toml` only when the program uses `Screen`.
 
 ### State between frames (wgpu)
 
-On wgpu the loop body can use the program's top-level setup values directly (tested by
-`tests/screen_render_loop_state.rs`):
+On wgpu the loop body can use the program's top-level setup values directly:
 
 - **Top-level `var`s are assignable.** `var dirty = false` at the top level, `dirty = true` (or `n += 1`) in
   `loop:`: the variable becomes a field of the generated `__App`. An unannotated `var` scalar literal gets its

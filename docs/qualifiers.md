@@ -593,7 +593,7 @@ For `'guard`, a `Counter&` parameter uses `read()` (shared read lock); `mut Coun
 
 #### Struct and enum method parameters
 
-Universal borrow inference applies to a bare, read-only struct/enum/array/dict/set parameter of a `req` or `def` method of a struct or enum exactly as to a free function's: no storage or qualifier-demand signal → `&T`, and every call site lends `&arg` (including calls emitted before the method and from other files). The inferred signature is kept in a per-`Type::method` table (`trait_borrowed_methods`, `src/transpiler/infer_trait_borrow.rs`), shared with bare-trait borrow inference. The key is the *name*: it need not be unique across the program. Same-named methods of several types are all borrowed when every one is a plain struct/enum method and they borrow the same positions (the by-name table then serves receivers of unknown type too); if one dissents (it needs the value owned, or borrows other positions), or the name is also a trait method, a field, a piped/bare value or a labeled-call target, *every* method of that name stays by value, even at call sites with a resolved receiver. Pinned by `tests/method_param_borrow_name_rule.rs`. A `def` call whose argument overlaps the receiver (`self.m(self.items)`, `c.m(c.items)`; disjoint fields do not overlap) passes a copy, since a shared borrow would conflict with `&mut self`.
+Universal borrow inference applies to a bare, read-only struct/enum/array/dict/set parameter of a `req` or `def` method of a struct or enum exactly as to a free function's: no storage or qualifier-demand signal → `&T`, and every call site lends `&arg` (including calls emitted before the method and from other files). The inferred signature is kept in a per-`Type::method` table, shared with bare-trait borrow inference. The key is the *name*: it need not be unique across the program. Same-named methods of several types are all borrowed when every one is a plain struct/enum method and they borrow the same positions (the by-name table then serves receivers of unknown type too); if one dissents (it needs the value owned, or borrows other positions), or the name is also a trait method, a field, a piped/bare value or a labeled-call target, *every* method of that name stays by value, even at call sites with a resolved receiver. A `def` call whose argument overlaps the receiver (`self.m(self.items)`, `c.m(c.items)`; disjoint fields do not overlap) passes a copy, since a shared borrow would conflict with `&mut self`.
 
 A call site cannot always resolve its receiver's type (an untyped closure result, a call with no declared return type). Such a call looks the signature up by method **name**, which is sound only when every method bearing that name is a plain struct/enum method and they all borrow the same positions (a free function of the same name is irrelevant: `f(x)` and `x.f(y)` differ). If a trait method, a field, a pipe target or another kind of method shares the name, or the types disagree, every parameter of that name stays by value at every call site, so a `&T` argument is never emitted against a by-value signature or vice versa.
 
@@ -742,7 +742,7 @@ display(b)
 
 ### Parameter auto-apply
 
-A pre-inference pass runs `infer_qualifiers` on the function body before emitting parameters. `emit_param` then consults `inferred_qualifiers` and applies the resolved qualifier automatically:
+The compiler infers the qualifiers of the function body before it emits the parameters, then applies the resolved qualifier to each parameter automatically:
 
 ```boring
 def process(Counter c):   # no qualifier written
@@ -769,7 +769,7 @@ def Value eval_expr(Interpreter interp, Expr e):
 
 ### A `mut` parameter stored in an `'actor` member
 
-A `mut` struct parameter of a struct method is lent (`&mut T`) whatever the body does, and storing it by bare name (`kept = p`, `self.kept = p`) used to be a checker error: a `&mut T` cannot be kept in `self`, and the only meaning of the store is "the member and the caller's variable are the same object". When the destination is a member declared `T'actor`, that meaning has a representation (`Arc<Mutex<T>>` / `Rc<RefCell<T>>`), so the parameter is **inferred `'actor`** instead (`infer_actor_params`, a rewrite right after parsing, so the checker, `boring run` and `boring build` see one signature):
+A `mut` struct parameter of a struct method is lent (`&mut T`) whatever the body does, and storing it by bare name (`kept = p`, `self.kept = p`) used to be a checker error: a `&mut T` cannot be kept in `self`, and the only meaning of the store is "the member and the caller's variable are the same object". When the destination is a member declared `T'actor`, that meaning has a representation (`Arc<Mutex<T>>` / `Rc<RefCell<T>>`), so the parameter is **inferred `'actor`** instead (a rewrite right after parsing, so the checker, `boring run` and `boring build` see one signature):
 
 ```boring
 struct Holder:
@@ -785,8 +785,8 @@ print h.kept.x                  # 9
 ```
 
 - **Signal.** In a non-trait, non-overloaded, non-generic method of a struct, a `mut` parameter `p` whose type is exactly `T` stored by bare name — `member = p` or `self.member = p`, `member` a field (not shadowed by a parameter) declared `T'actor` (looking through `mut`/`var`) — and stored nowhere else. Also a signal: `obj.field = p` where `obj`'s struct type is positively known (a `self` field of a declared struct type, a parameter or an annotated local of one; the struct's `field` is `T'actor`), and `xs.push(p)` / `xs.append`/`insert`/`add`/`set` / `d[k] = p` into a `[T'actor]` / `{T'actor}` / `{K = T'actor}` member (the element is the caller's own handle, pushed as a clone of the handle, not re-wrapped).
-- **Not inferred (the store diagnostic stays):** a trait method or a method named like a method of a trait of the same file *or of any file it `use`s* (sibling files, `[deps]`, embedded `boring.*` stdlib — the trait fixes the signature; the entry points tell the pass where to look through `infer_actor_params::set_import_context`), a `T'shared` member (`'shared` has no interior mutability, so it cannot alias a mutable value), a plain or `'owned` member, an element of a plain `[T]` / `{K = V}`, `obj.field = p` where `obj`'s type is not positively known (an unannotated local, a call result), and a `p` also stored into any non-`'actor` place.
-- **Effect on callers.** The caller's argument becomes `'actor` through the ordinary qualifier propagation, now also for method calls whose receiver has a known struct type (a method parameter declared `'actor`/`'guard` promotes its argument like a free function's parameter does): `p` is an `Arc<Mutex<Point>>` for its whole scope, so *all* its uses change representation. Passing it to a plain `mut` parameter lends the locked value (`&mut *p.lock().unwrap()`, `borrow_mut()` in single-thread mode). A variable is promoted (a `let` binding too, the handle is never reseated); a struct-field or element argument (`h.keep(o.inner)`) is a checker error (`check_actor_param_args`), not a silent copy. A caller variable that is also an explicitly annotated `mut Point'actor q` is not in the inferred table, so lending it to a plain `mut` parameter is not supported yet (same as for a free function).
+- **Not inferred (the store diagnostic stays):** a trait method or a method named like a method of a trait of the same file *or of any file it `use`s* (sibling files, `[deps]`, embedded `boring.*` stdlib — the trait fixes the signature), a `T'shared` member (`'shared` has no interior mutability, so it cannot alias a mutable value), a plain or `'owned` member, an element of a plain `[T]` / `{K = V}`, `obj.field = p` where `obj`'s type is not positively known (an unannotated local, a call result), and a `p` also stored into any non-`'actor` place.
+- **Effect on callers.** The caller's argument becomes `'actor` through the ordinary qualifier propagation, now also for method calls whose receiver has a known struct type (a method parameter declared `'actor`/`'guard` promotes its argument like a free function's parameter does): `p` is an `Arc<Mutex<Point>>` for its whole scope, so *all* its uses change representation. Passing it to a plain `mut` parameter lends the locked value (`&mut *p.lock().unwrap()`, `borrow_mut()` in single-thread mode). A variable is promoted (a `let` binding too, the handle is never reseated); a struct-field or element argument (`h.keep(o.inner)`) is a checker error, not a silent copy. A caller variable that is also an explicitly annotated `mut Point'actor q` is not in the inferred table, so lending it to a plain `mut` parameter is not supported yet (same as for a free function).
 - **`--show-qualifiers`.** Both choices are listed: `Holder.keep::p 'actor - param: ...stored by bare name into an 'actor member` and `main::p 'actor - let: the usage constraints leave only 'actor`.
 
 ### Design: borrow inference for bare-trait parameters (phases 1–4 implemented)
@@ -794,7 +794,7 @@ print h.kept.x                  # 9
 **Status: phases 1–4 implemented (explicit `Trait&` → `&dyn Trait`; inference for free functions and struct methods; borrowed trait-method contracts).** A bare-trait parameter (`def int flush(Builder b)`, dynamic dispatch) is
 emitted `b: Box<dyn Builder>` — by value — while structs/enums/collections are borrowed by inference
 (`auto_ref_param_vars`, free functions only). A trait-typed argument is therefore *moved*: passing
-the same local twice (`b.endEvent(first)` twice, boring-ui `tests/core_lifecycle_test.br:69,72`) is a
+the same local twice (`b.endEvent(first)` twice) is a
 rustc move error. Goal: make `&dyn Trait` the inferred norm unless the body consumes the parameter.
 
 #### Rust-level facts (checked with rustc, not assumed)
@@ -921,7 +921,7 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    `impl Addable`" hazard in that comment concerns the qualifier fallback, not the borrow result).
    Cases: receiver-only, forwarded chain (3 deep), mutual recursion, stored in a struct/array (stays
    `Box`), returned, captured by closure, shadowed name, cross-file via bare `use` and `[deps]`.
-   Landed as `src/transpiler/infer_trait_borrow.rs` (`tests/cases/trait_borrow_infer.br`): facts are
+   Landed as `src/transpiler/infer_trait_borrow.rs`: facts are
    gathered per file in `deep_pre_scan`, the shrinking fixpoint runs once after the outermost scan
    (`resolve_trait_borrow_params`), `fn_sigs` is rewritten to `Trait&`, and `emit_fn` emits the
    function as if the author had written `Trait& p` (so phase 1's call sites apply unchanged).
@@ -935,7 +935,7 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
 3. **(Done.)** **Struct methods** (gated as in (3)), then validate on `boring-ui/src/core.br`
    `flush`/`endEvent` (expect `&dyn Builder`; `start` builds `b.build(self)` only ⇒ borrowed too) and
    `core_lifecycle_test.br` with `endEvent(first)` twice.
-   Landed in the same `infer_trait_borrow.rs` (`tests/cases/trait_borrow_method_infer.br`), keyed
+   Landed in the same `infer_trait_borrow.rs`, keyed
    `Type::method`. A method is a candidate only when its *name* identifies it program-wide —
    declared by exactly one method of any kind, by no trait, and not also a free function, a field
    or a piped/bare-value name — and its struct is not generic. The registered declarations are
@@ -954,7 +954,7 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    shapes as free functions: a local or field is borrowed in place, a fresh value is borrowed,
    an already-borrowed parameter is passed through or reborrowed, an `'owned`/`'shared` binding
    is borrowed through its pointer, and a `let` passed to `mut T&` is a diagnostic
-   (`tests/cases/struct_borrow_method_param.br`). Lending a field of `self` to a `def` method of the
+. Lending a field of `self` to a `def` method of the
    same object is rejected by rustc's borrow checker, as it should be.
 4. **(Done.)** **Trait-method contracts default to borrowed** (breaking: none in the repository or its
    sibling projects declared a trait method with a bare-trait parameter). A bare-trait parameter of a
@@ -969,7 +969,7 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
    one trait also resolves forwarded calls and receivers of unknown type. An implementer or
    default body that consumes a borrowed parameter, or declares it with another type than the
    trait, is a Boring diagnostic naming the `'owned` fix
-   (`tests/trait_borrow_contract_build_fails.rs`); a name shared by several traits with
+; a name shared by several traits with
    different contracts is a diagnostic too. `'owned` on a bare trait parameter was only half
    working (a fresh value was boxed, an already-boxed local or parameter was boxed again, the
    call site cloned it): `is_boxed_trait_type` now treats it like the bare form wherever the
@@ -1121,7 +1121,7 @@ Every generated atomic operation uses `std::sync::atomic::Ordering::SeqCst` — 
 
 ### Binding permission — `mut`/`var mut` required for every mutating op
 
-`'atomic` is structurally in the same family as `'actor`/`'guard` (see this section's own opening paragraph), so it gets the same Boring-level binding-permission discipline: a bare `let x'atomic = ...` is **read-only** — every op in the "Operation mapping" table above except the bare read (`x = n`, `x += n`, `x -= n`, `x.swap(n)`) is a compile error unless the binding also carries `mut`/`var mut`. This is enforced by `src/checker/mod.rs`'s `check_assign_target` (for the assignment-shaped ops — `x = n`/`x += n`/`x -= n`, which all desugar to the same `Assign` AST node) and `src/transpiler/emit_methods.rs`'s `try_emit_atomic_method` (for `.swap()`, a method call with no `Assign`-node equivalent to piggyback on).
+`'atomic` is structurally in the same family as `'actor`/`'guard` (see this section's own opening paragraph), so it gets the same Boring-level binding-permission discipline: a bare `let x'atomic = ...` is **read-only** — every op in the "Operation mapping" table above except the bare read (`x = n`, `x += n`, `x -= n`, `x.swap(n)`) is a compile error unless the binding also carries `mut`/`var mut`. This is enforced for the assignment-shaped ops (`x = n`/`x += n`/`x -= n`) and for `.swap()` alike.
 
 Unlike a struct-typed `'actor`/`'guard` binding, a scalar `'atomic` binding has no operation that reassigns the pointer independently of mutating its content — there is no `x = Counter()`-style fresh construction for a bare scalar the way there is for a struct. So `var` alone (rebind-only for every other qualifier in this family) grants **nothing** extra for `'atomic`: every one of `x = n`/`x += n`/`x -= n`/`x.swap(n)` needs `mut` or `var mut`, exactly the same requirement as bare `let`.
 
@@ -1155,7 +1155,7 @@ Its exact position relative to `'guard` doesn't matter for default-selection pur
 1. An explicit annotation (`x'atomic`).
 2. An explicit call-site demand elsewhere in the program (a parameter typed `T'atomic`, added to the signal table as "Call site demanding `T'atomic`" → `{Atomic}`, exactly like the existing `'shared`/`'actor`/`'guard` demand signals).
 
-A bare scalar whose only signals are ambiguous between `{Actor, Guard, Atomic}` still resolves to `'actor` by default — confirmed as a regression test against `resolve_fallback` directly (`src/transpiler/infer_qualifiers.rs`'s test module).
+A bare scalar whose only signals are ambiguous between `{Actor, Guard, Atomic}` still resolves to `'actor` by default — covered by a test of the fallback itself.
 
 ### `with`-block incompatibility
 
@@ -1187,7 +1187,6 @@ Both `'actor` and `'guard` sources are treated identically: promoting a `'guard`
 - **Compare-and-swap pattern detection** — a `'actor`/`'guard` scalar used only via an `if x == a: x = b` pattern is not recognized as CAS-safe and stays on the lock-based representation.
 - **Cross-function whole-program promotion** — a promoted variable passed to another Boring function/method is always treated as escaping (criterion 2), exactly like `with`'s own local-only scan never opens a called function's body. A future version could extend the analysis to also examine the callee's own body when it's defined in the same file/module, under the same conservative false-negative-ok principle.
 
-Implementation: `src/transpiler/promote_atomic.rs` (`scan_atomic_promotions`, run once per function body immediately after `infer_qualifiers`/`infer_struct_field_qualifiers`, before any statement is emitted) populates `self.promoted_atomic_vars`; `emit_let.rs`'s `try_emit_qualified_let` consults it before falling through to the ordinary `'actor`/`'guard` mutex/rwlock emission.
 
 ---
 
@@ -1236,7 +1235,7 @@ Primitives (`int`, `uint`, `float`, `bool`) have no meaningful qualifier — the
 
 ### Cross-file struct field inference
 
-Struct field inference sees the uses of a field in every file of the project (`src/transpiler/infer_field_cross_file.rs`): once every file is registered and the function and method parameters are inferred, each unqualified struct-typed field is inferred again from all bodies, where `x.field` on a local `x` of the struct's type (parameter, typed `let`, constructor call, alias, `a.b.field` chain) counts like `self.field` in the struct's own methods. It alternates with the parameter pre-pass to a fixed point. A qualifier written on the field is never overwritten, the result does not depend on the order of the files, and requirements that no single qualifier meets are a `conflicting qualifier requirements for field` error naming the functions involved.
+Struct field inference sees the uses of a field in every file of the project: once every file is registered and the function and method parameters are inferred, each unqualified struct-typed field is inferred again from all bodies, where `x.field` on a local `x` of the struct's type (parameter, typed `let`, constructor call, alias, `a.b.field` chain) counts like `self.field` in the struct's own methods. It alternates with the parameter pre-pass to a fixed point. A qualifier written on the field is never overwritten, the result does not depend on the order of the files, and requirements that no single qualifier meets are a `conflicting qualifier requirements for field` error naming the functions involved.
 
 Followed too: a `for` variable or element of a `[S]`, `mut c = svc.stats` aliases, a field returned from a function declared to return a lock handle, a field placed in a literal bound to a declared `[T'actor]`, a field passed to a plain borrowed parameter (borrowed through its guard), and a `mut` method parameter demanded as a lock handle. Rejected with a diagnostic naming the fix when the field is a lock handle: a field in an unannotated literal and a field returned under a bare return type — see "Struct field inference" in `docs/book.md`.
 
@@ -1244,9 +1243,8 @@ Followed too: a `for` variable or element of a `[S]`, `mut c = svc.stats` aliase
 
 A bare (unqualified) local variable whose type is a struct larger than
 `--inline-auto-bytes` is resolved by the size-based fallback (see
-`docs/transpilation-modes.md` "Size-based auto-boxing (strict mode only)") —
-`resolve_fallback` (`src/transpiler/infer_qualifiers.rs`). This fallback used to
-not check `--mode` at all, so it resolved a bare oversized local to `'owned`
+`docs/transpilation-modes.md` "Size-based auto-boxing (strict mode only)"). This
+fallback used to not check `--mode` at all, so it resolved a bare oversized local to `'owned`
 regardless of mode; in `--mode managed`, `'owned` means `Arc<Mutex<T>>`/
 `RefCell<T>` rather than `Box<T>`. A function with a bare (also unqualified)
 return type of the same oversized struct does **not** get its signature promoted
@@ -1259,15 +1257,13 @@ oversized local used only as a struct-field initializer inside `main()` (never
 returned at all): the local's own `let` got wrapped while its constructor-call
 initializer stayed bare and unwrapped.
 
-Fixed by making `resolve_fallback` itself mode-aware: size-based auto-boxing now
+Fixed by making the fallback mode-aware: size-based auto-boxing now
 only ever escalates a bare local past `'inline` in strict mode (matching the
 "strict mode only" scope size-based auto-boxing has always been documented
 with) — in managed mode a bare oversized local now stays plain, unboxed `T`
 regardless of size, agreeing by construction with the (also unpromoted)
 managed-mode function-return signature and with any bare, unwrapped constructor
-call that initializes it. See `tests/cases/oversized_return_boxed_via_let.br`
-and `tests/cases/oversized_struct_field_stays_inline.br` (both now run all four
-mode/threading variants in `tests/transpile.rs`, no `ignore_managed`).
+call that initializes it.
 
 ---
 
@@ -1310,7 +1306,7 @@ These sets are populated during statement emission and propagated into sub-trans
 
 ### Qualifier on the type OR the name, never both
 
-A `let` binding's qualifier can be written on the type (`let Counter'actor c = …`) or, when the type can be inferred, on the name (`let c'actor = …`) — see the book's "Qualifier on the variable name" section. Writing it in **both** positions on the same binding (`let Counter'actor c'guard = …`) is a parse error (`parse_let_stmt_pub` in `src/parser/parse_stmt.rs`), not silently resolved by any precedence rule — there is no defined semantics for which qualifier would win, and the transpiler has no sane way to emit a doubly-qualified type. This is unrelated to a legitimate compound chain (`'actor'task`, `'shared'weak`): those are written as a single tick-sequence in one position and are unaffected.
+A `let` binding's qualifier can be written on the type (`let Counter'actor c = …`) or, when the type can be inferred, on the name (`let c'actor = …`) — see the book's "Qualifier on the variable name" section. Writing it in **both** positions on the same binding (`let Counter'actor c'guard = …`) is a parse error, not silently resolved by any precedence rule — there is no defined semantics for which qualifier would win, and the transpiler has no sane way to emit a doubly-qualified type. This is unrelated to a legitimate compound chain (`'actor'task`, `'shared'weak`): those are written as a single tick-sequence in one position and are unaffected.
 
 ### Interior mutability in the interpreter
 

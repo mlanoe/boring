@@ -188,7 +188,7 @@ A backend that cannot compile the program is left out with a warning. The crates
    it receive kernels.
 
 A backend that cannot be measured is scored from an embedded table of known devices
-(`DEVICES` in `src/multi_policy.rs`): the device's approximate peak FP32 throughput from the
+: the device's approximate peak FP32 throughput from the
 vendors' public figures (GeForce RTX 50/40/30/20 and GTX 16/10, data-centre NVIDIA, Radeon RX
 7000/6000 and Instinct, Intel Arc, Apple M1 to M4), converted to benchmark points (60 thousand
 per TFLOPS, calibrated on an Apple M3, and 60% of that through wgpu since it reaches less of the

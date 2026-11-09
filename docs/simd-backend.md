@@ -111,7 +111,7 @@ output into many more tasks than workers and the workers pull them from a shared
 heterogeneous performance/efficiency cores busy. On an Apple M3 the one-row decode of a
 2048x11008 Q8_0 weight went from 13.5 ms to 4.2 ms per call and Q4_0 from 20.4 ms to 5.7 ms. Every cell is
 computed in the same order whatever the worker count, so results are bit-identical to
-`BORING_SIMD_THREADS=1` (checked by `tests/simd_quant_linear.rs`).
+`BORING_SIMD_THREADS=1`.
 ### Quantized `linear` schedules
 
 Three schedules exist for the quantized `linear` (Q8_0, Q4_0, Q5_0, IQ4_NL, Q4_K, Q6_K, Q3_K, Q2_K);
@@ -137,7 +137,7 @@ sub block (plus a float minimum for Q4_K and Q2_K), and each sub block is one in
 still unstable in Rust), with a scalar fallback. The weights are exact; the
 only error is the activation rounding. **Declared tolerance: 6e-2 of the largest output magnitude**
 (observed up to 4.9e-2 for Q4_K, where the minimum term amplifies the rounding, typically 2e-3 to
-1e-2), checked in `tests/simd_quant_linear.rs`. A separate diagnostic value,
+1e-2). A separate diagnostic value,
 `BORING_SIMD_QUANT_INT8=activations`, rounds the activations the same way but computes in float:
 the integer kernels must match it within 2e-5, which isolates their correctness from the rounding
 (measured about 2e-7 on AArch64 and, through Rosetta with the real SSSE3 code, on x86-64). Any

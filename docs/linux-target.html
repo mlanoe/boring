@@ -288,19 +288,6 @@ tx.<span class="fn">send</span>(<span class="fm">c_str!</span>(<span class="s">&
 <h2 id="known-limitations">Known limitations</h2>
 <ul><li><strong>Float detection is name/shape based, not type-based</strong> — the validator has no type checker, so it rejects every place a float can <em>originate</em>: float literals, <code>float</code>/<code>float16</code>/<code>float32</code>/<code>float64</code> types (parameters, fields, returns, bindings, casts, generics), the math builtins, the conversion/constant builtins (<code>float(n)</code>, <code>float32(n)</code>, <code>bitsToFloat</code>, <code>floatToBits</code>, <code>isNaN</code>, <code>isInfinite</code>, <code>PI</code>, <code>E</code>, <code>INF</code>, <code>NAN</code>) and the conversion methods (<code>.parseFloat()</code>, <code>.toFloat()</code>, <code>.isNaN()</code>, ...). A float can&#x27;t reach a binding without passing one of those, so inferred bindings are covered. Residual gaps: <code>sqrt</code>/<code>sin</code>/... <em>as methods</em> (<code>x.sqrt()</code>) are not rejected by name because the integer-backed fixed-point types share those method names — but <code>x</code> can only be a float if it came from a rejected origin; and a user binding called <code>PI</code>/<code>E</code>/<code>INF</code>/<code>NAN</code> shadows the constant check by name. The generated-code <code>/* float forbidden */</code> markers remain as a backstop.</li><li><strong><code>catch</code> is rejected</strong> — the kernel has one error type (<code>kernel::error::Error</code>, propagated with <code>?</code>); there are no <code>BoringError</code> variants to dispatch on, so <code>catch</code>/<code>catch Type</code> now fails with a diagnostic (it used to be silently dropped, so the handler never ran). Use <code>try expr else default</code> / <code>try: ... else: ...</code>, or let the error propagate. <code>throws MyError</code> and the <code>type X as kernel.error.Error(ERRNO)</code> errno-binding syntax are still not implemented.</li><li><strong><code>assert_eq!</code></strong> — no kernel-specific override; plain <code>assert_eq!</code> is emitted without mapping to <code>WARN_ON</code> or <code>kernel::build_assert!</code>.</li></ul>
 <hr>
-<h2 id="transpiler-architecture">Transpiler architecture</h2>
-<p>A second emission backend within the same binary — parser, AST, and typing passes are shared and untouched.</p>
-<div class="code-block"><pre><code>src/
-  validator/
-    kernel.rs          # validation pass: rejects forbidden constructs
-  transpiler/
-    kernel/
-      mod.rs           # entry point, selected by --linux
-      emit_top.rs      # struct/impl/fn declarations, Work item generation
-      emit_stmt.rs     # statements, task expr, channel, yield
-      emit_expr.rs     # expressions, string literal → c_str!, method calls
-      helpers.rs       # KernelFuture&lt;T&gt;, KernelChan&lt;T&gt; runtime types</code></pre></div>
-<p>The <code>--linux</code> flag activates the kernel validator then the kernel emitter. The standard backend (<code>--target rust</code>, default) is not modified.</p>
 </main>
 <script>
 // Build TOC from headings
