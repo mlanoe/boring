@@ -1,0 +1,27 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Tally:
+    var int total = 0
+
+    def inc():
+        total += 10
+
+# `a'actor`: a qualifier written after an untyped parameter's name. The argument must be written
+# with that qualifier (another one is a Boring error); the function is specialised per type.
+def bump(var mut a'actor):
+    a.inc()
+
+def twice(var mut b'actor):
+    bump(b)
+    bump(b)
+
+def main():
+    var mut Counter'actor c = Counter()
+    var mut Tally'actor t = Tally()
+    twice(c)
+    bump(t)
+    print "{c.n} {t.total}"

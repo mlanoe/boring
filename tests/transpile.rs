@@ -392,6 +392,11 @@ transpile_test!(implicit_generics_literals);
 transpile_test!(implicit_generics_methods);
 transpile_test!(implicit_generics_struct_params);
 transpile_test!(implicit_generics_written_args);
+transpile_test!(implicit_generics_specialise);
+transpile_test!(implicit_generics_specialise_fields);
+transpile_test!(implicit_generics_specialise_slot);
+transpile_test!(monomorphize_qualified_arg);
+transpile_test!(monomorphize_qualified_infer);
 transpile_test!(view_generic_multi);
 transpile_test!(operators);
 transpile_test!(macros);
@@ -1681,9 +1686,6 @@ transpile_test!(qualifier_fns_cascade);
 // function mixing a type and a qualifier parameter; see tests/cases/qualifier_fns_methods.br.
 transpile_test!(qualifier_fns_methods);
 
-// Qualified generics `<T'q>`: a type and its qualifier as one parameter, short/long forms and
-// inference at construction and call; see tests/cases/qualified_generics.br.
-transpile_test!(qualified_generics);
 // A `'owned` local passed to a same-typed parameter isn't re-wrapped in managed mode. No
 // managed+multi config: its eager `__p1_mg` lock guard is still alive when the local is
 // moved into the call (E0505) — a separate, pre-existing gap.

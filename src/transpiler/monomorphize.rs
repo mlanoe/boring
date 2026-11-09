@@ -76,6 +76,10 @@ thread_local! {
     /// Declarations whose qualifier parameters all have a default: a bare use in type position
     /// is that instance (`Board` → `Board<elem'inline>`).
     static QUAL_DEFAULTS: RefCell<HashMap<String, Vec<Type>>> = RefCell::new(HashMap::new());
+    /// While the type annotations of a file are rewritten (`monomorphize_program`): per generic
+    /// struct/enum, the mangled names of its instances, so an annotation `Entry<int>` names the
+    /// specialised `Entry_int` that a turbofish construction `Entry<int>(5)` already produced.
+    static HOST_INSTANCES: RefCell<Option<HashMap<String, HashSet<String>>>> = const { RefCell::new(None) };
 }
 
 fn set_qual_defaults(program: &Program) {
@@ -304,6 +308,7 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
                     if let Some(m) = mangled_name(name, &args) { return Type::Named(m); }
                 }
             }
+            if let Some(m) = host_instance_use(name, &args) { return Type::Named(m); }
             if let Some(m) = device_generic_use(name, &args) { return Type::Named(m); }
             Type::Generic(name.clone(), args)
         }
@@ -322,6 +327,15 @@ pub(crate) fn with_device_generic<R>(names: HashSet<String>, f: impl FnOnce() ->
     let r = f();
     let uses = DEVICE_GENERIC.with(|d| d.borrow_mut().take()).map(|(_, u)| u).unwrap_or_default();
     (r, uses)
+}
+
+fn host_instance_use(name: &str, args: &[Type]) -> Option<String> {
+    HOST_INSTANCES.with(|h| {
+        let h = h.borrow();
+        let set = h.as_ref()?.get(name)?;
+        let m = mangled_name(name, args)?;
+        set.contains(&m).then_some(m)
+    })
 }
 
 fn device_generic_use(name: &str, args: &[Type]) -> Option<String> {
@@ -862,6 +876,19 @@ pub(crate) fn mangle_type(ty: &Type) -> Option<String> {
         // in the final report).
         Type::Mut(inner) => mangle_type(inner).map(|s| format!("mut_{}", s)),
         Type::QualArg(q) => OwnerQual::chain_mangle(q),
+        // `Counter'actor`: a qualified type argument names its qualifier chain, innermost first
+        // (`Entry_Counter_actor`), so `Entry<Counter'actor>` is specialised and the body is typed
+        // with the qualifier it is instantiated with (what `e.value.inc()` emits depends on it).
+        Type::Qualified(..) => {
+            let mut chain: Vec<OwnerQual> = Vec::new();
+            let mut base = ty;
+            while let Type::Qualified(inner, q) = base {
+                chain.push(q.clone());
+                base = inner;
+            }
+            chain.reverse();
+            Some(format!("{}_{}", mangle_type(base)?, OwnerQual::chain_mangle(&chain)?))
+        }
         _ => None,
     }
 }
@@ -1996,8 +2023,16 @@ impl Transpiler {
         program.items.retain(|it| !matches!(it, Item::Fn(f) if has_qual_params(&f.type_params)));
         rewrite_qual_lets(&mut program.items);
         QUAL_REWRITE.with(|c| c.set(true));
+        let mut instance_names: HashMap<String, HashSet<String>> = HashMap::new();
+        for (base, list) in &self.global_instantiations {
+            for inst in list {
+                if inst.is_struct || inst.is_enum { instance_names.entry(base.clone()).or_default().insert(inst.mangled.clone()); }
+            }
+        }
+        HOST_INSTANCES.with(|h| *h.borrow_mut() = Some(instance_names));
         let empty = HashMap::new();
         for item in program.items.iter_mut() { substitute_types_in_item(item, &empty); }
+        HOST_INSTANCES.with(|h| *h.borrow_mut() = None);
         QUAL_REWRITE.with(|c| c.set(false));
 
         rewrite_call_sites(program, &self.global_instantiations, &self.global_method_instantiations);

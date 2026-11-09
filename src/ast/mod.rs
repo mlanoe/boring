@@ -119,6 +119,10 @@ pub struct FnDecl {
     /// introduced by their first occurrence in the signature (`int count(Board<elem'q> b)`),
     /// with the number of times the name is written in the signature and body.
     pub implicit_quals: Vec<(String, usize)>,
+    /// Qualifier written after the name of an untyped parameter (`def f(a'owned)`): `(parameter
+    /// name, qualifier)`. Checked against the written qualifier of each call's argument by
+    /// `specialize_untyped`; the parameter itself stays untyped.
+    pub slot_quals: Vec<(String, OwnerQual)>,
     pub where_clause: Vec<(String, String)>,
     pub attrs: Vec<Attr>,
     pub line: usize,
@@ -2651,15 +2655,6 @@ pub fn qual_param_default(p: &str) -> Option<QualChain> {
     let rest = p.strip_prefix('^')?;
     OwnerQual::chain_from_name(rest.split_once('=')?.1)
 }
-
-/// The type parameters a qualifier parameter is tied to by the `<T'q>` sugar (`^q@T` -> `[T]`;
-/// `<A'q, B'q>` shares one `q`: `^q@A,B` -> `[A, B]`). `<T, 'q>` written long has none.
-pub fn qual_param_links(p: &str) -> Vec<&str> {
-    p.strip_prefix('^').and_then(|r| r.split_once('@')).map_or_else(Vec::new, |(_, t)| t.split(',').collect())
-}
-
-/// Is the qualifier parameter `p` tied to the type parameter `t`?
-pub fn qual_linked_to(p: &str, t: &str) -> bool { qual_param_links(p).contains(&t) }
 
 /// Label of a qualifier parameter in a `type_params` list (`^elem:..` → `elem`).
 pub fn qual_param_name(p: &str) -> Option<&str> { qual_param_decl(p).map(|(n, _)| n) }

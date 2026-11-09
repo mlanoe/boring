@@ -1,0 +1,19 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Entry<T>:
+    var mut T value
+
+# A bare construction takes its type argument from a variable whose type is written with a
+# qualifier: `Entry(c)` is `Entry<Counter'actor>(c)`, so `e.value.inc()` takes the lock. A call
+# with no written qualifier stays on the ordinary generic path.
+def main():
+    var mut Counter'actor c = Counter()
+    var mut e = Entry(c)
+    e.value.inc()
+    e.value.inc()
+    var mut Entry<int> i = Entry(5)
+    print "{c.n} {i.value}"

@@ -1,0 +1,28 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Tally:
+    var int total = 0
+
+    def inc():
+        total += 10
+
+# A method called on an untyped parameter: what `a.inc()` emits depends on the type and the
+# qualifier of the argument ('actor takes the lock), so each typed call gets its own copy.
+def bump(var mut a):
+    a.inc()
+
+def twice(var mut b):
+    bump(b)
+    bump(b)
+
+def main():
+    var mut Counter'actor c = Counter()
+    var mut Tally'actor t = Tally()
+    twice(c)
+    bump(c)
+    bump(t)
+    print "{c.n} {t.total}"

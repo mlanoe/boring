@@ -115,6 +115,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     }
     generic_args::check_bare_qual_uses(&program)?;
     crate::infer_param_generics::desugar_struct_params(&mut program)?;
+    crate::specialize_untyped::specialize_method_users(&mut program)?;
     // Before the actor passes: they (and everything after) must see the written-back return types.
     crate::infer_param_generics::propagate_bounds(&mut program);
     crate::infer_return_types::infer_return_types(&mut program);
@@ -171,6 +172,8 @@ struct Parser {
     pub(crate) pending_err: Option<ParseError>,
     /// Error of a parameter type that was then retried as a bare name (see `parse_param`).
     pub(crate) param_type_err: Option<ParseError>,
+    /// `true` while the parameter list of a free `def` is read: `name'qual` is then a qualifier slot.
+    pub(crate) slot_qual_ok: bool,
     /// Qualifier parameters of the top-level declaration being parsed (`T'elem` is valid for these).
     pub(crate) qual_scope: Vec<String>,
     /// Bound (member chains) of each name in `qual_scope`, to check a parameter passed on to
@@ -191,6 +194,7 @@ impl Parser {
             saw_labelled_generics: false,
             pending_err: None,
             param_type_err: None,
+            slot_qual_ok: false,
             qual_scope: Vec::new(),
             qual_bounds: HashMap::new(),
         }
@@ -366,7 +370,12 @@ impl Parser {
         while !self.check(&TokenKind::Eof) {
             self.qual_scope.clear();
             self.qual_bounds.clear();
-            let item = self.parse_item(false)?;
+            // An error recorded earlier in the declaration (its signature) comes before the one
+            // the body then raised because of it (`<T'q>` makes every `T'q` in the body unknown).
+            let item = match self.parse_item(false) {
+                Ok(item) => item,
+                Err(e) => return Err(self.pending_err.take().unwrap_or(e)),
+            };
             if let Some(e) = self.pending_err.take() { return Err(e); }
             items.push(item);
             self.skip_newlines_and_indent();
@@ -1786,7 +1795,6 @@ impl Parser {
         let mut params = Vec::new();
         let mut where_clause = Vec::new();
         // `<T'q>` sugar: qualifier name -> the types written with it.
-        let mut sugar_types: HashMap<String, Vec<String>> = HashMap::new();
         self.skip_newlines_and_indent();
         loop {
             // Qualifier parameter: `'elem`, `'elem as 'new` (docs/book.md "Qualifier parameters").
@@ -1869,46 +1877,17 @@ impl Parser {
             };
             params.push(name.clone());
 
-            // `<T'q>`: sugar for `<T, 'q>`, with `q` tied to `T` (docs/book.md, "Qualified generics").
-            // Plain form only: bounds and defaults of `q` need the long form.
+            // `<T'q>` (a type and its qualifier as one parameter) is not a form: a plain `T` carries
+            // the qualifier of its argument (`T = Counter'actor`), and `<T, 'q>` declares a
+            // qualifier parameter of its own.
             if self.check(&TokenKind::Tick) && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+                let (ql, qc) = (self.line(), self.col());
                 self.advance();
-                let (ql, qc, qn) = (self.line(), self.col(), self.tok_len());
-                let TokenKind::Ident(q) = self.peek().clone() else { unreachable!() };
+                let q = match self.peek().clone() { TokenKind::Ident(q) => q, _ => String::new() };
                 self.advance();
-                if crate::parser::generic_args::QUALIFIER_WORDS.contains(&q.as_str()) {
-                    self.pending_err.get_or_insert(ParseError::Generic {
-                        msg: format!("`'{q}` is a qualifier, it cannot name the qualifier parameter of `{name}'...`"),
-                        line: ql, col: qc, len: qn });
-                } else if params.iter().any(|p| qual_param_name(p) == Some(q.as_str()) && qual_param_links(p).is_empty()) {
-                    // A `q` declared on its own (`<A, 'q, B'q>`) cannot also be linked.
-                    self.pending_err.get_or_insert(ParseError::Generic {
-                        msg: format!("qualifier parameter `{q}` is declared twice; `{name}'{q}` would clash with it, write `<A, B, '{q}>` to share one"),
-                        line: ql, col: qc, len: qn });
-                } else {
-                    // `<A'q, B'q>`: each type has its own qualifier, `q` only says "the qualifier
-                    // of this type". Internally they are `q.A` and `q.B` (a lone `q` keeps its name);
-                    // `parse_type_qualifier` resolves `A'q` against the base type it follows.
-                    let others: Vec<String> = sugar_types.get(&q).cloned().unwrap_or_default();
-                    if others.len() == 1 {
-                        let first = &others[0];
-                        if let Some(at) = params.iter().position(|p| *p == format!("^{q}@{first}")) {
-                            params[at] = format!("^{q}.{first}@{first}");
-                        }
-                    }
-                    if others.is_empty() {
-                        params.push(format!("^{q}@{name}"));
-                    } else {
-                        params.push(format!("^{q}.{name}@{name}"));
-                    }
-                    sugar_types.entry(q.clone()).or_default().push(name.clone());
-                }
-                if matches!(self.peek(), TokenKind::As | TokenKind::Eq) {
-                    let (l, c, n) = (self.line(), self.col(), self.tok_len());
-                    self.pending_err.get_or_insert(ParseError::Generic {
-                        msg: format!("`{name}'{q}` takes no bound or default; write `<{name}, '{q} as ...>` to give `{q}` one"),
-                        line: l, col: c, len: n });
-                }
+                self.pending_err.get_or_insert(ParseError::Generic {
+                    msg: format!("`<{name}'{q}>` is not a declaration form: a plain `{name}` carries the qualifier of its argument (`{name} = Counter'actor`); write `<{name}, '{q}>` for a qualifier parameter of its own"),
+                    line: ql, col: qc, len: q.len() + 1 });
             }
 
             if self.eat(&TokenKind::As) {

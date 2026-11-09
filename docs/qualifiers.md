@@ -1040,7 +1040,7 @@ Inference picks one qualifier per *declared* type (see "One qualifier per declar
 - **Constructors and patterns of a generic enum** take their instance from the same evidence (`Slot.Full(p)` from a written qualifier, the expected type, the declared default); a qualified pattern follows the written type of the subject or names the instance itself, `Slot<elem'inline>.Full(p)`.
 - **Targets.** Specialised by the standard transpiler (and the GPU host emitters, which share it). `--linux` specialises a parameter whose whole bound is `'inline|owned` (the only qualifiers its emitter handles) and rejects any bound that also allows `'actor`, `'guard`, `'shared` or a chain.
 
-See the book's "Qualifier parameters" for the syntax, `ext`/enum support, and the errors. A type and its qualifier can be declared as one parameter, `<T'q>` (`T = Counter'actor` binds both, `T` and `q` are inferred from the arguments): see the book's "Qualified generics".
+See the book's "Qualifier parameters" for the syntax, `ext`/enum support, and the errors. A plain `<T>` takes a qualified argument (`T = Counter'actor`) and is specialised for it; a qualifier written on a slot (`T'owned a`, `a'owned`) is a constraint: see the book's "A type argument carries its qualifier".
 
 ### Explicit annotation — escape hatch
 

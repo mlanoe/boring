@@ -2570,6 +2570,8 @@ pub struct CpuDecision {
     pub line: usize,
     pub col: usize,
     pub qual: String,
+    /// The qualifier itself (`qual` is its display text), for the `full` level of the `.bri` output.
+    pub qualifier: Option<OwnerQual>,
     pub kind: &'static str,
     /// Which constraint or default decided it.
     pub why: Option<String>,
@@ -2585,7 +2587,7 @@ thread_local! {
 pub fn note_inferred_actor_param(method: &str, param: &str, line: usize, col: usize) {
     CPU_DECISIONS.with(|d| d.borrow_mut().push(CpuDecision {
         scope: method.to_string(), name: param.to_string(), line, col,
-        qual: "'actor".into(), kind: "param",
+        qual: "'actor".into(), qualifier: Some(OwnerQual::Actor), kind: "param",
         why: Some("`mut` parameter stored by bare name into an 'actor member: shares the caller's object, so the caller's argument is 'actor too".into()),
         note: None,
     }));
@@ -2645,7 +2647,7 @@ impl Transpiler {
             } else {
                 continue;
             };
-            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), kind, why: self.cpu_decision_reasons.get(name).cloned(), note: self.cpu_decision_notes.get(name).cloned() });
+            out.push(CpuDecision { scope: f.name.clone(), name: name.clone(), line, col, qual: cpu_qual_text(q), qualifier: Some(q.clone()), kind, why: self.cpu_decision_reasons.get(name).cloned(), note: self.cpu_decision_notes.get(name).cloned() });
         }
         out.sort_by_key(|d| (d.line, d.col));
         CPU_DECISIONS.with(|d| d.borrow_mut().extend(out));

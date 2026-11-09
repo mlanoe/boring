@@ -1,0 +1,17 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Entry<T>:
+    var mut T value
+
+# A qualified type argument is specialised like any concrete one (`Entry_Counter_actor`), so
+# `e.value.inc()` takes the lock; the annotation names the specialised instance too.
+def main():
+    var mut Counter'actor c = Counter()
+    var mut Entry<Counter'actor> e = Entry<Counter'actor>(c)
+    e.value.inc()
+    var mut Entry<int> i = Entry<int>(5)
+    print "{c.n} {i.value}"

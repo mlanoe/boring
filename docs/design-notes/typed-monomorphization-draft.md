@@ -1,6 +1,6 @@
 # Typed monomorphization — Boring → Boring (no generics) → Rust
 
-Status: draft, nothing implemented. Written 2026-11-09 after a design discussion on
+Status: draft; the `.bri` output (section 12) and the spike of section 9 are implemented, the rest is not. Written 2026-11-09 after a design discussion on
 qualifiers for implicit generics. Related: the book's "Untyped parameters", "Untyped
 fields", "Qualifier parameters", "Qualified generics — `<T'q>`", "Turbofish
 monomorphization".
@@ -14,6 +14,18 @@ monomorphization".
 - `.bri` files are complete: a full Boring printer, not only the touched declarations
   (open question 8), so a `.bri` is always a valid, whole file.
 - `mono` is built before `full` (phasing, step 6).
+- **`<T'q>` is removed entirely** (decided 2026-11-09; Boring is not 1.0 and only the sibling
+  projects of `perso/` use it). A plain `T` carries its own qualifier: `T = Counter'actor`
+  binds both, and a qualifier written on a slot (`T'owned a`, `a'owned`) is a constraint, not
+  a parameter. The linked-parameter sugar goes; what stays is the unlinked long form
+  `<T, 'q>` where a qualifier parameter is genuinely wanted (a slot can then write `T'q`).
+  Known loss to accept or fix: a field that follows a qualifier while another stays fixed
+  (`let T'q res` next to `let T'inline default`) is written with `<T, 'q>`, whose type
+  argument is not inferred (only from an expected type naming every argument).
+- Qualifier parameters keep their tick syntax (`<'q>`, `elem'actor`, `<T, 'q>`). An uppercase
+  form (`<T, Q>`, `let T'Q v`, `<T = Counter, Q = actor>`) was considered and rejected: it
+  needs a declaration-side marker (`Q as qualifier`) to tell it from a type parameter, and a
+  rename of about twenty test cases, the parser, `qual_infer.rs` and the docs.
 - `mono` is taken right after the specialisation pass, not after later passes.
 - `.bri` files go in `<stem>_rust[...]/bri/`, next to `src/` in the generated project
   (`boring build` writes `<stem>_rust`, `_rust_single`, `_rust_managed`... beside the
@@ -287,3 +299,225 @@ transpile suite is the regression net.
 `src/main.rs` (`--emit-bri`), `src/desugar_gpu_struct.rs`, the checker (typing helper, 3.3
 errors),
 `docs/book.md`, `CHANGELOG.md`, `tests/cases/`, `tests/transpile.rs`.
+
+## 9. Spike result (phase 1, 2026-11-09)
+
+Implemented in `src/specialize_untyped.rs` (a parser pass, after `desugar_struct_params`),
+with the D5 error relaxed in `parse_fn.rs` for a method call on an untyped parameter of a free
+function. Tests: `tests/cases/implicit_generics_specialise.br` (4 configs) and three cases in
+`tests/implicit_generics_errors.rs`.
+
+What it proves:
+- `def bump(var mut a): a.inc()` called with `Counter'owned` and `Counter'actor` produces
+  `bump_Counter_owned` / `bump_Counter_actor`. The emitted Rust is identical to the two
+  hand-written typed versions: `(*a).inc();` and `a.lock().unwrap().inc();`. rustc accepts
+  it and the program prints the right result. `boring run` and `boring build` agree.
+- The substitution engine is the monomorphizer's own (`substitute_fn_decl`); nothing new was
+  needed there.
+- The typing needed by this case is small: a call argument that is a plain variable whose
+  `let` or parameter type is written. Anything else is a loud error naming the argument
+  (`bump(Counter())` is rejected, an uncalled `bump` keeps the original D5 error).
+
+What it taught:
+- **Propagation is required.** `def twice(var mut b): bump(b); bump(b)` has no method call
+  of its own, yet cannot stay generic: it passes `b` to a function that needs its type. The
+  set of functions to specialise is a fixpoint (same shape as the bound propagation), done
+  in `passes_param_to`. Without it the chain fails with "type not known".
+- **The permission of the argument's binding is not part of the parameter's type.** Copying
+  the `mut` wrapper from `var mut Counter'actor c` onto the parameter emitted
+  `&mut Arc<Mutex<..>>` and failed in rustc; the parameter keeps the permission it was
+  declared with, so the instance types are `into_without_mut()`.
+- **`describe_type` is not a `.bri` printer.** It prints a qualified type as `Counter'...`
+  (qualifier elided). The `.bri` printer must write qualifiers in full.
+- **`boring run` runs the specialised program**, not the original, because D5 is a parse-time
+  error today. Section 4 of this note said `run` should keep the original; that needs D5 to
+  move out of the parser first.
+- A pre-existing, unrelated bug was found: in managed mode, passing a `'owned` `var mut`
+  value to a `var mut` parameter clones it (`bump(&mut RefCell::new(o.borrow().clone()))`), so
+  the mutation is lost. The hand-typed version prints `0` too. Proposed as its own task.
+
+Phase 2 additions (same day): field reads/writes and indexes on an untyped parameter are
+specialised like method calls (`takes_over` in `src/specialize_untyped.rs`; `a + b` of two
+untyped parameters stays an error, only uses whose meaning depends on the argument's type are
+taken over); labelled arguments give the type of the parameter they name; a name bound more
+than once in a function with different or unwritten types (a shadowing `let`, an unannotated
+rebinding, a `for` variable) is *ambiguous* and an error when used as an argument, instead of
+the flat environment picking one type silently. Tests: `tests/cases/implicit_generics_specialise_fields.br`
+(4 configs) and three more CLI cases.
+
+Phase 3 (same day): the qualifier slot of 3.3, in the two syntaxes decided ("both"):
+- `def bump(var mut a'owned)`: a qualifier written after an untyped parameter's name (parser:
+  `slot_qual_ok`, kept on `FnDecl.slot_quals`, the parameter stays untyped). Such a function is
+  always taken over by the pass; a call whose argument is a variable written with another
+  qualifier is an error naming both (`the parameter a'owned of bump expects that qualifier,
+  but this argument is written 'actor`). An uncalled one is kept as is.
+- `def show<T>(T'owned a)`: a qualifier on an explicit generic. Nothing is specialised, the
+  call stays on the generic path; only the mismatch of a written qualifier is reported.
+- The qualifier compared is the one written directly on the base type (`Counter'actor'weak` is
+  `'actor`). An argument whose qualifier is not written is not an error, and no qualifier is
+  resolved onto it: passing a bare `Counter d` to an `'actor` slot wraps a temporary exactly as
+  it does for a hand-typed `Counter'actor` parameter (`d` is moved), so the table row of 3.3
+  that said "accepted, resolved to the slot's qualifier" is, in practice, "accepted, with the
+  existing coercion".
+Tests: `tests/cases/implicit_generics_specialise_slot.br` (4 configs) and three CLI cases.
+
+Remaining limits (not design decisions): same file only (a `pub def` that other files call is
+still specialised by its own file's calls alone), top-level free functions only (no `mod`, no methods,
+no `task`/`stream`), all untyped parameters of a function are specialised together,
+`unbounded_use` reports only the first unbounded use (a later `a + b` on two untyped
+parameters is left to rustc), and the environment is per function, not per scope (so an
+inner-scope shadow makes the name ambiguous rather than resolved).
+
+Not yet decided from the spike: the specialisation currently lives in the parser rather than
+in the transpiler's monomorphizer (open question 2 decided the monomorphizer as the engine;
+moving the pass there needs the typed call sites to survive until the transpiler).
+
+## 10. What replacing `<T'q>` by `<T>` needs (found 2026-11-09, before the removal)
+
+`struct Entry<T>: var mut T value` already accepts a qualified argument at the Rust type level:
+`Entry<Counter'actor>(c)` and the bare `Entry(c)` (with `c` written `Counter'actor`) both emit
+`Entry<Arc<Mutex<Counter>>>`. But `e.value.inc()` then fails in rustc (E0599: no method `inc` on
+`Arc<Mutex<Counter>>`): a generic body cannot take the lock. Same problem as `bump(a)`, same
+answer: the struct must be specialised with `T = Counter'actor`.
+
+Why it is not specialised today: the turbofish monomorphizer bails when a type argument does not
+mangle, and `mangle_type` (`src/transpiler/monomorphize.rs`) has no case for `Type::Qualified`,
+so `Entry<Counter'actor>` stays generic Rust. The qualifier-parameter machinery (`Board_actor`)
+is what `<T'q>` used to reach specialisation.
+
+So the removal of `<T'q>` is not a deletion, it is a migration of its capability onto `<T>`:
+1. `mangle_type` / instantiation accept a qualified type argument (`Entry_Counter_actor`), so the
+   explicit `Entry<Counter'actor>(...)` is specialised like any other concrete argument.
+2. A bare construction or call (`Entry(c)`, `show(c)` with an explicit `<T>`) infers `T` from a
+   variable whose type is written, the typed call-site mechanism of `specialize_untyped.rs`
+   extended from free functions with untyped parameters to generic structs and generic functions.
+3. Then `<T'q>` (parser, `generic_args.rs`, `qual_infer.rs`, tests, book) is deleted, and
+   `tests/cases/qualified_generics.br` is rewritten on `<T>`.
+
+## 11. The `.bri` as a real stage: informative, then transpilable, then a two-phase compiler
+
+Raised 2026-11-09 (user): the `.bri` can be an intermediate step that splits the transpilation in
+two phases and makes both clearer. Three levels of ambition, built in this order:
+
+1. **Informative and oracle** (3.6): written on request (`--emit-bri`), and `boring run x.br`
+   and `boring run x.bri` give the same output over `tests/cases/`.
+2. **`boring build x.bri` transpiles it.** A `.bri` is valid Boring, so the compiler can read it;
+   the check is that the Rust generated from `x.br` and from `x.bri` is identical. Cheap once the
+   printer exists.
+3. **Two real phases.** Phase 1 (read, infer, specialise) produces an explicit program; phase 2
+   (Rust generation) consumes it and infers nothing. The boundary is the **in-memory AST after
+   phase 1**, and the `.bri` is its text form: a normal `boring build` neither writes nor rereads
+   a file, and `boring build x.bri` stays available as the level-2 entry point.
+
+Why the boundary is the AST and not a file read back every time: rereading runs the inference
+passes again on an already explicit program, and the book says a *written* qualifier is evidence
+while an *inferred* one is not, so a `full` file read back can change decisions (see 3.6, the
+round-trip caveat). Passing the AST avoids it.
+
+Open, unchecked, and the main risk of level 3: the transpiler still makes inference decisions of
+its own (`src/transpiler/infer_qualifiers.rs`, `infer_shared_elems.rs`, `share_dyn_traits.rs`, the
+lock and clone passes). For a real split they must move to phase 1, otherwise the `.bri` does not
+show what the Rust generator will decide. How much of that is separable is unknown; each move is
+validated by the same test, identical generated Rust before and after. The `full` level of 3.6
+(inferred qualifiers written out) is the first step in that direction.
+
+## 12. The `.bri` output, as built (2026-11-09)
+
+Implemented: `src/bri.rs` (printer, items and types), `src/bri/stmt.rs`, `src/bri/expr.rs`,
+`src/bri/full.rs` (`full` level), `src/bri/tests.rs`; `--emit-bri[=mono|full]` on `boring check`
+(stdout, or `--out <dir>`) and on `boring build` (`<stem>_rust[...]/bri/<file>.bri`, for the entry file
+and the sibling files it reaches through a bare `use <name>`; it does not combine with `--emit-rust`,
+`--linux` or `--target`). Tests: `tests/bri_oracle.rs` (the oracle), `tests/bri_cli.rs` (the flags).
+
+### What `mono` is (a deviation from the decision above)
+
+`mono` is the AST as `parser::parse` leaves it, printed before the later desugarings
+(`desugar_inline_kernel`, `desugar_labeled_array`, `desugar_array_block`, `desugar_inject`), which a
+reader of the `.bri` runs again. That includes `specialize_untyped` (it runs inside `parse`), so the
+specialised copies of an untyped-parameter function (`bump_Counter_actor`) are in it. It does **not**
+include the transpiler's monomorphizer (`transpiler/monomorphize.rs`: explicit `<..>` instances,
+qualifier-generic instances). It was tried (`Transpiler::global_pre_scan` + `monomorphize_program` on a
+clone, as `specialise_qualifier_params` does) and measured on the corpus, then removed: of 609 cases it
+broke 14, for four reasons that are the real cost of including it:
+1. It runs on the *desugared* AST (it panics on `labeled_array`, whose `[v for w in .. for h in ..]` is
+   still sugar after `parse`), and the desugarings produce `Block` expressions that have no source
+   spelling, so printing after them is not readable.
+2. An instance of an imported generic lives in the file that *declares* the generic (`Stack_int` goes
+   into the stdlib module, `Wrapper_string` into the other file), so the `.bri` of the calling file
+   calls an instance it does not declare: `boring run x.bri` fails with `undefined variable 'Stack_int'`.
+   A per-file `.bri` is not self-contained once monomorphizer output is in it.
+3. The substituted copies carry `mut` onto a scalar (`mut int value`), which the checker rejects when the
+   `.bri` is read back, and a `type let` default that depends on the struct's own parameter.
+4. It needs the project's `[deps]`/sibling files at print time (global, cross-file state).
+Putting it into `mono` therefore needs the two-phase compiler of section 11 level 3 (or an explicit
+"instances of imported generics go into the importing `.bri`" rule), not a printer change.
+
+### The printer
+
+- **Complete**: every construct the parser produces has an arm (items fn/struct/enum/trait/ext/mod/use/
+  alias/kernel/view; every statement and expression; patterns; types with qualifier chains, borrows,
+  `mut`, labelled arrays, function types). The three it cannot write are explicit errors: a
+  `SliceRange` outside an index, a `Block` expression outside `else`/`task`/`kernel`, and a qualifier
+  argument whose declaration is in another file (`Board<elem'actor>` needs the label `elem`, read from the
+  declaration of the same file). Those never occur in the corpus.
+- **Implicit generics are written back untyped.** After `parse` an untyped `def show(x)` is
+  `def show<T_x as Display>(T_x x)`, and bounds such as `PartialOrd<isize>`,
+  `std::ops::Add<f64, Output = T_x>` are Rust spellings the `as` bound of Boring cannot read. The printer
+  writes the parameter untyped again (`def show(x):  # inferred: T_x as Display`), the same for untyped
+  fields and for a bare struct parameter (`describe(Response r)`, expanded by `desugar_struct_params`),
+  and the reader re-derives the same generics. The bounds are a *trailing* comment on the header: a
+  full-line comment is kept by the parser as a statement and reaches the generated Rust. This is the one
+  place where the `.bri` shows less than the AST; `--show-types` is therefore not replaced yet.
+- Quirks of the parser the printer has to undo (each found by the oracle): `pass` and `sync` are parsed to
+  `Stmt::Comment` markers; a body that is empty is `def f(): pass` on the header line, a block with `pass`
+  is a statement; `def Worker.run()` must say `void` (`def void Worker.run()`), or `Worker` is read as the
+  return type; a statement that starts with `if`/`match` is the statement form, so an `ExprKind::If`
+  statement (the `f?(x)` sugar) is parenthesised; `.thread`/`.tensors` are `gpu.<name>` in the AST;
+  `join` takes `(`..`)`; a cast is parenthesised as a receiver and as the left operand of `<`, `>`, `<<`,
+  `>>` (`x as T.f()` and `x as T < y` read the type differently); `x = x + 1` is folded back to `x += 1`;
+  `let x'q = Ctor()` keeps the qualifier on the name when the parser left the `_` placeholder base.
+- Expressions that extend to the right (`if`, `match`, closures, `do`, `task`...) are parenthesised as the
+  left operand of an operator, an `else` or a pipe, and not as an argument; a multi-line argument puts
+  the next `,` / the closing `)` on its own line at the statement's indentation.
+
+### Oracle results (`tests/cases`, 609 `.br`, 447 with an `.expected`)
+
+| level | check | result |
+|---|---|---|
+| `mono` | `boring run x.bri` == `boring run x.br` | 447 / 447 comparable (3 more fail alone and are skipped) |
+| `mono` | `boring build --emit-rust x.bri` == `x.br` | 519 / 519 that emit (90 do not emit at all) |
+| `full` | run | 432 identical, 15 different (8 print/reparse failures on GPU-kernel programs and a few more, 7 reparse), 3 skipped |
+| `full` | build | 401 identical, 118 different, 90 skipped (about 22%) |
+
+The build identity needs one normalisation: `__stream_<n>` takes the source line of the `for`, which a
+reprint changes (`tests/bri_oracle.rs` normalises it). One case (`supertraits`) emits in a hash-map order
+that differs between runs of the *source* alone; the test compares the sets of outputs of several runs of each side.
+
+**`full` is not an oracle** (the caveat of 3.6, measured). The mismatches are one family: a written
+qualifier is an explicit constraint, so the reader emits differently, not wrongly:
+a written `'inline` on a scalar adds a Rust annotation (`let mut x: isize = 0`, the largest group, 13+
+cases) or turns `let x = 0` into `let x: Arc<isize>`; a parameter written `Counter&` loses the inferred
+`mut x: &mut X` binding of the same parameter; a by-value read becomes `.clone()`; `Box<dyn T>` becomes a
+plain struct. Behaviour (`boring run`) differs in 15 of 447, the failures being a binding whose written
+qualifier makes a later reassignment or a `def` call a type error (`mut _'inline`, `declare it mut
+Game_inline g3`). `full` is useful to read (the inferred choices, in source order) and is kept opt-in; it
+should not be promised as a round trip. Not written by `full`: the GPU residency decisions
+(`desugar_tensor_quals`: `'kernel'global`/`'kernel'unified` on `kernel.tensors` operands, which are
+operands in expressions, not declarations), a `let` whose initialiser is not a constructor call or a
+scalar literal (the printer cannot give it a base type, so `let p = [1, 2]` is left unqualified), and a
+`kernel` program (`full` runs the std transpile to collect decisions, which rejects a kernel without a GPU
+target).
+
+### Remaining (not started, as asked)
+
+- The two-phase compiler of section 11 level 3 (inference moved out of the transpiler: `infer_qualifiers`,
+  `infer_shared_elems`, `share_dyn_traits`, the lock and clone passes). `full` shows only the
+  `infer_qualifiers` part, collected by running the transpile and read back by position.
+- The transpiler's monomorphizer in `mono` (see above) and its rule for instances of imported generics.
+- `--show-types` / `--show-qualifiers` are not deprecated: `--show-types` prints the bounds the `.bri`
+  keeps as a comment; `--show-qualifiers` lists GPU residency, which `full` does not write.
+- `.bri` for `--target`/`--linux` builds, and a `.bri` per imported file that is not a bare sibling `use`.
+- Origin comments of 3.6 (`# bump_Counter_actor: bump at main.br:3, instantiated at main.br:12`) on the
+  specialised copies: the copies exist in `mono` but carry no comment yet.
+- Idempotence is not guaranteed everywhere (`trait X: pass` followed by a top-level `pass` gains a line
+  per reprint, `trait_scenarios_4`); the corpus has one such case.

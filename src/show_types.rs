@@ -17,9 +17,6 @@
 use crate::ast::*;
 use crate::desugar_array_block::describe_type as describe_leaf;
 
-/// A qualifier parameter as the user wrote it: the internal `q.A` of `<A'q, B'q>` is `q`.
-fn written_name(q: &str) -> &str { q.split('.').next().unwrap_or(q) }
-
 /// D10: the user never wrote `T_<name>`, so it is shown as `<name>`, the parameter or field it comes
 /// from. Only a `T_` at the start of an identifier is rewritten.
 fn unplace(s: &str) -> String {
@@ -59,7 +56,7 @@ fn describe_raw(t: &Type) -> String {
             let quals: String = match chain.as_slice() {
                 [OwnerQual::Param(p), rest @ ..] => {
                     let tail = if rest.is_empty() { String::new() } else { OwnerQual::chain_name(rest).map(|n| format!("'{n}")).unwrap_or_default() };
-                    format!("'{}{tail}", written_name(p))
+                    format!("'{}{tail}", p)
                 }
                 _ => match OwnerQual::chain_name(&chain) { Some(n) => format!("'{n}"), None => "'...".into() },
             };
@@ -85,22 +82,17 @@ fn implicit(t: &Type) -> bool {
     }
 }
 
-/// `["T", "^q@T", "U"]` -> `T'q, U`: the `<T'q>` sugar written back as it was declared.
+/// The declared generic parameters as written (`T, 'q`).
 fn generics_text(params: &[String]) -> String {
     unplace(&generics_raw(params))
 }
 
 fn generics_raw(params: &[String]) -> String {
-    params.iter().filter_map(|p| {
-        if !qual_param_links(p).is_empty() { return None; }
-        if let Some(q) = params.iter().find_map(|o| qual_linked_to(o, p).then(|| qual_param_name(o)).flatten()) {
-            return Some(format!("{p}'{}", written_name(q)));
-        }
-        Some(match qual_param_name(p) { Some(q) => format!("'{}", written_name(q)), None => p.clone() })
+    params.iter().map(|p| match qual_param_name(p) {
+        Some(q) => format!("'{q}"),
+        None => p.clone(),
     }).collect::<Vec<_>>().join(", ")
 }
-
-fn qualified(params: &[String]) -> bool { params.iter().any(|p| !qual_param_links(p).is_empty()) }
 
 fn where_text(clause: &[(String, String)]) -> String {
     if clause.is_empty() {
@@ -111,7 +103,7 @@ fn where_text(clause: &[(String, String)]) -> String {
 }
 
 fn fn_line(f: &FnDecl, prefix: &str) -> Option<String> {
-    let touched = qualified(&f.type_params) || f.params.iter().any(|p| p.ty.as_ref().is_some_and(implicit));
+    let touched = f.params.iter().any(|p| p.ty.as_ref().is_some_and(implicit));
     if !touched {
         return None;
     }
@@ -132,7 +124,7 @@ fn collect(items: &[Item], prefix: &str, out: &mut Vec<String>) {
     for item in items {
         match item {
             Item::Fn(f) => out.extend(fn_line(f, prefix)),
-            Item::Struct(s) if qualified(&s.type_params) || s.fields.iter().any(|f| implicit(&f.ty)) => {
+            Item::Struct(s) if s.fields.iter().any(|f| implicit(&f.ty)) => {
                 out.push(format!("{prefix}struct {}<{}>{}", s.name, generics_text(&s.type_params), where_text(&s.where_clause)));
                 for f in &s.fields {
                     if is_own_placeholder(&f.ty, &f.name) {
@@ -206,20 +198,5 @@ mod tests {
     fn untypable_constructions_and_plain_structs_are_not_listed() {
         let out = show("struct P:\n    int x\n\nstruct Resp:\n    let payload\n\ndef f(int n):\n    let p = P(x = 1)\n    return n\n");
         assert!(!out.contains("uses:"), "{out}");
-    }
-
-    #[test]
-    fn qualified_generics_are_shown_as_declared() {
-        let out = show("struct Entry<T'q>:\n    let T'q res\n    let T'inline fallback\n\nint peek<T'q>(T'q x):\n    1\n");
-        assert!(out.contains("struct Entry<T'q>"), "{out}");
-        assert!(out.contains("def peek<T'q>(T'q x) -> int"), "{out}");
-        assert!(out.contains("T'q res") && out.contains("T'inline fallback"), "{out}");
-    }
-
-    #[test]
-    fn qualifiers_are_shown_through_collections_and_per_type() {
-        let out = show("struct Group<T'q>:\n    var [T'q] items\n    var {string = T'q} named\n    var (T'q, int) pair\n    var T'q? maybe\n\nstruct Duo<A'q, B'q>:\n    var A'q first\n    var B'q second\n");
-        assert!(out.contains("[T'q] items") && out.contains("{string=T'q} named") && out.contains("(T'q, int) pair") && out.contains("T'q? maybe"), "{out}");
-        assert!(out.contains("struct Duo<A'q, B'q>") && out.contains("A'q first") && out.contains("B'q second"), "{out}");
     }
 }

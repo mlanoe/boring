@@ -91,7 +91,21 @@ impl Parser {
             });
         }
 
-        let mut params = self.parse_params()?;
+        self.slot_qual_ok = qualifier.is_none() && !prefix_task && !prefix_stream;
+        let params_result = self.parse_params();
+        self.slot_qual_ok = false;
+        let mut params = params_result?;
+        // `a'owned` (a qualifier after an untyped parameter's name) arrives as a qualified fresh
+        // type parameter: the qualifier is kept on the declaration, the parameter is untyped again.
+        let mut slot_quals: Vec<(String, OwnerQual)> = Vec::new();
+        for p in params.iter_mut() {
+            if let Some(Type::Qualified(inner, q)) = &p.ty {
+                if matches!(&**inner, Type::TypeParam(t) if *t == crate::infer_param_generics::fresh_name(&p.name)) {
+                    slot_quals.push((p.name.clone(), q.clone()));
+                    p.ty = None;
+                }
+            }
+        }
         // A parameter without a type is a fresh type parameter of the function (implicit
         // generics, phase 2: `infer_param_generics`), except where that cannot work: methods
         // (`def Type.name(..)`), `task`/`stream` functions, and a parameter with a default value
@@ -187,7 +201,13 @@ impl Parser {
                 }
             }
             if let Some(u) = crate::infer_param_generics::unbounded_use(&names, &body, &[]) {
-                return Err(crate::infer_param_generics::unbounded_error(u, "parameter"));
+                // A method call on an untyped parameter of a free function is taken over by
+                // `specialize_untyped` (typed specialisation per call), which reports the same error
+                // when it cannot specialise; every other unbounded use is an error right here.
+                let method_on_free_fn = crate::specialize_untyped::takes_over(&u.what) && qualifier.is_none() && !task && !stream;
+                if !method_on_free_fn {
+                    return Err(crate::infer_param_generics::unbounded_error(u, "parameter"));
+                }
             }
             for b in crate::infer_param_generics::bounds(&names, &body) {
                 if !where_clause.contains(&b) { where_clause.push(b); }
@@ -225,6 +245,7 @@ impl Parser {
             is_native,
             type_params,
             implicit_quals,
+            slot_quals,
             where_clause,
             attrs: vec![],
             line,
@@ -464,8 +485,20 @@ impl Parser {
             }
         } else {
             let n = self.expect_ident()?;
+            // `name'owned` — a qualifier slot on an untyped parameter (a free `def` only).
+            let slot = if self.slot_qual_ok && self.check(&TokenKind::Tick) {
+                let (l, c) = (self.line(), self.col());
+                match self.parse_type_qualifier(Type::Nil)? {
+                    Type::Qualified(inner, q) if matches!(*inner, Type::Nil) => {
+                        Some(Type::Qualified(Box::new(Type::TypeParam(crate::infer_param_generics::fresh_name(&n))), q))
+                    }
+                    _ => return Err(ParseError::Generic {
+                        msg: format!("write one qualifier after the untyped parameter `{n}` (`{n}'owned`)"), line: l, col: c, len: 1,
+                    }),
+                }
+            } else { None };
             // `name(Params)` — function-typed parameter with inferred return type
-            let ty = if matches!(self.peek(), TokenKind::LParen) {
+            let ty = if slot.is_some() { slot } else if matches!(self.peek(), TokenKind::LParen) {
                 self.advance();
                 let mut fn_params = Vec::new();
                 if !matches!(self.peek(), TokenKind::RParen) {
@@ -856,7 +889,7 @@ impl Parser {
             return_mutable: false,
             is_native,
             type_params: vec![],
-            implicit_quals: vec![],
+            implicit_quals: vec![], slot_quals: vec![],
             where_clause: vec![],
             attrs: vec![],
             line,
@@ -1097,7 +1130,7 @@ impl Parser {
                 name, qualifier: None, params, return_ty, body,
                 is_pub: false, throws, task, stream: false, stream_capacity: None, mutating,
                 return_mutable, is_native: false, throws_ty,
-                type_params, implicit_quals: vec![], where_clause: vec![], attrs: vec![], line, col,
+                type_params, implicit_quals: vec![], slot_quals: vec![], where_clause: vec![], attrs: vec![], line, col,
             }))
         } else {
             self.expect_newline()?;

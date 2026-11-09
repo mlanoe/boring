@@ -22,7 +22,9 @@ pub mod fixed_wide_core;
 mod fixed_wide_vectors;
 pub mod parser;
 pub mod infer_param_generics;
+pub mod specialize_untyped;
 pub mod show_types;
+pub mod bri;
 pub mod api_snapshot;
 pub mod infer_return_types;
 pub mod infer_actor_params;
@@ -1856,6 +1858,9 @@ Flags:
     --inline-auto-bytes <n> Size threshold for automatic 'inline qualifier inference
     --instrument            Instrument functions (coverage + trace journals)
     --emit-rust             Print generated Rust to stdout (no project created)
+    --emit-bri[=mono|full]  Also write the .bri (Boring inferred) files to <project>/bri/:
+                            valid Boring showing what the compiler decided (mono: the program
+                            after specialisation; full: also the inferred ownership qualifiers)
     --compile               Transpile, then run cargo build in the generated project
     --rust-options \"<f>\"   Extra flags for cargo build (implies --compile)
     --sanitize <s>          Sanitizer: address, thread or memory (nightly toolchain)
@@ -1881,12 +1886,16 @@ Flags:
     -h, --help              Print this help
 ",
         "check" => "\
-Usage: boring check [--show-types] <file.br>
+Usage: boring check [--show-types] [--emit-bri[=mono|full]] [--out <dir>] <file.br>
 
 Type-check a file without running it.
 
 Flags:
     --show-types            Print the headers inferred for untyped parameters/fields
+    --emit-bri[=mono|full]  Print the .bri (Boring inferred) of the file on stdout: valid Boring
+                            that shows what the compiler decided (mono: the program after
+                            specialisation, the default; full: also the inferred ownership qualifiers)
+    --out <dir>             With --emit-bri: write <dir>/<file>.bri instead of printing it
     -h, --help              Print this help
 ",
         "api" => "\
@@ -1988,11 +1997,22 @@ fn run() {
         Some("check") => {
             let rest = &args[2..];
             let show = rest.iter().any(|a| a == "--show-types");
-            let Some(path) = rest.iter().find(|a| !a.starts_with("--")) else {
-                eprintln!("usage: boring check [--show-types] <file.br>");
+            let bri = parse_emit_bri_flag(rest);
+            let out_dir = rest.iter().position(|a| a == "--out").and_then(|i| rest.get(i + 1)).cloned();
+            let mut skip_next = false;
+            let path = rest.iter().find(|a| {
+                if skip_next { skip_next = false; return false; }
+                if *a == "--out" { skip_next = true; return false; }
+                !a.starts_with("--")
+            });
+            let Some(path) = path else {
+                eprintln!("usage: boring check [--show-types] [--emit-bri[=mono|full]] [--out <dir>] <file.br>");
                 process::exit(1);
             };
             check_file(path, show);
+            if let Some(mode) = bri {
+                emit_bri_for_check(path, mode, out_dir.as_deref());
+            }
         }
 
         Some("api") => api_command(&args[2..]),
@@ -2022,6 +2042,7 @@ fn print_help() {
     eprintln!("    boring run --show-qualifiers  List the inferred qualifiers: 'kernel'global/'kernel'unified for kernel.tensors operands, plus CPU ownership ('owned/'actor/borrow...) of unannotated params and lets (also on build)");
     eprintln!("    boring run --offline       Never touch the network for a git [deps] dependency");
     eprintln!("    boring check --show-types <file.br>  Print the headers inferred for untyped parameters/fields (implicit generics)");
+    eprintln!("    boring check --emit-bri[=mono|full] [--out <dir>] <file.br>  Print (or write) the .bri \"Boring inferred\" file: valid Boring showing what the compiler decided");
     eprintln!("    boring api <file.br>       Print a snapshot of the file's @api signatures");
     eprintln!("    boring api --check <snapshot> <file.br>  Fail on a removed/changed @api signature compared with a snapshot");
     eprintln!("    boring build               Emit a Cargo project from boring.toml");
@@ -2145,6 +2166,7 @@ fn parse_build_command(build_args: &[String]) {
     let mut instrument = false;
     let mut sanitize: Option<&'static str> = None;
     let mut emit_rust = false;
+    let mut emit_bri: Option<bri::BriMode> = None;
     let mut compile = false;
     let mut rust_options: Vec<String> = Vec::new();
     let mut file: Option<&str> = None;
@@ -2234,6 +2256,9 @@ fn parse_build_command(build_args: &[String]) {
             }
             "--instrument" => instrument = true,
             "--emit-rust"  => emit_rust = true,
+            // `.bri` ("Boring inferred") output, written to `<project>/bri/` (docs/design-notes/typed-monomorphization-draft.md).
+            "--emit-bri" => emit_bri = Some(bri::BriMode::Mono),
+            a if a.starts_with("--emit-bri=") => emit_bri = parse_emit_bri_flag(&build_args[i..=i]),
             "--compile"    => compile = true,
             // See parse_run_flags's matching arms for why these are env vars, not a threaded
             // parameter — read back via DepPolicy::from_env() (src/git_deps.rs).
@@ -2409,6 +2434,11 @@ fn parse_build_command(build_args: &[String]) {
         }
     }
 
+    if emit_bri.is_some() && (emit_rust || target_kernel || target_cuda || target_rocm || target_metal || target_wgpu || target_simd) {
+        eprintln!("error: --emit-bri writes into the generated Rust project of a plain `boring build`; it does not combine with --emit-rust, --linux or --target (use `boring check --emit-bri` for a standalone .bri)");
+        process::exit(1);
+    }
+
     let config = TranspileConfig { mode, threading, inline_auto_bytes, instrument, sanitize, source_dir: PathBuf::new(), gpu_kernels: Vec::new(), gpu_kernel_generic_names: std::collections::HashMap::new(), is_gpu_target: false, is_simd_target: false, gpu_top_level_handled_by_host: false, screen_setup: None, external_tuple_structs: Vec::new(), external_const_fns: Vec::new(), external_optional_fields: Vec::new(), known_derives: Vec::new(), deps: std::collections::HashMap::new(), external_fns: Vec::new(), external_field_types: Vec::new(), unified_routing: false };
 
     if emit_rust {
@@ -2481,6 +2511,14 @@ fn parse_build_command(build_args: &[String]) {
         }
     };
 
+    if let Some(level) = emit_bri {
+        let entry = match file {
+            Some(path) => path.to_string(),
+            None => load_project_toml().0.main,
+        };
+        write_bri_files(&project_dir, Path::new(&entry), level);
+    }
+
     if compile {
         run_cargo_build(&project_dir, &rust_options);
     }
@@ -2549,6 +2587,153 @@ fn check_file(path: &str, show_types: bool) {
         let out = show_types::render_with_imports(&program, &imported);
         if !out.is_empty() {
             println!("{out}");
+        }
+    }
+}
+
+/// `--emit-bri` / `--emit-bri=mono` / `--emit-bri=full` among `args`: the requested `.bri` level.
+/// An unknown level is a usage error.
+fn parse_emit_bri_flag(args: &[String]) -> Option<bri::BriMode> {
+    for a in args {
+        if a == "--emit-bri" {
+            return Some(bri::BriMode::Mono);
+        }
+        if let Some(level) = a.strip_prefix("--emit-bri=") {
+            return match level {
+                "mono" => Some(bri::BriMode::Mono),
+                "full" => Some(bri::BriMode::Full),
+                other => {
+                    eprintln!("error: unknown --emit-bri level '{other}' (expected mono or full)");
+                    process::exit(1);
+                }
+            };
+        }
+    }
+    None
+}
+
+/// The program as the parser leaves it for `path` (every inference and specialisation pass runs in
+/// `parse`), before the later desugarings (`desugar_inline_kernel`, `desugar_labeled_array`,
+/// `desugar_array_block`, `desugar_inject`), which a `.bri` reader runs again, with its source
+/// text. Exits with a diagnostic on error.
+fn front_end_program(path: &Path) -> (ast::Program, String) {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{}': {}", path.display(), e);
+            process::exit(1);
+        }
+    };
+    let tokens = match lexer::lex_all(&source) {
+        Ok(t) => t,
+        Err(errors) => {
+            report_lex_errors(path, &source, &errors);
+            process::exit(1);
+        }
+    };
+    infer_actor_params::set_import_context(path);
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            report_error(path, &source, e.line(), e.col(), e.len(), &e.msg());
+            process::exit(1);
+        }
+    };
+    (program, source)
+}
+
+/// The text of the `.bri` of `path` at `mode`. `full` runs the compile pipeline up to the transpile
+/// (the ownership inference lives there) to collect the qualifiers it chooses. Exits on error.
+fn bri_text(path: &Path, mode: bri::BriMode) -> String {
+    bri_text_and_uses(path, mode).0
+}
+
+/// Like `bri_text`, also giving the names of the bare `use <name>` imports of the file (sibling
+/// files of the same project).
+fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
+    let (program, source) = front_end_program(path);
+    let uses: Vec<String> = program.items.iter().filter_map(|i| match i {
+        ast::Item::Use(u) if u.path.len() == 1 && u.items.is_empty() && !u.glob => Some(u.path[0].clone()),
+        _ => None,
+    }).collect();
+    let mut decisions: Vec<bri::full::QualDecision> = Vec::new();
+    if mode == bri::BriMode::Full {
+        let deps = find_project_root(path)
+            .and_then(|root| {
+                let toml_src = std::fs::read_to_string(root.join("boring.toml")).ok()?;
+                BoringToml::parse(&toml_src).resolve_deps(&root).ok()
+            })
+            .unwrap_or_default();
+        let d = desugar_inline_kernel::desugar_inline_kernels(program.clone());
+        let d = desugar_labeled_array::desugar_labeled_array(d);
+        let d = desugar_array_block_or_exit(path, &source, d);
+        let d = desugar_inject_or_exit(path, &source, d, &deps);
+        let d = escape_keyword_fields::escape_keyword_fields(d);
+        if report_check_result(path, &source, check_with_imports(path, &d, &deps)) { process::exit(1); }
+        let source_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let cfg = transpiler::TranspileConfig { source_dir, deps, ..Default::default() };
+        let out = transpiler::transpile_with_config(&d, cfg);
+        if !out.errors.is_empty() { report_transpile_errors(path, &source, &out.errors); process::exit(1); }
+        let mut cpu = transpiler::take_cpu_decisions();
+        let _ = desugar_tensor_quals::take_decisions();
+        cpu.dedup_by(|a, b| a.scope == b.scope && a.name == b.name && a.line == b.line);
+        for c in cpu {
+            let Some(qual) = c.qualifier else { continue };
+            decisions.push(bri::full::QualDecision { scope: c.scope, name: c.name, line: c.line, col: c.col, is_param: c.kind == "param", qual });
+        }
+    }
+    match bri::print_program_mode(&program, mode, &decisions) {
+        Ok(t) => (t, uses),
+        Err(e) => {
+            eprintln!("error: {path}: {e}", path = path.display());
+            process::exit(1);
+        }
+    }
+}
+
+/// Writes the `.bri` of `entry` and of every sibling file it reaches through a bare `use <name>`
+/// into `<project_dir>/bri/<stem>.bri` (next to `src/`, not in Cargo's `target/`).
+fn write_bri_files(project_dir: &Path, entry: &Path, mode: bri::BriMode) {
+    let out_dir = project_dir.join("bri");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("error: cannot create '{}': {}", out_dir.display(), e);
+        process::exit(1);
+    }
+    let mut queue = vec![entry.to_path_buf()];
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    while let Some(path) = queue.pop() {
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !seen.insert(key) { continue; }
+        let (text, uses) = bri_text_and_uses(&path, mode);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "output".into());
+        let target = out_dir.join(format!("{stem}.bri"));
+        if let Err(e) = std::fs::write(&target, text) {
+            eprintln!("error: cannot write '{}': {}", target.display(), e);
+            process::exit(1);
+        }
+        eprintln!("wrote {}", target.display());
+        let dir = path.parent().unwrap_or(Path::new("."));
+        for name in uses {
+            let sibling = dir.join(format!("{name}.br"));
+            if sibling.is_file() { queue.push(sibling); }
+        }
+    }
+}
+
+/// `boring check --emit-bri[=level] [--out <dir>] <file.br>`: the `.bri` of `file.br` on stdout, or
+/// in `<dir>/<stem>.bri` with `--out`.
+fn emit_bri_for_check(path: &str, mode: bri::BriMode, out_dir: Option<&str>) {
+    let path = PathBuf::from(path);
+    let text = bri_text(&path, mode);
+    match out_dir {
+        None => print!("{text}"),
+        Some(dir) => {
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "output".into());
+            let target = PathBuf::from(dir).join(format!("{stem}.bri"));
+            if let Err(e) = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&target, text)) {
+                eprintln!("error: cannot write '{}': {}", target.display(), e);
+                process::exit(1);
+            }
         }
     }
 }

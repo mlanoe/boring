@@ -1,0 +1,32 @@
+struct Counter:
+    var int n = 0
+
+struct Tally:
+    var int n = 0
+
+# Fields and indexes of untyped parameters: the type, and for an 'actor value the lock, come
+# from the typed call, so each call gets its own copy of the function.
+int total(a, b):
+    a.n + b.n
+
+def reset(var mut a):
+    a.n = 0
+
+int first(xs):
+    xs[0]
+
+def label(var mut a, var mut b):
+    a.n += 1
+    b.n += 10
+
+def main():
+    var mut Counter'actor c = Counter()
+    var mut Tally'actor t = Tally()
+    c.n = 4
+    t.n = 5
+    print "{total(c, t)}"
+    reset(c)
+    let [int] v = [7, 8]
+    print "{first(v)} {c.n}"
+    label(b = t, a = c)
+    print "{c.n} {t.n}"
