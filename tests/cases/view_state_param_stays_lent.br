@@ -1,0 +1,21 @@
+# A view's `body(mut V__State __st)` whose callback calls a `def` method of the view stays a lent
+# `&mut` state parameter. A probe that unlends lent `mut` method parameters accepted the size
+# fallback's `'actor` for it, so `body` took `&Arc<Mutex<V__State>>` while `expand` and the
+# callbacks still passed the plain state (the generated Rust did not compile).
+use boring.ui.*
+
+view Pager:
+    state [string] path = []
+    string title = "pager"
+
+    def push(string name):
+        path.push(name)
+
+    body():
+        let depth = path.length
+        Button(label = "{depth}", onActivate = (): self.push("a"))
+
+def main():
+    # The generated Rust must type-check: `expand` hands `body` the plain state.
+    let p = Pager()
+    print p.title

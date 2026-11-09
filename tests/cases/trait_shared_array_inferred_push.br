@@ -32,7 +32,41 @@ def [Style'shared] idx():
     found[1] = B()
     found
 
+pub struct Holder:
+    pub [Style'shared] installed = []
+    pub req string pick(string control): control
+    pub req [Style'shared] stylesFor(string control):
+        mut found = []
+        for e in installed:
+            if e.kind() == control:
+                found.push(e)
+        if found.length == 0:
+            let chosen = self.pick(control)
+            if chosen == "A":
+                found.push(A())
+        found
+    pub req [Style'shared] before(string control):
+        mut found = []
+        found.push(A())
+        for e in installed:
+            found.push(e)
+        found
+    pub req [Style'shared] elseBranch(string control):
+        mut found = []
+        for e in self.installed:
+            found.push(e)
+        if found.length > 0:
+            found.length
+        else:
+            found.push(B())
+        found
+
 def main():
+    let h = Holder()
+    print "n={h.stylesFor("A").length}"
+    print "b={h.before("A").length}"
+    print "e={h.elseBranch("A").length}"
+
     for s in pick(true, []):
         print s.kind()
     for s in pick(true, [B()]):

@@ -17,9 +17,16 @@ fn is_shared(t: &Type) -> bool {
     matches!(t.without_mut(), Type::Qualified(i, OwnerQual::Shared) if matches!(i.as_ref(), Type::Named(_)))
 }
 
-fn rw_body(params: &[Param], body: &mut [Stmt]) -> bool {
+fn rw_body(params: &[Param], fields: &[FieldDecl], body: &mut [Stmt]) -> bool {
     let mut env: HashMap<String, Type> = HashMap::new(); // name -> shared element type
     let mut arrays: HashMap<String, Type> = HashMap::new(); // array name -> shared element type
+    let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    for f in fields {
+        if param_names.contains(&f.name.as_str()) { continue; }
+        if let Type::Array(i) = f.ty.without_mut() {
+            if is_shared(i) { arrays.insert(f.name.clone(), i.without_mut().clone()); }
+        }
+    }
     for p in params {
         match p.ty.as_ref().map(Type::without_mut) {
             Some(t) if is_shared(t) => { env.insert(p.name.clone(), t.clone()); }
@@ -34,10 +41,18 @@ fn rw_body(params: &[Param], body: &mut [Stmt]) -> bool {
             Stmt::Let(l) => match (&l.ty, l.value.as_ref().map(|v| &v.kind)) {
                 (None, Some(ExprKind::Array(el))) if el.is_empty() => { cands.insert(l.name.clone(), None); }
                 (Some(t), _) if is_shared(t) => { env.insert(l.name.clone(), t.without_mut().clone()); }
+                (Some(t), _) => if let Type::Array(i) = t.without_mut() {
+                    if is_shared(i) { arrays.insert(l.name.clone(), i.without_mut().clone()); }
+                },
                 _ => {}
             },
             Stmt::For(f) => {
-                if let (ExprKind::Var(it), [v]) = (&f.iterable.kind, f.vars.as_slice()) {
+                let it = match &f.iterable.kind {
+                    ExprKind::Var(it) => Some(it),
+                    ExprKind::Field(o, it) if matches!(&o.kind, ExprKind::Var(s) if s == "self") => Some(it),
+                    _ => None,
+                };
+                if let (Some(it), [v]) = (it, f.vars.as_slice()) {
                     if let Some(t) = arrays.get(it) { env.insert(v.clone(), t.clone()); }
                 }
             }
@@ -84,10 +99,10 @@ fn rw_items(items: &mut [Item]) -> bool {
     let mut changed = false;
     for item in items {
         match item {
-            Item::Fn(f) => changed |= rw_body(&f.params, &mut f.body),
-            Item::Struct(s) => for m in &mut s.methods { changed |= rw_body(&m.params, &mut m.body); },
-            Item::Enum(e) => for m in &mut e.methods { changed |= rw_body(&m.params, &mut m.body); },
-            Item::Ext(x) => for m in &mut x.methods { changed |= rw_body(&m.params, &mut m.body); },
+            Item::Fn(f) => changed |= rw_body(&f.params, &[], &mut f.body),
+            Item::Struct(s) => { let fl = s.fields.clone(); for m in &mut s.methods { changed |= rw_body(&m.params, &fl, &mut m.body); } }
+            Item::Enum(e) => for m in &mut e.methods { changed |= rw_body(&m.params, &[], &mut m.body); },
+            Item::Ext(x) => for m in &mut x.methods { changed |= rw_body(&m.params, &[], &mut m.body); },
             Item::Mod(m) => changed |= rw_items(&mut m.items),
             _ => {}
         }

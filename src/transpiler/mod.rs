@@ -1042,6 +1042,9 @@ struct Transpiler {
     /// `mut` struct parameters of methods (name, line, col) the pre-pass resolved to a lock handle
     /// (`'actor`/`'guard`) instead of the default `&mut T` lend.
     pub(crate) unlent_method_params: std::collections::HashSet<(String, usize, usize)>,
+    /// Parameters being probed unlent by `pre_infer_fn_qualifiers_round`: only a real `'actor`/`'guard`
+    /// demand may resolve them, never the size/priority fallback for an unconstrained candidate set.
+    pub(crate) unlent_probe: std::collections::HashSet<String>,
     /// `(name, line, col)` of the `Var` occurrences in the function being emitted that are the
     /// provably last use of their (owned, let-bound) variable — by-value reads there may be a
     /// Rust move instead of a `.clone()`. See `last_use.rs`; empty outside a function body.
@@ -1809,6 +1812,7 @@ impl Transpiler {
             fn_current_params_rebind_only: std::collections::HashSet::new(),
             fn_current_params_lent: std::collections::HashSet::new(),
             unlent_method_params: std::collections::HashSet::new(),
+            unlent_probe: std::collections::HashSet::new(),
             last_use_sites: std::collections::HashSet::new(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),

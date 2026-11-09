@@ -739,6 +739,7 @@ impl Transpiler {
                     .map(|p| p.name.clone()).collect()
             } else { vec![] };
             for n in &lent_candidates { sub.fn_current_params_lent.remove(n); }
+            sub.unlent_probe = lent_candidates.iter().cloned().collect();
             sub.fn_return_ty = f.return_ty.clone();
             sub.self_type = self_ty.map(str::to_string);
             sub.in_struct_method = self_ty.is_some();

@@ -503,6 +503,9 @@ impl Transpiler {
                         self.inferred_qualifiers.insert(var_name.clone(), qual);
                         continue;
                     }
+                    // A lent `mut` struct parameter probed unlent keeps `&mut` unless a demand
+                    // narrowed it to a lock handle: the size fallback must not decide it.
+                    if self.unlent_probe.contains(var_name.as_str()) { continue; }
                     // Multiple candidates remaining: apply priority-ordered fallback.
                     let type_size = var_struct_types.get(var_name.as_str())
                         .and_then(|tn| self.type_sizes.get(tn.as_str()))

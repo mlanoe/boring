@@ -1709,3 +1709,4 @@ transpile_test!(optional_reuse_and_array_concat);
 transpile_test!(lock_handle_field_argument);
 transpile_test!(task_local_to_task_param);
 transpile_test!(trait_shared_array_inferred_push);
+transpile_test!(view_state_param_stays_lent);
