@@ -196,11 +196,11 @@ impl Transpiler {
 /// every later `c` is replaced by `self.field`, so a demand on `c` is a demand on the field.
 /// Only a name bound exactly once in the body is substituted (a rebound or shadowed `c` could
 /// hold something else).
-pub(super) fn substitute_field_aliases(stmts: &mut Vec<Stmt>, fields: &HashSet<&str>) {
+pub(super) fn substitute_field_aliases(stmts: &mut [Stmt], fields: &HashSet<&str>) {
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut candidates: HashMap<String, String> = HashMap::new();
     {
-        let mut copy = stmts.clone();
+        let mut copy = stmts.to_owned();
         let mut on_expr = |_: &mut Expr| {};
         let mut on_stmt = |st: &mut Stmt| {
             if let Stmt::Let(l) = st {
@@ -219,7 +219,7 @@ pub(super) fn substitute_field_aliases(stmts: &mut Vec<Stmt>, fields: &HashSet<&
     // Other binders (loop variables, patterns, closure parameters) of the same name disqualify it.
     let mut others: HashMap<String, usize> = HashMap::new();
     {
-        let mut copy = stmts.clone();
+        let mut copy = stmts.to_owned();
         let cell = std::cell::RefCell::new(&mut others);
         let mut on_stmt = |st: &mut Stmt| match st {
             Stmt::For(f) => { for v in &f.vars { *cell.borrow_mut().entry(v.clone()).or_default() += 1; } }

@@ -437,7 +437,7 @@ impl Parser {
     fn own_qual_name(scope: &[String], q: &str, ty: &Type) -> Option<String> {
         let (Type::TypeParam(base) | Type::Named(base)) = ty else { return None };
         let own = format!("{q}.{base}");
-        scope.iter().any(|s| *s == own).then_some(own)
+        scope.contains(&own).then_some(own)
     }
 
     pub(crate) fn parse_type_qualifier(&mut self, ty: Type) -> Result<Type, ParseError> {

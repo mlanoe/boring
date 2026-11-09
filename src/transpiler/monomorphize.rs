@@ -71,6 +71,7 @@ thread_local! {
     /// Device-code generics (`device_generic.rs`): names of the generic structs whose
     /// `Name<args>` type uses `substitute_type` replaces by the instance's name, and the uses it
     /// found (name, concrete arguments), for the pass to instantiate.
+    #[allow(clippy::type_complexity)]
     static DEVICE_GENERIC: RefCell<Option<(HashSet<String>, Vec<(String, Vec<Type>)>)>> = const { RefCell::new(None) };
     /// Declarations whose qualifier parameters all have a default: a bare use in type position
     /// is that instance (`Board` → `Board<elem'inline>`).

@@ -947,7 +947,7 @@ impl Transpiler {
     /// `T'owned` local, which is tracked only through its qualified `var_types` entry — `T`.
     pub(crate) fn operand_struct_type(&self, v: &str) -> Option<String> {
         if let Some(t) = self.var_struct_types.get(v) { return Some(t.clone()); }
-        if self.managed_owned_var_src(v).is_none() { return None; }
+        self.managed_owned_var_src(v)?;
         match self.var_types.get(v).map(Type::without_mut) {
             Some(Type::Qualified(inner, _)) => match inner.as_ref() {
                 Type::Named(n) => Some(n.clone()),

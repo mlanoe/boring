@@ -205,7 +205,7 @@ pub fn check_with_imports(program: &Program, imported: &[Item]) -> Result<(), cr
 
 /// One scope's worth of [`infer_return_types`]; a `mod` is its own scope (names resolve
 /// against its own members only), so each is handled by recursion.
-fn infer_items(items: &mut Vec<Item>) {
+fn infer_items(items: &mut [Item]) {
     for item in items.iter_mut() {
         if let Item::Mod(m) = item {
             infer_items(&mut m.items);
@@ -728,6 +728,7 @@ impl<'a> Ctx<'a> {
             in_progress: RefCell::new(HashSet::new()),
         };
         let mut duplicates: HashSet<String> = HashSet::new();
+        #[allow(clippy::collapsible_match)]
         for item in items {
             match item {
                 Item::Struct(s) => {

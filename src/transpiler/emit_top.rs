@@ -750,9 +750,8 @@ impl Transpiler {
                 .filter_map(|p| sub.inferred_qualifiers.get(&p.name).map(|q| (p.name.clone(), q.clone())))
                 .collect();
             for p in f.params.iter().filter(|p| lent_candidates.contains(&p.name)) {
-                if matches!(pre_inferred.get(&p.name), Some(crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::Guard)) {
-                    if self.unlent_method_params.insert((p.name.clone(), p.line, p.col)) { changed = true; }
-                }
+                if matches!(pre_inferred.get(&p.name), Some(crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::Guard))
+                    && self.unlent_method_params.insert((p.name.clone(), p.line, p.col)) { changed = true; }
             }
 
             // Update both the plain-name entry and the mangled-name entry (pre_register_fn

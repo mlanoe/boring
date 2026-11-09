@@ -159,7 +159,7 @@ impl Transpiler {
                 if !registered { return None; }
                 let field_task = self.struct_mutex_task_fields.contains(&r.key) || self.struct_rwlock_task_fields.contains(&r.key)
                     || matches!(r.field_ty.without_mut(), Type::Qualified(_, OwnerQual::ActorTask | OwnerQual::GuardTask));
-                (r.rwlock == guard && field_task == is_task).then(|| (r.handle, true))
+                (r.rwlock == guard && field_task == is_task).then_some((r.handle, true))
             }
             ExprKind::Call(callee, _) => {
                 let ExprKind::Var(f) = &callee.kind else { return None };
@@ -3283,13 +3283,13 @@ impl Transpiler {
                         let slot_ty = elem_tys.get(i);
                         // A lock-handle field in a slot declared with the same handle flavour is
                         // the shared handle the declaration asked for, not a copy of its value.
-                        if let Some((guard, task)) = slot_ty.and_then(|t| Self::lock_flavour(t)) {
+                        if let Some((guard, task)) = slot_ty.and_then(Self::lock_flavour) {
                             if let Some(h) = self.existing_lock_handle(e, task, guard) { return h; }
                         }
                         let v = self.emit_let_value(slot_ty, e);
                         // A lock-handle slot owns its handle: the call-argument form `&Arc::new(..)`
                         // `emit_let_value` produces for it is not an owned tuple member.
-                        if slot_ty.and_then(|t| Self::lock_flavour(t)).is_some() {
+                        if slot_ty.and_then(Self::lock_flavour).is_some() {
                             if let Some(owned) = v.strip_prefix("&Arc::new(").map(|r| format!("Arc::new({r}"))
                                 .or_else(|| v.strip_prefix("&Rc::new(").map(|r| format!("Rc::new({r}"))) { return owned; }
                         }

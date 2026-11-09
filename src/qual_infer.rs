@@ -493,7 +493,7 @@ fn push_direct(base: &str, slot: &Type, raw: &[String], arg_base: Type, written:
     let Some((t, slot_q)) = direct_param(slot, raw) else { return Ok(()) };
     if let (Some(sq), Some(w)) = (&slot_q, &written) {
         if !matches!(sq, OwnerQual::Param(_)) && w.as_slice() != std::slice::from_ref(sq) {
-            let shown = |c: &[OwnerQual]| OwnerQual::chain_name(&c.to_vec()).unwrap_or_else(|| "?".into());
+            let shown = |c: &[OwnerQual]| OwnerQual::chain_name(c).unwrap_or_else(|| "?".into());
             return Err(format!(
                 "`{t}'{}` slot of `{base}` is given an argument written `'{}` ({desc}); no silent conversion, write the argument with `'{}`",
                 shown(std::slice::from_ref(sq)), shown(w), shown(std::slice::from_ref(sq))));

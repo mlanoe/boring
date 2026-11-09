@@ -3543,7 +3543,7 @@ impl Interpreter {
                             }
                         }
                     });
-                    if ok && best.map_or(true, |(b, _)| exact > b) { best = Some((exact, variant)); }
+                    if ok && best.is_none_or(|(b, _)| exact > b) { best = Some((exact, variant)); }
                 }
                 let chosen = best.map(|(_, v)| v);
                 match chosen {
@@ -3589,7 +3589,7 @@ impl Interpreter {
     }
 
     fn unlabel(v: &Value) -> &Value {
-        match v { Value::Labeled { value, .. } => &**value, other => other }
+        match v { Value::Labeled { value, .. } => value, other => other }
     }
 
     /// Construct a value from a Rust type name.

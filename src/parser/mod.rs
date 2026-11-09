@@ -2540,9 +2540,6 @@ impl Parser {
         }
         // D8: inside a struct whose parameters are all implicit, a bare mention of the struct itself
         // (`Node? next`) shares its parameters: it is `Node<T_value>`, never a fresh instance.
-        let mut fields = fields;
-        let mut inits = inits;
-        let mut methods = methods;
         if !untyped_fields.is_empty() && type_params.iter().all(|p| p.starts_with("T_")) {
             let args: Vec<Type> = type_params.iter().map(|p| Type::TypeParam(p.clone())).collect();
             for f in &mut fields { crate::infer_param_generics::share_self_params(&mut f.ty, &name, &args); }

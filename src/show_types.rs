@@ -58,7 +58,7 @@ fn describe_raw(t: &Type) -> String {
             chain.reverse();
             let quals: String = match chain.as_slice() {
                 [OwnerQual::Param(p), rest @ ..] => {
-                    let tail = if rest.is_empty() { String::new() } else { OwnerQual::chain_name(&rest.to_vec()).map(|n| format!("'{n}")).unwrap_or_default() };
+                    let tail = if rest.is_empty() { String::new() } else { OwnerQual::chain_name(rest).map(|n| format!("'{n}")).unwrap_or_default() };
                     format!("'{}{tail}", written_name(p))
                 }
                 _ => match OwnerQual::chain_name(&chain) { Some(n) => format!("'{n}"), None => "'...".into() },

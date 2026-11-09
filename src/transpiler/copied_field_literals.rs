@@ -271,7 +271,7 @@ fn child_blocks(s: &Stmt) -> Vec<&[Stmt]> {
 }
 
 /// The statements following `target` in the block that holds it.
-fn rest_after<'a>(block: &'a [Stmt], target: *const Stmt) -> Option<&'a [Stmt]> {
+fn rest_after(block: &[Stmt], target: *const Stmt) -> Option<&[Stmt]> {
     for (i, s) in block.iter().enumerate() {
         if std::ptr::eq(s, target) { return Some(&block[i + 1..]); }
         for b in child_blocks(s) {

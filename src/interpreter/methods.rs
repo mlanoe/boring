@@ -1250,13 +1250,11 @@ impl Interpreter {
             return Err(err(format!("field '{}' is not rebindable", field_name), line));
         }
         if let Some(kind) = tv.ty.as_ref().and_then(Self::introspect_prim_kind) {
-            let ok = match (kind, &value) {
+            let ok = matches!((kind, &value),
                 ("int", Value::Int(_) | Value::Uint(_) | Value::Uint8(_) | Value::Int8(_) | Value::Int16(_) | Value::Int32(_)
-                    | Value::Int64(_) | Value::Int128(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_)) => true,
-                ("float", Value::Float32(_) | Value::Float64(_)) => true,
-                ("bool", Value::Bool(_)) | ("string", Value::Str(_)) => true,
-                _ => false,
-            };
+                    | Value::Int64(_) | Value::Int128(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_))
+                | ("float", Value::Float32(_) | Value::Float64(_))
+                | ("bool", Value::Bool(_)) | ("string", Value::Str(_)));
             if !ok {
                 let expected = match kind { "int" => "an integer", "float" => "a float", "bool" => "a bool", _ => "a string" };
                 return Err(err(format!("wrong argument type for '{}': expected {}", field_name, expected), line));

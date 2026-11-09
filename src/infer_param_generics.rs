@@ -337,6 +337,7 @@ pub(crate) fn propagate_in(items: &mut [Item]) {
         for item in items.iter() {
             if let Item::Fn(g) = item { *declared.entry(g.name.as_str()).or_default() += 1; }
         }
+        #[allow(clippy::type_complexity)]
         let mut callees: std::collections::HashMap<String, Vec<Option<(String, Vec<String>)>>> = Default::default();
         for item in items.iter() {
             let Item::Fn(g) = item else { continue };

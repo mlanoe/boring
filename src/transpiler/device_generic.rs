@@ -333,7 +333,6 @@ fn refs_of_item(item: &Item, cands: &HashSet<String>) -> HashSet<String> {
             Item::Let(l) => { sig_types.extend(l.ty.clone()); if let Some(v) = &mut l.value { w.expr(v); } }
             other => crate::transpiler::kernel_generic::walk_item(other, &mut w),
         }
-        drop(w);
         for t in types.iter().chain(&sig_types) { type_names(t, &mut seen); }
     }
     seen.retain(|n| cands.contains(n));

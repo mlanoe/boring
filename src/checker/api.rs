@@ -162,6 +162,7 @@ impl Checker {
 
     /// A function-like signature under `@api`: parameters typed, qualifier parameters declared,
     /// no hidden exposure.
+    #[allow(clippy::too_many_arguments)]
     fn check_api_sig(
         &mut self,
         owner: &str,
