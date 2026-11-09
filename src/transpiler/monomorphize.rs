@@ -313,7 +313,12 @@ pub(crate) fn substitute_type(ty: &Type, subst: &HashMap<String, Type>) -> Type 
             Type::Generic(name.clone(), args)
         }
         Type::AssocOf(base, name) => Type::AssocOf(Box::new(substitute_type(base, subst)), name.clone()),
-        Type::Mut(inner) => Type::Mut(Box::new(substitute_type(inner, subst))),
+        // `mut T` with `T` replaced by a scalar (`Entry<int>` for `var mut T value`): `mut` means nothing on
+        // a scalar (and is a checker error written there), so the instance's field is the bare scalar.
+        Type::Mut(inner) => {
+            let inner = substitute_type(inner, subst);
+            if inner.is_scalar_value() { inner } else { Type::Mut(Box::new(inner)) }
+        }
         // Int/Uint/.../Str/Bool/Nil/Void/Never/ConstInt/SelfAssoc — no nested Type, no
         // possible type-param reference of their own. Cloned through unchanged.
         other => other.clone(),
@@ -2045,6 +2050,17 @@ mod tests {
 
     fn subst_of(pairs: &[(&str, Type)]) -> HashMap<String, Type> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn substitute_type_drops_mut_on_a_scalar_argument_only() {
+        // `var mut T value` instantiated with a scalar: `mut` means nothing there (and is a checker error).
+        let mut_t = Type::Mut(Box::new(Type::TypeParam("T".into())));
+        assert_eq!(substitute_type(&mut_t, &subst_of(&[("T", Type::Named("int".into()))])), Type::Named("int".into()));
+        assert_eq!(substitute_type(&mut_t, &subst_of(&[("T", Type::Bool)])), Type::Bool);
+        // A struct keeps its `mut`: it is what lets `value.method()` call a `def`.
+        let point = Type::Named("Point".into());
+        assert_eq!(substitute_type(&mut_t, &subst_of(&[("T", point.clone())])), Type::Mut(Box::new(point)));
     }
 
     #[test]

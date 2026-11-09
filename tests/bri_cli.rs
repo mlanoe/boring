@@ -109,3 +109,34 @@ fn build_emit_bri_does_not_combine_with_emit_rust() {
     assert!(!o.status.success());
     assert!(text(&o).1.contains("--emit-bri"), "{}", text(&o).1);
 }
+
+#[test]
+fn full_shows_a_trait_the_transpiler_made_shared_and_the_rust_is_the_same() {
+    // A trait whose methods are all `req`, held by a struct field, is shared (`Trait'shared`): `mono`
+    // keeps what was written, `full` writes the decision, and building the `.bri` gives the same Rust.
+    let src = "trait Shape:\n    req float area()\n\nstruct Circle as Shape:\n    float r\n\n    req float area():\n        r * r * 3.0\n\nstruct Scene:\n    var [Shape] items = []\n\ndef main():\n    var mut s = Scene()\n    s.items.push(Circle(2.0))\n    print \"{s.items.len()}\"\n";
+    let dir = scratch("bri_cli_shared_trait");
+    std::fs::write(dir.join("shape.br"), src).unwrap();
+    let (mono, _) = text(&boring(&dir, &["check", "--emit-bri=mono", "shape.br"]));
+    let (full, _) = text(&boring(&dir, &["check", "--emit-bri=full", "shape.br"]));
+    assert!(mono.contains("var [Shape] items"), "{mono}");
+    assert!(full.contains("var [Shape'shared] items"), "{full}");
+    std::fs::write(dir.join("shape_full.bri"), &full).unwrap();
+    let rust = |f: &str| text(&boring(&dir, &["build", "--emit-rust", f])).0;
+    assert_eq!(rust("shape.br"), rust("shape_full.bri"));
+}
+
+#[test]
+fn full_keeps_the_trailing_array_block_of_a_shared_trait_array_working() {
+    // The `.bri` writes `[Widget'shared]` on the field the block collects into; the sugar still reads
+    // it as a trait-object array, and the builder it makes is shared too (same Rust as the source).
+    let dir = scratch("bri_cli_array_block_shared");
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/array_block_for.br");
+    std::fs::copy(&case, dir.join("blocks.br")).unwrap();
+    let (full, err) = text(&boring(&dir, &["check", "--emit-bri=full", "blocks.br"]));
+    assert!(full.contains("[Widget'shared] children"), "{full}\n{err}");
+    std::fs::write(dir.join("blocks_full.bri"), &full).unwrap();
+    let rust = |f: &str| text(&boring(&dir, &["build", "--emit-rust", f])).0
+        .lines().filter(|l| !l.contains("__stream_")).collect::<Vec<_>>().join("\n");
+    assert_eq!(rust("blocks.br"), rust("blocks_full.bri"));
+}

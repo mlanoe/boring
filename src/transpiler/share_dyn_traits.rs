@@ -102,6 +102,50 @@ impl DynFacts {
     }
 }
 
+thread_local! {
+    static SHARED_TRAITS: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// What the transpiler decided about shared traits: which traits are shared, and the outcome of
+/// borrow inference for the parameters of bare trait type (borrowed ones stay bare, by-value ones
+/// become `Trait'shared`). Exported for the `.bri`.
+#[derive(Default, Clone)]
+pub struct SharedDecision {
+    pub traits: HashSet<String>,
+    fns: HashMap<String, Vec<bool>>,
+    methods: HashMap<String, Vec<Option<Type>>>,
+    by_name: HashMap<String, String>,
+}
+
+thread_local! {
+    static DECISION: std::cell::RefCell<Option<SharedDecision>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Publishes the decision, once borrow inference has resolved (read by `take_shared_decision`).
+pub(crate) fn note_decision(
+    traits: &HashSet<String>,
+    fns: &HashMap<String, Vec<bool>>,
+    methods: &HashMap<String, Vec<Option<Type>>>,
+    by_name: &HashMap<String, String>,
+) {
+    DECISION.with(|d| *d.borrow_mut() = Some(SharedDecision {
+        traits: traits.clone(), fns: fns.clone(), methods: methods.clone(), by_name: by_name.clone(),
+    }));
+}
+
+/// Drains the decision of the last transpile on this thread (empty when none was taken).
+pub fn take_shared_decision() -> SharedDecision {
+    DECISION.with(|d| d.borrow_mut().take()).unwrap_or_default()
+}
+
+/// The rewrite exactly as the transpiler applies it, for the `.bri`: every position naming a shared
+/// trait becomes `Trait'shared`, except the parameters borrow inference left borrowed.
+pub fn apply_shared_decision(program: &mut Program, d: &SharedDecision) {
+    if d.traits.is_empty() { return; }
+    let view = BorrowView { fns: &d.fns, methods: &d.methods, by_name: &d.by_name };
+    rewrite_program(program, &d.traits, Some(&view));
+}
+
 /// Rewrites every type in `program` naming a target trait to `Trait'shared`.
 ///
 /// A parameter written as the bare trait is, to borrow inference (`infer_trait_borrow.rs`),

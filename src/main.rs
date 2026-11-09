@@ -2657,6 +2657,7 @@ fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
         _ => None,
     }).collect();
     let mut decisions: Vec<bri::full::QualDecision> = Vec::new();
+    let mut shared = transpiler::SharedDecision::default();
     if mode == bri::BriMode::Full {
         let deps = find_project_root(path)
             .and_then(|root| {
@@ -2674,6 +2675,7 @@ fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
         let cfg = transpiler::TranspileConfig { source_dir, deps, ..Default::default() };
         let out = transpiler::transpile_with_config(&d, cfg);
         if !out.errors.is_empty() { report_transpile_errors(path, &source, &out.errors); process::exit(1); }
+        shared = transpiler::take_shared_decision();
         let mut cpu = transpiler::take_cpu_decisions();
         let _ = desugar_tensor_quals::take_decisions();
         cpu.dedup_by(|a, b| a.scope == b.scope && a.name == b.name && a.line == b.line);
@@ -2682,7 +2684,7 @@ fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
             decisions.push(bri::full::QualDecision { scope: c.scope, name: c.name, line: c.line, col: c.col, is_param: c.kind == "param", qual });
         }
     }
-    match bri::print_program_mode(&program, mode, &decisions) {
+    match bri::print_program_mode(&program, mode, &decisions, &shared) {
         Ok(t) => (t, uses),
         Err(e) => {
             eprintln!("error: {path}: {e}", path = path.display());

@@ -919,11 +919,16 @@ fn desugar_trailing_array_block(
         });
     };
 
-    enum Interp { Collect(String), Tail, ClosureLiteral }
+    enum Interp { Collect(String, bool), Tail, ClosureLiteral }
 
     let interp = match sigs.last_param_type(name) {
         Some(Type::Array(inner)) => match inner.as_ref() {
-            Type::Named(n) if sigs.is_trait(n) => Interp::Collect(n.clone()),
+            Type::Named(n) if sigs.is_trait(n) => Interp::Collect(n.clone(), false),
+            // `[Widget'shared]`: the element type of a shared trait, as the `.bri` writes it.
+            Type::Qualified(base, OwnerQual::Shared) if matches!(base.as_ref(), Type::Named(n) if sigs.is_trait(n)) => {
+                let Type::Named(n) = base.as_ref() else { unreachable!() };
+                Interp::Collect(n.clone(), true)
+            }
             other => {
                 return Err(ParseError::Generic {
                     line, col, len,
@@ -958,7 +963,13 @@ fn desugar_trailing_array_block(
     };
 
     match interp {
-        Interp::Collect(trait_name) => {
+        Interp::Collect(trait_name, shared) => {
+            // The element type of the collected array, as the callee wrote it (`Widget` or `Widget'shared`).
+            let elem_ty = if shared {
+                Type::Qualified(Box::new(Type::Named(trait_name.clone())), OwnerQual::Shared)
+            } else {
+                Type::Named(trait_name.clone())
+            };
             let mut elems = stmts_to_array_block_elems(body, line, col, len)?;
             resolve_identity_keys(&mut elems, sigs)?;
             if !elems_have_control_flow(&elems) {
@@ -989,7 +1000,7 @@ fn desugar_trailing_array_block(
                 is_static: false,
                 name: CHILDREN_VAR.to_string(),
                 // `Type::Mut` wrapper, exactly like a parser-built `mut` local.
-                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(Type::Named(trait_name.clone())))))),
+                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(elem_ty.clone()))))),
                 var_mut: false,
                 value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
                 is_lazy: false,
@@ -1000,7 +1011,7 @@ fn desugar_trailing_array_block(
             // a keyed `for` keeps the same structural identity whatever its siblings did.
             let counter = SiteCounter::default();
             let sites = (trait_name == "View" && sigs.structs.contains_key("Sited")).then_some(&counter);
-            stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, &trait_name, line, col, sites));
+            stmts.extend(elems_to_push_stmts(&elems, CHILDREN_VAR, &elem_ty, line, col, sites));
             let mut new_args = args;
             new_args.push(Arg {
                 label: trailing_label(sigs, name, &new_args),
@@ -1084,7 +1095,7 @@ fn trailing_label(sigs: &Signatures, name: &str, args: &[Arg]) -> Option<String>
 /// Builds the imperative push-statement list for the control-flow collect
 /// case: `ArrayBlockElem::Item(e)` -> `__children.push(e)`; `If`/`For` -> the
 /// matching `Stmt::If`/`Stmt::For`, recursing into their own bodies.
-fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name: &str, line: usize, col: usize, sites: Option<&SiteCounter>) -> Vec<Stmt> {
+fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, elem_ty: &Type, line: usize, col: usize, sites: Option<&SiteCounter>) -> Vec<Stmt> {
     elems.iter().map(|elem| match elem {
         ArrayBlockElem::Item(e) => {
             let value = match sites {
@@ -1100,9 +1111,9 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
         }
         ArrayBlockElem::If { branches, else_body } => {
             let branches = branches.iter()
-                .map(|(c, b)| (c.clone(), elems_to_push_stmts(b, children_var, trait_name, line, col, sites)))
+                .map(|(c, b)| (c.clone(), elems_to_push_stmts(b, children_var, elem_ty, line, col, sites)))
                 .collect();
-            let else_body = else_body.as_ref().map(|b| elems_to_push_stmts(b, children_var, trait_name, line, col, sites));
+            let else_body = else_body.as_ref().map(|b| elems_to_push_stmts(b, children_var, elem_ty, line, col, sites));
             Stmt::If(IfStmt { branches, else_body, line, col })
         }
         ArrayBlockElem::For { vars, iterable, key: None, body } => {
@@ -1111,7 +1122,7 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
                 iterable: iterable.clone(),
                 key: None,
                 // An unkeyed loop keeps positional (index) identity for its items.
-                body: elems_to_push_stmts(body, children_var, trait_name, line, col, None),
+                body: elems_to_push_stmts(body, children_var, elem_ty, line, col, None),
                 line, col,
             })
         }
@@ -1128,7 +1139,7 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
                 is_pub: false,
                 is_static: false,
                 name: iter_var.clone(),
-                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(Type::Named(trait_name.to_string())))))),
+                ty: Some(Type::Mut(Box::new(Type::Array(Box::new(elem_ty.clone()))))),
                 var_mut: false,
                 value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
                 is_lazy: false,
@@ -1136,7 +1147,7 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, trait_name:
             })];
             // Inside the group the iteration's own items get a fresh numbering.
             let inner_counter = SiteCounter::default();
-            inner.extend(elems_to_push_stmts(body, &iter_var, trait_name, line, col, sites.map(|_| &inner_counter)));
+            inner.extend(elems_to_push_stmts(body, &iter_var, elem_ty, line, col, sites.map(|_| &inner_counter)));
             let group = Expr {
                 kind: ExprKind::Call(Box::new(var("KeyedGroup")), vec![
                     // The group's key is always a string (`"{key}"`): the runtime compares keys by

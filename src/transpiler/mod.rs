@@ -35,6 +35,7 @@ mod infer_field_cross_file;
 mod infer_field_scan;
 mod copied_field_literals;
 pub use infer_qualifiers::{note_inferred_actor_param, take_cpu_decisions, CpuDecision};
+pub use share_dyn_traits::{apply_shared_decision, take_shared_decision, SharedDecision};
 mod infer_trait_borrow;
 mod infer_shared_elems;
 mod share_dyn_traits;
@@ -2425,6 +2426,7 @@ impl Transpiler {
         self.source_dir = prev_dir;
         self.resolve_trait_borrow_params();
         self.trait_borrow_resolved = true;
+        share_dyn_traits::note_decision(&self.shared_dyn_traits, &self.trait_borrowed_fns, &self.trait_borrowed_methods, &self.trait_borrowed_method_by_name);
         // Registrations made before inference saw every bare param as bare: by-value ones are
         // `Trait'shared` for a shared trait (`share_dyn_traits.rs`).
         let targets = self.shared_dyn_traits.clone();

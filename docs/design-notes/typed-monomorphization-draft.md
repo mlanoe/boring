@@ -540,3 +540,87 @@ desugared AST (it panics on `labeled_array`), the instances of an imported gener
 file (a per-file `.bri` would call `Stack_int` without declaring it), and it substitutes `mut` onto
 scalars. The last one is a defect of the monomorphizer itself, independent of the `.bri`, to fix on its
 own.
+
+## 13. Sounding of level 3 (the two-phase compiler), 2026-11-09
+
+Measured by reading the tree, nothing built. Level 3 of section 11 asks that phase 1 produce an explicit
+program and phase 2 infer nothing. What the transpiler holds today:
+
+- `Transpiler` has **285 fields**, about **48** of them decision state filled while emitting
+  (`inferred_qualifiers`, `promoted_atomic_vars`, `var_lock_scalar`, `trait_borrow_resolved`,
+  `trait_borrowed_methods`, `borrowed_def_methods`, `last_use_sites`, `shared_dyn_traits`,
+  `fn_sigs`, `cpu_decision_notes`, ...). The decisions are read again by the emitters.
+- The emitters that consume them are the bulk of the transpiler: `emit_methods.rs` (8157 lines),
+  `emit_expr.rs` (6810), `emit_top.rs` (4354), `emit_let.rs` (3810), `emit_struct.rs` (3737). Several
+  decisions are not passes at all but are taken at the point of emission (a clone before a by-value
+  use, a lock at a call whose receiver is `'actor`, `box_if_trait_typed`).
+- The passes that are separable as such are small: `infer_qualifiers.rs` (2707, the largest),
+  `infer_trait_borrow.rs` (805), `last_use.rs` (460), `promote_atomic.rs` (411), `share_dyn_traits.rs`
+  (295), `copied_field_literals.rs` (282), `infer_field_scan.rs` (246), plus `infer_shared_elems.rs` and
+  `infer_field_cross_file.rs`. About 6000 lines.
+
+Conclusion: level 3 as written (all inference out of the transpiler, the emitter reading an explicit
+AST) is not a matter of moving a few passes: most decisions are interleaved with emission. It is a
+rewrite-sized refactor, and what it buys (a `.bri` that is faithful by construction) is partly
+obtained already: `full` reads back the decisions the transpiler recorded
+(`take_cpu_decisions`), and `mono` shows what the front end specialised.
+
+A cheaper route, in steps that each keep the generated Rust identical (the same test as the oracle):
+
+1. Move the small passes listed above to the front end one at a time, each writing its decision into
+   the AST (an explicit qualifier, an explicit borrow) instead of a `Transpiler` field, and checking
+   that the emitter then reads the AST. Validation per step: the full transpile suite, byte-identical
+   Rust.
+2. Extend `full` to print each decision that was moved, so the `.bri` shows it without a side channel.
+3. Only then reconsider the monomorphizer in `mono` (section 12): once the AST is explicit, the
+   instance of an imported generic can be written where it is used.
+
+Not started. Cross-file specialisation of an untyped-parameter function (`pub def bump(a)` in a library,
+called from another file) has the same placement question as the monomorphizer's imported instances,
+and waits with them: today such a function is refused with the "write its type" error in its
+declaring file.
+
+### 13.1 First step of the stepwise route, tried on paper (2026-11-09): no cheap first step
+
+The route above starts with "the smallest pass". Reading the three smallest candidates shows that none
+is independent, so the line counts understate the cost:
+
+- `copied_field_literals.rs` (282) is not a decision but a **diagnostic** ("a struct field copied into a
+  literal whose elements need a shared handle"). It reads `fn_sigs`, `struct_fields`,
+  `resolve_expr_struct_type`, `body_local_types`, `method_receiver_type`, the overload tables and
+  `emit_type`. Moving it means porting those tables to the front end or the checker, not moving a pass.
+- `share_dyn_traits.rs` (295) is already an AST rewrite (`Trait` becomes `Trait'shared`), the easiest
+  kind to make explicit, but it is interleaved with borrow inference (`BorrowView`, a by-value
+  parameter becomes `'shared` only once `infer_trait_borrow` has decided it is not borrowed) and its
+  facts come from a scan of the whole reachable file graph (`dyn_fact_pass`).
+- `promote_atomic.rs` (411) runs **after** `infer_qualifiers` has committed a binding to `'actor` or
+  `'guard`: it consumes the output of the 2707-line root pass.
+
+So the dependency order is `infer_qualifiers` first, then the passes that read its decisions, and the
+borrow and shared-trait decisions are entangled with each other. The honest size of level 3 is the size
+of the qualifier inference and what hangs off it, not the sum of the small files. A step that stays
+cheap and useful is to extend `full` with the decisions the transpiler already records or computes
+(for example export `shared_dyn_traits` and the borrow view the way the CPU decisions are exported)
+and print them, which shows more of the program without moving any inference.
+
+### 13.2 `full` extended with the shared traits (2026-11-10)
+
+Done instead of moving a pass (13.1): the transpiler's decision about shared traits is exported
+(`take_shared_decision`: the shared traits and the outcome of borrow inference) and `full` applies the
+same rewrite (`apply_shared_decision`), so a field, `let` or return naming a shared trait is written
+`Trait'shared` and a parameter borrow inference left borrowed stays bare.
+
+What it taught:
+- **Applying only the traits is wrong.** Writing `'shared` on fields and returns but leaving the
+  parameters bare changed the generated Rust for 24 of 43 cases: a by-value parameter of a shared trait is
+  `Arc<dyn Trait>` in the source, but read back next to explicit `'shared` positions it was decided again
+  and came out `Box<dyn Trait>`. The borrow outcome has to travel with the traits.
+- **A written qualifier removes the evidence that made the decision.** A trait is shared because some
+  struct field names it *bare*; once the `.bri` writes `'shared` there, a bare use that a desugaring
+  creates later (the trailing array-block builder `Vec<Widget>`) is no longer rewritten. The sugar now keeps
+  the callee's element type (`Widget'shared`) for its builder, and accepts `[Trait'shared]` as a
+  trait-object array.
+- **Result over `tests/cases`:** `full` run 432 of 447 identical (unchanged), `full` build 403 of 519
+  identical (401 before): the 40 cases the shared rewrite changes produce byte-identical Rust.
+This is the pattern for every decision that moves into the `.bri`: export what the transpiler decided,
+write it, and check that the reader, which now takes it as written, decides the rest the same way.

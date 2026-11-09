@@ -204,3 +204,13 @@ fn qualified_generic_sugar_is_refused_and_a_plain_type_parameter_carries_its_qua
         assert!(out.status.success(), "{}", stderr(&out));
     }
 }
+
+#[test]
+fn untyped_parameter_function_the_pass_does_not_handle_keeps_its_error() {
+    // Specialisation covers top-level functions with a unique name of one file. A `mod` function and an
+    // overloaded name keep the "write its type" error, in `run` and `build` alike (never an opaque rustc error).
+    let in_mod = format!("{COUNTER}mod tools:\n    pub def bump(var mut a):\n        a.inc()\n\ndef main():\n    print \"hi\"\n");
+    expect_error(&in_mod, "cannot use the untyped parameter `a` with the method call `.inc()`");
+    let overloaded = format!("{COUNTER}def bump(var mut a):\n    a.inc()\n\ndef bump(var mut a, int n):\n    a.inc()\n\ndef main():\n    var mut Counter'actor c = Counter()\n    bump(c)\n");
+    expect_error(&overloaded, "cannot use the untyped parameter `a` with the method call `.inc()`");
+}

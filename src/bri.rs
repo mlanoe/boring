@@ -58,12 +58,13 @@ pub enum BriMode {
 
 /// Prints `program` (as the parser leaves it, so after `specialize_untyped`) at the given level.
 /// `mono` prints the AST as is; `full` first writes `decisions`, the qualifiers the transpiler's
-/// inference chose (`full::apply_qualifiers`).
-pub fn print_program_mode(program: &Program, mode: BriMode, decisions: &[full::QualDecision]) -> Result<String, BriError> {
+/// inference chose (`full::apply_qualifiers`) and the traits it made shared (`Trait'shared`).
+pub fn print_program_mode(program: &Program, mode: BriMode, decisions: &[full::QualDecision], shared: &crate::transpiler::SharedDecision) -> Result<String, BriError> {
     match mode {
         BriMode::Mono => print_program(program),
         BriMode::Full => {
             let mut p = program.clone();
+            crate::transpiler::apply_shared_decision(&mut p, shared);
             full::apply_qualifiers(&mut p, decisions);
             print_program(&p)
         }

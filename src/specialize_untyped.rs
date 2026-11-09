@@ -390,6 +390,33 @@ fn show(f: &FnDecl) {
     eprintln!("# specialised: def {}({})", f.name, params.join(", "));
 }
 
+/// Every function with an untyped parameter used in a way that needs its type (`takes_over`) that the
+/// pass does not specialise keeps the error it would have had without it: one declared inside a `mod`,
+/// or whose name is declared more than once (overloads). Without this, the parser's relaxed check
+/// would let it through to rustc.
+fn refuse_unhandled(items: &[Item], handled: &HashSet<String>, in_mod: bool) -> Result<(), ParseError> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for item in items {
+        if let Item::Fn(f) = item { *seen.entry(f.name.as_str()).or_default() += 1; }
+    }
+    for item in items {
+        match item {
+            Item::Fn(f) if f.qualifier.is_none() && !f.task && !f.stream && !f.is_native => {
+                let idx = implicit_indices(f);
+                if idx.is_empty() { continue; }
+                let names: Vec<String> = idx.iter().map(|&i| f.params[i].name.clone()).collect();
+                let Some(u) = unbounded_use(&names, &f.body, &[]) else { continue };
+                if !takes_over(&u.what) { continue; }
+                let handled_here = !in_mod && seen.get(f.name.as_str()) == Some(&1) && handled.contains(&f.name);
+                if !handled_here { return Err(crate::infer_param_generics::unbounded_error(u, "parameter")); }
+            }
+            Item::Mod(m) => refuse_unhandled(&m.items, handled, true)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn specialize_method_users(program: &mut Program) -> Result<(), ParseError> {
     check_explicit_slots(program)?;
     infer_qualified_generic_args(program);
@@ -422,6 +449,7 @@ pub fn specialize_method_users(program: &mut Program) -> Result<(), ParseError> 
         .filter(|f| names.contains(&f.name))
         .map(|f| (f.name.clone(), (*f).clone()))
         .collect();
+    refuse_unhandled(&program.items, &names, false)?;
     if candidates.is_empty() { return Ok(()); }
 
     let mut instances: Vec<Instance> = Vec::new();
