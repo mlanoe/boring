@@ -2345,12 +2345,11 @@ kernel:
         break
 "#;
     let (_wgsl, rs) = wgpu_codegen("float_alias_scalar_field", src);
-    assert!(rs.contains("k.t = (") && rs.contains("__start_time.elapsed().as_secs_f32() as f32);"),
-        "expected bare float(...) to cast to f32, matching `var float t`'s now-narrowed \
+    assert!(rs.contains("k.t = (") && rs.contains("__start_time.elapsed().as_secs_f32() as f64)) as f32;"),
+        "expected bare float(...) (an f64) to be narrowed to f32 at the assignment, matching `var float t`'s \
          f32 host field;\ngot:\n{rs}");
     assert!(!rs.contains("__start_time.elapsed().as_secs_f32() as f64);"),
-        "must not cast a bare float(...) scalar-field assignment to f64 -- the field \
-         itself is f32, this would no longer compile;\ngot:\n{rs}");
+        "the f64 value must be narrowed into the f32 field, not assigned directly;\ngot:\n{rs}");
 }
 
 /// Regression test for `find_present_buffer`'s fallback in `src/transpiler/wgpu/host.rs`:

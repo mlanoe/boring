@@ -327,3 +327,53 @@ kernel:
         .unwrap();
     assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
 }
+
+// `float(screen.time)` is an f64 (`screen.time` itself is an f32), so it mixes with a `float` field.
+#[test]
+fn wgpu_float_of_screen_time_is_f64() {
+    let src = r#"
+struct Pace:
+    var float nextPoll = 0.0
+
+let screen = Screen(Dimension(8, 8), title = "t")
+mut Pace pace = Pace()
+kernel Fill:
+    mut [uint]'surface pixels
+    var int total
+
+    init(Dimension d):
+        pixels = [0 for ..<d.width * d.height]
+        total = 0
+
+    def ():
+        pixels[.thread.x] = uint(total)
+
+var mut k = Fill(Dimension(8, 8))
+kernel:
+    loop:
+        if float(screen.time) >= pace.nextPoll:
+            pace.nextPoll = float(screen.time) + 2.0
+            k.total = 1
+        let small = float32(screen.time)
+        k.total += int(small)
+        k(block = (4, 4))
+        screen.present(k.pixels)
+        if screen.key("\x1B"):
+            break
+"#;
+    let (project, rs) = build(src, "float_time");
+    let rs = rs.unwrap_or_else(|e| panic!("boring build failed:\n{e}"));
+    assert!(rs.contains("as_secs_f32() as f64)"), "{rs}");
+    assert!(rs.contains("as_secs_f32() as f32)"), "{rs}");
+    assert!(rs.contains("self.k.total = (((self.k.total as isize) +"), "kernel field read in a compound assignment: {rs}");
+    let shared = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("screen_render_loop_state_wgpu_target");
+    let out = common::SharedCargo::new("screen_render_loop_state")
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
+        .arg(project.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(shared)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "generated crate does not compile:\n{}", String::from_utf8_lossy(&out.stderr));
+}

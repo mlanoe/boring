@@ -2361,6 +2361,10 @@ impl<'a> HostEmitter<'a> {
                         && !crate::transpiler::host_types::gpu_host_expr_is_float16(rhs)
                     {
                         rhs_str = format!("half::f16::from_f32(({rhs_str}) as f32)");
+                    } else if host_scalar_type(fty) == "f32" {
+                        // `float`/`float64` kernel fields are f32 on the device (`host_scalar_type`), while
+                        // `float(x)` itself is an f64 on the host: narrow at the assignment.
+                        rhs_str = format!("({rhs_str}) as f32");
                     }
                 }
                 return Some(format!("{pfx}{obj_name}.{field} = {rhs_str};"));
@@ -2493,6 +2497,23 @@ impl<'a> HostEmitter<'a> {
                 format!("({}.len() as isize)", self.host_expr(obj))
             }
             ExprKind::Field(obj, field) => {
+                // A read of a kernel's `int`/`uint` scalar field: the host mirror is 32-bit, host ints are `isize`/`usize`.
+                if let ExprKind::Var(n) = &obj.kind {
+                    if let Some(f) = self.find_kernel_decl_for_var(n).and_then(|d| d.fields.iter().find(|f| f.name == field.as_str())) {
+                        let mut fty = &f.ty;
+                        while let Type::Mut(inner) = fty { fty = inner; }
+                        let wide = match fty {
+                            Type::Int => Some("isize"),
+                            Type::Uint => Some("usize"),
+                            Type::Named(t) if t == "int" => Some("isize"),
+                            Type::Named(t) if t == "uint" => Some("usize"),
+                            _ => None,
+                        };
+                        if let Some(w) = wide {
+                            return format!("({}.{} as {w})", self.host_expr(obj), field);
+                        }
+                    }
+                }
                 format!("{}.{}", self.host_expr(obj), field)
             }
             // `caret[0]` on a host array (a `let` bound to a call returning `[int]`, a setup value, ...).
@@ -2634,7 +2655,9 @@ impl<'a> HostEmitter<'a> {
                         return if crate::transpiler::host_types::gpu_host_expr_is_float16(&args[0].value) {
                             format!("f32::from({inner})")
                         } else {
-                            format!("({inner} as f32)")
+                            // `float`/`float64` are f64 (`screen.time` is an f32), only `float32` is f32
+                            let t = if n == "float32" { "f32" } else { "f64" };
+                            format!("({inner} as {t})")
                         };
                     }
                 }
@@ -2655,6 +2678,9 @@ impl<'a> HostEmitter<'a> {
             }
             // A value built by `__boring_screen_setup` lives on `__App`.
             ExprKind::Var(n) if self.setup_fields.iter().any(|(f, _)| f == n) => format!("{pfx}{n}"),
+            // A kernel instance (`var mut k = Fill(..)`) is a field of `__App`, read as `k.total`.
+            ExprKind::Var(n) if !self.frame_locals.borrow().contains(n) && !self.event_vars.borrow().contains(n)
+                && self.find_kernel_decl_for_var(n).is_some() => format!("{pfx}{n}"),
             // A top-level `let width = 8` is emitted as `const WIDTH` (see `emit_top`); a read of it
             // that is neither a setup value, a per-frame local nor an event variable names that const.
             ExprKind::Var(n) if !self.frame_locals.borrow().contains(n) && !self.event_vars.borrow().contains(n)
