@@ -1,0 +1,18 @@
+struct Counter:
+    var int n = 0
+    def inc():
+        n += 1
+
+def bump(var mut Counter'owned a):
+    a.inc()
+
+def twice(var mut Counter'owned b):
+    bump(b)
+    bump(b)
+
+def main():
+    var mut Counter'owned o = Counter()
+    bump(o)
+    print "{o.n}"
+    twice(o)
+    print "{o.n}"

@@ -6373,6 +6373,14 @@ impl Transpiler {
     /// whatever it was emitted as.
     fn borrow_place_arg(arg: &Expr, emitted: String) -> String {
         if matches!(&arg.kind, ExprKind::Var(_) | ExprKind::Field(..)) {
+            // Managed mode wraps an `'owned` struct value as `RefCell::new(x.borrow().clone())`:
+            // the place to lend is `x` itself (a `&mut RefCell<T>` already, for a lent parameter).
+            if let Some(place) = emitted.strip_prefix("RefCell::new(").and_then(|s| s.strip_suffix(".borrow().clone())")) {
+                return place.to_owned();
+            }
+            if let Some(place) = emitted.strip_prefix("Arc::new(std::sync::Mutex::new(").and_then(|s| s.strip_suffix(".lock().unwrap().clone()))")) {
+                return place.to_owned();
+            }
             emitted.strip_suffix(".clone()").map(str::to_owned).unwrap_or(emitted)
         } else {
             emitted

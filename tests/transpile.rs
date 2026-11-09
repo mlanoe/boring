@@ -1712,3 +1712,4 @@ transpile_test!(lock_handle_field_argument);
 transpile_test!(task_local_to_task_param);
 transpile_test!(trait_shared_array_inferred_push);
 transpile_test!(view_state_param_stays_lent);
+transpile_test!(var_mut_param_forwarded);
