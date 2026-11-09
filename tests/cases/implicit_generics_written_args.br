@@ -1,0 +1,18 @@
+# A struct with untyped fields is generic over them, so a mention of it in a signature writes the
+# arguments (in field order); a bare `Response r` is an error (tests/implicit_generics_errors.rs).
+
+struct Response:
+    status
+    payload
+
+def describe(Response<int, string> r):
+    print "{r.status}"
+
+Response<int, string> make():
+    Response(status = 200, payload = "x")
+
+def main():
+    let r = make()
+    describe(r)
+    let Response<int, string> again = make()
+    print "{again.payload}"

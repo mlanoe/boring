@@ -1,0 +1,34 @@
+# Implicit generics, phase 5: a parameter typed with a bare implicit-generic struct makes the
+# function generic over that struct's parameters (one set per parameter). Bounds are read off
+# `r.field` uses in the body, and flow through calls that pass the struct on.
+
+struct Response:
+    status
+    payload
+
+    req summary():
+        print "summary {status}"
+
+def describe(Response r):
+    print "{r.status}"
+
+def both(Response a, Response b):
+    print "{a.status} {b.status}"
+    describe(a)
+
+def big(Response r):
+    return r.status > 100
+
+def check(Response r):
+    r.summary()
+
+Response<int, string> make():
+    Response(status = 200, payload = "x")
+
+def main():
+    let r = make()
+    describe(r)
+    describe(r)                       # `r` is reused: cloned at each by-value call
+    both(r, Response(status = "ok", payload = 1))
+    print "{big(r)}"
+    check(r)

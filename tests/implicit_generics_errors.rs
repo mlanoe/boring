@@ -99,3 +99,22 @@ fn show_types_lists_constructions_of_an_imported_struct() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("Resp<status = int, payload = string>"), "{text}");
 }
+
+#[test]
+fn bare_mention_of_an_implicit_struct_in_a_type_is_an_error() {
+    // A bare mention used to run under `boring run` and fail in rustc (E0107). Parameters are
+    // the exception (phase 5: the function becomes generic), see implicit_generics_struct_params.br.
+    let head = "struct Response:\n    status\n    payload\n\n";
+    let main = "\ndef main():\n    print \"done\"\n";
+    for sig in [
+        "Response? make():\n    nil\n",
+        "struct Wrap:\n    Response inner\n",
+    ] {
+        expect_error(&format!("{head}{sig}{main}"), "`Response` has implicit parameters (status, payload)");
+    }
+    // Written arguments are fine, in both modes.
+    let ok = format!("{head}def describe(Response<int, string> r):\n    print \"{{r.status}}\"\n{main}");
+    for out in both(&ok) {
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+}

@@ -4956,6 +4956,21 @@ It is the same thing as writing `struct Response<S, P>` with `S status` and `P p
 
 A field may have a default value (`retries = 0`): the default types the field only when the construction does not supply it, and an argument always wins. `Request(url = "/x")` is `Request<string, int>`, `Request(url = "/x", retries = 1.5)` is `Request<string, float>`; the default is not evaluated in the second one, so it need not be compatible with the overriding type. There is no implicit numeric coercion (`retries = 1` binds `int`; write `1.0` for a `float`). A field of a `view` follows the rules in "Untyped fields of a view" below, and an argument with no type of its own (`Response(status = 200, payload = [])`, `{}`, `{=}`, `nil`) is an error naming the field (`cannot infer the type of `Response.payload``): there is nothing to fix the parameter with, so give the field a type.
 
+**Naming the struct in a type.** The struct is generic over its untyped fields, so a mention of it in a type position must write the arguments, in field order: `Response<int, string> make()`, `let Response<int, string> r = ...`. A bare `Response` there is an error naming the struct and its parameters (`` `Response` has implicit parameters (status, payload): a mention of it in a type must give their types, in that order, e.g. `Response<int, int>` ``), reported by `boring run` and `boring build` alike. It is the same rule as for a [qualifier parameter](#qualifier-parameters) (a bare use needs its arguments), and it replaces a rustc `E0107` on generated code that `boring run` used to let through. A construction, `Response(status = 200, payload = "x")`, needs no arguments: they come from the values. The labelled form (`Response<status = int, ...>`) is not accepted for implicit parameters yet.
+
+**One exception: a parameter of a `def`.** A parameter typed with the bare struct makes the *function* generic over that struct's parameters, a fresh set for each parameter, so the caller chooses them:
+
+```boring
+def describe(Response r):             # describe<T_r__status, T_r__payload>(Response<..> r)
+    print "{r.status}"                # T_r__status: Display; payload needs nothing
+
+def both(Response a, Response b):     # two independent instances
+    print "{a.status} {b.status}"
+    describe(a)                       # bounds flow through the call, as for untyped parameters
+```
+
+The bounds are read off the uses of `r.field` in the body with the rules of [untyped parameters](#untyped-parameters), each `r.field` counting as an untyped parameter of its own (printed gives `Display`, `r.status > 0` gives `PartialOrd<isize>`, ...); a use that cannot be bounded is an error naming it (`cannot use the untyped parameter `r.status` with the method call `.foo()``). A method call on `r` (`r.summary()`) also brings the struct's own bounds. Only a top-level `def` or one in a `mod`, and only a struct of the same file or `mod` whose parameters are all implicit; a `task`/`stream`/`native` function, a method (`def Type.f`), a parameter with a default value, `Response?`/`[Response]`, a return type, a field and a `let` annotation keep the error above (write `Response<int, string>`). A struct imported from another file is not handled yet either.
+
 ### A struct that names itself, and arrays of instances
 
 Inside a struct whose parameters are all implicit, a bare mention of the struct is the struct with its own parameters: in `struct Node: value / Node? next`, `next` is `Node<T_value>?`, so a chain is homogeneous (`Node(value = 1, next = Node(value = 2, next = nil))` is a `Node<int>`). The same goes for the struct's method signatures and `init` parameters. `nil` for an optional field binds nothing, the other fields decide. A mention that already carries arguments (`Node<int>? next`) keeps them, and an explicit annotation always wins over inference.

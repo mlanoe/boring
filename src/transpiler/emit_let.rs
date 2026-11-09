@@ -991,6 +991,13 @@ impl Transpiler {
                             Type::Named(n) if self.is_known_user_type(n.as_str()) => {
                                 self.var_struct_types.insert(s.name.clone(), n.clone());
                             }
+                            // A call returning an instance of a generic user struct
+                            // (`Response<int, string> make()`): tracked like the plain struct, so
+                            // the value reused after being passed by value is auto-cloned.
+                            Type::Generic(n, _) if self.is_known_user_type(n.as_str()) => {
+                                self.var_struct_types.insert(s.name.clone(), n.clone());
+                                self.var_types.insert(s.name.clone(), ret_ty.clone());
+                            }
                             // `let path = name_of(1)` where `name_of` returns `string`: the
                             // binding is an `Rc<str>`/`Arc<str>` exactly like a `let string path
                             // = ...` annotation or a string-returning method call (see the

@@ -390,6 +390,8 @@ transpile_test!(implicit_generics_selfref);
 transpile_test!(implicit_generics_literals);
 // `len()` on an untyped parameter, bounded by the prelude's BoringLen (phase 4 step 3).
 transpile_test!(implicit_generics_methods);
+transpile_test!(implicit_generics_struct_params);
+transpile_test!(implicit_generics_written_args);
 transpile_test!(view_generic_multi);
 transpile_test!(operators);
 transpile_test!(macros);

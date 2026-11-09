@@ -295,6 +295,134 @@ pub(crate) fn share_self_params(ty: &mut Type, name: &str, args: &[Type]) {
     }
 }
 
+/// The implicit type arguments of a struct parameter type written by [`desugar_struct_params`]:
+/// `Response<T_r__status, T_r__payload>` (through `mut`/borrow wrappers) gives both names. Empty for
+/// anything else, including an instance with written arguments.
+fn struct_param_args(ty: &Type, type_params: &[String]) -> Vec<String> {
+    match ty {
+        Type::Mut(i) | Type::Qualified(i, _) => struct_param_args(i, type_params),
+        Type::Generic(_, args) if !args.is_empty() => {
+            let names: Vec<String> = args.iter().filter_map(|a| match a {
+                Type::TypeParam(n) if n.starts_with("T_") && n.contains("__") && type_params.contains(n) => Some(n.clone()),
+                _ => None,
+            }).collect();
+            if names.len() == args.len() { names } else { vec![] }
+        }
+        _ => vec![],
+    }
+}
+
+/// Phase 5 of implicit generics: a parameter of a top-level `def` whose type is a bare
+/// implicit-generic struct (`def describe(Response r)`) makes the function generic over that
+/// struct's parameters, one fresh set per parameter:
+///
+/// ```text
+/// def describe(Response r):            def describe<T_r__status, T_r__payload>(Response<T_r__status, T_r__payload> r)
+///     print "{r.status}"         ==>       where T_r__status as Display:
+/// ```
+///
+/// The bounds are read off the body with each `r.status` standing for an untyped parameter of its own
+/// (same rules as phase 2); a method call on `r` also brings the struct's own bounds. Only structs
+/// of the same scope whose parameters are all implicit are handled; a `task`/`stream`/`native`
+/// function, a method (`def Type.f`), a parameter with a default, and a bare mention anywhere else
+/// (return type, field, `[Response]`, `let`) keep the bare-mention error.
+pub(crate) fn desugar_struct_params(program: &mut Program) -> Result<(), crate::parser::ParseError> {
+    desugar_in(&mut program.items)
+}
+
+fn desugar_in(items: &mut [Item]) -> Result<(), crate::parser::ParseError> {
+    for item in items.iter_mut() {
+        if let Item::Mod(m) = item { desugar_in(&mut m.items)?; }
+    }
+    // struct name -> (its implicit parameters, its where clause)
+    let mut structs: std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)> = Default::default();
+    for item in items.iter() {
+        let Item::Struct(s) = item else { continue };
+        let all_implicit = !s.is_view && !s.type_params.is_empty()
+            && s.type_params.iter().all(|p| s.fields.iter().any(|f| fresh_name(&f.name) == *p));
+        if all_implicit { structs.insert(s.name.clone(), (s.type_params.clone(), s.where_clause.clone())); }
+    }
+    if structs.is_empty() { return Ok(()); }
+    for item in items.iter_mut() {
+        let Item::Fn(f) = item else { continue };
+        if f.qualifier.is_some() || f.is_native || f.task || f.stream { continue; }
+        desugar_fn(f, &structs)?;
+    }
+    Ok(())
+}
+
+fn bare_struct(ty: &Type, structs: &std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)>) -> Option<String> {
+    match ty {
+        Type::Named(n) if structs.contains_key(n) => Some(n.clone()),
+        Type::Mut(i) | Type::Qualified(i, _) => bare_struct(i, structs),
+        _ => None,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn desugar_fn(f: &mut FnDecl, structs: &std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)>) -> Result<(), crate::parser::ParseError> {
+    // (parameter, struct, its implicit parameters), for each parameter rewritten.
+    let mut done: Vec<(String, String)> = Vec::new();
+    for p in f.params.iter_mut() {
+        if p.variadic || p.default.is_some() { continue; }
+        let Some(ty) = &mut p.ty else { continue };
+        let Some(sname) = bare_struct(ty, structs) else { continue };
+        let args: Vec<Type> = structs[&sname].0.iter()
+            .map(|t| Type::TypeParam(format!("T_{}__{}", p.name, &t[2..])))
+            .collect();
+        for a in &args {
+            if let Type::TypeParam(n) = a { if !f.type_params.contains(n) { f.type_params.push(n.clone()); } }
+        }
+        share_self_params(ty, &sname, &args);
+        done.push((p.name.clone(), sname));
+    }
+    if done.is_empty() { return Ok(()); }
+    // Each `param.field` of an implicit field stands for an untyped parameter named `param__field`.
+    let mut body = f.body.clone();
+    let mut virt: Vec<String> = Vec::new();
+    let mut method_called: Vec<(String, String)> = Vec::new();
+    for (pname, sname) in &done {
+        if rebinds(&f.body, pname) { continue; }
+        let fields: Vec<&str> = structs[sname].0.iter().map(|t| &t[2..]).collect();
+        for fl in &fields { virt.push(format!("{pname}__{fl}")); }
+        let mut on_expr = |e: &mut Expr| {
+            match &e.kind {
+                ExprKind::Field(b, fl) if fields.contains(&fl.as_str()) && matches!(&b.kind, ExprKind::Var(v) if v == pname) => {
+                    e.kind = ExprKind::Var(format!("{pname}__{fl}"));
+                }
+                ExprKind::MethodCall(b, _, _) if matches!(&b.kind, ExprKind::Var(v) if v == pname) => {
+                    if !method_called.iter().any(|(p, _)| p == pname) { method_called.push((pname.clone(), sname.clone())); }
+                }
+                _ => {}
+            }
+        };
+        let mut on_stmt = |_: &mut Stmt| {};
+        Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
+    }
+    if let Some(mut u) = unbounded_use(&virt, &body, &[]) {
+        u.name = u.name.replace("__", ".");
+        return Err(unbounded_error(u, "parameter"));
+    }
+    for b in bounds(&virt, &body) {
+        if !f.where_clause.contains(&b) { f.where_clause.push(b); }
+    }
+    // A method of the struct is only there under the struct's own bounds.
+    for (pname, sname) in &method_called {
+        let (tps, wc) = &structs[sname];
+        for (t, b) in wc {
+            let Some(i) = tps.iter().position(|x| x == t) else { continue };
+            let to = format!("T_{pname}__{}", &tps[i][2..]);
+            let mut bound = b.clone();
+            for other in tps.iter() {
+                bound = rename_token(&bound, other, &format!("T_{pname}__{}", &other[2..]));
+            }
+            let pair = (to, bound);
+            if !f.where_clause.contains(&pair) { f.where_clause.push(pair); }
+        }
+    }
+    Ok(())
+}
+
 /// Bound inference through calls (phase 4): `def show(x): label(x)` where `label(y)` needs
 /// `T_y: Display` means `x` needs it too. A fixpoint over the top-level functions of the file:
 /// when an untyped parameter of `f` is passed *as is* in position `i` of a call to another
@@ -338,20 +466,25 @@ pub(crate) fn propagate_in(items: &mut [Item]) {
             if let Item::Fn(g) = item { *declared.entry(g.name.as_str()).or_default() += 1; }
         }
         #[allow(clippy::type_complexity)]
-        let mut callees: std::collections::HashMap<String, Vec<Option<(String, Vec<String>)>>> = Default::default();
+        let mut callees: std::collections::HashMap<String, Vec<Vec<(String, Vec<String>)>>> = Default::default();
         for item in items.iter() {
             let Item::Fn(g) = item else { continue };
             if g.is_native || g.task || g.stream || declared.get(g.name.as_str()).copied().unwrap_or(0) != 1 { continue; }
             // A bound that names a type parameter of `g` (`Add<Output = T>`) means something only
             // inside `g`: not carried over.
             let own_other = |b: &str, n: &str| b.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|tok| tok != n && g.type_params.iter().any(|p| p == tok));
-            let per_param = g.params.iter().map(|p| match &p.ty {
-                // An implicit (`T_x`) or a written (`T`) type parameter of `g`.
-                Some(Type::TypeParam(n)) if g.type_params.contains(n) => Some((
-                    n.clone(),
-                    g.where_clause.iter().filter(|(t, b)| t == n && !own_other(b, n)).map(|(_, b)| b.clone()).collect(),
-                )),
-                _ => None,
+            let per_param = g.params.iter().map(|p| {
+                // An implicit (`T_x`) or a written (`T`) type parameter of `g`, or the implicit
+                // arguments of a struct parameter (`Response<T_r__status, ..>`, see `desugar_struct_params`).
+                let tparams = match &p.ty {
+                    Some(Type::TypeParam(n)) if g.type_params.contains(n) => vec![n.clone()],
+                    Some(t) => struct_param_args(t, &g.type_params),
+                    None => vec![],
+                };
+                tparams.into_iter().map(|n| {
+                    let bounds = g.where_clause.iter().filter(|(t, b)| *t == n && !own_other(b, &n)).map(|(_, b)| b.clone()).collect();
+                    (n, bounds)
+                }).collect::<Vec<_>>()
             }).collect();
             callees.insert(g.name.clone(), per_param);
         }
@@ -360,8 +493,9 @@ pub(crate) fn propagate_in(items: &mut [Item]) {
             let Item::Fn(f) = item else { continue };
             if f.is_native || f.task || f.stream { continue; }
             // parameter name -> its implicit type parameter
-            let own: std::collections::HashMap<String, String> = f.params.iter().filter_map(|p| match &p.ty {
-                Some(Type::TypeParam(n)) if n.starts_with("T_") && f.type_params.contains(n) => Some((p.name.clone(), n.clone())),
+            let own: std::collections::HashMap<String, Vec<String>> = f.params.iter().filter_map(|p| match &p.ty {
+                Some(Type::TypeParam(n)) if n.starts_with("T_") && f.type_params.contains(n) => Some((p.name.clone(), vec![n.clone()])),
+                Some(t) => { let a = struct_param_args(t, &f.type_params); (!a.is_empty()).then(|| (p.name.clone(), a)) }
                 _ => None,
             }).collect();
             if own.is_empty() { continue; }
@@ -375,12 +509,14 @@ pub(crate) fn propagate_in(items: &mut [Item]) {
                     for (i, a) in args.iter().enumerate() {
                         if a.label.is_some() { continue; }
                         let ExprKind::Var(v) = &a.value.kind else { continue };
-                        let (Some(t), Some(Some((_, bounds)))) = (own.get(v), slots.get(i)) else { continue };
-                        for b in bounds {
-                            // A bound naming only the callee's own parameter (`Add<Output = T_n>`) is
-                            // carried over with the caller's parameter in its place.
-                            let renamed = rename_token(b, &slots[i].as_ref().unwrap().0, t);
-                            found.push((t.clone(), renamed));
+                        let (Some(ts), Some(slot)) = (own.get(v), slots.get(i)) else { continue };
+                        if ts.len() != slot.len() { continue; }
+                        for (t, (callee_t, bounds)) in ts.iter().zip(slot) {
+                            for b in bounds {
+                                // A bound naming only the callee's own parameter (`Add<Output = T_n>`) is
+                                // carried over with the caller's parameter in its place.
+                                found.push((t.clone(), rename_token(b, callee_t, t)));
+                            }
                         }
                     }
                 };

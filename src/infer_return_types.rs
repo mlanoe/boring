@@ -200,6 +200,7 @@ pub fn check_with_imports(program: &Program, imported: &[Item]) -> Result<(), cr
     let skip = items.len();
     items.extend(program.items.iter().cloned());
     check_constructions_in(&items, skip)?;
+    check_bare_in(&items, skip)?;
     check_arrays_in(&items, skip)
 }
 
@@ -465,6 +466,113 @@ fn check_arrays_in(scope: &[Item], skip: usize) -> Result<(), crate::parser::Par
         }
     }
     match error { Some(e) => Err(e), None => Ok(()) }
+}
+
+/// A bare mention of an implicit-generic struct in a type position (`def describe(Response r)`,
+/// a return type, a field of another struct, a `let` annotation) is an error: the struct is
+/// generic over one hidden parameter per untyped field, so its arguments must be written, as for
+/// a qualifier-parameter type (`check_bare_qual_uses`). Without this, `boring run` accepted the
+/// program and rustc rejected the generated code (E0107, `missing generics for struct`).
+/// Inside the struct itself, signatures were already rewritten by D8 (`share_self_params`).
+pub fn check_bare_implicit_mentions(program: &Program) -> Result<(), crate::parser::ParseError> {
+    check_bare_in(&program.items, 0)
+}
+
+/// `(name, written parameters)` of the structs of `scope` that have an implicit parameter. An
+/// implicit parameter is shown under its field's name, an explicit one under its own.
+fn implicit_struct_params(scope: &[Item]) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
+    for item in scope {
+        let Item::Struct(s) = item else { continue };
+        if !s.type_params.iter().any(|p| p.starts_with("T_") && s.fields.iter().any(|f| crate::infer_param_generics::fresh_name(&f.name) == *p)) {
+            continue;
+        }
+        out.insert(s.name.clone(), s.type_params.clone());
+    }
+    out
+}
+
+fn bare_mention(ty: &Type, implicit: &HashMap<String, Vec<String>>) -> Option<String> {
+    let go = |t: &Type| bare_mention(t, implicit);
+    match ty {
+        Type::Named(n) if implicit.contains_key(n) => Some(n.clone()),
+        Type::Generic(_, a) | Type::Tuple(a) => a.iter().find_map(go),
+        Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::ArrayNExpr(i, _) | Type::LabeledArray(i, _)
+        | Type::Set(i) | Type::Mut(i) | Type::Qualified(i, _) | Type::Dyn(i) | Type::Impl(i) => go(i),
+        Type::Dict(k, v) => go(k).or_else(|| go(v)),
+        Type::Fn(r, ps, ..) => r.as_deref().and_then(go).or_else(|| ps.iter().find_map(go)),
+        _ => None,
+    }
+}
+
+fn bare_error(name: &str, params: &[String], line: usize, col: usize) -> crate::parser::ParseError {
+    let shown: Vec<&str> = params.iter().map(|p| p.strip_prefix("T_").unwrap_or(p)).collect();
+    let example = shown.iter().map(|_| "int").collect::<Vec<_>>().join(", ");
+    crate::parser::ParseError::Generic {
+        msg: format!(
+            "`{name}` has implicit parameters ({}): a mention of it in a type must give their types, in that order, e.g. `{name}<{example}>`",
+            shown.join(", "),
+        ),
+        line, col, len: name.len().max(1),
+    }
+}
+
+fn check_bare_in(scope: &[Item], skip: usize) -> Result<(), crate::parser::ParseError> {
+    for item in scope {
+        if let Item::Mod(m) = item {
+            check_bare_in(&m.items, 0)?;
+        }
+    }
+    let implicit = implicit_struct_params(scope);
+    if implicit.is_empty() {
+        return Ok(());
+    }
+    // Every bare mention found, as (line, col, name); the first in source order is reported.
+    let found: std::cell::RefCell<Vec<(usize, usize, String)>> = Default::default();
+    let note = |ty: &Type, line: usize, col: usize| {
+        if let Some(n) = bare_mention(ty, &implicit) { found.borrow_mut().push((line, col, n)); }
+    };
+    let fn_sig = |f: &FnDecl| {
+        for p in &f.params {
+            if let Some(t) = &p.ty { note(t, p.line, p.col); }
+        }
+        if let Some(t) = &f.return_ty { note(t, f.line, f.col); }
+    };
+    let mut on_stmt = |st: &mut Stmt| {
+        if let Stmt::Let(l) = st {
+            if let Some(t) = &l.ty { note(t, l.line, l.col); }
+        }
+    };
+    let mut on_expr = |_: &mut Expr| {};
+    let mut items = scope[skip..].to_vec();
+    for item in &mut items {
+        match item {
+            Item::Fn(f) => {
+                fn_sig(f);
+                Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut f.body);
+            }
+            Item::Struct(s) => {
+                for f in &s.fields { note(&f.ty, f.line, f.col); }
+                for p in s.inits.iter().flat_map(|i| &i.params) {
+                    if let Some(t) = &p.ty { note(t, p.line, p.col); }
+                }
+                for m in &s.methods { fn_sig(m); }
+            }
+            Item::Ext(x) => {
+                for m in &x.methods { fn_sig(m); }
+            }
+            Item::Stmt(st) => Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmt(st),
+            Item::Let(l) => {
+                if let Some(t) = &l.ty { note(t, l.line, l.col); }
+            }
+            _ => {}
+        }
+    }
+    let first = found.into_inner().into_iter().min_by_key(|(l, c, _)| (*l, *c));
+    match first {
+        Some((line, col, n)) => Err(bare_error(&n, &implicit[&n], line, col)),
+        None => Ok(()),
+    }
 }
 
 /// The construction half of D3 (implicit generics, phase 3): an untyped struct field fixed by an
@@ -1180,6 +1288,47 @@ mod tests {
         // Written on the overload that calls the other, it is fine.
         let ok = "int f(int a):\n    if a > 0:\n        return 1\n    return f(1.5)\n\ndef f(float a):\n    return 2\n";
         assert!(parse_err(ok).is_none());
+    }
+
+    #[test]
+    fn a_bare_mention_of_an_implicit_struct_in_a_type_is_an_error() {
+        let base = "struct Resp:\n    status\n    payload\n\n";
+        for tail in [
+            "Resp? mk():\n    nil\n",
+            "struct Wrap:\n    Resp inner\n",
+            "def f():\n    let Resp r = Resp(status = 1, payload = 2)\n    print \"{r.status}\"\n",
+            "def g([Resp] rs):\n    print \"{rs.len()}\"\n",
+            "def h(Resp? r):\n    print \"x\"\n",
+            "task def t(Resp r):\n    print \"x\"\n",
+        ] {
+            let e = parse_err(&format!("{base}{tail}")).unwrap_or_else(|| panic!("accepted: {tail}"));
+            assert!(e.contains("`Resp` has implicit parameters (status, payload)") && e.contains("`Resp<int, int>`"), "{e}");
+        }
+        // Written arguments, a struct without untyped fields and the struct's own self-mention are fine.
+        assert!(parse_err(&format!("{base}def d(Resp<int, string> r):\n    print \"{{r.status}}\"\n")).is_none());
+        assert!(parse_err("struct P:\n    int x\n\ndef d(P p):\n    print \"{p.x}\"\n").is_none());
+        assert!(parse_err("struct N:\n    value\n    N? next\n").is_none());
+    }
+
+    #[test]
+    fn a_bare_struct_parameter_makes_the_function_generic() {
+        let src = "struct Resp:\n    status\n    payload\n\ndef d(Resp r):\n    print \"{r.status}\"\n\ndef w(Resp r):\n    d(r)\n";
+        let program = parse(lex(src).expect("lex")).expect("parse");
+        let f = |n: &str| program.items.iter().find_map(|i| match i { Item::Fn(f) if f.name == n => Some(f.clone()), _ => None }).unwrap();
+        let d = f("d");
+        assert_eq!(d.type_params, vec!["T_r__status".to_string(), "T_r__payload".to_string()]);
+        assert_eq!(d.params[0].ty, Some(Type::Generic("Resp".into(), vec![Type::TypeParam("T_r__status".into()), Type::TypeParam("T_r__payload".into())])));
+        assert!(d.where_clause.contains(&("T_r__status".into(), "Display".into())));
+        assert!(!d.where_clause.iter().any(|(t, _)| t == "T_r__payload"));
+        // The bound flows through a call that passes the struct on.
+        assert!(f("w").where_clause.contains(&("T_r__status".into(), "Display".into())));
+    }
+
+    #[test]
+    fn a_struct_parameter_field_use_without_a_bound_is_an_error_naming_it() {
+        let bad = "struct Resp:\n    status\n    payload\n\ndef d(Resp r):\n    return r.status.foo()\n";
+        let e = parse_err(bad).expect("rejected");
+        assert!(e.contains("`r.status`") && e.contains(".foo()"), "{e}");
     }
 
     #[test]

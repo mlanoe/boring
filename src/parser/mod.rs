@@ -114,6 +114,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
         program = resolving.parse_program()?;
     }
     generic_args::check_bare_qual_uses(&program)?;
+    crate::infer_param_generics::desugar_struct_params(&mut program)?;
     // Before the actor passes: they (and everything after) must see the written-back return types.
     crate::infer_param_generics::propagate_bounds(&mut program);
     crate::infer_return_types::infer_return_types(&mut program);
@@ -121,6 +122,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, ParseError> {
     crate::infer_return_types::check_overloaded_returns(&program)?;
     crate::infer_return_types::check_untyped_returns(&program)?;
     crate::infer_return_types::check_untyped_constructions(&program)?;
+    crate::infer_return_types::check_bare_implicit_mentions(&program)?;
     crate::infer_return_types::check_homogeneous_arrays(&program)?;
     crate::infer_actor_params::infer_actor_params(&mut program);
     crate::infer_actor_elems::infer_actor_elems(&mut program);

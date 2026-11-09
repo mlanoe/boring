@@ -5768,12 +5768,12 @@ impl Transpiler {
                             // Function params with non-Copy types.
                             || matches!(
                                 self.fn_current_params.get(vname.as_str()),
-                                Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
+                                Some(Type::Named(_) | Type::Generic(..) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
                             ) && !self.is_external_non_clone_type(self.fn_current_params.get(vname.as_str()))
                             // Local variables whose type was tracked as a named/collection type.
                             || matches!(
                                 self.var_types.get(vname.as_str()),
-                                Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
+                                Some(Type::Named(_) | Type::Generic(..) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
                             ) && !self.is_external_non_clone_type(self.var_types.get(vname.as_str())) => {
                             format!("{}.clone()", emitted)
                         }
