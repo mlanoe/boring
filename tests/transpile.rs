@@ -1320,6 +1320,12 @@ transpile_test!(guard_let_else_panic_throws);
 // labeled args. See `try_emit_labeled_init_call` in
 // `src/transpiler/emit_expr.rs`.
 transpile_test!(labeled_scenarios);
+// `labeled_array`: labeled multi-dim arrays (chained-for comprehension, shape-only
+// fill, fixed-shape declaration, reshape/flatten, relabel). The comprehension
+// desugars to a `Block` that opens with a value-less `var __comp_L_C`; the block
+// emitter used to panic ("Let statement in expression context must have an
+// initializer value") and, once past that, reject the assignment as undeclared.
+transpile_test!(labeled_array);
 // `labeled_ctor_init_call_qualified`: same bug as `labeled_ctor_init_call`,
 // for a 'actor-qualified field constructed via a labeled arg whose init
 // param name differs from the field name.

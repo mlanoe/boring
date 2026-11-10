@@ -741,6 +741,20 @@ impl Transpiler {
                 sub.out.trim_end().to_string()
             }
             ExprKind::Block(stmts) => {
+                // A block that declares a deferred-init local (`var tmp` with no value, as
+                // `desugar_labeled_comp` emits) needs a real sub-emitter: the inline path
+                // can't register the binding in `known_local_vars` nor render the
+                // loops that follow it.
+                if stmts.iter().any(|s| matches!(s, Stmt::Let(l) if l.value.is_none())) {
+                    let mut sub = self.make_sub();
+                    sub.fn_returns_void = false;
+                    sub.suppress_ok_wrap = true;
+                    sub.in_throws = false;
+                    sub.current_fn_returns_resident = None;
+                    sub.current_fn_returns_resident_tuple = None;
+                    sub.emit_body(stmts);
+                    return format!("{{\n{}}}", sub.out);
+                }
                 let inner: Vec<String> = stmts.iter().map(|s| self.emit_stmt_inline(s)).collect();
                 format!("{{ {} }}", inner.join(" "))
             }
