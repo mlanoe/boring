@@ -47,7 +47,7 @@ impl Transpiler {
             mut_checked_local_vars: self.mut_checked_local_vars.contains(name),
             content_mutable_local_vars: self.content_mutable_local_vars.contains(name),
             var_types: self.var_types.get(name).cloned(),
-            var_struct_types: self.var_struct_types.get(name).cloned(),
+            var_struct_types: self.local_struct(name),
             string_vars: self.string_vars.contains(name),
             optional_vars: self.optional_vars.contains(name),
             var_mutex_types: self.var_mutex_types.contains(name),
@@ -639,7 +639,7 @@ impl Transpiler {
         // `for x in obj:` → `{ let mut __iter = obj; while let Some(x) = __iter.next() { body } }`
         // Detect from var_struct_types (variable with known struct type) or from the call return type.
         let iterable_struct_type: Option<String> = match &s.iterable.kind {
-            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+            ExprKind::Var(v) => self.local_struct(v),
             ExprKind::Call(callee, _) => match &callee.kind {
                 ExprKind::Var(fn_name) => self.fn_return_types.get(fn_name.as_str())
                     .and_then(|t| if let Type::Named(n) = t { Some(n.clone()) } else { None }),

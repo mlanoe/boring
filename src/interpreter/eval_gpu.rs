@@ -170,6 +170,25 @@ pub(crate) fn stmts_use_gpu_warp(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_uses_gpu_warp)
 }
 
+/// Does any statement in `stmts` reference a GPU-device-only builtin namespace
+/// (`.warp`, `.thread`, `.block`, `.grid`, `.blockDim`, `.gridDim`)?
+/// Used by the Rust host transpiler on GPU targets to avoid emitting host-side
+/// copies of device-only helper functions.
+pub(crate) fn stmts_use_gpu_device_builtins(stmts: &[Stmt]) -> bool {
+    let mut found = false;
+    crate::ast::walk_stmts(stmts, &mut |node| {
+        if found { return; }
+        if let crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Field(inner, name), .. }) = node {
+            if matches!(&inner.kind, ExprKind::Var(v) if v == "gpu")
+                && matches!(name.as_str(), "warp" | "thread" | "block" | "grid" | "blockDim" | "gridDim" | "block_dim" | "grid_dim")
+            {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
 fn stmt_uses_gpu_warp(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Let(s) => s.value.as_ref().map(expr_uses_gpu_warp).unwrap_or(false),
@@ -660,6 +679,53 @@ fn checked_total_threads(
         ))
 }
 
+fn eval_const_i64(expr: &crate::ast::Expr, consts: &HashMap<String, i64>) -> Option<i64> {
+    use crate::ast::{BinOp, ExprKind, UnaryOp};
+    match &expr.kind {
+        ExprKind::Int(n) => Some(*n),
+        ExprKind::Var(name) => consts.get(name.strip_prefix('$').unwrap_or(name)).copied(),
+        ExprKind::UnaryOp(UnaryOp::Neg, inner) => eval_const_i64(inner, consts)?.checked_neg(),
+        ExprKind::BinOp(op, l, r) => {
+            let lv = eval_const_i64(l, consts)?;
+            let rv = eval_const_i64(r, consts)?;
+            match op {
+                BinOp::Add => lv.checked_add(rv),
+                BinOp::Sub => lv.checked_sub(rv),
+                BinOp::Mul => lv.checked_mul(rv),
+                BinOp::Div if rv != 0 => lv.checked_div(rv),
+                BinOp::Rem if rv != 0 => lv.checked_rem(rv),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn eval_fixed_array_len_with_consts(ty: &crate::ast::Type, consts: &HashMap<String, i64>) -> Option<usize> {
+    match ty.without_mut() {
+        crate::ast::Type::ArrayN(_, n) => Some(*n),
+        crate::ast::Type::ArrayNExpr(_, expr) => {
+            let n = eval_const_i64(&expr.0, consts)?;
+            usize::try_from(n).ok()
+        }
+        other if other.as_labeled_array().is_some() => {
+            if let Some(n) = other.labeled_array_len() {
+                return usize::try_from(n).ok();
+            }
+            let (_, axes) = other.as_labeled_array()?;
+            let mut product: i64 = 1;
+            for axis in axes {
+                let expr = &axis.size.as_ref()?.0;
+                let n = eval_const_i64(expr, consts)?;
+                if n <= 0 { return None; }
+                product = product.checked_mul(n)?;
+            }
+            usize::try_from(product).ok()
+        }
+        _ => None,
+    }
+}
+
 /// Run the kernel's anonymous entry point for `dims.total_threads` threads in parallel.
 ///
 /// Returns the final kernel object with all thread writes merged.
@@ -706,9 +772,19 @@ fn run_kernel_parallel(
     // reading another's write after a barrier) — see `run_one_kernel_thread`'s doc
     // comment for why that needs a genuinely different execution strategy than the
     // rest of this function's "run every thread independently, merge afterward" model.
+    let const_map: HashMap<String, i64> = initial_fields.iter()
+        .filter_map(|(k, v)| {
+            let name = k.strip_prefix('$')?;
+            if let ThreadValue::Int(n) = v { Some((name.to_string(), *n)) } else { None }
+        })
+        .collect();
     let sync_field_specs: Vec<(String, crate::ast::Type, usize)> = decl_fields.iter()
         .filter_map(|f| match (&f.qual, &f.ty) {
             (GpuQual::Actor, Type::ArrayN(inner, n)) => Some((f.name.clone(), inner.as_ref().clone(), *n)),
+            (GpuQual::Actor, Type::ArrayNExpr(inner, _)) => {
+                let len = eval_fixed_array_len_with_consts(&f.ty, &const_map)?;
+                Some((f.name.clone(), inner.as_ref().clone(), len))
+            }
             // An 'actor-qualified `[T, width=16, height=16]` tile field
             // (LinearKernel/MatMulBTHeadsKernel's shared-memory tiles) needs
             // real cross-thread barrier visibility, or each thread silently
@@ -718,8 +794,9 @@ fn run_kernel_parallel(
             // crashing) GEMM results.
             (GpuQual::Actor, ty) if ty.as_labeled_array().is_some() => {
                 let (elem, _) = ty.as_labeled_array().unwrap();
-                let len = ty.labeled_array_len().expect("checker guarantees fixed-shape literal axes on an 'actor field");
-                Some((f.name.clone(), elem.clone(), len as usize))
+                let len = eval_fixed_array_len_with_consts(ty, &const_map)
+                    .expect("checker guarantees fixed-shape axes on an 'actor field");
+                Some((f.name.clone(), elem.clone(), len))
             }
             _ => None,
         })
@@ -1987,25 +2064,20 @@ impl Interpreter {
         // hardware) — see gpu-module.md's "no init() assignment needed". Mirror
         // that here instead of leaving the field `Nil`, which would hard-error
         // on the first `tile[i] = ...` inside the kernel body.
+        let const_map: HashMap<String, i64> = const_generics.iter()
+            .filter_map(|(k, v)| if let Value::Int(n) = v { Some((k.clone(), *n)) } else { None })
+            .collect();
         for (field_decl, (_, val)) in decl.fields.iter().zip(fields.iter_mut()) {
             if matches!(val, Value::Nil) {
                 if let crate::ast::Type::ArrayN(inner, n) = &field_decl.ty {
                     *val = Value::Array(vec![zero_value(inner); *n].into());
+                } else if let crate::ast::Type::ArrayNExpr(inner, _) = &field_decl.ty {
+                    if let Some(len) = eval_fixed_array_len_with_consts(&field_decl.ty, &const_map) {
+                        *val = Value::Array(vec![zero_value(inner); len].into());
+                    }
                 } else if let Some((elem, _)) = field_decl.ty.as_labeled_array() {
-                    // A fixed-shape LabeledArray field is represented the same
-                    // as a flat ArrayN of the same total length — `LabeledIndex`/
-                    // an axis-property read (`a.width`) have already been
-                    // lowered to a plain `Index`/literal into this same flat
-                    // array (see `lower_labeled_array_methods`), so no separate shape
-                    // tracking is needed at runtime. Only when every axis size
-                    // is a literal int — a LabeledArray axis may be an
-                    // arbitrary const-generic expression (`width = W`), which
-                    // `labeled_array_len()` can't fold without a subst-map
-                    // evaluation context this loop doesn't have. Left `Nil` in
-                    // that case — not yet exercised by any real kernel (every
-                    // real .br fixed-shape tile uses literal sizes).
-                    if let Some(len) = field_decl.ty.labeled_array_len() {
-                        *val = Value::Array(vec![zero_value(elem); len as usize].into());
+                    if let Some(len) = eval_fixed_array_len_with_consts(&field_decl.ty, &const_map) {
+                        *val = Value::Array(vec![zero_value(elem); len].into());
                     }
                 }
             }

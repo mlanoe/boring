@@ -1,0 +1,44 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Tally:
+    var int total = 0
+
+    def inc():
+        total += 10
+
+# A `mod`'s items are reached by their plain name, so a function of a `mod` is specialised like a
+# top-level one, and each instance stays in the `mod`; a nested `mod` works the same.
+mod tools:
+    pub def bump(var mut a):
+        a.inc()
+
+    pub def twice(var mut a):
+        bump(a)
+        bump(a)
+
+    mod deep:
+        pub def triple(var mut a):
+            a.inc()
+            a.inc()
+            a.inc()
+
+    struct Meter:
+        var int ticks = 0
+
+        def feed(var mut a):
+            a.inc()
+            ticks += 1
+
+def main():
+    var mut Counter c = Counter()
+    var mut Tally t = Tally()
+    var mut Meter m = Meter()
+    twice(c)
+    bump(t)
+    triple(c)
+    m.feed(t)
+    print "{c.n} {t.total} {m.ticks}"

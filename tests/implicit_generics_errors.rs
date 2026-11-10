@@ -123,7 +123,7 @@ const COUNTER: &str = "struct Counter:\n    var int n = 0\n\n    def inc():\n   
 
 #[test]
 fn method_call_on_an_untyped_parameter_is_specialised_per_typed_call() {
-    // Typed specialisation (docs/design-notes/typed-monomorphization-draft.md, phase 1): what
+    // Typed specialisation (docs/design-notes/typed-specialisation.md, phase 1): what
     // `a.inc()` emits depends on the qualifier of the argument, so each typed call gets its own
     // copy of `bump`, in `run` and in `build` alike.
     let src = format!("{COUNTER}def bump(var mut a):\n    a.inc()\n\ndef twice(var mut b):\n    bump(b)\n    bump(b)\n\n\
@@ -209,8 +209,56 @@ fn qualified_generic_sugar_is_refused_and_a_plain_type_parameter_carries_its_qua
 fn untyped_parameter_function_the_pass_does_not_handle_keeps_its_error() {
     // Specialisation covers top-level functions with a unique name of one file. A `mod` function and an
     // overloaded name keep the "write its type" error, in `run` and `build` alike (never an opaque rustc error).
-    let in_mod = format!("{COUNTER}mod tools:\n    pub def bump(var mut a):\n        a.inc()\n\ndef main():\n    print \"hi\"\n");
+    let in_mod = format!("{COUNTER}mod tools:\n    def bump(var mut a):\n        a.inc()\n\ndef main():\n    print \"hi\"\n");
     expect_error(&in_mod, "cannot use the untyped parameter `a` with the method call `.inc()`");
     let overloaded = format!("{COUNTER}def bump(var mut a):\n    a.inc()\n\ndef bump(var mut a, int n):\n    a.inc()\n\ndef main():\n    var mut Counter'actor c = Counter()\n    bump(c)\n");
     expect_error(&overloaded, "cannot use the untyped parameter `a` with the method call `.inc()`");
+}
+
+#[test]
+fn a_method_name_declared_twice_is_not_specialised() {
+    let o = boring(&["run"], "\
+struct A:
+    var int n = 0
+    def inc():
+        n += 1
+    def bump(var mut a):
+        a.inc()
+
+struct B:
+    var int n = 0
+    def bump(var mut a):
+        a.inc()
+
+def main():
+    var mut A x = A()
+    var mut A y = A()
+    x.bump(y)
+");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("untyped parameter `a` with the method call `.inc()`"), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+#[test]
+fn a_function_name_declared_in_two_mods_is_not_specialised() {
+    let o = boring(&["run"], "\
+struct A:
+    var int n = 0
+    def inc():
+        n += 1
+
+mod one:
+    pub def bump(var mut a):
+        a.inc()
+
+mod two:
+    pub def bump(var mut a):
+        a.inc()
+
+def main():
+    var mut A x = A()
+    bump(x)
+");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("untyped parameter `a` with the method call `.inc()`"), "{}", String::from_utf8_lossy(&o.stderr));
 }

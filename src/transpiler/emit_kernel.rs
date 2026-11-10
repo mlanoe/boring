@@ -308,9 +308,14 @@ impl Transpiler {
     /// counterpart to `materialize_resident_call`, same match the call-argument
     /// materialization in `emit_methods.rs` builds.
     pub(crate) fn materialize_resident_var(&self, var_name: &str, ret_ty: &Type) -> String {
+        let scrutinee = if self.current_fn_gpu_borrow_param_names.contains(var_name) {
+            var_name.to_string()
+        } else {
+            format!("&{var_name}")
+        };
         if self.config.is_simd_target {
             return format!(
-                "match &{var_name} {{ BoringKernelArg::Host(v) => v.clone() }}"
+                "match {scrutinee} {{ BoringKernelArg::Host(v) => v.clone() }}"
             );
         }
         let inner_ty = match ret_ty {
@@ -320,8 +325,45 @@ impl Transpiler {
         let host_ty = kernel_host_element_type(&inner_ty);
         let device_ty = kernel_host_scalar_type(&inner_ty);
         format!(
-            "match &{var_name} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }}"
+            "match {scrutinee} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }}"
         )
+    }
+
+    /// Materializes a resident local, resident parameter, or resident-returning call
+    /// expression back to a plain host `Vec<T>`, or returns `None` if `expr` is not resident.
+    pub(crate) fn try_materialize_resident_expr(&self, expr: &Expr) -> Option<String> {
+        if let ExprKind::Var(vname) = &expr.kind {
+            let ret_ty = self.resident_call_vars.get(vname.as_str()).cloned().or_else(|| {
+                (self.current_fn_gpu_arg_param_names.contains(vname.as_str())
+                    || self.current_fn_gpu_borrow_param_names.contains(vname.as_str()))
+                .then(|| self.fn_current_params.get(vname.as_str()).cloned())
+                .flatten()
+            })?;
+            return Some(self.materialize_resident_var(vname, &ret_ty));
+        }
+        self.try_materialize_resident_call(expr)
+    }
+
+    /// If `expr` is a call to a `fn_returns_resident` function, returns its Rust expression
+    /// ready for a `BoringKernelArg<T>` parameter of declared type `param_ty` (passing through
+    /// unchanged when element types match, or materializing + re-wrapping otherwise).
+    pub(crate) fn try_emit_resident_call_as_kernel_arg(&self, expr: &Expr, param_ty: Option<&Type>) -> Option<String> {
+        let materialized = self.try_materialize_resident_call(expr)?;
+        let ExprKind::Call(callee, _) = &expr.kind else { return None };
+        let ExprKind::Var(cn) = &callee.kind else { return None };
+        let ret_ty = self.fn_returns_resident.get(cn.as_str())?;
+        let elem_of = |ty: &Type| -> &'static str {
+            let unq = match ty.without_mut() {
+                Type::Qualified(inner, _) => inner.without_mut(),
+                other => other,
+            };
+            kernel_host_element_type(&array_inner_type(unq))
+        };
+        if param_ty.is_some_and(|pt| elem_of(pt) == elem_of(ret_ty)) {
+            Some(self.emit_expr(expr))
+        } else {
+            Some(format!("BoringKernelArg::Host({})", materialized))
+        }
     }
 
     /// Emits a materializing match over `call_expr` (a call to a function whose

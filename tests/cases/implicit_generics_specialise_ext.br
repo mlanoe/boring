@@ -1,0 +1,26 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Tally:
+    var int total = 0
+
+    def inc():
+        total += 10
+
+# A method added by `ext` with an untyped parameter used by a method call is specialised per argument
+# type, like a struct method.
+ext Counter:
+    def poke(var mut a):
+        a.inc()
+        n += 100
+
+def main():
+    var mut Counter c = Counter()
+    var mut Counter d = Counter()
+    var mut Tally t = Tally()
+    c.poke(t)
+    c.poke(d)
+    print "{c.n} {d.n} {t.total}"

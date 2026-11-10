@@ -1,0 +1,5 @@
+bool helper_priv(int x):
+    x > 0
+
+pub bool call_a(int x):
+    helper_priv(x)

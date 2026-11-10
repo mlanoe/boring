@@ -1128,4 +1128,21 @@ fn qualifier_infer_xfile() {
     let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert_eq!(actual.trim_end(), "3\n40\n5\nfull 9");
 }
+
+#[test]
+fn private_fn_module_isolation() {
+    let bin = env!("CARGO_BIN_EXE_boring");
+    let br_file = Path::new("tests/cases/private_fn_module_isolation/main.br");
+    let output = Command::new(bin)
+        .arg(br_file)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run boring: {}", e));
+    assert!(
+        output.status.success(),
+        "private_fn_module_isolation exited with error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(actual.trim_end(), "true true");
+}
 error_test!(error_task_param_in_sync_fn);

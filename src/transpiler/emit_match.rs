@@ -191,7 +191,7 @@ impl Transpiler {
                 crate::ast::ExprKind::Field(obj, field_name) => {
                     let sn = match &obj.kind {
                         crate::ast::ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
-                        crate::ast::ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned(),
+                        crate::ast::ExprKind::Var(v) => self.local_struct(v),
                         _ => None,
                     };
                     sn.and_then(|sn| self.struct_fields.get(sn.as_str()))

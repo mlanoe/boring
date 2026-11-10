@@ -70,13 +70,16 @@ fn check_out_dir_writes_the_file() {
 }
 
 #[test]
-fn full_writes_the_inferred_qualifiers_mono_does_not() {
+fn full_leaves_out_what_a_local_or_a_parameter_is_by_default() {
+    // `inline` locals and borrowed parameters are the defaults: spelling them would be a
+    // constraint (it changes the Rust), not a report of what was inferred.
     let dir = scratch("bri_cli_full");
     let mono = text(&boring(&dir, &["check", "--emit-bri=mono", "prog.br"])).0;
     let full = text(&boring(&dir, &["check", "--emit-bri=full", "prog.br"])).0;
-    assert!(!mono.contains("'inline"), "{mono}");
-    assert!(full.contains("let c'inline = Counter()"), "{full}");
-    assert!(full.contains("mut m'inline = Counter()") || full.contains("mut Counter'inline m"), "{full}");
+    assert_eq!(mono, full, "nothing here is a non-default decision");
+    let again = text(&boring(&dir, &["build", "--emit-rust", "prog.br"])).0;
+    std::fs::write(dir.join("full.bri"), &full).unwrap();
+    assert_eq!(again, text(&boring(&dir, &["build", "--emit-rust", "full.bri"])).0);
 }
 
 #[test]
@@ -139,4 +142,94 @@ fn full_keeps_the_trailing_array_block_of_a_shared_trait_array_working() {
     let rust = |f: &str| text(&boring(&dir, &["build", "--emit-rust", f])).0
         .lines().filter(|l| !l.contains("__stream_")).collect::<Vec<_>>().join("\n");
     assert_eq!(rust("blocks.br"), rust("blocks_full.bri"));
+}
+
+#[test]
+fn full_on_a_kernel_program_warns_and_prints_the_mono_text() {
+    let dir = scratch("bri_cli_full_kernel");
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/kernel_aux_method_fast_path.br"), dir.join("k.br")).unwrap();
+    let mono = text(&boring(&dir, &["check", "--emit-bri=mono", "k.br"])).0;
+    let o = boring(&dir, &["check", "--emit-bri=full", "k.br"]);
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "{err}");
+    assert!(err.contains("the .bri has no inferred qualifiers"), "{err}");
+    assert_eq!(out, mono);
+}
+
+#[test]
+fn full_keeps_a_borrowed_array_parameter_usable_by_the_array_block_sugar() {
+    let dir = scratch("bri_cli_full_sugar");
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/array_block_lowercase_collect.br"), dir.join("k.br")).unwrap();
+    let full = text(&boring(&dir, &["check", "--emit-bri=full", "k.br"])).0;
+    std::fs::write(dir.join("k.bri"), full).unwrap();
+    let o = boring(&dir, &["k.bri"]);
+    assert!(o.status.success(), "{}", text(&o).1);
+}
+
+#[test]
+fn full_writes_the_residency_of_tensor_operands_and_metal_output_is_the_same() {
+    let dir = scratch("bri_cli_full_gpu");
+    std::fs::write(dir.join("t.br"), "\
+def run([float32, n = 4, k = 4] x, [float32, k = 4, m = 4] w, mut [float32, n = 4, m = 4] y) throws:
+    kernel.tensors.matmul(x, w, y)
+
+let [float32, n = 4, k = 4] x = [1.0 as float32 for ..<16]
+let [float32, k = 4, m = 4] w = [1.0 as float32 for ..<16]
+var [float32, n = 4, m = 4] y = [0.0 as float32 for ..<16]
+run(x, w, y)
+").unwrap();
+    let full = text(&boring(&dir, &["check", "--emit-bri=full", "t.br"])).0;
+    assert!(full.contains("    kernel.tensors.matmul(x, w, y)"), "{full}");
+    assert!(full.contains("[float32, n = 4, k = 4]'global x"), "{full}");
+    assert!(full.contains("mut [float32, n = 4, m = 4]'unified y"), "{full}");
+    assert!(full.contains("var [float32, n = 4, m = 4]'unified y"), "{full}");
+    std::fs::write(dir.join("t_full.bri"), &full).unwrap();
+    for f in ["t.br", "t_full.bri"] {
+        let o = boring(&dir, &["build", "--emit-rust", "--target", "metal", f]);
+        assert!(o.status.success(), "{f}: {}", text(&o).1);
+    }
+    let read = |p: &str| std::fs::read_to_string(dir.join(p).join("src/main.rs")).unwrap_or_else(|e| panic!("{p}: {e}"));
+    assert_eq!(read("t_metal"), read("t_full_metal"));
+}
+
+#[test]
+fn a_specialised_copy_says_what_it_is_a_copy_of_and_the_file_builds_the_same_rust() {
+    let dir = scratch("bri_cli_origin");
+    std::fs::write(dir.join("o.br"), "\
+struct Counter:
+    var int n = 0
+    def inc(): n += 1
+
+def bump(var mut a):
+    a.inc()
+
+def main():
+    var mut Counter'actor c = Counter()
+    bump(c)
+    print \"{c.n}\"
+").unwrap();
+    let bri = text(&boring(&dir, &["check", "--emit-bri", "o.br"])).0;
+    assert!(bri.contains("def bump_Counter_actor(var mut Counter'actor a):  # copy of bump (line 5) for a = Counter'actor, first called at line 10"), "{bri}");
+    std::fs::write(dir.join("o2.bri"), &bri).unwrap();
+    assert_eq!(text(&boring(&dir, &["build", "--emit-rust", "o.br"])).0, text(&boring(&dir, &["build", "--emit-rust", "o2.bri"])).0);
+}
+
+#[test]
+fn full_shows_the_instances_the_monomorphizer_made_and_the_file_runs_the_same() {
+    let dir = scratch("bri_cli_mono");
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    for name in ["qualifier_fns", "qualifier_gaps_enums"] {
+        std::fs::copy(case.join(format!("{name}.br")), dir.join(format!("{name}.br"))).unwrap();
+        let full = text(&boring(&dir, &["check", "--emit-bri=full", &format!("{name}.br")])).0;
+        // The generic declarations are gone, their instances are written.
+        let code: String = full.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
+        assert!(!code.contains("<'elem") && !code.contains("<'q"), "{name}:\n{full}");
+        std::fs::write(dir.join(format!("{name}_full.bri")), &full).unwrap();
+        let original = boring(&dir, &[&format!("{name}.br")]);
+        let again = boring(&dir, &[&format!("{name}_full.bri")]);
+        assert!(again.status.success(), "{name}: {}", text(&again).1);
+        assert_eq!(text(&original).0, text(&again).0, "{name}");
+    }
+    let full = text(&boring(&dir, &["check", "--emit-bri=full", "qualifier_gaps_enums.br"])).0;
+    assert!(full.contains("enum Slot_inline") && full.contains("Slot_inline::") || full.contains("Slot_inline."), "{full}");
 }

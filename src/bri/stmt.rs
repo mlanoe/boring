@@ -155,7 +155,10 @@ impl Printer {
             }
             Stmt::KernelBlock(k) => {
                 self.line("kernel:");
-                self.block_inner(&k.body)
+                let was = std::mem::replace(&mut self.device, true);
+                let r = self.block_inner(&k.body);
+                self.device = was;
+                r
             }
             Stmt::With(w) => {
                 self.line(&format!("with {}:", w.names.join(", ")));

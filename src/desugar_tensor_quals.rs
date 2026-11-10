@@ -279,11 +279,13 @@ struct Facts {
     /// parameter, aliased, returned, or any use the pass does not model.
     maybe_written: bool,
     /// The array is a host-built `Vec` in some use a resident value cannot serve: a mutating
-    /// collection method (`x.push(..)`), or, outside any tensor operand role, an element
+    /// collection method (`x.push(..)`), a reassignment from a host expression (`x = f(...)`)
+    /// outside any tensor operand role, or, outside any tensor operand role, an element
     /// access (`x[i]`, `x[i] = v`) in host code. Such a local stays a host array; it is
     /// converted at the call that hands it to a resident parameter.
     host_push: bool,
     host_index: bool,
+    host_assign: bool,
     /// Used as an operand of a host `kernel.tensors.*` call.
     tensor_operand: bool,
 }
@@ -541,6 +543,11 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
         ));
     }
     let node_count = infos.len();
+    let resident_fns: HashSet<String> = items.iter().enumerate().filter_map(|(i, item)| {
+        let Item::Fn(f) = item else { return None };
+        let explicit = f.return_ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some());
+        (explicit || ret_nodes.contains_key(&i)).then(|| f.name.clone())
+    }).collect();
 
     // --- constraints and links ---------------------------------------------------------
     let mut facts: Vec<Facts> = (0..node_count).map(|_| Facts::default()).collect();
@@ -548,11 +555,12 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
     for (id, info) in infos.iter().enumerate() { facts[id].operand = info.marker; }
     for scope in &scopes {
         for (name, id) in &scope.names {
-            let f = usage_of(scope, name, *id, &sigs, &msigs);
+            let f = usage_of(scope, name, *id, &sigs, &msigs, &resident_fns);
             let slot = &mut facts[*id];
             slot.operand |= f.operand;
             slot.host_push |= f.host_push;
             slot.host_index |= f.host_index;
+            slot.host_assign |= f.host_assign;
             slot.tensor_operand |= f.tensor_operand;
             slot.maybe_written |= f.maybe_written;
             slot.forced.extend(f.forced);
@@ -582,11 +590,12 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
             if scope.declared.contains(name) { out_of_sight = true; continue; }
             let mut seen_from = scope.clone();
             seen_from.names.extend(top_names.iter().filter(|(n, _)| !scope.declared.contains(n)).cloned());
-            let f = usage_of(&seen_from, name, *id, &sigs, &msigs);
+            let f = usage_of(&seen_from, name, *id, &sigs, &msigs, &resident_fns);
             let slot = &mut facts[*id];
             slot.operand |= f.operand;
             slot.host_push |= f.host_push;
             slot.host_index |= f.host_index;
+            slot.host_assign |= f.host_assign;
             slot.tensor_operand |= f.tensor_operand;
             slot.maybe_written |= f.maybe_written;
             slot.forced.extend(f.forced);
@@ -596,6 +605,15 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
     }
 
     // --- groups, resolution ------------------------------------------------------------
+    // Disqualified host-only bindings stay plain host arrays and must not bridge
+    // unrelated callers through shared union-find groups.
+    let disqualified: Vec<bool> = (0..node_count).map(|id| {
+        !infos[id].marker && (
+            facts[id].host_push
+            || (facts[id].host_index && !facts[id].tensor_operand)
+            || (facts[id].host_assign && !facts[id].tensor_operand)
+        )
+    }).collect();
     let mut parent: Vec<usize> = (0..node_count).collect();
     fn find(parent: &mut [usize], x: usize) -> usize {
         let mut root = x;
@@ -605,7 +623,9 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
         root
     }
     for (id, fact) in facts.iter().enumerate().take(node_count) {
+        if disqualified[id] { continue; }
         for &other in &fact.unions {
+            if disqualified[other] { continue; }
             let (a, b) = (find(&mut parent, id), find(&mut parent, other));
             if a != b { parent[a] = b; }
         }
@@ -647,7 +667,7 @@ fn infer_unit(items: &mut [Item], aliases: &crate::desugar_tensor_fields::FieldA
     for (id, info) in infos.iter().enumerate().take(node_count) {
         // A host-built array stays a host `Vec` (see `Facts::host_push`); an explicit bare
         // `'kernel` is the programmer's own choice and is always resolved.
-        if !info.marker && (facts[id].host_push || (facts[id].host_index && !facts[id].tensor_operand)) { continue; }
+        if disqualified[id] { continue; }
         let root = find(&mut parent, id);
         let Some(g) = groups.get(&root) else { continue };
         let Some((q, why)) = resolve(g) else { continue };
@@ -842,7 +862,14 @@ fn tensor_call(e: &Expr) -> Option<&[Arg]> {
     Some(args)
 }
 
-fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>, msigs: &MethodIndex) -> Facts {
+fn usage_of(
+    scope: &Scope,
+    name: &str,
+    node: usize,
+    sigs: &HashMap<String, Sig>,
+    msigs: &MethodIndex,
+    resident_fns: &HashSet<String>,
+) -> Facts {
     // Both walker callbacks update the same counters.
     let facts = RefCell::new(Facts::default());
     let total = RefCell::new(0usize);
@@ -975,7 +1002,7 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
         }
         let mut host = scope.stmts.clone();
         strip(&mut host);
-        let flags = RefCell::new((false, false));
+        let flags = RefCell::new((false, false, false));
         let mut on_expr = |e: &mut Expr| match &e.kind {
             ExprKind::MethodCall(recv, m, _) if matches!(&recv.kind, ExprKind::Var(n) if n == name)
                 && matches!(m.as_str(), "push" | "append" | "extend" | "insert" | "pop" | "remove"
@@ -983,14 +1010,25 @@ fn usage_of(scope: &Scope, name: &str, node: usize, sigs: &HashMap<String, Sig>,
                 flags.borrow_mut().0 = true,
             ExprKind::Index(obj, _) if matches!(&obj.kind, ExprKind::Var(n) if n == name) =>
                 flags.borrow_mut().1 = true,
+            ExprKind::Assign(lhs, rhs) if matches!(&lhs.kind, ExprKind::Var(n) if n == name) => {
+                let rhs_resident = match &rhs.kind {
+                    ExprKind::Call(callee, _) => matches!(&callee.kind, ExprKind::Var(f) if resident_fns.contains(f)),
+                    ExprKind::Var(v) => scope.names.iter().any(|(n, _)| n == v),
+                    _ => false,
+                };
+                if !rhs_resident {
+                    flags.borrow_mut().2 = true;
+                }
+            }
             _ => {}
         };
         let mut on_stmt = |_: &mut Stmt| {};
         let mut walker = Walker { expr: &mut on_expr, stmt: &mut on_stmt };
         walker.stmts(&mut host);
-        let (p, i) = flags.into_inner();
+        let (p, i, a) = flags.into_inner();
         facts.host_push = p;
         facts.host_index = i;
+        facts.host_assign = a;
     }
     // A use the pass does not model (an assignment, a method call, a read, a `with` body...)
     // may be a write: only a fully understood array is reported as never written.
@@ -1917,5 +1955,38 @@ mod tests {
         assert!(errors_of(&src).iter().any(|e| e.contains("must be declared `mut`")), "{:?}", errors_of(&src));
         let src = layer("'kernel'global", "'kernel'unified", "").replace("def forward", "req forward");
         assert!(errors_of(&src).iter().any(|e| e.contains("must be `def`")), "{:?}", errors_of(&src));
+    }
+
+    #[test]
+    fn host_indexed_callee_and_host_reassigned_var_do_not_promote_unrelated_host_fns() {
+        let src = r#"
+pub req [float32]'kernel'unified gpu_id([float32]'kernel'global x, int n) throws:
+    x
+
+[float32] cpu_add([float32] a, [float32] b):
+    [a[i] + b[i] for i in 0..<a.length]
+
+[float32] bug_normed2(bool cond, [float32] a):
+    mut [float32] normed2 = []
+    if cond:
+        normed2 = a
+    else:
+        normed2 = cpu_add(a, a)
+    cpu_add(normed2, a)
+
+[float32] bug_host_vec_reassigned([float32] x0) throws:
+    var mut [float32] x = [x0[i] for i in 0..<x0.length]
+    var int i = 0
+    while i < 2:
+        let x_in = gpu_id(x, 2)
+        x = cpu_add(x, x_in)
+        i += 1
+    x
+"#;
+        let program = run(src);
+        assert_eq!(fn_quals(&program, "cpu_add").0, vec![None, None]);
+        assert_eq!(fn_quals(&program, "bug_normed2").0, vec![None, None]);
+        assert_eq!(fn_quals(&program, "bug_normed2").1, vec![None]);
+        assert_eq!(fn_quals(&program, "bug_host_vec_reassigned").1[0], None);
     }
 }

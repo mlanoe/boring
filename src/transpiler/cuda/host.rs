@@ -678,7 +678,7 @@ impl HostEmitter {
     // ── GPU prelude ────────────────────────────────────────────────────────────
 
     fn emit_prelude(&mut self, kernel_names: &[String]) {
-        self.line("fn set_gpu_batch_limit(_limit: i64) {}");
+        self.line("fn set_gpu_batch_limit(_limit: isize) {}");
         self.blank();
         // `PushKernelArg` brings `LaunchArgs::arg()` into scope -- it's a trait
         // method (real cudarc 0.19.8: `cudarc::driver::safe::launch::PushKernelArg`,

@@ -508,6 +508,7 @@ pub fn desugar_array_block_with_imports(
     if let Some(dir) = source_dir {
         if program.items.iter().any(|i| matches!(i, Item::Use(_))) {
             let imported = crate::infer_return_types::collect_inference_imports(&program.items, dir, deps);
+            crate::specialize_untyped::specialize_imported(&mut program, &imported)?;
             crate::infer_return_types::infer_return_types_with_imports(&mut program, &imported);
             crate::infer_return_types::check_with_imports(&program, &imported)?;
         }
@@ -921,7 +922,13 @@ fn desugar_trailing_array_block(
 
     enum Interp { Collect(String, bool), Tail, ClosureLiteral }
 
-    let interp = match sigs.last_param_type(name) {
+    // A written or inferred borrow (`[Widget]&`) does not change what the parameter is.
+    let last_ty = sigs.last_param_type(name);
+    let last_ty = match last_ty {
+        Some(Type::Qualified(base, _)) if matches!(base.as_ref(), Type::Array(_)) => Some(base.as_ref()),
+        other => other,
+    };
+    let interp = match last_ty {
         Some(Type::Array(inner)) => match inner.as_ref() {
             Type::Named(n) if sigs.is_trait(n) => Interp::Collect(n.clone(), false),
             // `[Widget'shared]`: the element type of a shared trait, as the `.bri` writes it.

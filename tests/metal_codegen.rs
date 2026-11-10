@@ -3585,7 +3585,7 @@ fn launches_are_encoded_into_shared_command_buffers() {
         "a launch must encode into the open batch;\ngot:\n{launch}");
     assert!(rs.contains("BORING_METAL_BATCH") && rs.contains("BORING_METAL_INFLIGHT"),
         "expected the batch and in-flight limits;\ngot:\n{rs}");
-    assert!(rs.contains("fn set_gpu_batch_limit(limit: i64)"),
+    assert!(rs.contains("fn set_gpu_batch_limit(limit: isize)"),
         "expected the runtime batch-limit hook;\ngot:\n{rs}");
     assert!(rs.contains("__BORING_METAL_BATCH_LIMIT.with(|l| l.set(limit.max(1) as usize))"),
         "expected a mutable, clamped batch limit;\ngot:\n{rs}");
@@ -5341,4 +5341,225 @@ def main() throws:
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
     assert!(check.status.success(), "generated Rust must type-check:\n{}\n{rs}", String::from_utf8_lossy(&check.stderr));
+}
+
+#[test]
+fn passthrough_gpu_call_inside_if_else_materializes_and_runs_on_metal() {
+    let src = r#"
+pub [float32] passthrough([float32] x):
+    x
+
+pub req [float32]'kernel'unified gpu_add_one([float32]'kernel'global x, int n) throws:
+    let blocks = (n + 63) / 64
+    kernel(block = 64, grid = blocks):
+        mut [float32]'unified out = [0.0 for ..<n]
+        let i = .block.x * 64 + .thread.x
+        if i < n:
+            out[i] = x[i] + 1.0 as float32
+        out
+
+[float32] bug_passthrough_if_else(bool flag, [float32]'kernel'unified g) throws:
+    let out = if flag:
+        [1.0 as float32, 2.0 as float32]
+    else:
+        passthrough(gpu_add_one(g, 2))
+    out
+
+let g = gpu_add_one([1.0 as float32, 2.0 as float32], 2)
+let r = bug_passthrough_if_else(false, g)
+print "{r.length} {r[0]} {r[1]}"
+"#;
+    let name = "passthrough_gpu_call_inside_if_else";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(rs.contains("passthrough(&(match gpu_add_one("), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "2 3 4");
+}
+
+#[test]
+fn host_arrays_shared_with_cpu_add_and_reassigned_stay_vec_on_metal() {
+    let src = r#"
+pub [float32] passthrough([float32] x):
+    x
+
+pub req [float32]'kernel'unified gpu_id([float32]'kernel'global x, int n) throws:
+    let blocks = (n + 63) / 64
+    kernel(block = 64, grid = blocks):
+        mut [float32]'unified out = [0.0 for ..<n]
+        let i = .block.x * 64 + .thread.x
+        if i < n:
+            out[i] = x[i]
+        out
+
+[float32] cpu_add([float32] a, [float32] b):
+    [a[i] + b[i] for i in 0..<a.length]
+
+[float32] bug_normed2(bool cond, [float32] a):
+    mut [float32] normed2 = []
+    if cond:
+        normed2 = a
+    else:
+        normed2 = cpu_add(a, a)
+    cpu_add(normed2, a)
+
+[float32] bug_host_vec_reassigned([float32] x0) throws:
+    var mut [float32] x = [x0[i] for i in 0..<x0.length]
+    var int i = 0
+    while i < 2:
+        let x_in = gpu_id(x, 2)
+        let delta = passthrough(x_in)
+        x = cpu_add(x, delta)
+        i += 1
+    x
+
+print "{bug_normed2(true, [1.0 as float32, 2.0 as float32]).length}"
+print "{bug_host_vec_reassigned([1.0 as float32, 2.0 as float32]).length}"
+"#;
+    let name = "host_arrays_shared_with_cpu_add_and_reassigned";
+    let (_msl, _rs, _toml) = run_metal(name, src);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "2\n2");
+}
+
+#[test]
+fn kernel_buffer_length_injects_element_count_and_runs_on_metal() {
+    let src = r#"
+pub [float32] passthrough([float32] x):
+    x
+
+pub req [float32]'kernel'unified gpu_norm_len([float32]'kernel'global x, [float32]'kernel'global w, int n, int d) throws:
+    let blocks = (n + 63) / 64
+    kernel(block = 64, grid = blocks):
+        mut [float32]'unified out = [0.0 for ..<n * d]
+        let row = .block.x * 64 + .thread.x
+        if row < n:
+            let w_row = if w.length > d: (row % (w.length / d)) * d else: 0
+            out[row * d] = x[row * d] * w[w_row]
+        out
+
+let x = [1.0 as float32, 2.0 as float32, 3.0 as float32, 4.0 as float32]
+let w = [0.5 as float32, 1.5 as float32, 2.5 as float32, 3.5 as float32]
+let r = passthrough(gpu_norm_len(x, w, 2, 2))
+print "{r.length} {r[0]} {r[2]}"
+"#;
+    let name = "kernel_buffer_length_injects_element_count";
+    let (msl, _rs, _toml) = run_metal(name, src);
+    assert!(!msl.contains("w.length"), "MSL must not emit raw `w.length`:\n{msl}");
+    assert!(msl.contains("__boring_len_w"), "MSL must inject buffer length:\n{msl}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "4 0.5 7.5");
+}
+
+#[test]
+fn global_helper_forwarding_to_global_helper_stays_host_vec() {
+    let src = r#"
+float32 inner_fn([uint8]'global buf, int i):
+    buf[i] as float32
+
+float32 outer_fn([uint8]'global buf, int i):
+    inner_fn(buf, i)
+
+pub [float32] passthrough([float32] x):
+    x
+
+pub req [float32]'kernel'unified test_kern([uint8]'kernel'global buf, int n) throws:
+    kernel(block = 64, grid = 1):
+        mut [float32]'unified out = [0.0 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = outer_fn(buf, i)
+        out
+
+let r = passthrough(test_kern([1 as uint8], 1))
+let h = outer_fn([2 as uint8], 0)
+print "{r.length} {r[0]} {h}"
+"#;
+    let name = "global_helper_forwarding_to_global_helper_stays_host_vec";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(rs.contains("fn inner_fn(buf: &Vec<u8>, i: isize) -> f32"), "{rs}");
+    assert!(rs.contains("fn outer_fn(buf: &Vec<u8>, i: isize) -> f32"), "{rs}");
+    assert!(!rs.contains("outer_fn(&BoringKernelArg::Host"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "1 1 2");
+}
+
+#[test]
+fn set_gpu_batch_limit_accepts_int_variable() {
+    let src = r#"
+pub def set_gpu_batch_limit(int limit): native
+
+static var int batch_limit = 8
+
+pub req [float32]'kernel'unified add_one([float32]'kernel'global x, int n) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] + 1.0 as float32
+        out
+
+def main() throws:
+    let int local_limit = 4
+    set_gpu_batch_limit(batch_limit)
+    set_gpu_batch_limit(local_limit)
+    set_gpu_batch_limit(1)
+    let r = add_one([1.0 as float32], 1)
+    with r:
+        print "{r[0]}"
+"#;
+    let name = "set_gpu_batch_limit_accepts_int_variable";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(rs.contains("fn set_gpu_batch_limit(limit: isize)"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "2");
 }

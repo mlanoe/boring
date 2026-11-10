@@ -40,6 +40,7 @@ mod infer_trait_borrow;
 mod infer_shared_elems;
 mod share_dyn_traits;
 mod last_use;
+pub(crate) mod type_table;
 mod promote_atomic;
 pub(crate) mod monomorphize;
 pub(crate) mod kernel_generic;
@@ -353,10 +354,192 @@ pub fn specialise_qualifier_params(program: &Program) -> Program {
     cloned
 }
 
+/// The program with the transpiler's monomorphizer applied (explicit `<..>` instances, qualifier-generic
+/// instances, annotations rewritten to the instance names), as the `.bri` shows it. `None` when the program has
+/// nothing for it to do.
+pub fn monomorphized_for_bri(program: &Program, config: TranspileConfig) -> Option<Program> {
+    let mut t = Transpiler::new(config);
+    t.source_dir = t.config.source_dir.clone();
+    t.deps = t.config.deps.clone();
+    t.global_pre_scan(program);
+    if !(monomorphize::program_declares_generics(program)
+        || monomorphize::program_contains_generic_call(program)
+        || t.has_qual_generics) {
+        return None;
+    }
+    let mut cloned = program.clone();
+    t.monomorphize_program(&mut cloned);
+    // Instances of imported generics are declared here, after the `use`s.
+    let extra = t.imported_instances(program);
+    if !extra.is_empty() {
+        let at = cloned.items.iter().rposition(|i| matches!(i, Item::Use(_))).map(|i| i + 1).unwrap_or(0);
+        for (k, it) in extra.into_iter().enumerate() { cloned.items.insert(at + k, it); }
+    }
+    Some(place_instances(program, cloned))
+}
+
+/// What names an item for the placement below: its kind and name (an `ext` by the type it extends).
+fn item_key(item: &Item) -> Option<(u8, String)> {
+    match item {
+        Item::Struct(s) => Some((0, s.name.clone())),
+        Item::Enum(e) => Some((1, e.name.clone())),
+        Item::Fn(f) if f.qualifier.is_none() => Some((2, f.name.clone())),
+        Item::Ext(e) => Some((3, e.type_name.clone())),
+        _ => None,
+    }
+}
+
+/// The monomorphizer appends its instances at the end of the file; a reader (`boring run x.bri`) needs a struct
+/// before the statements that use it. Each instance goes right after the generic it was made from (or where that
+/// generic was, when the monomorphizer dropped it), and a generic kept next to its instances loses the `type let`s
+/// that depend on its parameters (a Rust static cannot be generic: the transpiler leaves them out too).
+fn place_instances(original: &Program, mono: Program) -> Program {
+    let orig_keys: Vec<Option<(u8, String)>> = original.items.iter().map(item_key).collect();
+    let known: std::collections::HashSet<&(u8, String)> = orig_keys.iter().flatten().collect();
+    let mut kept: std::collections::VecDeque<Item> = std::collections::VecDeque::new();
+    let mut added: Vec<Item> = Vec::new();
+    for item in mono.items {
+        match item_key(&item) {
+            Some(k) if !known.contains(&k) => added.push(item),
+            _ => kept.push_back(item),
+        }
+    }
+    let base_of = |item: &Item| -> Option<String> {
+        let (_, name) = item_key(item)?;
+        orig_keys.iter().flatten()
+            .filter(|(_, g)| name.len() > g.len() && name.starts_with(g.as_str()) && name.as_bytes()[g.len()] == b'_')
+            .map(|(_, g)| g.clone())
+            .max_by_key(|g| g.len())
+    };
+    let mut out: Vec<Item> = Vec::new();
+    for key in &orig_keys {
+        let next_matches = match (key, kept.front()) {
+            (None, Some(_)) => true,
+            (Some(k), Some(item)) => item_key(item).as_ref() == Some(k),
+            _ => false,
+        };
+        if next_matches { out.push(kept.pop_front().unwrap()); }
+        if let Some((_, name)) = key {
+            let mut rest = Vec::new();
+            for item in added.drain(..) {
+                if base_of(&item).as_deref() == Some(name.as_str()) { out.push(item); } else { rest.push(item); }
+            }
+            added = rest;
+        }
+    }
+    out.extend(kept);
+    // Instances whose generic is not declared here (imported ones) go right after the `use`s, before any statement.
+    let at = out.iter().rposition(|i| matches!(i, Item::Use(_))).map(|i| i + 1).unwrap_or(0);
+    for (k, it) in added.into_iter().enumerate() { out.insert(at + k, it); }
+    mark_by_value_instance_params(original, &mut out);
+    // The enums the monomorphizer dropped: patterns on their instances name the instance.
+    let kept_enums: std::collections::HashSet<&str> = out.iter().filter_map(|i| if let Item::Enum(e) = i { Some(e.name.as_str()) } else { None }).collect();
+    let dropped: std::collections::HashSet<String> = original.items.iter().filter_map(|i| match i {
+        Item::Enum(e) if !e.type_params.is_empty() && !kept_enums.contains(e.name.as_str()) => Some(e.name.clone()),
+        _ => None,
+    }).collect();
+    let mut prog = Program { items: std::mem::take(&mut out) };
+    type_table::rewrite_variant_patterns(&mut prog, &dropped);
+    let mut out = prog.items;
+    // A generic kept next to instances of it loses the `type let`s that depend on its parameters.
+    let instanced: std::collections::HashSet<String> = out.iter().filter_map(|i| match i {
+        Item::Struct(s) if s.type_params.is_empty() => orig_keys.iter().flatten()
+            .filter(|(_, g)| s.name.len() > g.len() && s.name.starts_with(g.as_str()) && s.name.as_bytes()[g.len()] == b'_')
+            .map(|(_, g)| g.clone()).max_by_key(|g| g.len()),
+        _ => None,
+    }).collect();
+    for item in out.iter_mut() {
+        if let Item::Struct(s) = item {
+            if !s.type_params.is_empty() && instanced.contains(&s.name) {
+                let params = s.type_params.clone();
+                s.type_vars.retain(|tv| !tv.ty.as_ref().is_some_and(|t| Transpiler::type_mentions_type_params(t, &params)));
+            }
+        }
+    }
+    Program { items: out }
+}
+
+/// A method of a generic struct (or `ext`) whose parameter is a generic's instance type (`Board<elem'q> other`) takes
+/// it by value; written with the instance's plain name (`Board_owned other`) a reader would borrow it. The decision
+/// is the one the emitter took from the generic form, so it is written: `Board_owned'inline other`.
+fn mark_by_value_instance_params(original: &Program, items: &mut [Item]) {
+    use std::collections::HashMap;
+    let mut generic_methods: HashMap<String, Vec<FnDecl>> = HashMap::new();
+    for it in &original.items {
+        match it {
+            Item::Struct(s) => { generic_methods.insert(s.name.clone(), s.methods.clone()); }
+            Item::Enum(e) => { generic_methods.insert(e.name.clone(), e.methods.clone()); }
+            Item::Ext(e) => { generic_methods.entry(e.type_name.clone()).or_default().extend(e.methods.iter().cloned()); }
+            _ => {}
+        }
+    }
+    let generics: Vec<String> = generic_methods.keys().cloned().collect();
+    // The owner itself when it is declared (a plain struct with generic methods), else the generic it is an instance of.
+    let base_of = |name: &str| if generic_methods.contains_key(name) { Some(name.to_string()) } else { generics.iter()
+        .filter(|g| name.len() > g.len() && name.starts_with(g.as_str()) && name.as_bytes()[g.len()] == b'_')
+        .max_by_key(|g| g.len()).cloned() };
+    let fix = |owner: &str, methods: &mut Vec<FnDecl>| {
+        let Some(base) = base_of(owner) else { return };
+        let Some(base_methods) = generic_methods.get(&base) else { return };
+        for m in methods.iter_mut() {
+            let Some(bm) = base_methods.iter()
+                .filter(|b| m.name == b.name || (m.name.len() > b.name.len() && m.name.starts_with(b.name.as_str()) && m.name.as_bytes()[b.name.len()] == b'_'))
+                .max_by_key(|b| b.name.len()) else { continue };
+            for (i, p) in m.params.iter_mut().enumerate() {
+                let (Some(bt), Some(Type::Named(_))) = (bm.params.get(i).and_then(|bp| bp.ty.as_ref()), p.ty.as_ref().map(|t| t.without_mut())) else { continue };
+                if matches!(bt.without_mut(), Type::Generic(..)) {
+                    if let Some(t) = p.ty.take() {
+                        p.ty = Some(match t {
+                            Type::Mut(inner) => Type::Mut(Box::new(Type::Qualified(inner, OwnerQual::Inline))),
+                            other => Type::Qualified(Box::new(other), OwnerQual::Inline),
+                        });
+                    }
+                }
+            }
+        }
+    };
+    for it in items.iter_mut() {
+        match it {
+            Item::Struct(s) if s.type_params.is_empty() => { let n = s.name.clone(); fix(&n, &mut s.methods); }
+            Item::Enum(e) if e.type_params.is_empty() => { let n = e.name.clone(); fix(&n, &mut e.methods); }
+            Item::Ext(e) if e.type_params.is_empty() => { let n = e.type_name.clone(); fix(&n, &mut e.methods); }
+            _ => {}
+        }
+    }
+}
+
 pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> TranspileOutput {
     let rewritten = external_closure_borrow::infer(program);
     let program = rewritten.as_ref().unwrap_or(program);
+    // `BORING_TYPE_TABLE=replay`: a first emission records the typing answers, the real one reads them
+    // (type_table.rs). Validation only, off by default.
+    let replay = std::env::var("BORING_TYPE_TABLE").ok().filter(|v| v == "replay" || v == "stats");
+    let recorded = replay.as_ref().map(|_| {
+        let mut r = Transpiler::new(config.clone());
+        r.source_dir = r.config.source_dir.clone();
+        r.deps = r.config.deps.clone();
+        r.type_table_mode = type_table::TypeTableMode::Record;
+        if r.config.is_gpu_target || first_kernel_decl(&program.items).is_none() { r.emit_program(program); }
+        let table = r.type_table.borrow().clone();
+        let built = r.built_struct_names.borrow().clone();
+        (table, built)
+    });
     let mut t = Transpiler::new(config);
+    match std::env::var("BORING_TYPE_TABLE").as_deref() {
+        Ok("walk") => t.type_table_mode = type_table::TypeTableMode::Walk,
+        Ok("check") => t.type_table_mode = type_table::TypeTableMode::Check,
+        _ => {}
+    }
+    if let (Some((table, built)), Some(mode)) = (recorded, replay) {
+        if mode == "stats" {
+            let c = type_table::compare(&table, &built);
+            eprintln!("type table: {} struct answers, {} conflicting positions", table.struct_names.len(), table.conflicts);
+            eprintln!("type table built alone: agree {} missing {} disagree {} over_claim {} undecided {} by_rule {}", c.agree, c.missing, c.disagree, c.over_claim, c.undecided, c.by_rule);
+        } else {
+            t.type_table = std::rc::Rc::new(std::cell::RefCell::new(table));
+            t.type_table_mode = type_table::TypeTableMode::Replay;
+        }
+    }
     t.source_dir = t.config.source_dir.clone();
     t.deps = t.config.deps.clone();
     // The `std` target (plain `boring build`, no `--target`) has no GPU runtime at
@@ -394,6 +577,14 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
         );
     } else {
         t.emit_program(program);
+    }
+    if matches!(t.type_table_mode, type_table::TypeTableMode::Replay | type_table::TypeTableMode::Walk) && std::env::var_os("BORING_TYPE_TABLE_STATS").is_some() {
+        let tt = t.type_table.borrow();
+        eprintln!("type table {:?}: {} hits, {} misses, {} of them known to the emitter", t.type_table_mode, tt.hits, tt.misses, tt.missed_known);
+    }
+    if t.type_table_mode == type_table::TypeTableMode::Check && std::env::var_os("BORING_TYPE_TABLE_STATS").is_some() {
+        let tt = t.type_table.borrow();
+        eprintln!("type table check: {} positions agree, {} differ; {} by-name reads agree, {} differ; {} decisions agree, {} differ", tt.hits, tt.conflicts, tt.local_hits, tt.local_conflicts, tt.decision_hits, tt.decision_conflicts);
     }
     let apply_single_thread_fixups = |s: String| -> String {
         s
@@ -1167,6 +1358,17 @@ struct Transpiler {
     /// Variable name → struct type name for locally-declared vars that hold struct values.
     /// Populated from `let x = StructName(...)` constructor calls.
     pub(crate) var_struct_type: std::collections::HashMap<String, String>,
+    /// Typing by position (`type_table.rs`): the table, the way it is used, and the enclosing function.
+    pub(crate) type_table: std::rc::Rc<std::cell::RefCell<type_table::TypeTable>>,
+    pub(crate) type_table_mode: type_table::TypeTableMode,
+    pub(crate) type_scope: String,
+    /// What a standalone walk (`type_table::build_struct_names`) gets on each program this transpiler
+    /// emits, after the monomorphizer: compared with the recorded answers by `BORING_TYPE_TABLE=stats`.
+    /// The walk's table of locals (scope, name) -> struct, read by `local_struct`.
+    /// The qualifiers decided per body before emission (see `decided_qual`).
+    pub(crate) decision_table: std::rc::Rc<std::cell::RefCell<type_table::Decisions>>,
+    pub(crate) built_locals: std::rc::Rc<std::cell::RefCell<type_table::Locals>>,
+    pub(crate) built_struct_names: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<type_table::Key, Option<String>>>>,
     /// fn_name → ordered parameter names (for reordering named/labeled call arguments).
     pub(crate) fn_param_names: std::collections::HashMap<String, Vec<String>>,
     /// True when the user defines a type named `Box` (conflicts with std::boxed::Box).
@@ -1595,6 +1797,10 @@ struct Transpiler {
     /// Mirrors `TranspileConfig::is_gpu_target` for quick access. See that field's doc
     /// comment — this is NOT the same as `!kernel_decls.is_empty()`.
     pub(crate) is_gpu_target: bool,
+    /// Names of free functions that use GPU-device-only intrinsics (`.warp.*`, `.thread.*`,
+    /// `.block.*`, `.grid.*`, `.blockDim.*`, `.gridDim.*`) directly or transitively — never
+    /// emitted into the Rust host output on GPU targets.
+    pub(crate) gpu_device_only_fns: std::collections::HashSet<String>,
     /// `true` while emitting the body of `main` (either a user `def main():` or the
     /// synthesized bare-statement one). A `T'static` `let` inside that body is
     /// hoisted to a module-level `static` before the body is emitted (mirroring a
@@ -1853,6 +2059,12 @@ impl Transpiler {
             struct_operator_methods: std::collections::HashSet::new(),
             struct_operator_param_types: std::collections::HashMap::new(),
             var_struct_type: std::collections::HashMap::new(),
+            type_table: Default::default(),
+            type_table_mode: type_table::TypeTableMode::Off,
+            type_scope: String::new(),
+            built_struct_names: Default::default(),
+            built_locals: Default::default(),
+            decision_table: Default::default(),
             fn_param_names: std::collections::HashMap::new(),
             user_defines_box: false,
             user_defines_result: false,
@@ -1967,6 +2179,7 @@ impl Transpiler {
             current_fn_gpu_arg_param_names: std::collections::HashSet::new(),
             user_top_level_names: std::collections::HashSet::new(),
             is_gpu_target,
+            gpu_device_only_fns: std::collections::HashSet::new(),
             currently_in_main: false,
             static_backing_names: std::collections::HashSet::new(),
             gpu_main_emitted: std::cell::Cell::new(false),
@@ -2536,6 +2749,7 @@ impl Transpiler {
         self.compute_gpu_arg_params(program);
         if self.is_gpu_target {
             self.fn_gpu_borrow_params = compute_gpu_borrow_params(program, &self.kernel_decls);
+            self.compute_gpu_device_only_fns(program);
         }
         let owned_program3;
         let program: &Program = match self.unqualify_host_only_gpu_array_params(program) {
@@ -3025,6 +3239,13 @@ impl Transpiler {
     }
 
     fn emit_program_items(&mut self, program: &Program, emit_main: bool) {
+        if matches!(self.type_table_mode, type_table::TypeTableMode::Record | type_table::TypeTableMode::Walk | type_table::TypeTableMode::Check) {
+            let imported = crate::infer_return_types::collect_inference_imports(&program.items, &self.source_dir, &self.deps);
+            let (built, locals) = type_table::build_struct_names(program, &imported);
+            self.built_struct_names.borrow_mut().extend(built);
+            self.built_locals.borrow_mut().extend(locals);
+            self.decide_program(program);
+        }
         // Separate top-level declarations from statements
         let mut stmts: Vec<&Item> = Vec::new();
         // emitted_fn_sigs is shared across all inlined files (self.emitted_fn_sigs) to deduplicate
@@ -4102,6 +4323,49 @@ impl Transpiler {
                 && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
         }
         self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
+    }
+
+    /// Collects free functions in `program` that use GPU-device-only builtins (`.warp.*`,
+    /// `.thread.*`, `.block.*`, `.grid.*`, `.blockDim.*`, `.gridDim.*`) directly or
+    /// transitively (excluding `main` and kernel-launching functions).
+    pub(crate) fn compute_gpu_device_only_fns(&mut self, program: &Program) {
+        let mut all_fns: Vec<&FnDecl> = Vec::new();
+        for item in &program.items { Self::gather_gpu_arg_fns_item(item, &mut all_fns); }
+        let kernel_names: std::collections::HashSet<String> = self.kernel_decls.keys().cloned().collect();
+        for f in &all_fns {
+            if f.qualifier.is_none() && f.name != "main" && !f.is_native
+                && crate::interpreter::eval_gpu::stmts_use_gpu_device_builtins(&f.body)
+            {
+                self.gpu_device_only_fns.insert(f.name.clone());
+            }
+        }
+        loop {
+            let mut changed = false;
+            for f in &all_fns {
+                if f.qualifier.is_some() || f.name == "main" || f.is_native
+                    || self.gpu_device_only_fns.contains(&f.name)
+                    || stmts_touch_kernel(&f.body, &kernel_names)
+                {
+                    continue;
+                }
+                let mut calls_device_only = false;
+                crate::ast::walk_stmts(&f.body, &mut |node| {
+                    if calls_device_only { return; }
+                    if let crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Call(callee, _), .. }) = node {
+                        if let ExprKind::Var(name) = &callee.kind {
+                            if self.gpu_device_only_fns.contains(name.as_str()) {
+                                calls_device_only = true;
+                            }
+                        }
+                    }
+                });
+                if calls_device_only {
+                    self.gpu_device_only_fns.insert(f.name.clone());
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+        }
     }
 
     fn gather_gpu_arg_fns_item<'a>(item: &'a Item, out: &mut Vec<&'a FnDecl>) {
@@ -6421,6 +6685,20 @@ pub(crate) fn is_gpu_array_param(p: &Param) -> bool {
     })
 }
 
+fn kernel_ctor_takes_gpu_array(
+    kernel_decls: &std::collections::HashMap<String, crate::ast::KernelDecl>,
+    fn_name: &str,
+    arg_idx: usize,
+) -> bool {
+    let Some(decl) = kernel_decls.get(fn_name) else { return false };
+    let Some(init) = decl.inits.first() else { return false };
+    let Some(init_param) = init.params.get(arg_idx) else { return false };
+    let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
+    let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
+    matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
+        && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _))
+}
+
 /// Free function name -> per-position flags: `true` for a `'kernel'global`/`'kernel'unified`
 /// array parameter that every GPU backend passes as `&BoringKernelArg<T>` instead of by value.
 /// `'kernel'global`/`'kernel'unified` describes memory residency, not ownership, so the borrow is
@@ -6443,21 +6721,53 @@ pub(crate) fn compute_gpu_borrow_params(
     }
     let mut all_fns: Vec<&FnDecl> = Vec::new();
     for item in &program.items { Transpiler::gather_gpu_arg_fns_item(item, &mut all_fns); }
-    let candidate = |p: &Param| !p.mutable && !p.rebindable && !p.variadic && p.default.is_none() && is_gpu_array_param(p);
-    let mut flags: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
-        .map(|f| (f.name.as_str(), f.params.iter().map(candidate).collect()))
-        .collect();
-    // Overloaded names would alias one entry: leave them by value.
-    for f in &all_fns {
-        if all_fns.iter().filter(|g| g.name == f.name).count() > 1 {
-            if let Some(v) = flags.get_mut(f.name.as_str()) { v.iter_mut().for_each(|b| *b = false); }
-        }
-    }
-    let by_name: std::collections::HashMap<&str, &FnDecl> = all_fns.iter().map(|g| (g.name.as_str(), *g)).collect();
     // The shared entry has only one overload's arity, so skip every overload when iterating.
     let overloaded: std::collections::HashSet<&str> = all_fns.iter()
         .filter(|f| all_fns.iter().filter(|g| g.name == f.name).count() > 1)
         .map(|f| f.name.as_str()).collect();
+    // Least fixed point: which `(fn_name, param_idx)` actually take `BoringKernelArg<T>`?
+    // A plain host/device helper (`[uint8]'global buf` indexing `buf[i]`, or a wrapper around one)
+    // stays `&Vec<T>` in the general pass and must never be treated as a `BoringKernelArg` target.
+    let mut takes_kernel_arg: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
+        .map(|f| {
+            let ret_res = fn_returns_resident(f);
+            let row = f.params.iter().map(|p| ret_res && is_gpu_array_param(p)).collect();
+            (f.name.as_str(), row)
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for f in &all_fns {
+            if overloaded.contains(f.name.as_str()) { continue; }
+            for (i, p) in f.params.iter().enumerate() {
+                if takes_kernel_arg[f.name.as_str()][i] || !is_gpu_array_param(p) { continue; }
+                let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
+                    kernel_ctor_takes_gpu_array(&kernel_decls, fn_name, arg_idx)
+                        || takes_kernel_arg.get(fn_name).and_then(|v| v.get(arg_idx).copied()).unwrap_or(false)
+                };
+                let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, true);
+                if any && only {
+                    takes_kernel_arg.get_mut(f.name.as_str()).unwrap()[i] = true;
+                    changed = true;
+                }
+            }
+        }
+        if !changed { break; }
+    }
+    let candidate = |fn_name: &str, i: usize, p: &Param| {
+        !p.mutable && !p.rebindable && !p.variadic && p.default.is_none()
+            && is_gpu_array_param(p)
+            && takes_kernel_arg.get(fn_name).and_then(|v| v.get(i).copied()).unwrap_or(false)
+    };
+    let mut flags: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
+        .map(|f| (f.name.as_str(), f.params.iter().enumerate().map(|(i, p)| candidate(f.name.as_str(), i, p)).collect()))
+        .collect();
+    // Overloaded names would alias one entry: leave them by value.
+    for f in &all_fns {
+        if overloaded.contains(f.name.as_str()) {
+            if let Some(v) = flags.get_mut(f.name.as_str()) { v.iter_mut().for_each(|b| *b = false); }
+        }
+    }
     // Greatest fixed point: start optimistic, drop a position as soon as a use disqualifies it.
     loop {
         let mut changed = false;
@@ -6466,17 +6776,13 @@ pub(crate) fn compute_gpu_borrow_params(
             for (i, p) in f.params.iter().enumerate() {
                 if !flags[f.name.as_str()][i] { continue; }
                 let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
-                    if let Some(decl) = kernel_decls.get(fn_name) {
-                        let Some(init) = decl.inits.first() else { return false };
-                        let Some(init_param) = init.params.get(arg_idx) else { return false };
-                        let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
-                        let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
-                        return matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
-                            && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+                    if kernel_ctor_takes_gpu_array(&kernel_decls, fn_name, arg_idx) {
+                        return true;
                     }
                     // A forwarded argument is read-only whether the callee borrows it or takes
-                    // it by value (`x.clone()` of a reference is the handle clone).
-                    by_name.get(fn_name).is_some_and(|g| g.params.get(arg_idx).is_some_and(is_gpu_array_param))
+                    // it by value (`x.clone()` of a reference is the handle clone), as long as
+                    // the callee's parameter is actually `BoringKernelArg`-typed.
+                    takes_kernel_arg.get(fn_name).and_then(|v| v.get(arg_idx).copied()).unwrap_or(false)
                 };
                 let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, true);
                 if !any || !only {

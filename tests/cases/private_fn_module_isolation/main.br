@@ -1,0 +1,4 @@
+use mod_a
+use mod_b
+
+print "{call_a(1)} {call_b(1)}"

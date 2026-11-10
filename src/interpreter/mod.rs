@@ -2443,6 +2443,17 @@ fn register_result_and_args_builtins(e: &mut Env) {
             std::process::exit(code);
         },
     });
+
+    // set_gpu_batch_limit(limit) — Metal command-buffer batching hint (no-op in interpreter)
+    e.define("set_gpu_batch_limit", Value::NativeFn {
+        name: "set_gpu_batch_limit".into(),
+        func: |args, line| {
+            match args.iter().next() {
+                Some(Value::Int(_)) if args.len() == 1 => Ok(Value::Void),
+                _ => Err(err("set_gpu_batch_limit: expected 1 int argument", line)),
+            }
+        },
+    });
 }
 
 fn register_misc_globals(e: &mut Env) {

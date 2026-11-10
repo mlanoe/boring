@@ -1,9 +1,21 @@
-# Typed monomorphization — Boring → Boring (no generics) → Rust
+# Typed specialisation, `.bri` files and the typing walk (design record)
 
-Status: draft; the `.bri` output (section 12) and the spike of section 9 are implemented, the rest is not. Written 2026-11-09 after a design discussion on
-qualifiers for implicit generics. Related: the book's "Untyped parameters", "Untyped
-fields", "Qualifier parameters", "Qualified generics — `<T'q>`", "Turbofish
-monomorphization".
+Status (2026-11-11): **implemented**, apart from the two-phase compiler (open, below). This file started as the
+draft of 2026-11-09 and is now the record of what was decided, built and measured; sections 1 to 8 are the original
+proposal, kept as written, the later ones say what actually happened. Where each part is documented for users and
+where it is tested:
+
+| Part | User documentation | Tests |
+|---|---|---|
+| Typed specialisation of untyped parameters (free functions, methods, `ext`, `mod`, across files) | book, "Advanced — Typed specialisation of untyped parameters"; CHANGELOG | `tests/cases/implicit_generics_specialise*.br`, `tests/specialize_cross_file.rs`, `tests/implicit_generics_errors.rs` |
+| `<T>` carries the qualifier of its argument (`<T'q>` removed) | book, "A type argument carries its qualifier" | `tests/cases/monomorphize_qualified_*.br` |
+| `.bri` files (`mono`, `full`, instances, origin comments) | book, "Advanced — Boring inferred files"; CHANGELOG | `tests/bri_oracle.rs` (report), `tests/bri_cli.rs` |
+| Typing walk / `TypeTable` (`BORING_TYPE_TABLE=replay\|walk\|check\|stats`), decisions pass | this file, sections 16 to 18 | `tests/type_table.rs` |
+
+Open: the two-phase compiler (sections 11, 13, 16.7 to 16.9, 18): making the walk and the decisions pass the only
+source of what the emitter reads, and removing its per-body tables. Measured and blocked by decisions the emitter
+takes while emitting; no part of it is needed by the features above. Related: the book's "Untyped parameters",
+"Untyped fields", "Qualifier parameters", "Turbofish monomorphization".
 
 ## Decisions (2026-11-09)
 
@@ -361,9 +373,9 @@ Phase 3 (same day): the qualifier slot of 3.3, in the two syntaxes decided ("bot
   existing coercion".
 Tests: `tests/cases/implicit_generics_specialise_slot.br` (4 configs) and three CLI cases.
 
-Remaining limits (not design decisions): same file only (a `pub def` that other files call is
-still specialised by its own file's calls alone), top-level free functions only (no `mod`, no methods,
-no `task`/`stream`), all untyped parameters of a function are specialised together,
+Remaining limits (not design decisions): same file only until 14.2 (a `pub def` that other files call is
+then specialised by the callers' files), top-level free functions and struct/enum methods of a unique name (14: no `ext`, trait or
+kernel method, no `task`/`stream`; `mod` items included, since 14.1), all untyped parameters of a function are specialised together,
 `unbounded_use` reports only the first unbounded use (a later `a + b` on two untyped
 parameters is left to rustc), and the environment is per function, not per scope (so an
 inner-scope shadow makes the name ambiguous rather than resolved).
@@ -624,3 +636,472 @@ What it taught:
   identical (401 before): the 40 cases the shared rewrite changes produce byte-identical Rust.
 This is the pattern for every decision that moves into the `.bri`: export what the transpiler decided,
 write it, and check that the reader, which now takes it as written, decides the rest the same way.
+
+### 13.3 `full` writes decisions, not defaults (2026-11-10)
+
+The oracle's failures showed that a qualifier written by hand is a constraint: `inline` on a local or enum parameter, `&` on a parameter and `shared` on a captured scalar all changed the Rust or broke the file. `full` now leaves out what is the default (`inline` locals and parameters, parameter borrows, scalar `shared`). Result: build 519/520 identical (was 403), run 447/447 (was 432). Also left out: `'actor` on a `mut` binding and `'owned` on a local (usage-lifted locks and boxed oversized values change how the value is lent when written). The one case left, `shared_dyn_tree_copy`, only loses a redundant `as Arc<dyn Widget>` cast the typed `.bri` makes unnecessary. The oracle blanks compiler-made names that carry source positions (`__comp_4_9`, `__a_axis0_4_1`).
+
+### 13.4 `full` writes GPU residency (2026-11-10)
+
+`desugar_tensor_quals` decisions (scope, name, position, `'global`/`'unified`) are taken right after the inline-kernel desugaring, before the check drains them, and applied to the parameter or `let` at that position, top-level statements included. Checked over `tests/cases` with `--target metal`: 15/16 identical Metal source (the other differs by `__inline_kernel_<line>_<col>`). `--show-qualifiers` still adds the reason of each decision, so it stays. The printer tracks whether it is inside device code (a `kernel` declaration or a `kernel(...)` block): host code is printed `kernel.tensors.matmul`, device code `.tensors`.
+
+### 14. Methods and top-level statements (2026-11-10)
+
+`specialize_untyped` now also takes over a struct or enum method with an untyped parameter used by a method call, field access or index, when the method name is declared once among all methods (struct, enum, `ext`, trait defaults and required signatures, kernels): the receiver's type is not needed, the call `o.m(x)` is found by the name and rewritten to `o.m_Counter(x)`, and the instance is added to the declaring type. A method that forwards an untyped parameter to a taken-over function or method is taken over too (fixpoint). Calls are rewritten from free functions, methods, `mod` bodies (unless the `mod` declares the same name) and the file's own statements (one synthetic body whose locals are the top-level `let`s). Refused as before, with the D5 error: a method in an `ext`, a trait default or a kernel, a function inside a `mod`, a method name declared twice. A bare call of a sibling method (`bump(a)` inside the struct) is not valid Boring for the transpiler (it asks for `self.`), so it is not handled.
+
+### 14.1 `mod` (2026-11-10)
+
+A `mod`'s items are reached by their plain name from anywhere (the interpreter runs modules flat, the transpiler flattens them), so there is no qualified call to resolve: a function or method of a `mod`, nested ones included, is a candidate when its name is unique across the file and every `mod` (a name declared in two `mod`s is refused with the D5 error). Calls are found by name wherever they are, and each instance is put back where its original was declared (`replace_originals`).
+
+### 14.2 Across files (2026-11-10)
+
+Placement: the caller's file, not the declaring one. Each Rust file is its own module, so a typed copy `bump_Counter` in `main.rs` cannot collide with another file's, and no instantiation registry is needed. In the declaring file a top-level `pub` candidate is kept as the generic original with an internal `specialise_only` attribute (not printed in the `.bri`, derived again when the file is parsed); the transpiler skips it (`emit_fn`), so the library never has a generic Rust form of it, and an uncalled one is no longer an error. In a file that `use`s it, `specialize_imported` (called where the other import-aware passes run, `desugar_array_block_with_imports`) takes the marked imports that no local function shadows (a name imported from two files is ambiguous and not taken), rewrites the calls with the same machinery as the same-file case and appends the instances as private functions. A forwarder (`twice` calling `bump`) is marked too, its copy asks for the `bump` copy.
+
+Limits: top-level free functions only (a `pub` method or `mod` function is not marked, so it keeps the D5 error); the copy is checked and emitted in the caller's scope, so a private helper of the library that the body names is not visible there (rustc says so); the monomorphizer's own cross-file instances (explicit `<T>`) are a different path and still go through its registry.
+
+### 15. The transpiler's monomorphizer in the `.bri`, tried again (2026-11-10): not shippable
+
+Tried a second time, now in `full` only (`mono` stays the output of the front end): a
+`Transpiler::global_pre_scan` + `monomorphize_program` on a clone of the parsed program (as
+`specialise_qualifier_params` does), a placement step (each instance right after the generic it comes
+from, the generic's `type let`s that depend on its parameters removed, because the instances are
+appended at the end of the file where `boring run x.bri` cannot see them from the statements above),
+and an order-insensitive comparison of the generated items in the oracle. It fell back to the
+unmonomorphized program when the scan panicked (a labeled multi-dimensional array). Result over
+`tests/cases`: `full` build identical went from 521/522 to 508/522 and `run` from 449/449 to 444/449.
+The remaining blockers, each the size of a pass of its own:
+
+1. **Patterns follow the subject's instance, which the monomorphizer does not rewrite.** After
+   specialisation `match slot: Slot.Full(p)` still names the dropped generic `Slot`; the transpiler
+   resolves it from the subject's type, the interpreter cannot (`qualifier_gaps_enums`: wrong result,
+   `qualifier_gaps_headers`: other output). Rewriting a pattern needs the type of its subject, i.e. the
+   typing pass of level 3.
+2. **Instances of an imported generic are made in the declaring file.** `Stack_int` of `boring.collections`,
+   `Wrapper_string`/`copy_first_int` of a sibling file are not in the calling file's program
+   (`boring_stdlib_collections`, `monomorphize_cross_file_*`: `undefined variable`). The calling `.bri`
+   would have to declare them (a `.bri` that is no longer the image of one source file) and the reader's
+   own transpile must not make them again.
+3. **The same instance is read back differently.** An instance method or function written with the
+   concrete type (`Board_owned other`) gets a different parameter-passing decision than the same
+   instance made from the generic (`Board<elem'owned>`): `merge_owned(&mut self, other: &Board_owned)`
+   against `other: Board_owned`, in eight `qualifier_*` cases. Both are valid Rust; the second is what
+   the original pipeline produces, so the file is not faithful.
+
+So the earlier conclusion stands: this belongs with the two-phase compiler (the typed AST gives the
+patterns' instances, the placement of imported instances and the parameter decisions at one place), not
+before. What `mono` and `full` already show is the same-file specialisation of untyped parameters
+(`bump_Counter_actor`), the qualifier decisions, the shared traits and the GPU residency.
+
+### 15.1 `--show-types` and `--show-qualifiers` stay (2026-11-10)
+
+Decision after the `.bri` work: neither is deprecated.
+
+- `--show-qualifiers` gives the reason of every decision (`default: ...`, `shares its qualifier with ...`,
+  notes) and the full list, including what `full` leaves out on purpose because writing it is a
+  constraint, not a report (`inline` locals and parameters, parameter borrows, `'actor` on a `mut`
+  binding, `'owned` on a local). The `.bri` shows the result; this shows why.
+- `--show-types` is mostly redundant with `mono` (the inferred headers and the bounds as a trailing
+  comment). It keeps the marking of types that came from a default value and the per-use instantiation
+  view. No upkeep cost, so it stays; both help texts point at `--emit-bri` for the whole-program view.
+
+### 15.2 Origin comments (2026-11-10)
+
+The origin comments of 3.6 exist, in a shorter form: the specialisation records, per copy, the base function (or `Owner.method`) with its line, the written types of the untyped parameters and the line of the first call that asked for it (`ORIGINS` in `specialize_untyped.rs`, cleared before each `.bri` and read by the printer). It is a trailing comment on the `def` line, the place of the `# inferred:` note, so no comment item reaches the generated Rust. No file name: a `.bri` is the image of one file, and a copy of an imported function says so instead. The transpiler's own instances (`Entry_Counter_actor`) have none, since they are not in the `.bri` (section 15).
+
+## 16. Measuring what a shared typing layer would replace (2026-11-10)
+
+Question: is "two phases" really "a typer first"? What exists, and how far do the existing resolvers agree?
+
+### What exists
+
+Expression typing is done at least seven times, none sharing code:
+
+| Where | What it answers | State it reads |
+|---|---|---|
+| `emit_methods.rs` `resolve_expr_type` (209 lines, 119 call sites) | declared `Type` of an expression | per-local tables filled while emitting |
+| `emit_methods.rs` `resolve_expr_struct_type` (44 call sites) | the struct *name* of a receiver | same tables |
+| `emit_methods.rs` `resolve_expr_declared_type`, `infer_std_type`, `overload_arg_type`, `resolve_iterable_type` ... | variations (declared, std result, overload argument, loop element) | same tables |
+| `infer_field_scan.rs` `body_local_types` | locals of a body, outside emission | its own `HashMap` |
+| `specialize_untyped.rs` `local_types` | written types of locals, ambiguity set | its own |
+| `infer_return_types.rs` `ty_of`, `field_ty` | types for return-type inference | declarations |
+| `qual_infer.rs` `of_expr`, `subject_type`, `receiver_base`; `desugar_tensor_quals.rs` `receiver_type`; `desugar_array_block.rs` `infer` | qualifier / residency / array-block decisions | each its own |
+
+The emission-time tables are the core: `var_types`, `var_struct_type`, `var_struct_types`,
+`var_scalar_types`, `var_std_types`, `var_init_exprs`, `var_newtype_type`, `known_local_vars`,
+`var_mutex_types`, `var_rwlock_types`, `var_atomic_types`, `var_lock_scalar`, ... (about 15), written
+at roughly 140 sites and read at roughly 190 while the emitter walks the program. A type is therefore only
+known *during* emission, in the order the walk reaches it: this is what keeps decisions out of the AST.
+
+### Agreement, measured
+
+Temporary instrumentation (not committed): every call of `resolve_expr_struct_type` on a variable or a
+field also computed `resolve_expr_type(..)` reduced to a struct name, over the `.br` files of
+`tests/cases` (`build --emit-rust`). 34,787 queries (weighted by how often an expression is asked, not
+distinct expressions):
+
+| Outcome | Queries | Share |
+|---|---|---|
+| same struct | 21,275 | 61% |
+| both unknown | 11,823 | 34% |
+| only the type resolver knows | 1,466 | 4.2% |
+| only the struct resolver knows | 98 | 0.3% |
+| different | 105 | 0.3% |
+
+Reading the 203 disagreements: the 105 "different" are variables declared with a trait and built from a
+struct (`Visitor v = A()`: one resolver answers the declared type, the other the concrete one). Both are
+right, to different questions; a typed AST would need both (declared and dynamic). The 98 "struct only" are
+implicit-generics locals with no written type (`let r = Request(...)`), where only the construction says
+what they are. The 1,466 "type only" are cases the struct resolver cannot follow (calls, indexes). One
+case showed a `Type::Named` that holds emitted Rust text (`Rc<CDog { name: ... }>`), i.e. a type made from a
+string.
+
+### What it says
+
+- The resolvers mostly agree where both answer (99.7%), so a shared table is feasible without redefining
+  semantics: the disagreements are two questions, not two truths.
+- The cost is not the resolvers but their inputs: they read tables that exist only during emission.
+  Moving them before emission means computing those tables in a separate walk (the `deep_pre_scan` /
+  `infer_field_scan::body_local_types` pattern, which already exists as a second, partial copy), then
+  making the emitter read the result instead of its own tables.
+- Size of the first useful step: one `TypeTable` (expression position to declared type and concrete
+  struct), built by a walk that reuses `resolve_expr_type` on a transpiler with the tables filled as
+  the emitter fills them; then replace the 190 reads one family at a time (`var_struct_type(s)` first,
+  11 + 32 reads). Each step keeps the generated Rust identical, so the 1535-case suite is the test.
+- What it does not give: the decisions (qualifiers, borrows, clones, locks) still live in
+  `infer_qualifiers` and the emitters; a typing layer is their prerequisite, not their replacement.
+
+### 16.1 The `TypeTable`, first version (2026-11-11)
+
+Built: `src/transpiler/type_table.rs`, wired through `Transpiler::type_table` (shared with the
+sub-transpilers), `type_scope` (set by `emit_fn`) and a wrapper around `resolve_expr_struct_type`. Off unless
+`BORING_TYPE_TABLE` is set. Key: `(scope, line, col, "v:<name>" | "f:<name>")`: the scope because the
+copies made by the specialisations keep the positions of their declaration, the name because `self.items`
+(sugar for an implicit field) is two expressions on one token.
+
+**Record then replay.** Over the 522 `.br` of `tests/cases`: 31,158 questions answered from the table, 27
+asked to the emitter after all, Rust identical (the two files that differ between two runs, `supertraits`
+and `generics`, differ the same way without the table: hash-map order). So the question "what struct is this
+variable or field?" is answerable from a table.
+
+**Position alone does not always decide.** 12 positions in 2 files (and the 27 questions above) get two
+different answers: a variable asked before and after its binding is registered (`clone_deep_copy`), and
+synthetic `self` nodes at `(1, 1)` in a scope the key does not tell apart (`protocols`, emitted by a path
+other than `emit_fn`). Such a position is marked ambiguous and falls back to the emitter. These are the
+order-dependent questions a pre-pass will have to settle by a rule, not by position.
+
+**A walk of its own** (`build_struct_names`, no emission, flow-insensitive: annotated parameters and
+`let`s, constructor calls, `self`, fields of a resolved struct, implicit `self.field`): against the
+recorded answers, 5,243 agree (81%), 1,127 not covered (17.6%), 64 different (1%), 41 claimed where the
+emitter says unknown (0.6%). Reading them: the different ones are specialised instances (`Board_inline`
+for `Board`: the walk runs before the monomorphizer, it must run on its output); the over-claims are
+enum-typed locals the emitter's struct resolver does not know (`V attr` matched in `match attr:`) and
+names rebound by a pattern. The 17.6% are what needs the emitter's richer rules: call results, indexing,
+loop elements, `if let`/`match` bindings, std results.
+
+**Next steps, in this order** (each keeps the Rust identical, checked by replay):
+1. run the walk after the monomorphizer, so instance scopes match;
+2. cover calls (`call_return_type`, overloads), indexing and loop elements, then pattern bindings;
+3. when the walk agrees with the record on every position it claims, replace the emitter's tables for
+   this question (`var_struct_type`, `var_struct_types`: 43 reads) by the table; repeat with `var_types`
+   (80 reads), `var_scalar_types`, `known_local_vars`;
+4. the record then becomes a regression check rather than the source of the table.
+
+### 16.2 The walk after the monomorphizer, and with types (2026-11-11)
+
+Done: the walk runs on the program each emission actually emits (`emit_program_items`, so after
+`monomorphize_program` and every rewrite before it), accumulating over the files a build inlines; it types
+expressions (not only names): a table of declared types for parameters and `let`s, `type_of` for variables,
+fields, indexes, free-function calls (not overloaded), constructors, method calls (owner known, name
+declared once for it), `for x in typed_array`; the top-level statements are one body (scope `""`), `ext`
+methods have their owner.
+
+Over `tests/cases`, against the recorded answers (6,478 decided positions): 5,775 agree (89.2%), 649 not
+covered (10.0%), 0 different (64 before the walk ran after the monomorphizer), 51 claimed where the
+emitter says unknown (0.8%), 3 undecided. Steps: 81.0% (first walk) → 83.2% (after the monomorphizer) →
+87.5% (top-level statements) → 89.2% (types, `ext`).
+
+What is left of the 649: 273 are `self` (42%) in methods where the emitter asks about a `self` it builds
+itself while emitting (implicit `self.field`), an expression that is not in the AST at all: answered by
+`self` = owner when asked, not by a walk; 123 are fields of receivers the walk cannot type; 253 are other
+variables (93 in two files about the standard library and type introspection): bindings made by patterns
+(`match`/`if let`), closure parameters, std call results, generic `T`. The 51 over-claims: enum-typed
+locals the emitter's struct question does not answer, and `observed_qualifier` (24, qualified fields
+`'observed`) where the emitter deliberately says unknown.
+
+Next: pattern bindings and closure parameters (they need the type of the matched subject, which the walk
+now has), then the synthetic `self`; then the 43 reads of `var_struct_type(s)` can start to come from the
+table, with the replay as the check.
+
+### 16.3 Patterns, closures, variants, implicit fields (2026-11-11)
+
+The walk now binds pattern variables with their types (`match` arms and `elif`/`if let`/`while let`/`guard let`
+patterns: `Some(p)` against `T?` gives `T`, `Variant(a, b)` gives the variant's declared payload types, a
+tuple pattern its elements), types closure parameters (written type, else unknown), types `Enum.Variant(..)`
+as the enum, and records for a bare field name `x` in a method both the variable and the `self.x` access the
+emitter builds on the same token. A method's `self` is a rule (its owner), counted apart.
+
+Over `tests/cases`, 6,475 decided positions: 5,525 found by the walk, 629 by the `self` rule (together
+95.0%), 270 not covered (4.2%), 0 different, 51 claimed where the emitter says unknown (0.8%), 3 undecided.
+Steps: 89.2% (16.2) → 93.5% (patterns, closures, `self` rule) → 95.0% (variants, implicit fields).
+
+Left of the 270: locals typed by what the walk cannot see from declarations (calls of overloaded or
+imported functions, std results, `T` generics), fields of those receivers, and the two files about the
+standard library and type introspection (43 of them). The 51 over-claims are unchanged: enum-typed locals
+the emitter's struct question does not answer, and `'observed` fields it deliberately leaves unknown.
+
+What it means for the reads: the walk finds what the emitter knows for 95% of the positions and never
+contradicts it, so the first reads can move to the table where the walk claims the position (the emitter
+stays the fallback for the rest, and the replay is the check): `var_struct_type` (11 reads) and
+`var_struct_types` (32) are the candidates.
+
+### 16.4 The walk answers instead of the emitter (`BORING_TYPE_TABLE=walk`, 2026-11-11)
+
+First time the emitter's behaviour can come from the walk: `resolve_expr_struct_type` for a variable or field
+asks the table the walk built for the program being emitted (after the monomorphizer) and falls back to its
+own tables where the walk does not claim the position. Rust identical over the 522 `.br` of `tests/cases`
+(`tests/type_table.rs` checks ten of them, in `replay` and `walk`).
+
+Live-weighted, the picture differs from the per-position one (95%): of the 33,872 questions asked while
+emitting, the walk answered 15,035 (44%); of the 18,837 left to the emitter, 13,052 are "no struct" answers
+and 5,785 (17% of all questions) are names the walk missed. So the walk covers 72% of the *positive*
+answers by weight (15,035 of 20,820): the questions asked many times are the hard ones (loop elements,
+call chains, results of std calls).
+
+Why this is still not the end of `var_struct_type(s)`: they are read directly by name in 60 more places,
+each with its own fallbacks and meaning (`contains_key` as "is a known struct variable"), not only through
+`resolve_expr_struct_type`. Moving them is a site-by-site job where the expression is at hand, each batch
+checked by the corpus in both modes; the unknown-or-no-struct distinction (13,052 answers) needs the walk
+to say "known, and not a struct" rather than stay silent. What would change the picture most: the 5,785
+missed names (std results, overloaded and imported functions), which the type of a call needs the callee's
+declaration for: imported ones need the file graph the walk does not read yet.
+
+### 16.5 `self` by rule (2026-11-11)
+
+Of the 5,785 names the emitter knew and the walk did not, 4,347 (75%) were the `self` of a method, asked about
+expressions the emitter builds itself while emitting (an implicit `self.field`): they are not in the AST. In
+walk mode `v:self` is now answered from the scope (`Owner::method`), which is what the emitter answers too
+(same Rust over the corpus).
+
+Result, live-weighted over `tests/cases`: of 33,872 questions, 19,315 answered by the walk (57%), 13,052
+"no struct" left to the emitter, 1,505 names the walk misses (4.4% of all questions). The walk now covers
+92.8% of the positive answers by weight (19,315 of 20,820).
+
+What the 1,505 are: 815 are one file (`boring_stdlib_collections`, instances of an imported generic
+`Stack_int`), then locals bound from std results and from overloaded or imported functions, and
+`T`-typed generics. The imported ones need the walk to read the files `use` brings in (their structs, enums
+and function signatures), as `infer_return_types::collect_inference_imports` already does for the front end.
+
+### 16.6 Imports (2026-11-11)
+
+The walk reads the declarations of the files the program imports (`collect_inference_imports`: sibling
+files, `[deps]` projects, the embedded `boring.*` stdlib; their structs, enums with variant payloads,
+fields, method and function return types), and knows that a generic struct `Stack` makes `Stack_int`, an
+instance the monomorphizer names in the file that declares the generic.
+
+Live-weighted over `tests/cases`: 19,488 of 33,872 questions answered by the walk (57.5%), 1,332 names it
+still misses (3.9%; 1,505 before), so 93.6% of the positive answers by weight (19,488 of 20,820). Same Rust in
+both modes (`generics` and `supertraits` vary between two runs of the same binary, in both modes, over the same
+two outputs: hash-map order). The 1,332 are now spread flat: the introspection files (`type_var_introspect_*`,
+`introspect_thread_safety`: 282), `json_scenarios`, trait-object scenarios; none dominates, each needs its own
+rule (std results, `Type`/`Info` values, trait objects built from structs).
+
+The two-phase line of work stops being "find the missing rule" and becomes "decide what to move": the walk
+answers the struct question well enough to start replacing the emitter's by-name reads (60 sites), the
+1,332 stay with the emitter until their rules are written.
+
+### 14.3 `ext` methods (2026-11-11)
+
+A method of an `ext` of a plain type (no type parameter, no type argument: not `ext Board<elem'actor>`) is a
+candidate like a struct method, owner = the extended type, name unique among all methods; the instance is
+added to the same `ext`. An `ext` of a generic's instance keeps the D5 error, as do trait defaults and
+kernels. Test: `tests/cases/implicit_generics_specialise_ext.br`.
+
+### 14.4 `pub` methods across files (2026-11-11)
+
+The marking of 14.2 now covers the `pub` methods of top-level structs and enums: the declaring file keeps the
+original marked (`swap_methods`, never emitted), and `specialize_imported` also takes the marked methods of
+the imported structs and enums (a name two imports declare, or that a local method has, is not taken). The
+copies of a method go in an `ext <Type>:` the calling file gains: a cross-file `ext` of an imported type
+works, private fields included (checked by building and running the generated project). A caller that
+declares its own method of the same name hides the imported one: a call on a receiver written with the
+imported type is then an error naming both (`check_shadowed_calls`); a receiver whose type is not written stays
+silent, since the call may mean the local method. Tests:
+`tests/specialize_cross_file.rs` (run, the generated project, the library without the original).
+
+### 14.5 `pub` functions of a `mod` across files (2026-11-11)
+
+Same mechanism as 14.2: a `pub` free function is kept, marked, at any depth (`replace_originals` no longer
+requires the top level for functions), and `specialize_imported` looks for marked functions inside the
+imported `mod`s too. The copy lands at the top level of the calling file, where the plain name resolves, as
+in the same-file case. `pub` methods of a struct declared inside a `mod` are marked and found the same way (14.6): the caller's `ext <Type>:`
+needs no `mod` path, since the plain name resolves. Tests: `tests/specialize_cross_file.rs`.
+
+### 14.6 `pub` methods of a struct inside a `mod`, across files (2026-11-11)
+
+`swap_methods` marks a `pub` method at any depth, `specialize_imported` and `check_shadowed_calls` look for
+marked methods inside imported `mod`s. Nothing else: the copies go in an `ext <Type>:` of the caller, and the
+type's plain name resolves because a `mod`'s items are flat. Test: `tests/specialize_cross_file.rs`.
+
+### 16.7 Toward a complete walk, and the emitter's quirks (2026-11-11)
+
+Rules added to the walk, each measured on `tests/cases` against the recorded answers: traits (a trait-typed `let`
+takes the struct its initialiser builds, as the emitter does; a trait-typed *parameter* answers the trait name, a
+loop element or local of a trait type does not), enum variants looked up per enum (variant names collide across
+enums) for unit variants, payload constructions and patterns, `as` casts, array literals, the reflection
+types the transpiler registers itself (`IntrospectInfo`, `Field`, `Method`, `value.introspect()`), inits, setters,
+conversions and trait defaults (their scope: the owner), and the emitter's own refusals (`'observed` values,
+enum-typed declared locals and parameters, `Enum.Variant` paths).
+
+Steps over the 6,478 decided positions: 95.0% → 96.5% (traits, casts, arrays, enum variants) → 97.4%
+(reflection types) → 97.6% (inits/setters/conversions/trait defaults, trait parameters). Not covered: 130 (2.0%);
+claimed where the emitter says unknown: 25 (0.4%); different: 0.
+
+What the over-claims show is not a missing rule: the emitter's answer for the *same shape* depends on state
+that is not in the program. A parameter `Counter c` is a struct for it in one function and unknown in another
+(`error_trait_mut_immutable_arg` against `mut_param_type_method`), depending on how the parameter is passed and
+what was registered before. A typing pass written from the AST cannot reproduce that without copying the quirk,
+and the quirks are exactly what the emitter's per-local tables encode as a side effect. So two goals pull apart:
+*agreeing with the emitter* (what the oracle measures) and *a clean typed table* (what a two-phase compiler
+wants). The honest route is to make the table the specification and let the emitter's quirks that change Rust
+show up as differences to review one by one, instead of copying them.
+
+`BORING_TYPE_TABLE=check` is the gate for that review: it runs over every program a suite transpiles (not only
+`tests/cases`), changes nothing, and logs each position where the walk claims something different. Over the
+whole transpile suite and the self-hosted interpreter build (1,539 + 4 + 186 tests, before the rules above) it
+logged 180 lines, all of one kind ("the walk claims a struct, the emitter says unknown"), from six variable
+names in a handful of programs, and not one contradiction.
+
+### 16.8 The by-name reads, and why the type table is not enough (2026-11-11)
+
+27 reads of `var_struct_types` by variable name (`get(v).cloned()`, `contains_key(v)`) now go through one accessor
+(`Transpiler::local_struct`, `is_struct_local`); the ten composite ones (`.get(v).map(..)`, `.or_else(..)`) stay
+direct: replacing them changed the Rust of four programs in walk mode, each for a reason specific to its site.
+The accessor's walk-mode answer comes from a per-body table of locals the walk builds (`(scope, name)` to
+struct), flow-insensitive: a name bound to two different things in one body has no entry.
+
+What a walk of the AST cannot see, found by running `check` over the corpus and fixing the largest classes: the
+emitter does not keep in `var_struct_types` a local that has a written qualifier (it is tracked through its
+qualified `var_types` entry), nor one decided to live behind a lock (`inferred_qualifiers`), nor one read out of
+a field or an element (`let d = denominator`: and the Rust differs, `d.clone()` against `d`), nor one bound by an
+`if let t = x as T` downcast, nor one declared with an enum type. Each is a *decision about representation*,
+not a type. With those taken into account the walk's claims agree with the table 97.9% of the time (8,814 against
+190, live-weighted) and walk mode gives the same Rust as the emitter over all of `tests/cases`.
+
+So `var_struct_types` is not a typing table: it is type x representation. A table of types alone cannot replace
+it, and the representation is exactly what `infer_qualifiers` and its neighbours decide (step 4). The two-phase
+design has to carry decisions as data next to the types; that is the next work.
+
+Concurrent work note: another session was editing the tensor files of the same checkout while this was done
+(`tensor_host.rs`, `ast/mod.rs`, `checker/tensor.rs`, `desugar_tensor_*.rs`), which stopped the tree from
+building for a while; this work was validated in a clean `git worktree` of the previous commit plus these files.
+
+### 16.9 The decisions pass (step 4, first part), 2026-11-11
+
+`decide_program` (in `emit_top.rs`, run where the walk is built, on the program the emitter is about to emit) is a
+phase-1 pass for the qualifier decisions: for every function and method body, `infer_qualifiers` on a clone of the
+transpiler with the facts `emit_fn` gives it just before emitting (parameters, lent parameters, mutability, the
+method's forced borrows from its signature), results kept by `(scope, name)` in `decision_table`. The 30 reads of
+`inferred_qualifiers` outside the pass itself go through `Transpiler::decided_qual`.
+
+Two attempts, measured with `check` over `tests/cases`:
+1. reuse the *speculative* runs `pre_infer_fn_qualifiers` already makes (a probe for signature qualifiers, with
+   another configuration: lent parameters unlent, methods treated as free functions): 93.1% agreement, the
+   table saying `Inline` where the emitter borrows. A probe is not the decisions pass.
+2. a run in the configuration of the real emission: 98.7%, every difference "the table says `Inline`, the
+   emitter has no entry". `Inline` is the default and an absent entry is not the same to the emitter (an
+   explicit one annotates the `let`: `let p: LPoint = ..`), so the table is read only for a non-default decision:
+   1,303 reads, 0 differences, and walk mode gives the same Rust for all of `tests/cases`.
+
+What this does not give, and the reason a table computed in advance is not simply the emitter's state: the emitter
+re-runs the inference on nested blocks while it emits a body ("emit_body may call infer_qualifiers recursively for
+nested arm/block bodies ... which would overwrite inferred_qualifiers", `emit_fn`'s own comment), so the value of
+a read can depend on how far the emission is. The corpus does not hit it (0 differences); a program that does
+would show as a difference in `check`, which is why `check` has to run over every suite before the emitter stops
+computing these itself. Not covered: the decisions of the top-level statements (the file's own body), closures'
+captured bodies, and the other decision families (borrows of trait parameters, shared traits, atomic promotion,
+lock and clone choices), each with its own interleaving.
+
+### 17. The monomorphizer in `full` (step 6), 2026-11-11
+
+Done, in `full` (not `mono`, which stays the output of the front end): `transpiler::monomorphized_for_bri` runs the
+transpiler's `global_pre_scan` + `monomorphize_program` on a clone of the parsed program (falling back to the
+generics as written if the scan panics on sugar the later desugarings remove) and four steps make the result a file a
+reader can run and build:
+
+1. **Placement** (`place_instances`): each instance goes right after the generic it was made from, or where that generic
+   was; instances of a generic this file does not declare (`Stack_int`) go after the `use`s (`imported_instances`, from
+   the transpiler's registry of generic declarations and instantiations); a generic left next to its instances loses
+   the `type let`s that depend on its parameters.
+2. **Patterns** (`type_table::rewrite_variant_patterns`): the walk's typing gives the subject's type, a variant pattern
+   of a dropped generic enum is renamed to the subject's instance (`Slot::Full` -> `Slot_inline::Full`).
+3. **By-value parameters** (`mark_by_value_instance_params`): the third blocker of section 15, solved by experiment: an
+   instance method whose parameter came from a generic's instance type (`Board<elem'q> other`) is passed by value by
+   the emitter, and spelled with the plain name (`Board_owned other`) it is borrowed. Writing `Board_owned'inline other`
+   gives back the original Rust. (The one residual, `qualifier_gaps_calls`, is a method of a generic struct whose
+   by-value parameter the emitter also clones: no spelling gives "by value, cloned".)
+4. **The oracle** compares generated items as a set, ignoring blank lines (`sorted_items`): the monomorphizer's instances
+   come last in the transpiler's file, next to their generic in the `.bri`.
+
+Result over `tests/cases` (450 with an `.expected`, 523 built): run 450/450; build identical 519/523 (522/523 without the
+monomorphizer). The four: a redundant cast (`shared_dyn_tree_copy`), a redundant clone (`qualifier_gaps_calls`), the
+comment of a dropped static (`monomorphize_struct`) and `monomorphize_cross_file_main`, where the library's own
+generic `Wrapper<T>` has a `type let` that depends on `T` and nothing in the reader's world specialises it.
+The by-value finding also says something about the two-phase design: a parameter's passing mode is a decision
+(here derived from the generic form of its type) that must live in the AST as data, not in how the type is spelled.
+
+### 18. Sharing the typer with the checker and the interpreter (step 7), 2026-11-11: what it would be, measured
+
+**The interpreter** has no static typing to share: values carry their type at run time (`Value::Struct`, ...), so
+nothing there duplicates a typing pass. Nothing to merge.
+
+**The checker** types on purpose as little as it needs. Its `Binding` carries three independent flags, each
+feeding one check and each "positively known, never guessed": `ctor_type` (the struct of an unannotated
+`let h = S(...)`, for `check_same_object_lend`), `builtin_collection` (for the content-mutation gate),
+`kernel_type`. Its own comment says overload resolution and call-argument typing are out of reach "without type
+inference it doesn't have". So the checker/typer question is not a duplication to remove, it is a capability the
+checker lacks.
+
+Measured with the walk over `tests/cases` (unannotated `let`s, counted per emission): 542 are a direct constructor
+call, the only shape `ctor_type` knows; 133 more (+25%) have a struct type the walk knows from something else (a
+call of a typed function, a method with a declared return type, an enum variant, a cast, an element of a typed
+array, a pattern binding); 1,377 are unknown to the walk as a *struct* (scalars, strings, collections, std results:
+the walk answers the struct question only). So sharing would let the checker's struct-based checks reach a quarter
+more bindings; it would add diagnostics, not remove code, and a new diagnostic is a behaviour change to review.
+
+Decision: not done as a refactor. If wanted, the way in is the one used for the emitter: an accessor in the checker
+for "the struct of this binding", `check` mode logging where the walk knows more than the checker, and each new
+check enabled on its own. The walk is already a standalone function of a `Program` (`build_struct_names`), so it
+needs no emitter state to be called from the checker.
+
+### 19. All by-name reads through the accessor (point 1 of the remaining work), 2026-11-11
+
+The 19 composite reads of `var_struct_types` that section 16.8 left direct (`.get(v).map(..)`, `.or_else(..)`) go
+through `local_struct` too, so there is no read of the emitter's table by variable name left outside the accessor.
+In walk mode they had changed the Rust of four programs; each was a shape the emitter does not track as a struct
+local while the walk typed it, and became a rule of the walk: `x.introspect()` on a type-level path
+(`Shape.Unit.introspect()`), `let sa = x as T` (a conversion; `x as T else ..` is tracked), and `T c = b` where `b`
+is another local (an alias).
+
+Result over `tests/cases`: walk mode gives the same Rust for all 523 programs (the two that varied between runs
+before no longer differ), and `check` finds, live-weighted, 8,894 by-name reads that agree with the emitter against
+138 where the walk claims a struct and the emitter has none (98.5%), 20,653 positions against 92, and 1,303
+decisions against 0.
+
+### 19.1 Two questions, two projections; what is left of point 1 (2026-11-11)
+
+The emitter answers two neighbouring questions with different rules: *by position* (`resolve_expr_struct_type`, which
+falls back on the declared types of the locals) and *by name* (`var_struct_types`, the table of struct locals). A plain
+cast, an alias of a local (`T c = b`) and a local read out of a field or an element (`let d = denominator`) are
+answered by position and not tracked by name. The walk now keeps the two apart: those shapes are left out of its table
+of locals only, not of its answers by position, which brought the position coverage back up. Closure parameters given
+to an array method (`items.map((x): ..)`) take the array's element type.
+
+Over `tests/cases`: walk mode gives the same Rust for all 523 programs; by position, 97.8% of the recorded answers are
+found (118 not covered, 23 claimed where the emitter says unknown, none different); live-weighted, `check` finds
+20,871 positions agreeing against 97, 8,898 by-name reads against 138, and 1,303 decisions against 0.
+
+What is left of point 1 is a long tail, not a missing mechanism. The 118 positions are bindings the walk makes
+ambiguous because a name is reused in a body (`s` as a closure parameter and as a loop variable), std results, and
+fields of such receivers. The 23 + 138 are the emitter's own inconsistencies (a parameter `Counter c` is a struct
+for it in one function and unknown in another); settling them means choosing which answer is right, which can
+change the Rust, so they are a list to review, not rules to add.

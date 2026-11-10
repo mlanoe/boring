@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Mickaël LANOË
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The `.bri` oracle (docs/design-notes/typed-monomorphization-draft.md, sections 3.6 and 11).
+// The `.bri` oracle (docs/design-notes/typed-specialisation.md, sections 3.6 and 11).
 //
 // A `.bri` is valid Boring, so for every `tests/cases/*.br`:
 //   1. `boring run x.br` and `boring run x.bri` print the same output (level 1, `mono`);
@@ -55,16 +55,37 @@ fn run(dir: &Path, args: &[&str]) -> Out {
 
 /// `__stream_<source line>` names depend on the line of the `for` in the file, which a reprint changes.
 fn normalise(rust: &str) -> String {
+    // Compiler-made names (`__stream_<line>`, `__comp_<line>_<col>`, `__a_axis0_<line>_<col>`) carry source
+    // positions, which the printed file moves: their digit runs are blanked.
+    let bytes = rust.as_bytes();
     let mut out = String::with_capacity(rust.len());
-    let mut rest = rust;
-    while let Some(i) = rest.find("__stream_") {
-        out.push_str(&rest[..i + 9]);
-        rest = &rest[i + 9..];
-        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-        out.push('N');
-        rest = &rest[digits..];
+    let mut i = 0;
+    while i < bytes.len() {
+        if rust[i..].starts_with("__") && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')) {
+            let end = i + bytes[i..].iter().take_while(|b| b.is_ascii_alphanumeric() || **b == b'_').count();
+            let ident = &rust[i..end];
+            let ib = ident.as_bytes();
+            let mut prev_us = false;
+            let mut j = 0;
+            while j < ib.len() {
+                if prev_us && ib[j].is_ascii_digit() {
+                    let n = ib[j..].iter().take_while(|b| b.is_ascii_digit()).count();
+                    out.push('N');
+                    j += n;
+                    prev_us = false;
+                    continue;
+                }
+                out.push(ib[j] as char);
+                prev_us = ib[j] == b'_';
+                j += 1;
+            }
+            i = end;
+        } else {
+            let ch = rust[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
     }
-    out.push_str(rest);
     out
 }
 
@@ -118,6 +139,28 @@ fn run_oracle(dir: &Path, name: &str, level: &str) -> Verdict {
     Verdict::Ok
 }
 
+/// The top-level items of generated Rust (blocks closed at brace depth 0), sorted.
+fn sorted_items(rust: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut depth: i64 = 0;
+    for line in rust.lines() {
+        cur.push_str(line);
+        cur.push('\n');
+        for c in line.chars() {
+            match c { '{' => depth += 1, '}' => depth -= 1, _ => {} }
+        }
+        if depth <= 0 && (line.trim_end().ends_with('}') || line.trim_end().ends_with(';')) {
+            items.push(std::mem::take(&mut cur).trim().to_string());
+            depth = 0;
+        }
+    }
+    if !cur.trim().is_empty() { items.push(cur.trim().to_string()); }
+    items.retain(|i| !i.trim().is_empty());
+    items.sort();
+    items
+}
+
 fn build_oracle(dir: &Path, name: &str, level: &str) -> Verdict {
     let original = run(dir, &["build", "--emit-rust", &format!("{name}.br")]);
     if !original.ok { return Verdict::Skipped; }
@@ -127,6 +170,9 @@ fn build_oracle(dir: &Path, name: &str, level: &str) -> Verdict {
         return Verdict::Mismatch(format!("the .bri does not build: {}", again.stderr.lines().find(|l| l.contains("error")).unwrap_or("")));
     }
     if normalise(&original.stdout) == normalise(&again.stdout) { return Verdict::Ok; }
+    // The same items in another order is the same program: the monomorphizer's instances go at the end of the
+    // generated file, but a `.bri` needs them before the statements that use them.
+    if sorted_items(&normalise(&original.stdout)) == sorted_items(&normalise(&again.stdout)) { return Verdict::Ok; }
     // A few generated orders come from a hash map (`supertraits`): the source alone has more than one
     // output. Same output set for both is the identity.
     let outputs = |file: String, first: String| -> std::collections::HashSet<String> {

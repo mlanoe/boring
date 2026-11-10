@@ -165,7 +165,7 @@ impl Transpiler {
                 // Struct unary neg dispatch: `-a` → `a.clone().neg()`
                 if matches!(op, UnaryOp::Neg) {
                     if let ExprKind::Var(vname) = &e.kind {
-                        if let Some(sty) = self.var_struct_types.get(vname.as_str()).cloned() {
+                        if let Some(sty) = self.local_struct(vname) {
                             let key = format!("{}::neg", sty);
                             if self.struct_operator_methods.contains(&key) {
                                 return format!("{}.clone().neg()", s);
@@ -571,7 +571,7 @@ impl Transpiler {
                     let needs_clone = match &e.kind {
                         ExprKind::Field(..) => true,
                         ExprKind::Var(vname) =>
-                            self.var_struct_types.contains_key(vname.as_str())
+                            self.is_struct_local(vname)
                             || self.collection_vars.contains(vname.as_str())
                             || self.vec_vars.contains(vname.as_str())
                             || self.string_arc_vars.contains(vname.as_str())
@@ -1303,7 +1303,16 @@ impl Transpiler {
                 | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr, l, r) =>
                 self.is_definitely_numeric_expr(l) && self.is_definitely_numeric_expr(r),
             ExprKind::Var(v) => self.var_types.get(v.as_str())
-                .map(is_known_numeric_scalar_type).unwrap_or(false),
+                .or_else(|| self.fn_current_params.get(v.as_str()))
+                .map(|t| is_known_numeric_scalar_type(t.without_mut())).unwrap_or(false),
+            ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Field(..)
+                | ExprKind::Index(..) | ExprKind::LabeledIndex(..) => {
+                self.resolve_field_or_index_type(expr)
+                    .or_else(|| self.resolve_expr_type(expr))
+                    .map(|t| is_known_numeric_scalar_type(t.without_mut()))
+                    .unwrap_or(false)
+            }
+            ExprKind::Else(_, default) => self.is_definitely_numeric_expr(default),
             ExprKind::If(if_stmt) => self.if_stmt_is_definitely_numeric(if_stmt),
             // A cast to a numeric scalar of a non-string/bool source is itself numeric
             // (`(t as int) as float`).
@@ -1428,7 +1437,7 @@ impl Transpiler {
         // do not transform string/numeric literal casts.
         let src_is_struct_or_enum = match &e.kind {
             ExprKind::Var(v) =>
-                self.var_struct_types.contains_key(v.as_str())
+                self.is_struct_local(v)
                 || self.var_struct_type.contains_key(v.as_str())
                 || matches!(self.var_types.get(v.as_str()),
                     Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str())),
@@ -2848,7 +2857,7 @@ impl Transpiler {
             // struct field access from JoinHandle avoids false positives on plain
             // structs with a "value" field (e.g. LetStmt, ReturnStmt, pair tuples).
             if let ExprKind::Var(v) = &obj.kind {
-                let is_known_struct = self.var_struct_types.contains_key(v.as_str())
+                let is_known_struct = self.is_struct_local(v)
                     || self.struct_fields.contains_key(v.as_str())
                     || self.var_types.get(v.as_str()).map(|t| {
                         if let Type::Named(tn) = t { self.struct_fields.contains_key(tn.as_str()) } else { false }
@@ -2875,7 +2884,7 @@ impl Transpiler {
                     .map(|t| self.struct_getters.contains(&format!("{}::{}", t, field)))
                     .unwrap_or(false)
             } else {
-                let from_struct = self.var_struct_types.get(v.as_str())
+                let from_struct = self.local_struct(v).as_ref()
                     .map(|type_name| self.struct_getters.contains(&format!("{}::{}", type_name, field)))
                     .unwrap_or(false);
                 let from_enum = if !from_struct {
@@ -2914,9 +2923,10 @@ impl Transpiler {
                 let access = self.mutex_var_read(v, v);
                 // If the field is itself an Rc/Arc<RefCell/Mutex<T>> (actor/guard),
                 // we must clone it to avoid moving out of the borrow/lock guard.
+                let tracked_struct = self.local_struct(v);
                 let field_is_shared = self.var_types.get(v.as_str())
                         .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
-                        .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()))
+                        .or(tracked_struct.as_deref())
                         .and_then(|tname| self.struct_fields.get(tname))
                         .and_then(|fields| fields.iter().find(|(fname, _)| fname == field))
                         .map(|(_, fty)| Self::is_arc_qualified(fty) || Self::is_rc_qualified(fty))
@@ -3076,7 +3086,7 @@ impl Transpiler {
         // If the accessed field is Arc-qualified (actor/guard/shared), add .clone()
         // so the value is not moved out of the struct — Arc::clone is cheap.
         let field_is_arc = if let ExprKind::Var(v) = &obj.kind {
-            let struct_name = self.var_struct_types.get(v.as_str())
+            let struct_name = self.local_struct(v).as_ref()
                 .cloned()
                 .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
                     Type::Named(n) => Some(n.clone()),
@@ -3138,7 +3148,7 @@ impl Transpiler {
         };
         if let ExprKind::Var(v) = &obj.kind {
             if v == "self" { return; }
-            let owner_struct = self.var_struct_types.get(v.as_str()).cloned()
+            let owner_struct = self.local_struct(v)
                 .or_else(|| self.var_types.get(v.as_str()).and_then(&named))
                 .or_else(|| self.fn_current_params.get(v.as_str()).and_then(&named));
             if let Some(sn) = owner_struct {
@@ -3952,7 +3962,7 @@ impl Transpiler {
                     // Same diagnostic as above, for a plain local binding rather
                     // than a parameter — see the matching comment in
                     // `emit_methods.rs`'s `emit_method_call_fallback`.
-                    let struct_name = self.var_struct_types.get(v.as_str()).cloned()
+                    let struct_name = self.local_struct(v)
                         .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
                             if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                         }));
@@ -4434,8 +4444,20 @@ impl Transpiler {
             }
         }
         let rhs_s = if target_is_resident {
+            let target_ty = match &target.kind {
+                ExprKind::Var(name) => self.resident_call_vars.get(name.as_str()),
+                _ => None,
+            };
             self.try_emit_gpu_resident_return(value)
                 .or_else(|| rhs_resident_var.as_ref().map(|(v, _)| format!("{v}.clone()")))
+                .or_else(|| self.try_emit_resident_call_as_kernel_arg(value, target_ty))
+                .or_else(|| self.expr_is_gpu_resident_field(value).then(|| self.emit_expr_owned(value)))
+                .or_else(|| match &value.kind {
+                    ExprKind::Var(v) if self.gpu_resident_vars.contains_key(v.as_str())
+                        || self.current_fn_gpu_arg_param_names.contains(v.as_str()) => Some(format!("{v}.clone()")),
+                    _ => None,
+                })
+                .or_else(|| Some(format!("BoringKernelArg::Host({})", self.emit_expr_owned(value))))
         } else {
             self.try_materialize_resident_call(value)
                 .or_else(|| rhs_resident_var.as_ref().map(|(v, ty)| self.materialize_resident_var(v, ty)))
@@ -4774,7 +4796,7 @@ impl Transpiler {
                                     let inferred = inferred
                                         .or_else(|| self.resolve_expr_type(&arg.value))
                                         .or_else(|| match &arg.value.kind {
-                                            ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                                            ExprKind::Var(v) => self.local_struct(v).as_ref()
                                                 .map(|n| Type::Named(n.clone())),
                                             _ => None,
                                         });
@@ -4823,7 +4845,7 @@ impl Transpiler {
             }
             // Callable struct: `obj(args)` where `obj` is a struct instance with `def ()` / `req ()`.
             // Emit `obj.__call__(args)` — the anonymous method is named `__call__` in Rust.
-            if let Some(struct_name) = self.var_struct_types.get(name.as_str()).cloned() {
+            if let Some(struct_name) = self.local_struct(name) {
                 if self.callable_structs.contains(&struct_name) {
                     let args_s = args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ");
                     return format!("{}.__call__({})", name, args_s);
@@ -6085,7 +6107,7 @@ impl Transpiler {
         };
         match &e.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
-            ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned()
+            ExprKind::Var(v) => self.local_struct(v)
                 .or_else(|| self.var_types.get(v.as_str()).and_then(&named)),
             ExprKind::Field(base, field) => {
                 let struct_name = self.resolve_struct_name(base)?;
@@ -6676,7 +6698,7 @@ impl Transpiler {
         !self.fn_sigs.contains_key(name)
             && !self.known_local_vars.contains(name)
             && !self.fn_current_params.contains_key(name)
-            && !self.var_struct_types.contains_key(name)
+            && !self.is_struct_local(name)
             && !self.task_fns.contains(name)
             && !self.user_top_level_names.contains(name)
     }
@@ -6744,7 +6766,7 @@ impl Transpiler {
             let is_optional_method_call = !is_optional_var && !is_optional_call
                 && matches!(&a.value.kind, ExprKind::MethodCall(recv, method, _)
                     if matches!(&recv.kind, ExprKind::Var(v)
-                        if self.var_struct_types.get(v.as_str()).map(|sty| {
+                        if self.local_struct(v).as_ref().map(|sty| {
                             self.struct_method_return_types
                                 .get(&format!("{}::{}", sty, method))
                                 .map(|t| matches!(t, Type::Optional(_)))

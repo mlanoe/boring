@@ -142,6 +142,9 @@ struct DeviceEmitter {
     /// A 64-bit fixed-point `*` or `/` was emitted: the `bp_fx_*` helper block is spliced into
     /// the header (at `FIXED64_MARKER`) once, only then.
     fixed64_used: bool,
+    /// Buffer fields of the current kernel whose `.length`/`.count` is referenced in device code
+    /// (injected as extra `int64_t` scalar buffers).
+    current_len_fields: std::collections::HashSet<String>,
     errors: Vec<crate::transpiler::TranspileError>,
 }
 
@@ -159,6 +162,7 @@ impl DeviceEmitter {
             current_ret_fmt: None,
             fn_param_fmts: std::collections::HashMap::new(),
             fixed64_used: false,
+            current_len_fields: std::collections::HashSet::new(),
             errors: Vec::new(),
         }
     }
@@ -270,6 +274,10 @@ impl DeviceEmitter {
     fn emit_kernel_decl(&mut self, decl: &KernelDecl) {
         self.current_fields = decl.fields.clone();
         self.current_kernel = decl.name.clone();
+        self.current_len_fields = kernel_buffer_length_fields(decl)
+            .into_iter()
+            .map(|f| f.name.clone())
+            .collect();
         self.line(&format!("// ─── kernel {} ───", decl.name));
         self.blank();
 
@@ -306,6 +314,11 @@ impl DeviceEmitter {
         let ret = method.return_ty.as_ref().map(msl_type).unwrap_or_else(|| "void".into());
         let fn_name = format!("{}_{}", kernel, method.name);
         let mut params = buffer_field_params(fields);
+        for f in fields {
+            if self.current_len_fields.contains(&f.name) {
+                params.push(format!("int64_t __boring_len_{}", msl_safe_ident(&f.name)));
+            }
+        }
         for p in &method.params {
             let name = msl_safe_ident(&p.name);
             params.push(match p.ty.as_ref() {
@@ -412,6 +425,16 @@ impl DeviceEmitter {
                 }
         }
 
+        // 3.5. Element lengths for buffer fields whose `.length`/`.count` is queried in device code.
+        let len_fields = kernel_buffer_length_fields(decl);
+        for f in &len_fields {
+            params.push(format!(
+                "constant int64_t* __boring_len_{}_ptr [[buffer({})]]",
+                msl_safe_ident(&f.name), buf_idx
+            ));
+            buf_idx += 1;
+        }
+
         // 4. Dynamic 'shared array fields → threadgroup T* [[threadgroup(N)]]
         for f in &decl.fields {
             if matches!(f.qual, GpuQual::Actor)
@@ -503,6 +526,11 @@ impl DeviceEmitter {
                     }
                 }
             }
+        }
+
+        for f in &len_fields {
+            let safe = msl_safe_ident(&f.name);
+            self.line(&format!("const int64_t __boring_len_{} = *__boring_len_{}_ptr;", safe, safe));
         }
 
         if decl.name.starts_with("BoringTensorDynamicQ8Native") {
@@ -2285,6 +2313,32 @@ impl DeviceEmitter {
         }
     }
 
+    fn try_buffer_length_expr(&self, obj: &Expr, member: &str) -> Option<String> {
+        if member != "length" && member != "count" {
+            return None;
+        }
+        match &obj.kind {
+            ExprKind::Var(name) => {
+                if let Some(Type::ArrayN(_, n)) = self.locals.get(name.as_str()) {
+                    return Some(format!("((int64_t){})", n));
+                }
+                if !self.locals.contains_key(name.as_str())
+                    && self.current_len_fields.contains(name.as_str())
+                {
+                    return Some(format!("__boring_len_{}", msl_safe_ident(name)));
+                }
+                None
+            }
+            ExprKind::Field(inner, name)
+                if matches!(&inner.kind, ExprKind::Var(s) if s == "self")
+                    && self.current_len_fields.contains(name.as_str()) =>
+            {
+                Some(format!("__boring_len_{}", msl_safe_ident(name)))
+            }
+            _ => None,
+        }
+    }
+
     /// `a.axis` — read-only shape-query property on a fixed-shape
     /// `LabeledArray` field (dynamic-shape ones are already desugared to a
     /// shadow field before codegen — see `desugar_labeled_array`). `a[width =
@@ -2420,7 +2474,9 @@ impl DeviceEmitter {
                 self.fixed_field(obj, field, e).unwrap()
             }
             ExprKind::Field(obj, field) => {
-                if let Some(msl) = self.try_labeled_array_field_access(obj, field) {
+                if let Some(msl) = self.try_buffer_length_expr(obj, field) {
+                    msl
+                } else if let Some(msl) = self.try_labeled_array_field_access(obj, field) {
                     msl
                 } else {
                     let obj_s = self.expr(obj);
@@ -2470,8 +2526,15 @@ impl DeviceEmitter {
                     // `self.method(args)` → the sibling device function this method was
                     // emitted as (see `emit_device_fn`): `KernelName_method(fields..., args)`.
                     let mut all_args = buffer_field_arg_names(&self.current_fields);
+                    for f in &self.current_fields {
+                        if self.current_len_fields.contains(&f.name) {
+                            all_args.push(format!("__boring_len_{}", msl_safe_ident(&f.name)));
+                        }
+                    }
                     all_args.extend(args_s);
                     format!("{}_{}({})", self.current_kernel, method, all_args.join(", "))
+                } else if args.is_empty() && self.try_buffer_length_expr(obj, method).is_some() {
+                    self.try_buffer_length_expr(obj, method).unwrap()
                 } else if let Some(msl) = float_unary_method_msl(method, &self.expr(obj), &args_s) {
                     // Boring's built-in numeric methods (`x.exp()`, `x.sqrt()`, ...) map
                     // directly onto MSL's `metal_stdlib` free functions of the same shape.
@@ -2850,6 +2913,44 @@ fn buffer_field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
 fn is_const_scalar_field(f: &KernelFieldDecl) -> bool {
     !matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _))
         && f.ty.as_labeled_array().is_none()
+}
+
+fn is_buffer_field(f: &KernelFieldDecl) -> bool {
+    matches!(
+        f.qual,
+        GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified
+            | GpuQual::Surface | GpuQual::Const
+    ) && !is_const_scalar_field(f)
+}
+
+/// Buffer fields of `decl` whose `.length`/`.count` is queried in any of `decl`'s device methods,
+/// in declaration order. Shared between the MSL emitter and `metal::host` so `[[buffer(N)]]`
+/// indices and `set_bytes` bindings stay in lockstep.
+pub(crate) fn kernel_buffer_length_fields(decl: &KernelDecl) -> Vec<&KernelFieldDecl> {
+    let mut used = std::collections::HashSet::<String>::new();
+    let note_receiver = |obj: &Expr, used: &mut std::collections::HashSet<String>| {
+        match &obj.kind {
+            ExprKind::Var(name) => { used.insert(name.clone()); }
+            ExprKind::Field(inner, name) if matches!(&inner.kind, ExprKind::Var(s) if s == "self") => {
+                used.insert(name.clone());
+            }
+            _ => {}
+        }
+    };
+    for m in &decl.methods {
+        crate::ast::walk_stmts(&m.body, &mut |node| {
+            if let crate::ast::WalkNode::Expr(e) = node {
+                match &e.kind {
+                    ExprKind::Field(obj, f) if f == "length" || f == "count" => note_receiver(obj, &mut used),
+                    ExprKind::MethodCall(obj, f, args) if args.is_empty() && (f == "length" || f == "count") => {
+                        note_receiver(obj, &mut used);
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+    decl.fields.iter().filter(|f| is_buffer_field(f) && used.contains(&f.name)).collect()
 }
 
 /// Argument names to pass at a call site for `buffer_field_params(fields)` — same

@@ -9678,13 +9678,51 @@ def add(a, b):
 
 **`len()`.** `x.len()` (no arguments) is allowed on an untyped parameter or field: Rust has no std `len` trait, so the parameter is bounded by `BoringLen`, a small trait in the generated prelude implemented for arrays, dicts, sets and strings (scalar-value count, like `string.len()`). The result is a `uint` (as for a known array or dict), so `def size(x): return x.len()` is typed `uint`; any type that is not one of those collections fails in the generated Rust naming `BoringLen`.
 
-**Not done, on purpose.** There is no bound for any other method call (`push`, `abs`, a user method: no trait to name, write the type), and two separate untyped parameters are never related (`def larger(a, b)` returning either: each parameter is its own type, so no sound return type exists without a shared `T`).
+**Not done, on purpose.** There is no *bound* for any other method call (`push`, `abs`, a user method: no trait to name), and two separate untyped parameters are never related (`def larger(a, b)` returning either: each parameter is its own type, so no sound return type exists without a shared `T`). A method call, a field read and an index on an untyped parameter are not refused any more, they are specialised: see [Typed specialisation](#advanced--typed-specialisation-of-untyped-parameters).
 
 The reported uses are a method call (`clone`, `to_string` and `len()` are allowed; `to_string` adds `Display`, `len()` adds `BoringLen`), a field read, an index, and an operator whose other operand is neither the same parameter nor (on its right) a numeric literal. A name that the body binds again (a `let`, a loop variable, a closure parameter) is not the parameter and is never reported; for a struct field, neither is a method parameter of the same name. Write the type (`[int] x`, `int x`, `T x`) to use the value further.
 
 A **recursive** function (directly, or through other functions of its scope) that returns a value needs its return type written: `int fact(int n)`. Inferring it would need a fixpoint over the cycle, and without the check such a function silently became `void`. A recursive function that returns nothing is unaffected.
 
 A **struct with untyped fields is generic**, and device code only has concrete structs: building one bare in a kernel, in a function a kernel calls, or naming it in a kernel field or a reachable signature is an error on every GPU backend (`simd`, `metal`, `wgpu`, `cuda`, `rocm`). Write the field types (`int v`), instantiate it explicitly (`Wrap<int>(v = i, n = 2)`, the types in field order; `metal`/`wgpu`/`cuda`/`rocm` specialise it like any generic struct, see [GPU module](gpu-module.html#type-generics-not-on-kernels-yes-on-structs-and-helper-functions)), or use a concrete struct there. Trait method signatures keep requiring written types.
+
+### Advanced — Typed specialisation of untyped parameters
+
+A method call, a field read or write, or an index on an untyped parameter cannot be a Rust generic: what `a.inc()` emits depends on the *qualifier* of the argument (an `'actor` takes the lock, an `'owned` does not). So such a function is not generic, it is **specialised**: every call is typed from the *written* type of its argument, the function is copied with that type, and the call goes to the copy.
+
+```boring
+struct Counter:
+    var int n = 0
+    def inc(): n += 1
+
+def bump(var mut a):
+    a.inc()
+
+def main():
+    var mut Counter c = Counter()
+    var mut Counter'actor d = Counter()
+    bump(c)        # calls bump_Counter
+    bump(d)        # calls bump_Counter_actor, which takes the lock
+```
+
+The argument must be a plain variable bound once, with its type written (`var mut Counter'actor d`, a typed parameter, a typed `let`); a variable bound twice with different types, or a value whose type is not written, is an error that names it (`cannot specialise `bump` for this call: ...`). A function that only forwards its parameter to another one that is specialised (`def twice(var mut b): bump(b)`) is specialised too. A qualifier can be written on the parameter, `def bump(var mut a'owned)` or `def show<T>(T'owned a)`: an argument written with another qualifier is an error naming both. A function nothing calls keeps the plain "write its type" error.
+
+**Where it applies.** Free functions, methods of a `struct` or `enum` and of an `ext` of a plain type, inside a `mod` (nested ones too), and across files for what is `pub` (the function stays in its library, nothing generic is emitted for it, and each file that calls it gets its own typed copy: `bump_Counter` in the caller's module). A method is found by its name, so the name must be declared once among the methods the calling file sees (a method in two types, an overload, or the same name in the calling file's own types, is refused, or is an error that says so when the receiver is written with the imported type). Not covered, and kept as the error above: trait default methods (the signatures of a trait are its contract and are always typed), an `ext` of a generic's instance, kernels, `task` and `stream` functions, a `pub` function whose body names something the calling file cannot see.
+
+`BORING_SHOW_MONO=1` prints the headers of the copies; `boring check --emit-bri` shows them in the whole program, with where each comes from (below).
+
+### Advanced — Boring inferred files (`.bri`)
+
+`boring check --emit-bri[=mono|full] file.br` prints, and `boring build --emit-bri[=mono|full] file.br` writes into `<stem>_rust/bri/<file>.bri` (for the file and the sibling files it `use`s), a "Boring inferred" file: ordinary Boring that shows what the compiler decided, complete and readable, so that an error in the generated Rust can be traced to a choice you can see.
+
+| Level | What it shows |
+|---|---|
+| `mono` (the default) | The program after parsing and the inference of types: the return types written back, the specialised copies of untyped-parameter functions (`bump_Counter_actor`, with a trailing comment saying what it is a copy of and where it was first called), the implicit generics with the bounds the compiler derived as a comment (`# inferred: T_x as Display`). |
+| `full` | Also the transpiler's choices: ownership qualifiers it inferred for locals and parameters (`'actor`, `'owned`, `'shared`...), the traits it made shared (`[Shape'shared]`), the GPU residency of tensor operands (`'global` / `'unified`), and the instances its monomorphizer made (the generic `Board<'elem>` is replaced by `Board_actor`, `Board_inline`, ... with the patterns on them renamed). |
+
+What `full` does **not** write is a default: an `inline` local, a borrowed parameter, an `'actor` on a `mut` binding. Written by hand, a qualifier is a constraint and changes the code, so it would no longer be a report. A few things have no spelling (the redundant `clone` the generated Rust sometimes has).
+
+A `.bri` is Boring: `boring run x.bri` prints what `boring run x.br` prints, and `boring build x.bri` generates the same Rust (for `full`, over the project's test corpus, for all but a handful of cases that differ by a redundant cast or clone). It is meant to be read, not edited: re-reading it is how the compiler is tested, so the generated Rust is the same as the source's. `--show-qualifiers` still gives the *reason* of each qualifier and `--show-types` the per-use view of untyped parameters; the `.bri` shows the result.
 
 ### Advanced — Implicit generics: design notes
 

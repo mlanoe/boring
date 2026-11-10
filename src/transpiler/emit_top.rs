@@ -460,6 +460,9 @@ impl Transpiler {
             return self.deep_pre_scan_uses(program, visited);
         }
         self.pre_scan(program);
+        if self.is_gpu_target {
+            self.compute_gpu_device_only_fns(program);
+        }
         self.collect_trait_borrow_facts(program);
         // Cross-file monomorphization (see `monomorphize.rs`'s module doc comment):
         // fold two more things into this same recursive walk over every reachable
@@ -665,6 +668,40 @@ impl Transpiler {
     /// callee's stale unqualified signature and never learn it takes e.g. `&Vec<T>` — this
     /// bit both bare-struct params (rare in practice) and bare array/dict/set params (the
     /// common case in a call-heavy file like a hand-written recursive-descent parser).
+    /// The decisions pass: runs `infer_qualifiers` on every function and method body of `program` the way
+    /// `emit_fn` does just before emitting it (same parameter facts, the signature's forced borrows applied
+    /// afterwards) and keeps the result in `decision_table`, so the qualifiers of a body are known before any
+    /// of it is emitted. `decided_qual` then reads the table (`type_table.rs`).
+    pub(crate) fn decide_program(&mut self, program: &crate::ast::Program) {
+        for (self_ty, f) in Self::qualifier_inference_targets(program) {
+            if f.is_native { continue; }
+            let mut sub = self.make_sub();
+            sub.fn_current_params_lent = sub.fn_lent_param_names(f, self_ty.is_some());
+            sub.fn_current_params = f.params.iter()
+                .filter_map(|p| p.ty.as_ref().map(|ty| (p.name.clone(), ty.clone())))
+                .collect();
+            sub.fn_current_param_lines = f.params.iter().map(|p| (p.name.clone(), p.line)).collect();
+            sub.fn_current_param_cols = f.params.iter().map(|p| (p.name.clone(), p.col)).collect();
+            sub.fn_current_params_mut = f.params.iter().filter(|p| p.mutable).map(|p| p.name.clone()).collect();
+            sub.fn_current_params_rebind_only = f.params.iter()
+                .filter(|p| p.mutable && !p.grants_content_mut())
+                .map(|p| p.name.clone())
+                .collect();
+            let forced_borrows = sub.method_borrow_positions(f, self_ty);
+            sub.in_struct_method = self_ty.is_some() && forced_borrows.is_empty();
+            sub.fn_return_ty = f.return_ty.clone();
+            sub.self_type = self_ty.map(str::to_string);
+            sub.infer_qualifiers(&f.body);
+            for &i in &forced_borrows {
+                sub.inferred_qualifiers.insert(f.params[i].name.clone(), crate::ast::OwnerQual::Borrow);
+            }
+            let scope = format!("{}::{}", self_ty.unwrap_or(""), f.name);
+            let mut table = self.decision_table.borrow_mut();
+            table.retain(|(s, _), _| *s != scope);
+            for (name, q) in &sub.inferred_qualifiers { table.insert((scope.clone(), name.clone()), q.clone()); }
+        }
+    }
+
     pub(crate) fn pre_infer_fn_qualifiers(&mut self, program: &crate::ast::Program) {
         // A caller declared before its callee only learns the callee's qualifier from the next
         // round, and a chain of N functions in reverse order needs N rounds: iterate to a fixed
@@ -1586,7 +1623,7 @@ impl Transpiler {
                             | Type::Qualified(_, OwnerQual::Owned)
                             | Type::Qualified(_, OwnerQual::Union(_))));
                 let effective_ty = if needs_inference {
-                    if let Some(qual) = self.inferred_qualifiers.get(&p.name) {
+                    if let Some(qual) = self.decided_qual(&p.name).as_ref() {
                         inferred_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, qual.clone());
                         &inferred_ty
                     } else {
@@ -1695,6 +1732,15 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
+        let previous_scope = std::mem::replace(&mut self.type_scope, format!("{}::{}", self_ty.unwrap_or(""), f.name));
+        self.emit_fn_scoped(f, self_ty);
+        self.type_scope = previous_scope;
+    }
+
+    fn emit_fn_scoped(&mut self, f: &FnDecl, self_ty: Option<&str>) {
+        // A `pub` function with an untyped parameter used by a method call has no generic Rust
+        // form: its callers carry a typed copy (`specialize_untyped.rs`).
+        if crate::specialize_untyped::is_specialise_only(f) { return; }
         // Bare-trait params inferred borrowed (`infer_trait_borrow.rs`) are emitted exactly as
         // if the author had written `Trait& p`.
         if let Some(patched) = self.with_inferred_trait_borrows(f, self_ty) {
@@ -1725,6 +1771,14 @@ impl Transpiler {
             if f.task && self_ty.is_none() {
                 self.task_fns.insert(f.name.clone());
             }
+            return;
+        }
+        if self.is_gpu_target
+            && self_ty.is_none()
+            && f.name != "main"
+            && (self.gpu_device_only_fns.contains(&f.name)
+                || crate::interpreter::eval_gpu::stmts_use_gpu_device_builtins(&f.body))
+        {
             return;
         }
 
@@ -1890,7 +1944,7 @@ impl Transpiler {
             // Snapshot only the qualifiers for THIS function's params.
             pre_inferred_param_quals = f.params.iter()
                 .filter_map(|p| {
-                    self.inferred_qualifiers.get(&p.name)
+                    self.decided_qual(&p.name).as_ref()
                         .map(|q| (p.name.clone(), q.clone()))
                 })
                 .collect();
@@ -1982,7 +2036,10 @@ impl Transpiler {
             self.current_fn_gpu_arg_params = self.fn_gpu_arg_params.get(&f.name).cloned().unwrap_or_default();
             let borrow_flags = self.fn_gpu_borrow_params.get(&f.name).cloned().unwrap_or_default();
             self.current_fn_gpu_borrow_param_names = f.params.iter().enumerate()
-                .filter(|(i, _)| borrow_flags.get(*i).copied().unwrap_or(false))
+                .filter(|(i, _)| {
+                    self.current_fn_gpu_arg_params.get(*i).copied().unwrap_or(false)
+                        && borrow_flags.get(*i).copied().unwrap_or(false)
+                })
                 .map(|(_, p)| p.name.clone())
                 .collect();
             self.current_fn_gpu_arg_param_names = f.params.iter().enumerate()
@@ -2586,7 +2643,7 @@ impl Transpiler {
                     lent_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, OwnerQual::BorrowMut);
                     &lent_ty
                 } else if needs_inference {
-                    if let Some(qual) = self.inferred_qualifiers.get(&p.name) {
+                    if let Some(qual) = self.decided_qual(&p.name).as_ref() {
                         inferred_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(ty, qual.clone());
                         &inferred_ty
                     } else {
@@ -2761,10 +2818,11 @@ impl Transpiler {
                         let access = self.mutex_var_read(v, v);
                         // If the field itself is an actor (Rc/Arc<RefCell/Mutex<T>>), clone it
                         // to avoid moving out of a temporary borrow/lock guard.
+                        let tracked_struct = self.local_struct(v);
                         let field_ty_opt = self.struct_fields.get(
                                 self.var_types.get(v.as_str())
                                     .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
-                                    .or_else(|| self.var_struct_types.get(v.as_str()).map(|s| s.as_str()))
+                                    .or(tracked_struct.as_deref())
                                     .unwrap_or("")
                             ).and_then(|fields| fields.iter().find(|(fname,_)| fname == field))
                             .map(|(_, fty)| fty.clone());
@@ -2901,14 +2959,14 @@ impl Transpiler {
             // Struct variable in owned position: clone to avoid moving out.
             // In Boring, structs are copy-by-value semantics; Rust requires explicit .clone().
             // Exception: `var` params are `&mut T` — emit as-is (the &mut is already the reference).
-            ExprKind::Var(v) if self.var_struct_types.contains_key(v.as_str())
+            ExprKind::Var(v) if self.is_struct_local(v)
                 && !self.arc_vars.contains(v.as_str())
                 && !self.var_mutex_types.contains(v.as_str())
                 && !self.var_primitive_params.contains(v.as_str()) =>
             {
                 // A struct that (transitively) holds a trait object isn't `Clone`: forward it
                 // as-is (a borrowed param re-borrows, an owned local moves).
-                if self.var_struct_types.get(v.as_str())
+                if self.local_struct(v).as_ref()
                     .is_some_and(|n| self.struct_holds_dyn(n, false, &mut vec![]))
                 {
                     return self.emit_expr(expr);
@@ -3239,7 +3297,7 @@ impl Transpiler {
     /// (`Type::Qualified(Named("Holder"), Actor)`) — one more unwrap than the plain
     /// `.without_mut()` idiom handles, hence this dedicated helper.
     pub(crate) fn resolve_receiver_type_name(&self, v: &str) -> String {
-        self.var_struct_types.get(v).cloned().unwrap_or_else(|| {
+        self.local_struct(v).unwrap_or_else(|| {
             self.var_types.get(v).and_then(|t| {
                 let inner = match t.without_mut() {
                     Type::Qualified(inner, _) => inner.without_mut(),

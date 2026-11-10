@@ -335,7 +335,7 @@ fn desugar_in(items: &mut [Item]) -> Result<(), crate::parser::ParseError> {
         if let Item::Mod(m) = item { desugar_in(&mut m.items)?; }
     }
     // struct name -> (its implicit parameters, its where clause)
-    let mut structs: std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)> = Default::default();
+    let mut structs: ImplicitStructs = Default::default();
     for item in items.iter() {
         let Item::Struct(s) = item else { continue };
         let all_implicit = !s.is_view && !s.type_params.is_empty()
@@ -351,7 +351,10 @@ fn desugar_in(items: &mut [Item]) -> Result<(), crate::parser::ParseError> {
     Ok(())
 }
 
-fn bare_struct(ty: &Type, structs: &std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)>) -> Option<String> {
+/// Struct name -> (its implicit parameters, its where clause).
+type ImplicitStructs = std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)>;
+
+fn bare_struct(ty: &Type, structs: &ImplicitStructs) -> Option<String> {
     match ty {
         Type::Named(n) if structs.contains_key(n) => Some(n.clone()),
         Type::Mut(i) | Type::Qualified(i, _) => bare_struct(i, structs),
@@ -360,7 +363,7 @@ fn bare_struct(ty: &Type, structs: &std::collections::HashMap<String, (Vec<Strin
 }
 
 #[allow(clippy::type_complexity)]
-fn desugar_fn(f: &mut FnDecl, structs: &std::collections::HashMap<String, (Vec<String>, Vec<(String, String)>)>) -> Result<(), crate::parser::ParseError> {
+fn desugar_fn(f: &mut FnDecl, structs: &ImplicitStructs) -> Result<(), crate::parser::ParseError> {
     // (parameter, struct, its implicit parameters), for each parameter rewritten.
     let mut done: Vec<(String, String)> = Vec::new();
     for p in f.params.iter_mut() {
@@ -390,8 +393,9 @@ fn desugar_fn(f: &mut FnDecl, structs: &std::collections::HashMap<String, (Vec<S
                 ExprKind::Field(b, fl) if fields.contains(&fl.as_str()) && matches!(&b.kind, ExprKind::Var(v) if v == pname) => {
                     e.kind = ExprKind::Var(format!("{pname}__{fl}"));
                 }
-                ExprKind::MethodCall(b, _, _) if matches!(&b.kind, ExprKind::Var(v) if v == pname) => {
-                    if !method_called.iter().any(|(p, _)| p == pname) { method_called.push((pname.clone(), sname.clone())); }
+                ExprKind::MethodCall(b, _, _) if matches!(&b.kind, ExprKind::Var(v) if v == pname)
+                    && !method_called.iter().any(|(p, _)| p == pname) => {
+                    method_called.push((pname.clone(), sname.clone()));
                 }
                 _ => {}
             }

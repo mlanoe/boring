@@ -37,6 +37,12 @@ impl Transpiler {
                     self.line(&if self.in_throws { format!("return Ok({resident});") } else { format!("return {resident};") });
                     return;
                 }
+                if self.current_fn_returns_resident.is_none() {
+                    if let Some(materialized) = self.try_materialize_resident_expr(e) {
+                        self.line(&if self.in_throws { format!("return Ok({materialized});") } else { format!("return {materialized};") });
+                        return;
+                    }
+                }
                 self.check_dyn_borrow_escape(e);
                 let is_optional_return = matches!(&self.fn_return_ty, Some(Type::Optional(_)));
                 // Check if the declared return type is a known trait → wrap value in Box::new().
@@ -80,7 +86,7 @@ impl Transpiler {
                         || (inner.ends_with("?") && matches!(&e.kind, ExprKind::Call(_, _)))
                         || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
                             if matches!(&recv.kind, ExprKind::Var(v)
-                                if self.var_struct_types.get(v.as_str()).map(|sty| {
+                                if self.local_struct(v).as_ref().map(|sty| {
                                     self.struct_method_return_types
                                         .get(&format!("{}::{}", sty, method))
                                         .map(|t| matches!(t, Type::Optional(_)))

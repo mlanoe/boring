@@ -49,7 +49,7 @@ fn transparent_wrapper_inner_name(ty: &Type) -> Option<&str> {
 /// the method name verbatim or run it through `map_method`'s builtin table, and by
 /// `check_field_def_call_mut_gate` to resolve the field's content type for its own
 /// `req`-vs-`def` lookup.
-fn qualified_named_type_name(ty: &Type) -> Option<String> {
+pub(super) fn qualified_named_type_name(ty: &Type) -> Option<String> {
     let mut cur = ty.without_mut();
     while let Type::Qualified(inner, _) = cur {
         cur = inner.without_mut();
@@ -72,7 +72,7 @@ pub(crate) struct LockFieldRef {
 /// spellings (`Type::Dyn`/`Type::Impl`) a bare trait name in type position can parse to —
 /// (and a generic `T`'s bare name) — the receiver-resolution entry point for "which user
 /// type/trait does this value have?".
-fn receiver_type_name(ty: &Type) -> Option<String> {
+pub(super) fn receiver_type_name(ty: &Type) -> Option<String> {
     let mut cur = ty.without_mut();
     loop {
         match cur {
@@ -85,7 +85,7 @@ fn receiver_type_name(ty: &Type) -> Option<String> {
 
 /// The type of one element obtained by indexing a value of type `ty`: `[T]`/`[T, N]` → `T`,
 /// `{K=V}` → `V` (looking through `mut` and ownership qualifiers on the container).
-fn indexed_elem_type(ty: &Type) -> Option<&Type> {
+pub(super) fn indexed_elem_type(ty: &Type) -> Option<&Type> {
     let mut cur = ty.without_mut();
     while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
     match cur {
@@ -118,6 +118,73 @@ impl Transpiler {
     }
 
     pub(crate) fn resolve_expr_struct_type(&self, expr: &Expr) -> Option<String> {
+        use super::type_table::TypeTableMode;
+        if self.type_table_mode == TypeTableMode::Off || !matches!(expr.kind, ExprKind::Var(_) | ExprKind::Field(..)) {
+            return self.resolve_expr_struct_type_inner(expr);
+        }
+        let what = match &expr.kind { ExprKind::Var(n) => format!("v:{n}"), ExprKind::Field(_, n) => format!("f:{n}"), _ => String::new() };
+        // Bodies the emitter does not reach through `emit_fn` (inits, setters, conversions) have the scope of
+        // their owner.
+        let scope = if self.type_scope.is_empty() { self.self_type.as_ref().map(|o| format!("{o}::")).unwrap_or_default() } else { self.type_scope.clone() };
+        let key = (scope, expr.line, expr.col, what);
+        if self.type_table_mode == TypeTableMode::Walk {
+            // The `self` of a method is its owner: asked about expressions the emitter builds itself
+            // (an implicit `self.field`), which no walk over the AST can find.
+            if key.3 == "v:self" {
+                if let Some(owner) = key.0.split("::").next().filter(|o| !o.is_empty()) {
+                    self.type_table.borrow_mut().hits += 1;
+                    return Some(owner.to_string());
+                }
+            }
+            if let Some(Some(name)) = self.built_struct_names.borrow().get(&key) {
+                self.type_table.borrow_mut().hits += 1;
+                return Some(name.clone());
+            }
+            self.type_table.borrow_mut().misses += 1;
+            let answer = self.resolve_expr_struct_type_inner(expr);
+            if answer.is_some() {
+                self.type_table.borrow_mut().missed_known += 1;
+                if std::env::var_os("BORING_TYPE_TABLE_WHY").is_some() { eprintln!("WALKMISS {:?} emitter {:?}", key, answer); }
+            }
+            return answer;
+        }
+        if self.type_table_mode == TypeTableMode::Check {
+            let answer = self.resolve_expr_struct_type_inner(expr);
+            let claim = if key.3 == "v:self" {
+                key.0.split("::").next().filter(|o| !o.is_empty()).map(str::to_string)
+            } else {
+                match self.built_struct_names.borrow().get(&key) { Some(Some(n)) => Some(n.clone()), _ => None }
+            };
+            if let Some(c) = claim {
+                if answer.as_deref() != Some(c.as_str()) {
+                    self.type_table.borrow_mut().conflicts += 1;
+                    if let Some(path) = std::env::var_os("BORING_TYPE_TABLE_LOG") {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                            let _ = writeln!(f, "TYPEMISMATCH {:?} walk {:?} emitter {:?}", key, c, answer);
+                        }
+                    }
+                } else {
+                    self.type_table.borrow_mut().hits += 1;
+                }
+            }
+            return answer;
+        }
+        if self.type_table_mode == TypeTableMode::Replay {
+            let known = self.type_table.borrow().struct_answer(&key);
+            match known {
+                Some(answer) => { self.type_table.borrow_mut().hits += 1; return answer; }
+                None => { self.type_table.borrow_mut().misses += 1; }
+            }
+        }
+        let answer = self.resolve_expr_struct_type_inner(expr);
+        if self.type_table_mode == TypeTableMode::Record {
+            self.type_table.borrow_mut().record_struct(key, answer.clone());
+        }
+        answer
+    }
+
+    fn resolve_expr_struct_type_inner(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
             ExprKind::Var(v) => self
@@ -292,7 +359,7 @@ impl Transpiler {
                 .or_else(|| self.fn_current_params.get(v.as_str()))
                 .or_else(|| self.var_std_types.get(v.as_str()))
                 .cloned()
-                .or_else(|| self.var_struct_types.get(v.as_str()).cloned().map(Type::Named))
+                .or_else(|| self.local_struct(v).map(Type::Named))
                 .or_else(|| self.bare_self_field_type(v))
                 .or_else(|| self.global_var_types.get(v.as_str()).cloned().flatten()),
             // `slot.value` of a `Slot<T>'actor` (a lowered view's `state`/`bind`) is the `T`.
@@ -349,6 +416,18 @@ impl Transpiler {
                 let ExprKind::Var(name) = &callee.kind else { return None };
                 if self.known_local_vars.contains(name.as_str()) { return None; }
                 match name.as_str() {
+                    "int" => return Some(Type::Int),
+                    "uint" => return Some(Type::Uint),
+                    "int8" => return Some(Type::Int8),
+                    "int16" => return Some(Type::Int16),
+                    "int32" => return Some(Type::Int32),
+                    "int64" => return Some(Type::Int64),
+                    "int128" => return Some(Type::Int128),
+                    "uint8" => return Some(Type::Uint8),
+                    "uint16" => return Some(Type::Uint16),
+                    "uint32" => return Some(Type::Uint32),
+                    "uint64" => return Some(Type::Uint64),
+                    "uint128" => return Some(Type::Uint128),
                     "float16" => return Some(Type::Float16),
                     "float32" => return Some(Type::Float32),
                     "float" | "float64" => return Some(Type::Float64),
@@ -695,7 +774,7 @@ impl Transpiler {
                     // widgets` parameter falls through to the builtin Vec/HashMap/HashSet
                     // `.remove` codegen below instead of dispatching to `Widgets`'s own `remove`
                     // method, even though the wrapper is fully deref-transparent to `Widgets`.
-                    let type_name = self.var_struct_types.get(v.as_str()).cloned()
+                    let type_name = self.local_struct(v)
                         .or_else(|| self.var_types.get(v.as_str()).and_then(receiver_type_name))
                         .or_else(|| self.var_types.get(v.as_str())
                             .and_then(transparent_wrapper_inner_name)
@@ -1767,7 +1846,7 @@ impl Transpiler {
                 {
                     None
                 } else {
-                    self.var_struct_types.get(v.as_str()).or_else(|| self.var_struct_type.get(v.as_str())).cloned()
+                    self.local_struct(v).as_ref().or_else(|| self.var_struct_type.get(v.as_str())).cloned()
                 };
                 if let Some(outer_type) = outer_type {
                     let key = Some(format!("{}::{}", outer_type, rwlock_field));
@@ -2219,7 +2298,7 @@ impl Transpiler {
         if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
             if let ExprKind::Var(v) = &inner_obj.kind {
                 // Determine the struct type of the outer variable.
-                let outer_struct = self.var_struct_types.get(v.as_str())
+                let outer_struct = self.local_struct(v).as_ref()
                     .or_else(|| self.var_struct_type.get(v.as_str()))
                     .cloned()
                     .or_else(|| {
@@ -3763,7 +3842,7 @@ impl Transpiler {
         // `var` (rebindable) params are `&mut Vec<_>`; so are `mut` (content-mutable) array
         // params, which the qualifier inference types as `BorrowMut`.
         if self.var_primitive_params.contains(name)
-            || matches!(self.inferred_qualifiers.get(name), Some(OwnerQual::BorrowMut))
+            || matches!(self.decided_qual(name).as_ref(), Some(OwnerQual::BorrowMut))
         {
             Some((true, self.content_mutable_params.contains(name)))
         } else if !self.immutable_local_vars.contains(name) {
@@ -4469,7 +4548,7 @@ impl Transpiler {
                 if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
             }
             crate::ast::Type::Qualified(inner, crate::ast::OwnerQual::Union(_)) => {
-                match self.inferred_qualifiers.get(param_name) {
+                match self.decided_qual(param_name).as_ref() {
                     Some(crate::ast::OwnerQual::Owned) | Some(crate::ast::OwnerQual::Inline) => {
                         if let crate::ast::Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None }
                     }
@@ -4613,7 +4692,7 @@ impl Transpiler {
                 // checker would NOT catch this on its own (the emitted binding
                 // is `let mut` either way — see `BindingKind::is_mutable`'s
                 // doc), so this has to be a Boring-level check.
-                let struct_name = self.var_struct_types.get(v.as_str()).cloned()
+                let struct_name = self.local_struct(v)
                     .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
                         if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                     }));
@@ -4643,7 +4722,7 @@ impl Transpiler {
         if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
             let owner_struct: Option<String> = match &inner_obj.kind {
                 ExprKind::Var(v) if v == "self" => self.self_type.clone(),
-                ExprKind::Var(v) => self.var_struct_types.get(v.as_str()).cloned()
+                ExprKind::Var(v) => self.local_struct(v)
                     .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
                         if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                     })),
@@ -5496,11 +5575,13 @@ impl Transpiler {
                 // value as `BoringKernelArg::Host(...)` for upload as today. Caller keeps
                 // ownership either way (`.clone()` on a bare variable), matching
                 // Boring's normal by-value argument semantics.
-                let borrowed_pos = self.fn_gpu_borrow_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false);
+                let is_gpu_arg_pos = self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false);
+                let borrowed_pos = is_gpu_arg_pos
+                    && self.fn_gpu_borrow_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false);
                 if borrowed_pos {
                     // `&BoringKernelArg<T>` position (`compute_gpu_borrow_params`): lend the
                     // caller's value — a reborrow of the enclosing function's own borrowed
-                    // parameter, `&local`, `&obj.field`, or a temporary for a host array.
+                    // parameter, `&local`, `&obj.field`, a resident call, or a temporary for a host array.
                     let lent = if let ExprKind::Var(vname) = &a.value.kind {
                         if self.current_fn_gpu_borrow_param_names.contains(vname.as_str()) {
                             escape_rust_keyword(vname)
@@ -5513,6 +5594,8 @@ impl Transpiler {
                         }
                     } else if self.expr_is_gpu_resident_field(&a.value) {
                         format!("&{}", self.emit_expr(&a.value))
+                    } else if let Some(arg_s) = self.try_emit_resident_call_as_kernel_arg(&a.value, sig.get(i)) {
+                        format!("&({})", arg_s)
                     } else {
                         format!("&BoringKernelArg::Host(({}).clone())", self.emit_expr(&a.value))
                     };
@@ -5520,7 +5603,7 @@ impl Transpiler {
                     i += 1;
                     continue;
                 }
-                if self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(i)).copied().unwrap_or(false) {
+                if is_gpu_arg_pos {
                     let wrapped = if let ExprKind::Var(vname) = &a.value.kind {
                         // Already a `BoringKernelArg<T>`-typed Rust binding either way:
                         // `resident_call_vars` (a same-function local bound to a
@@ -5539,6 +5622,8 @@ impl Transpiler {
                         }
                     } else if self.expr_is_gpu_resident_field(&a.value) {
                         format!("({}).clone()", self.emit_expr(&a.value))
+                    } else if let Some(arg_s) = self.try_emit_resident_call_as_kernel_arg(&a.value, sig.get(i)) {
+                        arg_s
                     } else {
                         // Any other expression shape (most commonly a struct field —
                         // `linear_gpu(x, self.mlp_fc_w, ...)`) needs the same clone the
@@ -5556,57 +5641,21 @@ impl Transpiler {
                 }
                 // Interprocedural GPU residency, the materializing counterpart to the
                 // `fn_gpu_arg_params` branch above: this position does NOT want a
-                // `BoringKernelArg<T>` (checked above and not taken), but the argument
-                // itself is a bare `resident_call_vars` local (`let fc =
-                // linear_gpu(...)?`) — a real `BoringKernelArg<T>` Rust value, not the
-                // plain array the callee's signature declares. The generic by-ref
-                // coercion below has no idea this Var's actual Rust type diverges
-                // from its boring-level declared type, and would emit a bare `&fc`
-                // — a genuine E0308 confirmed via a real `cargo check` on
-                // whisper-boring's `mha_gpu` calling `attention_heads_gpu`/
-                // `linear_gpu`/`gelu_gpu` (this exact bug is also present, unfixed,
-                // in a plain `boring build`'s own output — pre-existing and
-                // target-agnostic, not introduced by any GPU-backend work).
-                // Materializes by reference (mirrors `emit_stmt.rs`'s identical
-                // by-ref materialization for a reassignment target) so `fc` itself
-                // stays usable afterward, matching boring's no-moves semantics.
-                if let ExprKind::Var(vname) = &a.value.kind {
-                    if let Some(ret_ty) = self.resident_call_vars.get(vname.as_str()).cloned() {
-                        let inner_ty = match &ret_ty {
-                            Type::Qualified(inner, _) => crate::transpiler::emit_kernel::array_inner_type(inner),
-                            other => crate::transpiler::emit_kernel::array_inner_type(other),
-                        };
-                        let host_ty = crate::transpiler::emit_kernel::kernel_host_element_type(&inner_ty);
-                        let device_ty = crate::transpiler::emit_kernel::kernel_host_scalar_type(&inner_ty);
-                        let materialized = if self.config.is_simd_target {
-                            format!("match &{vname} {{ BoringKernelArg::Host(v) => v.clone() }}")
-                        } else { format!(
-                            "match &{vname} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }}"
-                        ) };
-                        // Only wrap in an extra `&(...)` when the callee's declared
-                        // parameter at this position is actually `T&` (Borrow/BorrowMut-
-                        // qualified) — the general by-ref coercion further below does the
-                        // same check (see its own `param_ty` match against
-                        // `OwnerQual::Borrow | OwnerQual::BorrowMut`) but is skipped
-                        // entirely by this branch's `continue`. A plain by-value array
-                        // parameter (the common case: `add_one_gpu([float32] x, ...)`)
-                        // must receive the materialized `Vec<T>` itself, not `&Vec<T>` —
-                        // confirmed via a real E0308 (`expected Vec<f32>, found &Vec<f32>`)
-                        // when chaining one GPU host function's result directly into
-                        // another's argument through a single `let` binding.
-                        let param_ty_here = sig.get(i);
-                        let needs_ref = matches!(
-                            param_ty_here,
-                            Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
-                        );
-                        result.push(if needs_ref {
-                            format!("&({})", materialized)
-                        } else {
-                            materialized
-                        });
-                        i += 1;
-                        continue;
-                    }
+                // `BoringKernelArg<T>`, so any resident local/param or resident-returning
+                // call passed here must materialize back to a host `Vec<T>`.
+                if let Some(materialized) = self.try_materialize_resident_expr(&a.value) {
+                    let param_ty_here = sig.get(i);
+                    let needs_ref = matches!(
+                        param_ty_here,
+                        Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
+                    );
+                    result.push(if needs_ref {
+                        format!("&({})", materialized)
+                    } else {
+                        materialized
+                    });
+                    i += 1;
+                    continue;
                 }
                 // `mut Counter'actor c` is `Mut(Qualified(Counter, Actor))`: the content-mutability
                 // marker is irrelevant to how the handle is passed, so look through it for the
@@ -5758,7 +5807,7 @@ impl Transpiler {
                     match &a.value.kind {
                         ExprKind::Field(..) => format!("{}.clone()", emitted),
                         ExprKind::Var(vname) if
-                            self.var_struct_types.contains_key(vname.as_str())
+                            self.is_struct_local(vname)
                             || self.collection_vars.contains(vname.as_str())
                             || self.vec_vars.contains(vname.as_str())
                             || self.dict_vars.contains(vname.as_str())
@@ -6562,6 +6611,11 @@ impl Transpiler {
     /// and an `'owned`/`'shared` binding is borrowed through its pointer.
     fn emit_plain_borrow_arg(&self, mutable: bool, arg: &Expr) -> Option<String> {
         let r = if mutable { "&mut " } else { "&" };
+        if !mutable {
+            if let Some(materialized) = self.try_materialize_resident_expr(arg) {
+                return Some(format!("&({})", materialized));
+            }
+        }
         let ExprKind::Var(v) = &arg.kind else {
             return Some(format!("{}{}", r, self.emit_expr(arg)));
         };
@@ -7354,7 +7408,7 @@ impl Transpiler {
             let mut cur = t.without_mut();
             while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
             if let Type::Named(n) = cur { Some(n.clone()) } else { None }
-        }).or_else(|| self.var_struct_types.get(var).cloned())?;
+        }).or_else(|| self.local_struct(var))?;
         self.struct_fields.get(tname.as_str())?.iter().find(|(f, _)| f == field).map(|(_, t)| t.clone())
     }
 
@@ -7416,7 +7470,7 @@ impl Transpiler {
             ExprKind::Field(obj, field_name) => {
                 let struct_name = match &obj.kind {
                     ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
-                    ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                    ExprKind::Var(v) => self.local_struct(v).as_ref()
                         .or_else(|| self.var_struct_type.get(v.as_str()))
                         .cloned(),
                     _ => None,
@@ -7466,7 +7520,7 @@ impl Transpiler {
             ExprKind::Field(obj, field_name) => {
                 let struct_name = match &obj.kind {
                     ExprKind::Var(v) if v.as_str() == "self" => self.self_type.clone(),
-                    ExprKind::Var(v) => self.var_struct_types.get(v.as_str())
+                    ExprKind::Var(v) => self.local_struct(v).as_ref()
                         .or_else(|| self.var_struct_type.get(v.as_str()))
                         .cloned(),
                     _ => None,
@@ -7665,6 +7719,12 @@ impl Transpiler {
             struct_operator_methods: self.struct_operator_methods.clone(),
             struct_operator_param_types: self.struct_operator_param_types.clone(),
             var_struct_type: self.var_struct_type.clone(),
+            type_table: self.type_table.clone(),
+            type_table_mode: self.type_table_mode,
+            type_scope: self.type_scope.clone(),
+            built_struct_names: self.built_struct_names.clone(),
+            built_locals: self.built_locals.clone(),
+            decision_table: self.decision_table.clone(),
             fn_param_names: self.fn_param_names.clone(),
             user_defines_box: self.user_defines_box,
             user_defines_result: self.user_defines_result,
@@ -7781,6 +7841,7 @@ impl Transpiler {
             current_fn_gpu_arg_params: self.current_fn_gpu_arg_params.clone(),
             current_fn_gpu_arg_param_names: self.current_fn_gpu_arg_param_names.clone(),
             is_gpu_target: self.is_gpu_target,
+            gpu_device_only_fns: self.gpu_device_only_fns.clone(),
             currently_in_main: self.currently_in_main,
             static_backing_names: self.static_backing_names.clone(),
             user_top_level_names: self.user_top_level_names.clone(),

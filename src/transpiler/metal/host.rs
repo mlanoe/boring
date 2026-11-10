@@ -982,7 +982,7 @@ impl HostEmitter {
         // decode section without imposing the same policy on GPU-bound prefill.
         // Commit the current partial batch before changing its threshold so one
         // command buffer never straddles two policies.
-        self.line("fn set_gpu_batch_limit(limit: i64) {");
+        self.line("fn set_gpu_batch_limit(limit: isize) {");
         self.indent += 1;
         self.line("__boring_metal_commit();");
         self.line("__BORING_METAL_BATCH_LIMIT.with(|l| l.set(limit.max(1) as usize));");
@@ -1938,7 +1938,7 @@ impl HostEmitter {
             }
         }
 
-        self.emit_boring_launch(name, &decl.fields);
+        self.emit_boring_launch(name, decl);
 
         self.indent -= 1;
         self.line("}");
@@ -2261,7 +2261,8 @@ impl HostEmitter {
         }
     }
 
-    fn emit_boring_launch(&mut self, _name: &str, fields: &[KernelFieldDecl]) {
+    fn emit_boring_launch(&mut self, _name: &str, decl: &KernelDecl) {
+        let fields = &decl.fields;
         // Auto-grid when there is at least one device array (or LabeledArray) field.
         let auto_grid_field: Option<String> = fields.iter().find_map(|f| {
             match f.qual {
@@ -2389,6 +2390,22 @@ impl HostEmitter {
                 ));
                 buf_idx += 1;
             }
+        }
+        for f in super::device::kernel_buffer_length_fields(decl) {
+            let elem = if matches!(f.qual, GpuQual::Surface) {
+                "u32".to_string()
+            } else {
+                elem_rust_type(&f.ty)
+            };
+            self.line(&format!(
+                "let __boring_len_{}: i64 = (self.{}.length() as usize / mem::size_of::<{}>()) as i64;",
+                f.name, f.name, elem
+            ));
+            self.line(&format!(
+                "__encoder.set_bytes({}, mem::size_of::<i64>() as u64, &__boring_len_{} as *const _ as *const _);",
+                buf_idx, f.name
+            ));
+            buf_idx += 1;
         }
         for f in fields {
             if matches!(f.qual, GpuQual::Actor) && matches!(f.ty, Type::Array(_)) {
@@ -2809,7 +2826,14 @@ impl HostEmitter {
                     self.track_string_var(&s.name, s.ty.as_ref(), Some(val));
                     if is_resident_preserving { self.suppress_resident_materialize = true; }
                     let actor_rhs = self.actor_literal(s.ty.as_ref(), val);
-                    let rhs = if let Some(r) = actor_rhs { r } else if is_resident_preserving && !is_materializing_call { format!("BoringKernelArg::Host({})", self.expr(val)) } else { self.expr_for_type(s.ty.as_ref(), val) };
+                    let rhs_is_resident_var = matches!(&val.kind, ExprKind::Var(v) if self.resident_locals.contains(v.as_str()));
+                    let rhs = if let Some(r) = actor_rhs {
+                        r
+                    } else if is_resident_preserving && !is_materializing_call {
+                        if rhs_is_resident_var { format!("{}.clone()", self.expr(val)) } else { format!("BoringKernelArg::Host({})", self.expr(val)) }
+                    } else {
+                        self.expr_for_type(s.ty.as_ref(), val)
+                    };
                     self.line(&format!("{} {}{} = {};", binding, crate::transpiler::helpers::escape_rust_keyword(&s.name), ty_ann, rhs));
                 } else {
                     self.track_dict_var(&s.name, s.ty.as_ref(), None);

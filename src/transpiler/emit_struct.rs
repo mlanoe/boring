@@ -1156,7 +1156,7 @@ impl Transpiler {
     /// qualifier — used to reject a `type let` field whose type depends on the
     /// struct's own `T`, since a Rust `static`/`LazyLock` cannot be generic (see
     /// docs/qualifiers.md's `'static` section, "Generic structs").
-    fn type_mentions_type_params(ty: &Type, params: &[String]) -> bool {
+    pub(crate) fn type_mentions_type_params(ty: &Type, params: &[String]) -> bool {
         match ty {
             Type::Named(n) => params.iter().any(|p| p == n),
             Type::TypeParam(n) => params.iter().any(|p| p == n),

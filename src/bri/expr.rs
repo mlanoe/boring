@@ -301,7 +301,8 @@ impl Printer {
             ExprKind::Assign(..) | ExprKind::QuestionAssign(..) => self.expr_stmt(e)?,
             // `.thread` / `.tensors`: the parser spells the implicit kernel namespaces `gpu.<name>`.
             ExprKind::Field(x, n) if matches!(&x.kind, ExprKind::Var(g) if g == "gpu") => {
-                format!(".{}", if n == "tensor" { "tensors" } else { n.as_str() })
+                let name = if n == "tensor" { "tensors" } else { n.as_str() };
+                if self.device || name != "tensors" { format!(".{name}") } else { format!("kernel.{name}") }
             }
             ExprKind::Field(x, n) => format!("{}.{}", self.receiver(x)?, n),
             ExprKind::Index(x, i) => {
@@ -342,7 +343,12 @@ impl Printer {
                 if let Some(a) = &config.after { parts.push(format!("after = {}", self.expr(a, P_OR)?)); }
                 if let Some(p) = &config.priority { parts.push(format!("priority = {}", quote_str(p))); }
                 let body = match &kernel.kind {
-                    ExprKind::Block(stmts) => self.block_text(stmts)?,
+                    ExprKind::Block(stmts) => {
+                        let was = std::mem::replace(&mut self.device, true);
+                        let t = self.block_text(stmts);
+                        self.device = was;
+                        t?
+                    }
                     _ => return unsupported("kernel launch whose body is not a block", e.line),
                 };
                 format!("kernel({}):\n{body}", parts.join(", "))

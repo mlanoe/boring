@@ -594,6 +594,8 @@ impl HostEmitter {
     /// out of the constant above only because `Dimension`'s definition is
     /// shared verbatim with `cuda`/`metal` via `helpers::DIMENSION_STRUCT_RUST`.
     fn emit_prelude(&mut self, kernel_names: &[String]) {
+        self.line("fn set_gpu_batch_limit(_limit: isize) {}");
+        self.blank();
         self.line(ROCM_HOST_PRELUDE);
         self.blank();
         if self.rocblas {

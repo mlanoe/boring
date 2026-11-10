@@ -13,7 +13,7 @@
 //!
 //! The output is valid, re-parsable Boring written for a developer to read: what the compiler
 //! decided (inferred return types, implicit generics written as explicit type parameters with
-//! their bounds, specialised copies) is spelled out. See `docs/design-notes/typed-monomorphization-draft.md`
+//! their bounds, specialised copies) is spelled out. See `docs/design-notes/typed-specialisation.md`
 //! sections 3.6 and 11.
 //!
 //! The printer never guesses: a construct it does not know is an explicit error naming it
@@ -69,6 +69,11 @@ pub fn print_program_mode(program: &Program, mode: BriMode, decisions: &[full::Q
             print_program(&p)
         }
     }
+}
+
+/// A type as the `.bri` writes it (`Counter'actor`), for comments.
+pub fn type_text(t: &Type) -> Option<String> {
+    Printer::new(&Program { items: Vec::new() }).ty(t).ok()
 }
 
 /// Prints a whole program. `Err` names the first construct the printer does not know.
@@ -129,13 +134,16 @@ struct Printer {
     /// Declaration labels of qualifier parameters, by declaration name: `Board` -> `['elem']`
     /// (positional), to write a `QualArg` as `elem'actor`.
     qual_labels: HashMap<String, Vec<Option<String>>>,
+    /// Inside device code (a `kernel` declaration or a `kernel(...)` block): the implicit
+    /// namespaces are spelled `.tensors`, elsewhere `kernel.tensors`.
+    device: bool,
 }
 
 impl Printer {
     fn new(program: &Program) -> Printer {
         let mut qual_labels = HashMap::new();
         collect_qual_labels(&program.items, &mut qual_labels);
-        Printer { out: String::new(), indent: 0, qual_labels }
+        Printer { out: String::new(), indent: 0, qual_labels, device: false }
     }
 
     fn pad(&self) -> String {
@@ -214,6 +222,9 @@ impl Printer {
 
     fn attrs(&mut self, attrs: &[Attr]) {
         for a in attrs {
+            // Derived by the specialisation pass from `pub` + an untyped parameter: re-parsing the
+            // file gives it again.
+            if a.name == crate::specialize_untyped::SPECIALISE_ONLY { continue; }
             if a.args.is_empty() {
                 self.line(&format!("@{}", a.name));
             } else {
@@ -290,6 +301,8 @@ impl Printer {
         self.attrs(&f.attrs);
         let implicit = implicit_param_types(f);
         let note = if implicit.is_empty() { None } else { Some(self.implicit_comment(&implicit, &f.where_clause)) };
+        // A specialised copy says what it is a copy of.
+        let note = note.or_else(|| crate::specialize_untyped::origin_of(&f.name));
         let head = self.fn_head(f, enclosing)?;
         self.fn_body_after(&head, &f.body, f.is_native, note)
     }
@@ -443,7 +456,7 @@ impl Printer {
 
     /// A printer for a nested expression on a scratch buffer (same labels, indent 0).
     fn sub(&self) -> Printer {
-        Printer { out: String::new(), indent: self.indent, qual_labels: self.qual_labels.clone() }
+        Printer { out: String::new(), indent: self.indent, qual_labels: self.qual_labels.clone(), device: self.device }
     }
 
     fn qual_suffix(&self, q: &OwnerQual) -> R<String> {
@@ -766,6 +779,13 @@ impl Printer {
     }
 
     fn kernel_decl(&mut self, k: &KernelDecl) -> R<()> {
+        let was = std::mem::replace(&mut self.device, true);
+        let r = self.kernel_decl_inner(k);
+        self.device = was;
+        r
+    }
+
+    fn kernel_decl_inner(&mut self, k: &KernelDecl) -> R<()> {
         if let Some(c) = k.prefer { self.line(&format!("@prefer(.{})", c.name())); }
         if let Some(c) = k.only { self.line(&format!("@only(.{})", c.name())); }
         let mut head = String::new();

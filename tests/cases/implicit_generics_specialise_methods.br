@@ -1,0 +1,47 @@
+struct Counter:
+    var int n = 0
+
+    def inc():
+        n += 1
+
+struct Tally:
+    var int total = 0
+
+    def inc():
+        total += 10
+
+# A method with an untyped parameter used with a method call is specialised per argument type,
+# like a free function; it is found by its name when that name is declared once.
+struct Runner:
+    var int runs = 0
+
+    def bump(var mut a):
+        a.inc()
+        runs += 1
+
+    def bumpTwice(var mut a):
+        self.bump(a)
+        self.bump(a)
+
+# Calls from a method body and from the file's own statements are specialised too.
+def spin(var mut Runner r, var mut Counter c):
+    r.bump(c)
+
+enum Mode:
+    Fast
+    Slow
+
+    def poke(var mut a):
+        a.inc()
+
+def main():
+    var mut Runner r = Runner()
+    var mut Counter c = Counter()
+    var mut Tally t = Tally()
+    r.bump(c)
+    r.bump(t)
+    r.bumpTwice(c)
+    spin(r, c)
+    var mut Mode m = Mode.Fast
+    m.poke(t)
+    print "{c.n} {t.total} {r.runs}"

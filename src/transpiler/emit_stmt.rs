@@ -33,7 +33,7 @@ impl Transpiler {
                         .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
             || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
                 if matches!(&recv.kind, ExprKind::Var(v)
-                    if self.var_struct_types.get(v.as_str()).map(|sty| {
+                    if self.local_struct(v).as_ref().map(|sty| {
                         self.struct_method_return_types
                             .get(&format!("{}::{}", sty, method))
                             .map(|t| matches!(t, Type::Optional(_)))
@@ -294,7 +294,7 @@ impl Transpiler {
                     // `[float]`-returning function). Materialize instead of letting
                     // `Ok(...)` wrap a `BoringKernelArg<T>` where `Vec<T>` is expected.
                     if self.current_fn_returns_resident.is_none() {
-                        if let Some(materialized) = self.try_materialize_resident_call(e) {
+                        if let Some(materialized) = self.try_materialize_resident_expr(e) {
                             self.line(&format!("Ok({materialized})"));
                             return;
                         }
@@ -337,7 +337,7 @@ impl Transpiler {
                     // `fn_returns_resident` function without this function's own
                     // return type opting into residency.
                     if self.current_fn_returns_resident.is_none() {
-                        if let Some(materialized) = self.try_materialize_resident_call(e) {
+                        if let Some(materialized) = self.try_materialize_resident_expr(e) {
                             self.line(&materialized);
                             return;
                         }
@@ -584,7 +584,7 @@ impl Transpiler {
             // lookups, never opening a called function/method's body. `let`-bound names
             // never satisfy the scan in valid Boring code (mutating them would already
             // require a rejected `def` call), so no separate binding-kind check is needed.
-            let struct_name = self.var_struct_types.get(name.as_str()).cloned();
+            let struct_name = self.local_struct(name);
             let req_methods = self.struct_req_methods.clone();
             let fn_var_params = self.fn_var_params.clone();
             let mut is_var_param = |fn_name: &str, idx: usize| {
@@ -946,7 +946,7 @@ impl Transpiler {
     /// Struct type of an operator operand variable: the tracked struct type, or — for a managed
     /// `T'owned` local, which is tracked only through its qualified `var_types` entry — `T`.
     pub(crate) fn operand_struct_type(&self, v: &str) -> Option<String> {
-        if let Some(t) = self.var_struct_types.get(v) { return Some(t.clone()); }
+        if let Some(t) = self.local_struct(v).as_ref() { return Some(t.clone()); }
         self.managed_owned_var_src(v)?;
         match self.var_types.get(v).map(Type::without_mut) {
             Some(Type::Qualified(inner, _)) => match inner.as_ref() {
@@ -991,7 +991,7 @@ impl Transpiler {
             }
             ExprKind::MethodCall(obj, method, _args) => {
                 let struct_ty = if let ExprKind::Var(v) = &obj.kind {
-                    self.var_struct_types.get(v.as_str()).cloned()
+                    self.local_struct(v)
                 } else { None };
                 if let Some(sty) = struct_ty {
                     let key = format!("{}::{}", sty, method);
@@ -1004,7 +1004,7 @@ impl Transpiler {
             ExprKind::UnaryOp(crate::ast::UnaryOp::Neg, operand) => {
                 // `-a` where `a` is a struct with `neg()` method returning managed type
                 let struct_ty = if let ExprKind::Var(v) = &operand.kind {
-                    self.var_struct_types.get(v.as_str()).cloned()
+                    self.local_struct(v)
                 } else { None };
                 if let Some(sty) = struct_ty {
                     let key = format!("{}::neg", sty);

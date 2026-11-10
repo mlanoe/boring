@@ -1866,7 +1866,7 @@ Flags:
     --sanitize <s>          Sanitizer: address, thread or memory (nightly toolchain)
     --locked                Fail instead of creating/updating a boring.lock entry
     --offline               Never touch the network for a git [deps] dependency
-    --show-qualifiers       List the inferred ownership qualifiers
+    --show-qualifiers       List the inferred ownership qualifiers, with the reason of each (`check --emit-bri=full` writes the result into a file)
     --env <name>            Environment name for @provide(env = \"...\")
     -h, --help              Print this help
 ",
@@ -1880,7 +1880,7 @@ Flags:
     --target <t>            Check the GPU profile can use backend t (cuda, rocm, metal, wgpu, ...)
     --locked                Fail instead of creating/updating a boring.lock entry
     --offline               Never touch the network for a git [deps] dependency
-    --show-qualifiers       List the inferred ownership qualifiers
+    --show-qualifiers       List the inferred ownership qualifiers, with the reason of each (`check --emit-bri=full` writes the result into a file)
     --env <name>            Environment name for @provide(env = \"...\")
     --                      Everything after is passed to the script (args())
     -h, --help              Print this help
@@ -1891,7 +1891,7 @@ Usage: boring check [--show-types] [--emit-bri[=mono|full]] [--out <dir>] <file.
 Type-check a file without running it.
 
 Flags:
-    --show-types            Print the headers inferred for untyped parameters/fields
+    --show-types            Print the headers inferred for untyped parameters/fields (`--emit-bri` shows them in the whole program)
     --emit-bri[=mono|full]  Print the .bri (Boring inferred) of the file on stdout: valid Boring
                             that shows what the compiler decided (mono: the program after
                             specialisation, the default; full: also the inferred ownership qualifiers)
@@ -2041,7 +2041,7 @@ fn print_help() {
     eprintln!("    boring run --locked        Fail instead of creating/updating a boring.lock entry");
     eprintln!("    boring run --show-qualifiers  List the inferred qualifiers: 'kernel'global/'kernel'unified for kernel.tensors operands, plus CPU ownership ('owned/'actor/borrow...) of unannotated params and lets (also on build)");
     eprintln!("    boring run --offline       Never touch the network for a git [deps] dependency");
-    eprintln!("    boring check --show-types <file.br>  Print the headers inferred for untyped parameters/fields (implicit generics)");
+    eprintln!("    boring check --show-types <file.br>  Print the headers inferred for untyped parameters/fields (implicit generics); `--emit-bri` shows them in the whole program");
     eprintln!("    boring check --emit-bri[=mono|full] [--out <dir>] <file.br>  Print (or write) the .bri \"Boring inferred\" file: valid Boring showing what the compiler decided");
     eprintln!("    boring api <file.br>       Print a snapshot of the file's @api signatures");
     eprintln!("    boring api --check <snapshot> <file.br>  Fail on a removed/changed @api signature compared with a snapshot");
@@ -2256,7 +2256,7 @@ fn parse_build_command(build_args: &[String]) {
             }
             "--instrument" => instrument = true,
             "--emit-rust"  => emit_rust = true,
-            // `.bri` ("Boring inferred") output, written to `<project>/bri/` (docs/design-notes/typed-monomorphization-draft.md).
+            // `.bri` ("Boring inferred") output, written to `<project>/bri/` (docs/design-notes/typed-specialisation.md).
             "--emit-bri" => emit_bri = Some(bri::BriMode::Mono),
             a if a.starts_with("--emit-bri=") => emit_bri = parse_emit_bri_flag(&build_args[i..=i]),
             "--compile"    => compile = true,
@@ -2651,6 +2651,7 @@ fn bri_text(path: &Path, mode: bri::BriMode) -> String {
 /// Like `bri_text`, also giving the names of the bare `use <name>` imports of the file (sibling
 /// files of the same project).
 fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
+    specialize_untyped::clear_origins();
     let (program, source) = front_end_program(path);
     let uses: Vec<String> = program.items.iter().filter_map(|i| match i {
         ast::Item::Use(u) if u.path.len() == 1 && u.items.is_empty() && !u.glob => Some(u.path[0].clone()),
@@ -2658,14 +2659,28 @@ fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
     }).collect();
     let mut decisions: Vec<bri::full::QualDecision> = Vec::new();
     let mut shared = transpiler::SharedDecision::default();
+    let deps = find_project_root(path)
+        .and_then(|root| {
+            let toml_src = std::fs::read_to_string(root.join("boring.toml")).ok()?;
+            BoringToml::parse(&toml_src).resolve_deps(&root).ok()
+        })
+        .unwrap_or_default();
+    // `full` also shows what the transpiler's monomorphizer made (explicit `<..>` and qualifier-generic instances).
+    // It needs the registrations the transpiler makes while scanning the whole file graph, which can stop on sugar
+    // the later desugarings remove (a labeled multi-dimensional array): the file then keeps its generics as written.
+    let program = if mode == bri::BriMode::Full {
+        let source_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let cfg = transpiler::TranspileConfig { source_dir, deps: deps.clone(), ..Default::default() };
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transpiler::monomorphized_for_bri(&program, cfg)));
+        std::panic::set_hook(previous_hook);
+        match result { Ok(Some(p)) => p, _ => program }
+    } else { program };
     if mode == bri::BriMode::Full {
-        let deps = find_project_root(path)
-            .and_then(|root| {
-                let toml_src = std::fs::read_to_string(root.join("boring.toml")).ok()?;
-                BoringToml::parse(&toml_src).resolve_deps(&root).ok()
-            })
-            .unwrap_or_default();
         let d = desugar_inline_kernel::desugar_inline_kernels(program.clone());
+        // Taken here: the check below reports and drains them.
+        let gpu = desugar_tensor_quals::take_decisions();
         let d = desugar_labeled_array::desugar_labeled_array(d);
         let d = desugar_array_block_or_exit(path, &source, d);
         let d = desugar_inject_or_exit(path, &source, d, &deps);
@@ -2674,14 +2689,28 @@ fn bri_text_and_uses(path: &Path, mode: bri::BriMode) -> (String, Vec<String>) {
         let source_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let cfg = transpiler::TranspileConfig { source_dir, deps, ..Default::default() };
         let out = transpiler::transpile_with_config(&d, cfg);
-        if !out.errors.is_empty() { report_transpile_errors(path, &source, &out.errors); process::exit(1); }
+        if !out.errors.is_empty() {
+            // The program needs a target this command does not select (a kernel on `std`): the
+            // transpiler's choices are not available, so the file shows what `mono` shows.
+            eprintln!("warning: {}: the transpiler cannot run on it here, so the .bri has no inferred qualifiers ({})",
+                path.display(), out.errors.first().map(|e| e.to_string()).unwrap_or_default());
+            let _ = transpiler::take_shared_decision();
+            let _ = transpiler::take_cpu_decisions();
+            return match bri::print_program_mode(&program, mode, &decisions, &shared) {
+                Ok(t) => (t, uses),
+                Err(e) => { eprintln!("error: {path}: {e}", path = path.display()); process::exit(1); }
+            };
+        }
         shared = transpiler::take_shared_decision();
         let mut cpu = transpiler::take_cpu_decisions();
-        let _ = desugar_tensor_quals::take_decisions();
+        for g in gpu {
+            let qual = if g.qual == "'kernel'unified" { ast::OwnerQual::GpuUnified } else { ast::OwnerQual::GpuGlobal };
+            decisions.push(bri::full::QualDecision { scope: g.scope, name: g.name, line: g.line, col: g.col, is_param: false, either_kind: true, qual });
+        }
         cpu.dedup_by(|a, b| a.scope == b.scope && a.name == b.name && a.line == b.line);
         for c in cpu {
             let Some(qual) = c.qualifier else { continue };
-            decisions.push(bri::full::QualDecision { scope: c.scope, name: c.name, line: c.line, col: c.col, is_param: c.kind == "param", qual });
+            decisions.push(bri::full::QualDecision { scope: c.scope, name: c.name, line: c.line, col: c.col, is_param: c.kind == "param", either_kind: false, qual });
         }
     }
     match bri::print_program_mode(&program, mode, &decisions, &shared) {

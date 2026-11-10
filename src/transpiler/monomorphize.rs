@@ -1843,6 +1843,40 @@ impl Transpiler {
     /// even when multiple other files call the same instantiation; cross-file
     /// visibility works with zero prefixing because the emitted Rust is one flat,
     /// concatenated namespace (see this module's top-level doc comment).
+    /// The instances of generics this file does not declare (`Stack_int` of an imported `Stack`): the monomorphizer
+    /// puts them in the file that declares the generic; a `.bri` is the image of one file, so it declares what it
+    /// calls. `declared` are the names the file declares itself.
+    pub(crate) fn imported_instances(&self, program: &Program) -> Vec<Item> {
+        let mut local: HashSet<String> = HashSet::new();
+        for item in &program.items {
+            match item {
+                Item::Struct(s) => { local.insert(s.name.clone()); }
+                Item::Enum(e) => { local.insert(e.name.clone()); }
+                Item::Fn(f) => { local.insert(f.name.clone()); }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        let mut names: Vec<&String> = self.global_instantiations.keys().collect();
+        names.sort();
+        for name in names {
+            if local.contains(name) { continue; }
+            let insts = &self.global_instantiations[name];
+            if let Some(decl) = self.global_generic_structs.get(name) {
+                for inst in insts.iter().filter(|i| i.is_struct) {
+                    let subst = build_type_subst(&decl.type_params, &inst.type_args);
+                    out.push(Item::Struct(substitute_struct_decl(decl, &subst, &inst.mangled)));
+                }
+            } else if let Some(decl) = self.global_generic_fns.get(name) {
+                for inst in insts.iter().filter(|i| !i.is_struct && !i.is_enum) {
+                    let subst = build_type_subst(&decl.type_params, &inst.type_args);
+                    out.push(Item::Fn(substitute_fn_decl(decl, &subst, &inst.mangled)));
+                }
+            }
+        }
+        out
+    }
+
     pub(crate) fn monomorphize_program(&mut self, program: &mut Program) {
         // Constructions a context determines take their instance's name (the instances were
         // registered by `rewrite_qual_program`). Before the qualifier-generic declarations are

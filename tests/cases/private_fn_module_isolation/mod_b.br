@@ -1,0 +1,7 @@
+use mod_a
+
+bool helper_priv(int x):
+    x < 0
+
+pub bool call_b(int x):
+    helper_priv(x)
