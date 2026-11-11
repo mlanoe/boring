@@ -436,7 +436,6 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
         .filter(|f| f.view_kind.is_none())
         .map(|f| f.name.clone())
         .collect();
-    outside_names.extend(binds.iter().cloned());
     outside_names.extend(envs.iter().cloned());
     outside_names.insert(ENV.to_string());
     // The description keeps inputs; a `bind` input becomes a shared slot handle.
@@ -515,7 +514,7 @@ fn lower_view(mut s: StructDecl, env: &Env) -> Result<(Vec<AliasDecl>, Vec<Struc
         }
         if let Some(e) = failure { return Err(e); }
         if env.view_trait && has_state && !native {
-            report_callbacks(&mut s.methods, &outside_names);
+            report_callbacks(&mut s.methods, &outside_names, &binds);
         }
     }
     if !projections.is_empty() {
@@ -695,7 +694,15 @@ fn view_methods(s: &StructDecl, native: bool, has_state: bool, has_env: bool, ow
             // The runtime's own mount: the same state, already linked to its owner (see `StateOwner`).
             // (Built in one constructor expression: a shared trait object cannot be mutated after boxing.)
             let owned = if owner_slot { "__owner = Slot(value = owner)" } else { "__owner = owner" };
-            let mut owned_args = args.clone();
+            let mut owned_args: Vec<String> = Vec::new();
+            for (name, slotted, _) in seeds {
+                if *slotted {
+                    // A state handed to a child's `bind` records its owner: the child's writes report to it.
+                    owned_args.push(format!("{name} = Slot(value = self.{name}__initial(), owner = StateOwner(id = owner.id, generation = owner.generation, sink = owner.sink))"));
+                } else {
+                    owned_args.push(format!("{name} = self.{name}__initial()"));
+                }
+            }
             owned_args.push(owned.to_string());
             src.push_str(&format!(
                 "    req StateBox'shared newOwnedState(StateOwner owner): {state_name}({})\n",
@@ -1442,8 +1449,9 @@ fn owner_touch_methods(slot: bool) -> Vec<FnDecl> {
 
 /// Whether `body` (with `params` in scope) touches nothing outside the view's own `state` and the
 /// `own` methods it calls; the second value is the own methods it calls.
-fn stays_in_state(body: &mut [Stmt], params: &[String], outside: &HashSet<String>, own: &HashSet<String>) -> (bool, HashSet<String>) {
+fn stays_in_state(body: &mut [Stmt], params: &[String], outside: &HashSet<String>, own: &HashSet<String>, binds: &HashSet<String>) -> (bool, HashSet<String>, HashSet<String>) {
     use std::cell::{Cell, RefCell};
+    let used_binds: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     let locals: RefCell<HashSet<String>> = RefCell::new(params.iter().cloned().collect());
     let bad = Cell::new(false);
     let self_ok = Cell::new(0usize);
@@ -1469,6 +1477,8 @@ fn stays_in_state(body: &mut [Stmt], params: &[String], outside: &HashSet<String
             if n == ST || locals.borrow().contains(n) { return; }
             if n == "self" {
                 if self_ok.get() > 0 { self_ok.set(self_ok.get() - 1); } else { bad.set(true); }
+            } else if binds.contains(n) {
+                used_binds.borrow_mut().insert(n.clone());
             } else if outside.contains(n) {
                 bad.set(true);
             }
@@ -1483,19 +1493,19 @@ fn stays_in_state(body: &mut [Stmt], params: &[String], outside: &HashSet<String
     };
     Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(body);
     let calls = calls.into_inner();
-    (!bad.get(), calls)
+    (!bad.get(), calls, used_binds.into_inner())
 }
 
-fn report_callbacks(methods: &mut [FnDecl], outside: &HashSet<String>) {
+fn report_callbacks(methods: &mut [FnDecl], outside: &HashSet<String>, binds: &HashSet<String>) {
     let own: HashSet<String> = methods.iter().filter(|m| m.name != "body").map(|m| m.name.clone()).collect();
     // Which own methods stay in state: a fixpoint, since they call each other.
-    let mut info: HashMap<String, (bool, HashSet<String>)> = HashMap::new();
+    let mut info: HashMap<String, (bool, HashSet<String>, HashSet<String>)> = HashMap::new();
     for m in methods.iter().filter(|m| own.contains(&m.name)) {
         let params: Vec<String> = m.params.iter().map(|p| p.name.clone()).collect();
         let mut body = m.body.clone();
-        info.insert(m.name.clone(), stays_in_state(&mut body, &params, outside, &own));
+        info.insert(m.name.clone(), stays_in_state(&mut body, &params, outside, &own, binds));
     }
-    let mut local: HashSet<String> = info.iter().filter(|(_, (ok, _))| *ok).map(|(n, _)| n.clone()).collect();
+    let mut local: HashSet<String> = info.iter().filter(|(_, (ok, _, _))| *ok).map(|(n, _)| n.clone()).collect();
     loop {
         let before = local.len();
         let snapshot = local.clone();
@@ -1515,9 +1525,32 @@ fn report_callbacks(methods: &mut [FnDecl], outside: &HashSet<String>) {
                 ClosureBody::Block(b) => b.clone(),
                 ClosureBody::Expr(x) => vec![Stmt::Expr((**x).clone())],
             };
-            let (ok, calls) = stays_in_state(&mut probe, &names, outside, &own);
+            let (ok, calls, mut used) = stays_in_state(&mut probe, &names, outside, &own, binds);
             let precise = ok && calls.iter().all(|c| local.contains(c));
-            let mut stmts = parse_stmts(if precise { "__st.touch__()" } else { "__st.escalate__()" });
+            if precise {
+                // The binds reached through the own methods it calls (transitively) report too.
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut todo: Vec<String> = calls.iter().cloned().collect();
+                while let Some(c) = todo.pop() {
+                    if !seen.insert(c.clone()) { continue; }
+                    if let Some((_, cs, bs)) = info.get(&c) {
+                        used.extend(bs.iter().cloned());
+                        todo.extend(cs.iter().cloned());
+                    }
+                }
+            }
+            // A write through a `bind` is a write to the state of whichever composite owns the slot: that
+            // composite is the one to re-expand (`Slot.touchOwner`); a slot with no owner (a projection, a
+            // hand-built one) falls back to the whole-window rebuild.
+            let mut src = String::from(if precise { "__st.touch__()" } else { "__st.escalate__()" });
+            if precise {
+                let mut names: Vec<&String> = used.iter().collect();
+                names.sort();
+                for b in names {
+                    src.push_str(&format!("\nlet __o{b} = {b}.owner\nif let __own = __o{b}:\n    __own.touch()\nelse:\n    __st.escalate__()"));
+                }
+            }
+            let mut stmts = parse_stmts(&src);
             match std::mem::replace(body, ClosureBody::Block(vec![])) {
                 ClosureBody::Block(b) => stmts.extend(b),
                 ClosureBody::Expr(x) => stmts.push(Stmt::Expr(*x)),

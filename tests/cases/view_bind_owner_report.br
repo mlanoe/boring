@@ -1,0 +1,40 @@
+# A callback that writes through a `bind` reports to the composite that owns the bound `state` (the slot
+# carries its owner), not to the whole window: it touches its own view and the slot's owner. A callback that
+# also reaches an input still escalates; a slot with no owner (hand-built) escalates too.
+use boring.ui.*
+
+view Counter:
+    string label
+    bind int n
+    state int local = 0
+
+    def bumpBoth():
+        n += 1
+        local += 1
+
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Button(label = "bind", onActivate = ():
+                n += 1)
+            Button(label = "method", onActivate = ():
+                self.bumpBoth())
+            Button(label = "input", onActivate = ():
+                print label)
+
+view Page:
+    state int count = 0
+    body():
+        Column(alignment = .Center, spacing = nil):
+            Counter(label = "c", n = count)
+
+def main():
+    mut DirtySink'actor sink = DirtySink()
+    let page = Page()
+    let pst = page.newOwnedState(StateOwner(id = 7, generation = 3, sink = sink))
+    let kid = page.expand(pst).viewChildren()[0] as Counter else (Counter(label = "?", n = Slot(value = 0)))
+    let cst = kid.newOwnedState(StateOwner(id = 9, generation = 4, sink = sink))
+    let col = kid.expand(cst)
+    for i in 0..<3:
+        sink.clear()
+        col.viewChildren()[i].viewAct("activate", "")
+        print "{i}: reports={sink.reports} all={sink.all} ids={sink.ids}"

@@ -145,6 +145,10 @@ pub trait View:
 # src/lower_view.rs). Application code never names it.
 pub struct Slot<T>:
     pub var mut T value
+    # The composite whose `state` this slot backs (set at mount for a `state` handed to a child's `bind`);
+    # a child's write through the slot reports to it (the lowering reads `owner` itself: a generic
+    # method would not resolve through the slot's lock). nil: unknown, the writer escalates.
+    pub var StateOwner? owner = nil
 
 pub enum AxisAlignment:
     Leading

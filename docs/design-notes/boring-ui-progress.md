@@ -2,7 +2,7 @@
 
 Companion to [`boring-ui-draft.md`](boring-ui-draft.md) (the design). This file tracks **what is
 implemented, what is decided, and what to do next**, so work can resume on another machine.
-Last updated: 2026-10-28.
+Last updated: 2026-11-11 (sections after "2026-10-27/28" are summaries; the README of `../boring-ui` is the detailed source).
 
 The draft's "Implementation sequence" has 6 layers, all started and the first vertical slice finished: **layer 1 (language
 prerequisites)** — view lowering, `state`/`bind`/`env`, keyed `for … with …`, identity — is done (view lowering below, and the
@@ -333,9 +333,7 @@ on an optional moves it under `boring build`, so `collectScopes` pushes after re
 
 **Error reporting (2026-10-18).** `boring-ui/src/core.br`: `ErrorReport` (kind, message, view path, node, task-run generation, source), `Runtime.reports`
 beside the unchanged `errors`, `report`/`reportAtPath`/`reportFailure`/`failTask`/`takeReports`/`pathOf`; every existing error site now reports a
-structured entry; a cancelled or superseded task run is not an error. Test `core_errors_test.br` (interpreter and `boring build`). Not wired yet: the
-dispatch boundary catching a throwing callback, which needs `boring build` to support throwing closures / function types (task proposed; the
-interpreter already does). Also proposed: consistent string `length` plus `graphemes()` / `displayWidth` (the interpreter counts scalar values, the
+structured entry; a cancelled or superseded task run is not an error. Test `core_errors_test.br` (interpreter and `boring build`). (Wired 2026-10-18, 85a4114: the dispatch boundary catches throwing callbacks, interpreter and `boring build`.) Also proposed: consistent string `length` plus `graphemes()` / `displayWidth` (the interpreter counts scalar values, the
 transpiled output bytes).
 
 Design choices not in the draft: ids are recycled only *after* the pass that released them (a node
@@ -343,12 +341,33 @@ created in the same pass gets a fresh id); an invalid description refuses the *w
 the offending `for` subtree; hooks are an event log (`events`), not user callbacks; update-pass counter is
 `passesRun`.
 
-## Next steps (suggested order)
+## 2026-10-29 → 2026-11-09 — what landed after the last update (summary)
 
-1. Horizontal flipping for `Popover`, a show delay for `Tooltip` (the host would pass a clock), animated programmatic scrolling.
-2. Layout cache for non-windowed trees; `scene.br` emitting glyphs directly.
-3. Hardware checks: real touch screen, real IME, VoiceOver.
-4. Remaining deferred items of the draft: `Alert`, navigation containers, `Video`, gradients/filters, two-axis scrolling.
+Details and "Not done" lists are in `../boring-ui/README.md` (one section per item). Done since 2026-10-28: `Popover` horizontal
+flipping, `Tooltip` show delay (`OnHover(delay = …)`), animated programmatic scrolling; non-modal focus scopes, directional
+navigation, multiple selection, momentum scrolling, scroll into view on focus, key dispatch phases, undo/redo, focus ring;
+`NavigationStack`/`NavigationLink`/`NavigationBack`, `Form`/`Section`/`LabeledContent`/`Menu`, `Grid`, `ContextMenu`, `Alert` and
+confirmation dialogs, `DatePicker`, `ColorPicker`, `Canvas` and shapes, drag and drop, gestures, several windows in one surface
+(`Desktop`), mobile adaptation (`ScreenInfo`, `SafeArea`, iOS Simulator host via `ios_sim.sh`); rounded corners in the renderer;
+platform themes (mac, Fluent, adwaita), system appearance/accent/contrast, application-written `ControlStyle`s (`Styled`,
+`Theme.withStyle`), built-in styles (Underlined, Switch, list styles).
+
+## Next steps (suggested order, 2026-11-11)
+
+Not verified by running anything: derived from the README "Not done" lists.
+
+1. **Platform**: real iOS/Android hosts (device build and signing, soft-keyboard height, native text-input adapter); hardware
+   checks (real touch screen, real IME, VoiceOver).
+2. **Rendering**: `scene.br` emitting glyphs directly (today `glyphify` after the fact); free-running animation loop; layout cache
+   inside non-windowed trees; paths, ellipses, gradients, filters (need new renderer commands).
+3. **Runtime**: lifecycle hooks as user callbacks (today an event log); `bind` writes by a child reporting their owner (avoids whole-window rebuilds); a view-tree
+   `.onError`; low-level event API for third-party controls; named custom accessibility actions.
+4. **Controls**: navigation (back gesture/Escape, push/pop transitions, deep links, `NavigationSplitView`); `Grid` weighted
+   columns and spans; `DatePicker` time/ranges/locale; `ColorPicker` alpha/HSB; drag and drop on touch and across windows; pinch
+   and rotation gestures; window resize/minimize; `Video`; two-axis scrolling; keyframes.
+5. **boring (compiler)**: field projections into native `bind`s (`item.title`), convenience modifiers (`width(200)`) and modifiers
+   on helper results / generic `ext View`, real type inference in the checker for `IdentityKey`, `lower_view` seeing views of
+   sibling files without an explicit `use`; re-check the remaining boring-ui workarounds against current boring HEAD.
 
 ## Decisions made while implementing
 

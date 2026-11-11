@@ -1,6 +1,10 @@
 # Draft — boring-ui: a SwiftUI-flavored, custom-rendered GUI toolkit for Boring
 
-Status: **working draft**, not a spec. Nothing in this document is implemented yet except the
+Status: **working draft**. *(2026-11-11: the first vertical slice described here is implemented — layers 1–6 of "Implementation
+sequence", the Todo acceptance app and a native window host — and many items below marked "deferred" have since shipped, e.g.
+programmatic scrolling, `Alert`, navigation, `Grid`, `Menu`, drag and drop, gestures. See `boring-ui-progress.md` and
+`../boring-ui/README.md` for what is built and what remains; the text below is the original design and is not re-edited per item.)*
+Originally written when nothing was implemented except the
 language mechanisms explicitly marked as shipped below (§1's array-block sugar, and `'observed`
 in §3 — including, as of this update, struct fields/parameters/return types, not just local
 bindings). It now defines the design basis and acceptance criteria for a first implementation;

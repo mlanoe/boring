@@ -1,6 +1,8 @@
 # Draft — boring-ui renderer: native Boring kernels, built incrementally
 
-Status: **working draft**, not a spec. Nothing here is implemented. It refines layer 4 ("Renderer") of
+Status: **working draft, largely implemented** (2026-11-11): steps 0–4 below are done (CPU reference, per-pixel and tiled kernels,
+text, window host); the "Status" sections that follow are the history, newest-first by area. Still open: `scene.br` emitting glyphs
+directly, paths/gradients/filters, a free-running animation loop, real touch/IME hardware checks. It refines layer 4 ("Renderer") of
 [`boring-ui-draft.md`](boring-ui-draft.md#runtime-architecture) and its "Painting, compositing, and render
 invalidation" section; progress is tracked in [`boring-ui-progress.md`](boring-ui-progress.md).
 

@@ -801,6 +801,7 @@ interp_test!(view_state_set_dict_mutation);
 interp_test!(view_body_lowering);
 interp_test!(view_runtime_methods);
 interp_test!(view_state_owner_report);
+interp_test!(view_bind_owner_report);
 interp_test!(view_sited_blocks);
 interp_test!(view_props);
 interp_test!(view_actions);
