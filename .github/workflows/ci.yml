@@ -36,6 +36,9 @@ jobs:
       - name: Build
         run: cargo build --locked
 
+      - name: Run unit tests
+        run: cargo test --locked --bin boring
+
       - name: Run integration tests (interpreter)
         run: cargo test --test run
 
