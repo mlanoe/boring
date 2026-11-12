@@ -1738,6 +1738,10 @@ struct Transpiler {
     /// kernel-construction codegen that consumes it branches on the enum instead of
     /// always uploading (`emit_kernel::emit_kernel_construction`).
     pub(crate) fn_gpu_arg_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Plain-literal struct name -> `[(field_name, is_gpu_resident_array)]`, populated during
+    /// `compute_gpu_arg_params` so struct constructor arguments (`Plane(x, ...)`) are recognized
+    /// as GPU-resident-preserving positions.
+    pub(crate) gpu_struct_fields: std::collections::HashMap<String, Vec<(String, bool)>>,
     /// Free function name -> per-position flags: the `'kernel'global`/`'kernel'unified` array
     /// parameters passed as `&BoringKernelArg<T>` (see `compute_gpu_borrow_params`).
     pub(crate) fn_gpu_borrow_params: std::collections::HashMap<String, Vec<bool>>,
@@ -2168,6 +2172,7 @@ impl Transpiler {
             gpu_resident_vars: std::collections::HashMap::new(),
             fn_returns_resident: std::collections::HashMap::new(),
             fn_gpu_arg_params: std::collections::HashMap::new(),
+            gpu_struct_fields: std::collections::HashMap::new(),
             fn_gpu_borrow_params: std::collections::HashMap::new(),
             current_fn_gpu_borrow_param_names: std::collections::HashSet::new(),
             fn_returns_resident_tuple: std::collections::HashMap::new(),
@@ -2534,8 +2539,8 @@ impl Transpiler {
             crate::ast::walk_stmts(&f.body, &mut |n| { if let crate::ast::WalkNode::Stmt(Stmt::With(_)) = n { with_block = true; } });
             if with_block { return false; }
             let mut at_gpu_position = false;
-            let mut classify = |callee: &str, idx: usize| -> bool {
-                let q = this.gpu_arg_position_qualifies(callee, idx);
+            let mut classify = |callee: &str, idx: usize, label: Option<&str>| -> bool {
+                let q = this.gpu_arg_position_qualifies_labeled(callee, idx, label);
                 at_gpu_position |= q;
                 q
             };
@@ -4252,6 +4257,16 @@ impl Transpiler {
     fn compute_gpu_arg_params(&mut self, program: &Program) {
         let mut all_fns: Vec<&FnDecl> = Vec::new();
         for item in &program.items { Self::gather_gpu_arg_fns_item(item, &mut all_fns); }
+        for item in &program.items {
+            gather_gpu_struct_fields_item(item, &mut self.gpu_struct_fields);
+        }
+        for (name, decl) in &self.struct_decls {
+            if !self.gpu_struct_fields.contains_key(name) {
+                if let Some(fields) = struct_decl_gpu_fields(decl) {
+                    self.gpu_struct_fields.insert(name.clone(), fields);
+                }
+            }
+        }
 
         let mut flags_by_fn: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
             .map(|f| (f.name.as_str(), vec![false; f.params.len()]))
@@ -4265,34 +4280,40 @@ impl Transpiler {
             let mut changed = false;
             for f in &all_fns {
                 let mut new_flags = vec![false; f.params.len()];
+                let returns_resident = f.return_ty.as_ref().is_some_and(|ty| match ty {
+                    Type::Tuple(elems) => elems.iter().any(|t| t.gpu_resident_qual().is_some()),
+                    other => other.gpu_resident_qual().is_some(),
+                });
                 for (i, p) in f.params.iter().enumerate() {
-                    let returns_resident = f.return_ty.as_ref().is_some_and(|ty| match ty {
-                        Type::Tuple(elems) => elems.iter().any(|t| t.gpu_resident_qual().is_some()),
-                        other => other.gpu_resident_qual().is_some(),
-                    });
-                    let resident_boundary = returns_resident
-                        && p.ty.as_ref().is_some_and(|ty| {
-                            matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
-                                if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
-                        });
+                    let explicitly_resident = p.ty.as_ref().is_some_and(is_gpu_array_type);
                     let kernel_decls = &self.kernel_decls;
+                    let struct_fields = &self.gpu_struct_fields;
                     let known = &flags_by_fn;
-                    let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
-                        if let Some(decl) = kernel_decls.get(fn_name) {
-                            let Some(init) = decl.inits.first() else { return false };
-                            let Some(init_param) = init.params.get(arg_idx) else { return false };
-                            let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
-                            let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
-                            return matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
-                                && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
-                        }
-                        known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
+                    let imported_gpu_arg_params = &self.fn_gpu_arg_params;
+                    let is_gpu_target = self.is_gpu_target;
+                    let mut has_qualifying_call = false;
+                    let mut classify = |fn_name: &str, arg_idx: usize, label: Option<&str>| -> bool {
+                        let ok = if kernel_ctor_takes_gpu_array(kernel_decls, fn_name, arg_idx, label) {
+                            true
+                        } else if is_gpu_target && struct_ctor_takes_gpu_array(struct_fields, fn_name, arg_idx, label) {
+                            true
+                        } else if let Some(idx) = fn_param_index(&all_fns, fn_name, arg_idx, label) {
+                            known.get(fn_name)
+                                .or_else(|| imported_gpu_arg_params.get(fn_name))
+                                .and_then(|flags| flags.get(idx).copied())
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if ok { has_qualifying_call = true; }
+                        ok
                     };
-                    let is_array_like_param = p.ty.as_ref().is_some_and(|ty| {
-                        matches!(ty.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _))
-                    });
-                    let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, is_array_like_param);
-                    new_flags[i] = resident_boundary || only_qualifying;
+                    let is_array_like_param = p.ty.as_ref().is_some_and(is_array_like_type);
+                    let (any_use, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, is_array_like_param);
+                    let keep_resident = (returns_resident && explicitly_resident)
+                        || (is_gpu_target && explicitly_resident
+                            && (has_qualifying_call || body_has_resident_use_of(&f.body, &p.name) || !any_use));
+                    new_flags[i] = keep_resident || only_qualifying;
                 }
                 if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {
                     changed = true;
@@ -4309,18 +4330,16 @@ impl Transpiler {
         }
     }
 
-    /// Does position `arg_idx` of a call to `fn_name` take a `BoringKernelArg<T>` natively —
-    /// a kernel constructor's `'unified`/`'global` array field, or a function parameter
-    /// `compute_gpu_arg_params` flagged? Same classification as that fixed point, over
-    /// its final result.
-    pub(crate) fn gpu_arg_position_qualifies(&self, fn_name: &str, arg_idx: usize) -> bool {
-        if let Some(decl) = self.kernel_decls.get(fn_name) {
-            let Some(init) = decl.inits.first() else { return false };
-            let Some(init_param) = init.params.get(arg_idx) else { return false };
-            let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
-            let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
-            return matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
-                && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
+    /// Does position `arg_idx` (or `label`) of a call to `fn_name` take a `BoringKernelArg<T>` natively —
+    /// a kernel constructor's `'unified`/`'global` array field, a struct constructor's
+    /// `'kernel'unified`/`'kernel'global` field, or a function parameter `compute_gpu_arg_params`
+    /// flagged? Same classification as that fixed point, over its final result.
+    pub(crate) fn gpu_arg_position_qualifies_labeled(&self, fn_name: &str, arg_idx: usize, label: Option<&str>) -> bool {
+        if kernel_ctor_takes_gpu_array(&self.kernel_decls, fn_name, arg_idx, label) {
+            return true;
+        }
+        if self.is_gpu_target && struct_ctor_takes_gpu_array(&self.gpu_struct_fields, fn_name, arg_idx, label) {
+            return true;
         }
         self.fn_gpu_arg_params.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
     }
@@ -6676,27 +6695,144 @@ fn first_kernel_decl(items: &[Item]) -> Option<&KernelDecl> {
     None
 }
 
+/// True when `ty` (through `mut`) is a `'kernel'global`/`'kernel'unified` array type.
+pub(crate) fn is_gpu_array_type(ty: &Type) -> bool {
+    matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+        if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
+}
+
+/// True when `ty` (through `mut` and optional `'kernel'global`/`'kernel'unified`) is an array-like type.
+pub(crate) fn is_array_like_type(ty: &Type) -> bool {
+    let inner = match ty.without_mut() {
+        Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified) => inner.without_mut(),
+        other => other,
+    };
+    matches!(inner, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _))
+}
+
 /// A parameter typed as a `'kernel'global`/`'kernel'unified` array (emitted by the host
 /// emitter as a `BoringKernelArg<T>` parameter).
 pub(crate) fn is_gpu_array_param(p: &Param) -> bool {
-    p.ty.as_ref().is_some_and(|ty| {
-        matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
-            if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
-    })
+    p.ty.as_ref().is_some_and(is_gpu_array_type)
+}
+
+fn struct_decl_gpu_fields(s: &crate::ast::StructDecl) -> Option<Vec<(String, bool)>> {
+    if !s.inits.iter().all(|init| init.body.is_empty()) {
+        return None;
+    }
+    let fields: Vec<(String, bool)> = if !s.fields.is_empty() {
+        s.fields.iter().map(|fd| (fd.name.clone(), is_gpu_array_type(&fd.ty))).collect()
+    } else if let Some(init) = s.inits.first() {
+        init.params.iter()
+            .map(|p| (p.name.clone(), p.ty.as_ref().is_some_and(is_gpu_array_type)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    fields.iter().any(|(_, is_gpu)| *is_gpu).then_some(fields)
+}
+
+fn gather_gpu_struct_fields_item(item: &Item, out: &mut std::collections::HashMap<String, Vec<(String, bool)>>) {
+    match item {
+        Item::Struct(s) => {
+            if let Some(fields) = struct_decl_gpu_fields(s) {
+                out.insert(s.name.clone(), fields);
+            }
+        }
+        Item::Mod(m) => {
+            for i in &m.items { gather_gpu_struct_fields_item(i, out); }
+        }
+        _ => {}
+    }
+}
+
+fn struct_ctor_takes_gpu_array(
+    struct_fields: &std::collections::HashMap<String, Vec<(String, bool)>>,
+    fn_name: &str,
+    arg_idx: usize,
+    label: Option<&str>,
+) -> bool {
+    let Some(fields) = struct_fields.get(fn_name) else { return false };
+    match label {
+        Some(l) => fields.iter().find(|(n, _)| n == l).is_some_and(|(_, is_gpu)| *is_gpu),
+        None => fields.get(arg_idx).is_some_and(|(_, is_gpu)| *is_gpu),
+    }
 }
 
 fn kernel_ctor_takes_gpu_array(
     kernel_decls: &std::collections::HashMap<String, crate::ast::KernelDecl>,
     fn_name: &str,
     arg_idx: usize,
+    label: Option<&str>,
 ) -> bool {
     let Some(decl) = kernel_decls.get(fn_name) else { return false };
     let Some(init) = decl.inits.first() else { return false };
-    let Some(init_param) = init.params.get(arg_idx) else { return false };
+    let init_param = match label {
+        Some(l) => init.params.iter().find(|p| p.name == l),
+        None => init.params.get(arg_idx),
+    };
+    let Some(init_param) = init_param else { return false };
     let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
     let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
     matches!(field.qual, crate::ast::GpuQual::Unified | crate::ast::GpuQual::Global)
         && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _))
+}
+
+fn fn_param_index(all_fns: &[&FnDecl], fn_name: &str, arg_idx: usize, label: Option<&str>) -> Option<usize> {
+    match label {
+        Some(l) => all_fns.iter().find(|g| g.name == fn_name)
+            .and_then(|g| g.params.iter().position(|p| p.name == l)),
+        None => Some(arg_idx),
+    }
+}
+
+/// True when `body` uses `name` in a way that expects or preserves `BoringKernelArg<T>`
+/// beyond call-argument positions handled by `classify`: a `with <name>:` block, a
+/// `'kernel'global`/`'kernel'unified` local initialized/assigned from `<name>`, or a
+/// `kernel.tensors.*` readable operand.
+fn body_has_resident_use_of(body: &[Stmt], name: &str) -> bool {
+    let mut resident_locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    crate::ast::walk_stmts(body, &mut |node| {
+        if let crate::ast::WalkNode::Stmt(Stmt::Let(l)) = node {
+            if l.ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some()) {
+                resident_locals.insert(l.name.clone());
+            }
+        }
+    });
+    let mut found = false;
+    crate::ast::walk_stmts(body, &mut |node| {
+        if found { return; }
+        match node {
+            crate::ast::WalkNode::Stmt(Stmt::With(w)) if w.names.iter().any(|n| n == name) => {
+                found = true;
+            }
+            crate::ast::WalkNode::Stmt(Stmt::Let(l))
+                if l.ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some())
+                    && l.value.as_ref().is_some_and(|v| matches!(&v.kind, ExprKind::Var(vname) if vname == name)) =>
+            {
+                found = true;
+            }
+            crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Assign(lhs, rhs), .. })
+                if matches!(&lhs.kind, ExprKind::Var(ln) if resident_locals.contains(ln))
+                    && matches!(&rhs.kind, ExprKind::Var(rn) if rn == name) =>
+            {
+                found = true;
+            }
+            crate::ast::WalkNode::Expr(Expr { kind: ExprKind::MethodCall(recv, method, args), .. })
+                if matches!(method.as_str(), "matmul" | "mma" | "linear" | "moe_linear")
+                    && matches!(&recv.kind, ExprKind::Field(gpu, namespace)
+                        if namespace == "tensor" && matches!(&gpu.kind, ExprKind::Var(root) if root == "gpu")) =>
+            {
+                let positional = args.iter().position(|arg| arg.label.is_some()).unwrap_or(args.len());
+                let readable_operands = if (method == "linear" && positional == 4) || method == "moe_linear" { 3 } else { 2 };
+                if args.iter().take(readable_operands).any(|a| matches!(&a.value.kind, ExprKind::Var(v) if v == name)) {
+                    found = true;
+                }
+            }
+            _ => {}
+        }
+    });
+    found
 }
 
 /// Free function name -> per-position flags: `true` for a `'kernel'global`/`'kernel'unified`
@@ -6719,6 +6855,10 @@ pub(crate) fn compute_gpu_borrow_params(
     for item in &program.items {
         if let Item::Kernel(k) = item { kernel_decls.entry(k.name.clone()).or_insert_with(|| k.clone()); }
     }
+    let mut struct_fields: std::collections::HashMap<String, Vec<(String, bool)>> = std::collections::HashMap::new();
+    for item in &program.items {
+        gather_gpu_struct_fields_item(item, &mut struct_fields);
+    }
     let mut all_fns: Vec<&FnDecl> = Vec::new();
     for item in &program.items { Transpiler::gather_gpu_arg_fns_item(item, &mut all_fns); }
     // The shared entry has only one overload's arity, so skip every overload when iterating.
@@ -6731,7 +6871,9 @@ pub(crate) fn compute_gpu_borrow_params(
     let mut takes_kernel_arg: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
         .map(|f| {
             let ret_res = fn_returns_resident(f);
-            let row = f.params.iter().map(|p| ret_res && is_gpu_array_param(p)).collect();
+            let row = f.params.iter().map(|p| {
+                is_gpu_array_param(p) && (ret_res || body_has_resident_use_of(&f.body, &p.name))
+            }).collect();
             (f.name.as_str(), row)
         })
         .collect();
@@ -6741,12 +6883,19 @@ pub(crate) fn compute_gpu_borrow_params(
             if overloaded.contains(f.name.as_str()) { continue; }
             for (i, p) in f.params.iter().enumerate() {
                 if takes_kernel_arg[f.name.as_str()][i] || !is_gpu_array_param(p) { continue; }
-                let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
-                    kernel_ctor_takes_gpu_array(&kernel_decls, fn_name, arg_idx)
-                        || takes_kernel_arg.get(fn_name).and_then(|v| v.get(arg_idx).copied()).unwrap_or(false)
+                let mut has_qualifying_call = false;
+                let mut classify = |fn_name: &str, arg_idx: usize, label: Option<&str>| -> bool {
+                    let ok = kernel_ctor_takes_gpu_array(&kernel_decls, fn_name, arg_idx, label)
+                        || struct_ctor_takes_gpu_array(&struct_fields, fn_name, arg_idx, label)
+                        || fn_param_index(&all_fns, fn_name, arg_idx, label)
+                            .and_then(|idx| takes_kernel_arg.get(fn_name).and_then(|v| v.get(idx).copied()))
+                            .unwrap_or(false);
+                    if ok { has_qualifying_call = true; }
+                    ok
                 };
-                let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, true);
-                if any && only {
+                let treat_len = p.ty.as_ref().is_some_and(is_array_like_type);
+                let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, treat_len);
+                if has_qualifying_call || !any || (any && only) {
                     takes_kernel_arg.get_mut(f.name.as_str()).unwrap()[i] = true;
                     changed = true;
                 }
@@ -6775,14 +6924,15 @@ pub(crate) fn compute_gpu_borrow_params(
             if overloaded.contains(f.name.as_str()) { continue; }
             for (i, p) in f.params.iter().enumerate() {
                 if !flags[f.name.as_str()][i] { continue; }
-                let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
-                    if kernel_ctor_takes_gpu_array(&kernel_decls, fn_name, arg_idx) {
+                let mut classify = |fn_name: &str, arg_idx: usize, label: Option<&str>| -> bool {
+                    if kernel_ctor_takes_gpu_array(&kernel_decls, fn_name, arg_idx, label) {
                         return true;
                     }
-                    // A forwarded argument is read-only whether the callee borrows it or takes
-                    // it by value (`x.clone()` of a reference is the handle clone), as long as
-                    // the callee's parameter is actually `BoringKernelArg`-typed.
-                    takes_kernel_arg.get(fn_name).and_then(|v| v.get(arg_idx).copied()).unwrap_or(false)
+                    // Storing into a struct field (`Plane(x, ...)`) consumes an owned `BoringKernelArg<T>`,
+                    // so only forwarding to another function keeps the parameter borrowed.
+                    fn_param_index(&all_fns, fn_name, arg_idx, label)
+                        .and_then(|idx| takes_kernel_arg.get(fn_name).and_then(|v| v.get(idx).copied()))
+                        .unwrap_or(false)
                 };
                 let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, true);
                 if !any || !only {

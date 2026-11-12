@@ -896,6 +896,15 @@ impl Checker {
     fn collect_gpu_arg_params(&mut self, program: &Program) {
         let mut all_fns: Vec<&FnDecl> = Vec::new();
         for item in &program.items { Self::gather_fns_item(item, &mut all_fns); }
+        let mut struct_decls: HashMap<&str, &StructDecl> = HashMap::new();
+        fn gather_structs<'a>(item: &'a Item, out: &mut HashMap<&'a str, &'a StructDecl>) {
+            match item {
+                Item::Struct(s) => { out.insert(s.name.as_str(), s); }
+                Item::Mod(m) => { for i in &m.items { gather_structs(i, out); } }
+                _ => {}
+            }
+        }
+        for item in &program.items { gather_structs(item, &mut struct_decls); }
 
         let mut flags_by_fn: HashMap<&str, Vec<bool>> = all_fns.iter()
             .map(|f| (f.name.as_str(), vec![false; f.params.len()]))
@@ -918,19 +927,44 @@ impl Checker {
                     });
                     let kernel_decls = &self.kernel_decls;
                     let known = &flags_by_fn;
-                    let mut classify = |fn_name: &str, arg_idx: usize| -> bool {
+                    let mut classify = |fn_name: &str, arg_idx: usize, label: Option<&str>| -> bool {
                         if let Some(decl) = kernel_decls.get(fn_name) {
                             let Some(init) = decl.inits.first() else { return false };
-                            let Some(init_param) = init.params.get(arg_idx) else { return false };
+                            let init_param = match label {
+                                Some(l) => init.params.iter().find(|ip| ip.name == l),
+                                None => init.params.get(arg_idx),
+                            };
+                            let Some(init_param) = init_param else { return false };
                             let Some(field_name) = kernel_init_field_for_param(decl, &init_param.name) else { return false };
                             let Some(field) = decl.fields.iter().find(|fd| fd.name == field_name) else { return false };
                             return matches!(field.qual, GpuQual::Unified | GpuQual::Global)
                                 && matches!(field.ty, Type::Array(_) | Type::ArrayN(_, _));
                         }
-                        known.get(fn_name).and_then(|flags| flags.get(arg_idx).copied()).unwrap_or(false)
+                        if let Some(s) = struct_decls.get(fn_name) {
+                            if s.inits.iter().all(|init| init.body.is_empty()) {
+                                let field_ty = match label {
+                                    Some(l) => s.fields.iter().find(|fd| fd.name == l).map(|fd| &fd.ty),
+                                    None => s.fields.get(arg_idx).map(|fd| &fd.ty),
+                                };
+                                if let Some(ty) = field_ty {
+                                    return matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
+                                        if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)));
+                                }
+                            }
+                        }
+                        let param_idx = match label {
+                            Some(l) => all_fns.iter().find(|g| g.name == fn_name)
+                                .and_then(|g| g.params.iter().position(|gp| gp.name == l)),
+                            None => Some(arg_idx),
+                        };
+                        param_idx.and_then(|idx| known.get(fn_name).and_then(|flags| flags.get(idx).copied())).unwrap_or(false)
                     };
                     let is_array_like_param = p.ty.as_ref().is_some_and(|ty| {
-                        matches!(ty.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _))
+                        let inner = match ty.without_mut() {
+                            Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified) => inner.without_mut(),
+                            other => other,
+                        };
+                        matches!(inner, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _))
                     });
                     let (_any, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, is_array_like_param);
                     new_flags[i] = explicitly_resident || only_qualifying;

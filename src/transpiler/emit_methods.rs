@@ -5583,10 +5583,13 @@ impl Transpiler {
                     // caller's value — a reborrow of the enclosing function's own borrowed
                     // parameter, `&local`, `&obj.field`, a resident call, or a temporary for a host array.
                     let lent = if let ExprKind::Var(vname) = &a.value.kind {
-                        if self.current_fn_gpu_borrow_param_names.contains(vname.as_str()) {
+                        if !self.with_open_names.contains(vname.as_str())
+                            && self.current_fn_gpu_borrow_param_names.contains(vname.as_str())
+                        {
                             escape_rust_keyword(vname)
-                        } else if self.resident_call_vars.contains_key(vname.as_str())
-                            || self.current_fn_gpu_arg_param_names.contains(vname.as_str())
+                        } else if !self.with_open_names.contains(vname.as_str())
+                            && (self.resident_call_vars.contains_key(vname.as_str())
+                                || self.current_fn_gpu_arg_param_names.contains(vname.as_str()))
                         {
                             format!("&{}", vname)
                         } else {
@@ -5613,8 +5616,9 @@ impl Transpiler {
                         // case: `wrap_scale`'s `x` is itself `BoringKernelArg<T>`, so
                         // re-wrapping it in `Host(...)` on the way into `scale(x, n)`
                         // would be a type error, not just a missed optimization).
-                        if self.resident_call_vars.contains_key(vname.as_str())
-                            || self.current_fn_gpu_arg_param_names.contains(vname.as_str())
+                        if !self.with_open_names.contains(vname.as_str())
+                            && (self.resident_call_vars.contains_key(vname.as_str())
+                                || self.current_fn_gpu_arg_param_names.contains(vname.as_str()))
                         {
                             format!("{}.clone()", vname)
                         } else {
@@ -7831,6 +7835,7 @@ impl Transpiler {
             gpu_resident_vars: self.gpu_resident_vars.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
             fn_gpu_arg_params: self.fn_gpu_arg_params.clone(),
+            gpu_struct_fields: self.gpu_struct_fields.clone(),
             fn_gpu_borrow_params: self.fn_gpu_borrow_params.clone(),
             current_fn_gpu_borrow_param_names: self.current_fn_gpu_borrow_param_names.clone(),
             fn_returns_resident_tuple: self.fn_returns_resident_tuple.clone(),

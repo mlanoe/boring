@@ -1842,13 +1842,23 @@ impl Transpiler {
         // `Vec<T>` made every later `v = <resident call>` a blocking device-to-host readback
         // (a Metal batch flush). A host-typed non-literal initialiser (`mut [T]'kernel'unified v = cache.hk`) starts the slot in
         // the Host variant too. A non-empty literal stays a plain host array.
-        let resident_init = s.value.as_ref().filter(|_| {
+        let resident_init = s.value.as_ref().filter(|value_expr| {
+            let value_is_already_resident = self.expr_is_gpu_resident_field(value_expr)
+                || matches!(&value_expr.kind, ExprKind::Var(v)
+                    if !self.with_open_names.contains(v.as_str())
+                        && (self.resident_call_vars.contains_key(v.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(v.as_str())
+                            || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
+                || matches!(&value_expr.kind, ExprKind::Call(callee, _)
+                    if matches!(&callee.kind, ExprKind::Var(name)
+                        if self.fn_returns_resident.contains_key(name.as_str())));
             self.is_gpu_target
                 && !self.config.is_simd_target
                 && (self.current_fn_returns_resident.is_some()
+                    || value_is_already_resident
                     || (s.binding.is_mutable()
                         && !self.fn_returns_resident.is_empty()
-                        && s.value.as_ref().is_some_and(|v| !matches!(&v.kind, ExprKind::Array(e) if !e.is_empty()))))
+                        && !matches!(&value_expr.kind, ExprKind::Array(e) if !e.is_empty())))
                 && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
         });
         if let Some(value_expr) = resident_init {
@@ -3380,8 +3390,10 @@ impl Transpiler {
             }
             if self.expr_is_gpu_resident_field(value)
                 || matches!(&value.kind, ExprKind::Var(v)
-                    if self.resident_call_vars.contains_key(v.as_str())
-                        || self.current_fn_gpu_arg_param_names.contains(v.as_str()))
+                    if !self.with_open_names.contains(v.as_str())
+                        && (self.resident_call_vars.contains_key(v.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(v.as_str())
+                            || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
             {
                 return format!("({}).clone()", self.emit_expr(value));
             }
@@ -3762,7 +3774,9 @@ impl Transpiler {
         if self.current_fn_body.is_empty() {
             return false;
         }
-        let mut classify = |fn_name: &str, idx: usize| self.gpu_arg_position_qualifies(fn_name, idx);
+        let mut classify = |fn_name: &str, idx: usize, label: Option<&str>| {
+            self.gpu_arg_position_qualifies_labeled(fn_name, idx, label)
+        };
         super::helpers::resident_slot_uses_stay_resident(
             &self.current_fn_body,
             name,

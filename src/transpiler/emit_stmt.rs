@@ -498,7 +498,18 @@ impl Transpiler {
         let saved_var_types = self.var_types.clone();
 
         for name in &s.names {
-            if let Some(ty) = self.resident_call_vars.get(name.as_str()).cloned() {
+            let resident_ty = self.resident_call_vars.get(name.as_str()).cloned().or_else(|| {
+                (self.current_fn_gpu_arg_param_names.contains(name.as_str())
+                    || self.current_fn_gpu_borrow_param_names.contains(name.as_str()))
+                .then(|| self.fn_current_params.get(name.as_str()).cloned())
+                .flatten()
+            });
+            if let Some(ty) = resident_ty {
+                let scrutinee = if self.current_fn_gpu_borrow_param_names.contains(name.as_str()) {
+                    name.clone()
+                } else {
+                    format!("&{name}")
+                };
                 let inner_ty = match &ty {
                     Type::Qualified(inner, _) => super::emit_kernel::array_inner_type(inner),
                     other => super::emit_kernel::array_inner_type(other),
@@ -512,7 +523,7 @@ impl Transpiler {
 
                 if self.config.is_simd_target {
                     self.line(&format!(
-                        "let {}{name} = match &{name} {{ BoringKernelArg::Host(v) => v.clone() }};",
+                        "let {}{name} = match {scrutinee} {{ BoringKernelArg::Host(v) => v.clone() }};",
                         if is_write { "mut " } else { "" },
                     ));
                     self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));
@@ -527,11 +538,11 @@ impl Transpiler {
                 }
                 if is_write {
                     self.line(&format!(
-                        "let __{name}_buf = match &{name} {{ BoringKernelArg::Resident(buf, _) => Some(std::sync::Arc::clone(buf)), BoringKernelArg::Host(_) => None }};"
+                        "let __{name}_buf = match {scrutinee} {{ BoringKernelArg::Resident(buf, _) => Some(std::sync::Arc::clone(buf)), BoringKernelArg::Host(_) => None }};"
                     ));
                 }
                 self.line(&format!(
-                    "let {}{name} = match &{name} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }};",
+                    "let {}{name} = match {scrutinee} {{ BoringKernelArg::Resident(buf, _) => __boring_gpu_copy_d2h::<{device_ty}>(&__boring_gpu_device(), &__boring_gpu_queue(), buf).iter().map(|&x| x as {host_ty}).collect::<Vec<{host_ty}>>(), BoringKernelArg::Host(v) => v.clone() }};",
                     if is_write { "mut " } else { "" },
                 ));
                 self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));

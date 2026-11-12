@@ -2136,7 +2136,7 @@ fn with_stmt_mutates(
 pub fn scan_var_call_arg_uses(
     body: &[Stmt],
     name: &str,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
+    classify: &mut dyn FnMut(&str, usize, Option<&str>) -> bool,
     treat_len_count_as_qualifying: bool,
 ) -> (bool, bool) {
     let mut any = false;
@@ -2148,7 +2148,7 @@ pub fn scan_var_call_arg_uses(
 fn scan_stmt_var_arg(
     stmt: &Stmt,
     name: &str,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
+    classify: &mut dyn FnMut(&str, usize, Option<&str>) -> bool,
     treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
@@ -2209,7 +2209,7 @@ fn scan_stmt_var_arg(
 fn scan_match_var_arg(
     s: &MatchStmt,
     name: &str,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
+    classify: &mut dyn FnMut(&str, usize, Option<&str>) -> bool,
     treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
@@ -2227,7 +2227,7 @@ fn scan_match_var_arg(
 fn scan_cond_clause_var_arg(
     c: &CondClause,
     name: &str,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
+    classify: &mut dyn FnMut(&str, usize, Option<&str>) -> bool,
     treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
@@ -2240,7 +2240,7 @@ fn scan_cond_clause_var_arg(
 fn scan_expr_var_arg(
     expr: &Expr,
     name: &str,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
+    classify: &mut dyn FnMut(&str, usize, Option<&str>) -> bool,
     treat_len_count_as_qualifying: bool,
     any: &mut bool,
     other: &mut bool,
@@ -2256,7 +2256,7 @@ fn scan_expr_var_arg(
                 for (i, a) in args.iter().enumerate() {
                     if matches!(&a.value.kind, ExprKind::Var(v) if v == name) {
                         *any = true;
-                        if !classify(fn_name, i) { *other = true; }
+                        if !classify(fn_name, i, a.label.as_deref()) { *other = true; }
                     } else {
                         e!(&a.value);
                     }

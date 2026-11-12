@@ -2859,7 +2859,7 @@ pub(crate) fn resident_slot_uses_stay_resident(
     body: &[Stmt],
     name: &str,
     tail_flags: Option<&[bool]>,
-    classify: &mut dyn FnMut(&str, usize) -> bool,
+    classify: &mut dyn FnMut(&str, usize, Option<&str>) -> bool,
 ) -> bool {
     let tail_elems = match (body.last(), tail_flags) {
         (Some(Stmt::Expr(e)), Some(flags)) => match &e.kind {

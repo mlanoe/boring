@@ -333,6 +333,9 @@ impl Transpiler {
     /// expression back to a plain host `Vec<T>`, or returns `None` if `expr` is not resident.
     pub(crate) fn try_materialize_resident_expr(&self, expr: &Expr) -> Option<String> {
         if let ExprKind::Var(vname) = &expr.kind {
+            if self.with_open_names.contains(vname.as_str()) {
+                return None;
+            }
             let ret_ty = self.resident_call_vars.get(vname.as_str()).cloned().or_else(|| {
                 (self.current_fn_gpu_arg_param_names.contains(vname.as_str())
                     || self.current_fn_gpu_borrow_param_names.contains(vname.as_str()))

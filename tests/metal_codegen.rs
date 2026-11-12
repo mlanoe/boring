@@ -5563,3 +5563,146 @@ def main() throws:
     assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
     assert_eq!(stdout.trim_end(), "2");
 }
+
+#[test]
+fn plain_fn_kernel_global_param_into_resident_struct_stays_device_resident() {
+    let src = r#"
+struct Plane:
+    [float32]'kernel'unified f
+    [float32]'kernel'unified g
+
+pub req [float32]'kernel'unified scale_gpu([float32]'kernel'global x, int n) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0 as float32
+        out
+
+pub Plane plane_pack([float32]'kernel'global x, int t) throws:
+    let zeros = [0.0 as float32 for ..<x.length]
+    if t == 0:
+        let dg = scale_gpu(zeros, zeros.length)
+        Plane(x, dg)
+    else:
+        let df = scale_gpu(zeros, zeros.length)
+        Plane(df, scale_gpu(x, x.length))
+
+pub Plane plane_pack_labeled([float32]'kernel'global x) throws:
+    let zeros = [0.0 as float32 for ..<x.length]
+    let dg = scale_gpu(zeros, zeros.length)
+    Plane(g = dg, f = x)
+
+def main() throws:
+    let dev = scale_gpu([1.5 as float32, 2.5 as float32], 2)
+    let p0 = plane_pack(dev, 0)
+    let p1 = plane_pack(dev, 1)
+    let p2 = plane_pack_labeled(dev)
+    let out0 = scale_gpu(p0.f, 2)
+    let out1 = scale_gpu(p1.g, 2)
+    let out2 = scale_gpu(p2.f, 2)
+    with out0, out1, out2:
+        print "{out0[0]} {out1[1]} {out2[1]}"
+"#;
+    let name = "plain_fn_kernel_global_param_into_resident_struct";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(rs.contains("pub fn plane_pack(x: BoringKernelArg<f32>, t: isize)"), "expected BoringKernelArg<f32> param for plane_pack:\n{rs}");
+    assert!(rs.contains("pub fn plane_pack_labeled(x: BoringKernelArg<f32>)"), "expected BoringKernelArg<f32> param for plane_pack_labeled:\n{rs}");
+    assert!(!rs.contains("f: BoringKernelArg::Host(x)"), "plane_pack must not wrap x in BoringKernelArg::Host:\n{rs}");
+    let main_start = rs.find("fn boring_main()").expect("boring_main emitted");
+    let main_end = rs[main_start..].find("\nfn main()").map(|i| main_start + i).unwrap_or(rs.len());
+    let main_fn = &rs[main_start..main_end];
+    // Only the three `with out0, out1, out2:` reads at the end may copy D2H — never the `plane_pack(dev, ...)` calls.
+    assert_eq!(main_fn.matches("__boring_gpu_copy_d2h").count(), 3, "unexpected D2H copy in boring_main:\n{main_fn}");
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "6 20 10");
+}
+
+#[test]
+fn plain_fn_kernel_global_param_with_block_stays_device_resident() {
+    let src = r#"
+pub req [float32]'kernel'unified scale_gpu([float32]'kernel'global x, int n) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0 as float32
+        out
+
+pub float32 inspect_first([float32]'kernel'global x) throws:
+    var float32 v = 0.0
+    with x:
+        v = x[0]
+    v
+
+def main() throws:
+    let dev = scale_gpu([3.0 as float32, 4.0 as float32], 2)
+    print "{inspect_first(dev)}"
+"#;
+    let name = "plain_fn_kernel_global_param_with_block";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(rs.contains("pub fn inspect_first(x: BoringKernelArg<f32>)"), "expected BoringKernelArg<f32> param:\n{rs}");
+    let main_start = rs.find("fn boring_main()").expect("boring_main emitted");
+    let main_end = rs[main_start..].find("\nfn main()").map(|i| main_start + i).unwrap_or(rs.len());
+    let main_fn = &rs[main_start..main_end];
+    assert!(!main_fn.contains("__boring_gpu_copy_d2h"), "call site must not copy D2H:\n{main_fn}");
+
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "6");
+}
+
+#[test]
+fn direct_index_on_kernel_global_param_outside_with_is_diagnosed() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen")
+        .join("direct_index_on_kernel_global_param_outside_with");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let br = dir.join("test.br");
+    fs::write(&br, r#"
+pub req [float32]'kernel'unified scale_gpu([float32]'kernel'global x, int n) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = x[i] * 2.0 as float32
+        out
+
+def float32 bad([float32]'kernel'global x) throws:
+    let y = scale_gpu(x, x.length)
+    x[0]
+"#).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+        .args(["build", "--target", "metal"])
+        .arg(&br)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "expected build to fail with diagnostic");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is GPU-resident and cannot be indexed directly outside a `with x:` block"),
+        "expected clear diagnostic, got:\n{stderr}"
+    );
+}

@@ -1351,8 +1351,8 @@ impl Transpiler {
                 // (`[float] x`) — the exclusive-ctor-arg scan doesn't require an
                 // explicit `'kernel'unified`/`'kernel'global` annotation — but strip one off
                 // if present, same as the return-type case below.
-                let unqualified = p.ty.as_ref().map(|ty| match ty {
-                    Type::Qualified(inner, _) => inner.as_ref().clone(),
+                let unqualified = p.ty.as_ref().map(|ty| match ty.without_mut() {
+                    Type::Qualified(inner, _) => inner.without_mut().clone(),
                     other => other.clone(),
                 });
                 let inner_ty = unqualified.as_ref()

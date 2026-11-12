@@ -1850,6 +1850,20 @@ impl Transpiler {
     /// vars (`get_at`), dict/HashMap access (including `self.field[key]`), and plain
     /// array indexing (with `.clone()` unless this is itself an assignment target).
     fn emit_expr_index(&self, obj: &Expr, idx: &Expr) -> String {
+        if let ExprKind::Var(name) = &obj.kind {
+            if self.is_gpu_target
+                && !self.with_open_names.contains(name.as_str())
+                && (self.current_fn_gpu_arg_param_names.contains(name.as_str())
+                    || self.current_fn_gpu_borrow_param_names.contains(name.as_str())
+                    || self.resident_call_vars.contains_key(name.as_str()))
+            {
+                self.push_error(
+                    obj.line,
+                    obj.col,
+                    format!("`{name}` is GPU-resident and cannot be indexed directly outside a `with {name}:` block"),
+                );
+            }
+        }
         // Slice: a[M..<N], a[..<N], a[M..], a[..]  →  obj[M..N].to_vec()
         if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
             // Detect whether the receiver is a string to emit a char-safe slice.
