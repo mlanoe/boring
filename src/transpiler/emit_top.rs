@@ -599,7 +599,8 @@ impl Transpiler {
                     let Some(src) = crate::stdlib_embed::lookup(module) else { continue };
                     let synthetic = crate::stdlib_embed::synthetic_path(module);
                     if !visited.insert(synthetic) { continue; }
-                    let Ok(tokens) = crate::lexer::lex(src) else { continue };
+                    let Ok(mut tokens) = crate::lexer::lex(src) else { continue };
+                    crate::errors::shift_token_lines(&mut tokens, crate::errors::register_merged_file(std::path::Path::new(&format!("boring.{module}")), Some(src)));
                     let Ok(sub_program) = crate::parser::parse(tokens) else { continue };
                     let sub_program = Self::lowered_for_pre_scan(sub_program);
                     self.deep_pre_scan(&sub_program, visited);
@@ -621,7 +622,8 @@ impl Transpiler {
                         };
                         if !visited.insert(canonical.clone()) { continue; }
                         let Ok(source) = std::fs::read_to_string(&canonical) else { continue };
-                        let Ok(tokens) = crate::lexer::lex(&source) else { continue };
+                        let Ok(mut tokens) = crate::lexer::lex(&source) else { continue };
+                        crate::errors::shift_token_lines(&mut tokens, crate::errors::register_merged_file(&canonical, None));
                         let Ok(sub_program) = crate::parser::parse(tokens) else { continue };
                         let sub_program = Self::lowered_for_pre_scan(sub_program);
                     self.deep_pre_scan(&sub_program, visited);
@@ -640,10 +642,11 @@ impl Transpiler {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let tokens = match crate::lexer::lex(&source) {
+                let mut tokens = match crate::lexer::lex(&source) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
+                crate::errors::shift_token_lines(&mut tokens, crate::errors::register_merged_file(&canonical, None));
                 let sub_program = match crate::parser::parse(tokens) {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -876,17 +879,22 @@ impl Transpiler {
                 return;
             }
         };
-        let tokens = match crate::lexer::lex(&source) {
+        let mut tokens = match crate::lexer::lex(&source) {
             Ok(t) => t,
             Err(e) => {
                 self.push_error(use_line, use_col, format!("lex error in '{}': {}", canonical.display(), e));
                 return;
             }
         };
+        // Keep this file's identity in every line of its items, so an error found while
+        // emitting them is reported against this file (see `errors::register_merged_file`).
+        crate::errors::shift_token_lines(&mut tokens, crate::errors::register_merged_file(&canonical, None));
         let program = match crate::parser::parse(tokens) {
             Ok(p) => p,
             Err(e) => {
-                self.push_error(use_line, use_col, format!("parse error in '{}': {}", canonical.display(), e));
+                // The parse error's own (file-tagged) line: reported against the sibling, not the `use`.
+                let _ = (use_line, use_col);
+                self.push_error(e.line(), e.col(), e.msg());
                 return;
             }
         };
@@ -938,13 +946,14 @@ impl Transpiler {
         }
         self.loaded.insert(synthetic);
 
-        let tokens = match crate::lexer::lex(source) {
+        let mut tokens = match crate::lexer::lex(source) {
             Ok(t) => t,
             Err(e) => {
                 self.push_error(use_line, use_col, format!("lex error in boring.{module}: {e}"));
                 return;
             }
         };
+        crate::errors::shift_token_lines(&mut tokens, crate::errors::register_merged_file(std::path::Path::new(&format!("boring.{module}")), Some(source)));
         let program = match crate::parser::parse(tokens) {
             Ok(p) => p,
             Err(e) => {

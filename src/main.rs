@@ -77,6 +77,7 @@ impl Ansi {
     fn yellow(&self, s: &str) -> String { if self.on { format!("\x1b[33;1m{s}\x1b[0m") } else { s.to_string() } }
 }
 
+
 /// Print a Rust-style diagnostic with source context.
 ///
 /// ```text
@@ -87,6 +88,8 @@ impl Ansi {
 ///   |   ^
 /// ```
 fn report_error(path: &Path, source: &str, line: usize, col: usize, len: usize, message: &str) {
+    let (path, source, line) = errors::resolve_merged_line(path, source, line);
+    let (path, source) = (path.as_path(), source.as_str());
     let c = Ansi::new();
     eprintln!("{} {}", c.red("error:"), c.bold(message));
     if line == 0 {
@@ -186,6 +189,8 @@ fn current_env_flag() -> Option<String> {
 }
 
 fn report_warning(path: &Path, source: &str, line: usize, col: usize, len: usize, message: &str) {
+    let (path, source, line) = errors::resolve_merged_line(path, source, line);
+    let (path, source) = (path.as_path(), source.as_str());
     let c = Ansi::new();
     eprintln!("{} {}", c.yellow("warning:"), c.bold(message));
     if line == 0 {
@@ -3382,7 +3387,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     let program = match desugar_array_block::desugar_array_block(program) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
+            report_error(&path, &std::fs::read_to_string(&path).unwrap_or_default(), e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     };
@@ -3391,7 +3396,7 @@ fn parse_and_merge_program(path: &str) -> ast::Program {
     {
         Ok(p) => escape_keyword_fields::escape_keyword_fields(p),
         Err(e) => {
-            eprintln!("error: line {}:{}: {}", e.line(), e.col(), e.msg());
+            report_error(&path, &std::fs::read_to_string(&path).unwrap_or_default(), e.line(), e.col(), e.len(), &e.msg());
             process::exit(1);
         }
     }
@@ -3431,6 +3436,11 @@ fn merge_into(
         }
     };
 
+    let mut tokens = tokens;
+    // The entry file (first one merged) keeps its plain lines; every other file gets its own.
+    if visited.len() > 1 {
+        errors::shift_token_lines(&mut tokens, errors::register_merged_file(&canonical, None));
+    }
     infer_actor_params::set_import_context(&canonical);
     let program = match parser::parse(tokens) {
         Ok(p) => p,
@@ -3522,6 +3532,8 @@ fn merge_stdlib_into(
             process::exit(1);
         }
     };
+    let mut tokens = tokens;
+    errors::shift_token_lines(&mut tokens, errors::register_merged_file(Path::new(&format!("boring.{module}")), Some(source)));
     let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {

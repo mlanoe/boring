@@ -57,3 +57,60 @@ impl std::fmt::Display for SourceError {
         write!(f, "line {}: {}", self.line, self.message)
     }
 }
+
+// ---- File identity of merged sibling files -------------------------------------------------
+//
+// GPU targets merge a project's bare-`use` sibling files (and `[deps]` / stdlib modules) into one
+// flat item list, and every later pass (checker, transpiler, desugars) reports a bare
+// `line`/`col`. To keep the file identity, the tokens of the Nth merged file (N >= 1) get their
+// line shifted by `N << MERGED_LINE_SHIFT`; the entry file (N = 0) is left as is. The diagnostic
+// printers (`main.rs`) decode it back (`resolve_merged_line`), so an error is shown against the file it is
+// really in, with that file's own line and excerpt.
+pub const MERGED_LINE_SHIFT: u32 = 20;
+pub const MERGED_LINE_MASK: usize = (1 << MERGED_LINE_SHIFT) - 1;
+
+/// Merged files in merge order (index = line-offset group); `None` source = read from disk.
+static MERGED_FILES: std::sync::Mutex<Vec<(std::path::PathBuf, Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Registers a merged file (once per path) and returns the line offset to add to each of its tokens.
+pub fn register_merged_file(path: &std::path::Path, source: Option<&str>) -> usize {
+    let mut files = MERGED_FILES.lock().unwrap();
+    // Slot 0 is the entry file (never shifted); the entry is not necessarily registered itself.
+    if files.is_empty() {
+        files.push((std::path::PathBuf::new(), None));
+    }
+    // Idempotent: a file read by several passes (pre-scan, emission) keeps one identity.
+    if let Some(i) = files.iter().position(|(p, _)| p == path) {
+        return i << MERGED_LINE_SHIFT;
+    }
+    files.push((path.to_path_buf(), source.map(str::to_string)));
+    (files.len() - 1) << MERGED_LINE_SHIFT
+}
+
+/// Decodes a possibly shifted line: the file (and its source) it belongs to when that is not the
+/// file the caller passed, and the plain line.
+pub fn resolve_merged_line(path: &std::path::Path, source: &str, line: usize) -> (std::path::PathBuf, String, usize) {
+    let idx = line >> MERGED_LINE_SHIFT;
+    if idx == 0 {
+        return (path.to_path_buf(), source.to_string(), line);
+    }
+    let files = MERGED_FILES.lock().unwrap();
+    match files.get(idx) {
+        Some((file, embedded)) => {
+            let src = match embedded {
+                Some(s) => s.clone(),
+                None => std::fs::read_to_string(file).unwrap_or_default(),
+            };
+            (file.clone(), src, line & MERGED_LINE_MASK)
+        }
+        None => (path.to_path_buf(), source.to_string(), line & MERGED_LINE_MASK),
+    }
+}
+
+pub fn shift_token_lines(tokens: &mut [crate::lexer::Token], offset: usize) {
+    if offset != 0 {
+        for t in tokens.iter_mut() {
+            if t.line > 0 { t.line += offset; }
+        }
+    }
+}
