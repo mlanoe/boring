@@ -1724,3 +1724,4 @@ transpile_test!(task_local_to_task_param);
 transpile_test!(trait_shared_array_inferred_push);
 transpile_test!(view_state_param_stays_lent);
 transpile_test!(var_mut_param_forwarded);
+transpile_test!(for_var_shadows_float_local);

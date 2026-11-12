@@ -335,7 +335,19 @@ impl Transpiler {
         let saved_string_membership: Vec<(String, bool, bool)> = s.vars.iter()
             .map(|v| (v.clone(), self.string_vars.contains(v.as_str()), self.string_arc_vars.contains(v.as_str())))
             .collect();
+        // Same for the declared type: a loop var shadows an earlier same-named binding of another
+        // branch/scope (`let i = 0.0` in one `elif`, `for i in 0..<n` in the next), so a stale
+        // float entry must not make `i == 0` emit `0_f64`. Hide it for the loop, restore after.
+        let saved_var_types: Vec<(String, Option<Type>)> = s.vars.iter()
+            .map(|v| (v.clone(), self.var_types.remove(v.as_str())))
+            .collect();
         self.emit_for_inner(s);
+        for (name, ty) in saved_var_types {
+            match ty {
+                Some(t) => { self.var_types.insert(name, t); }
+                None => { self.var_types.remove(name.as_str()); }
+            }
+        }
         for (name, in_string_vars, in_string_arc_vars) in saved_string_membership {
             set_membership(&mut self.string_vars, &name, in_string_vars);
             set_membership(&mut self.string_arc_vars, &name, in_string_arc_vars);

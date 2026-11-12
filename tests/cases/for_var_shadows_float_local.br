@@ -1,0 +1,22 @@
+# A `for i in 0..<n` loop var shadows a float `i` bound in an earlier branch of the same function:
+# `i == 0` must compare isize with `0`, not `0_f64` (stale var_types entry leaked into the loop).
+struct ForVarShadowNode:
+    var [int] children = []
+    var string kind = ""
+
+def float forVarShadowPick(ForVarShadowNode n):
+    var anchorH = 0.0
+    if n.kind == "Padding":
+        let i = 2.5
+        anchorH = i
+    elif n.kind == "Popover":
+        for i in 0..<n.children.length:
+            if i == 0:
+                anchorH = 10.0
+            else:
+                anchorH = anchorH + 1.0
+    return anchorH
+
+def main():
+    print forVarShadowPick(ForVarShadowNode(kind = "Padding"))
+    print forVarShadowPick(ForVarShadowNode(children = [1, 2, 3], kind = "Popover"))
