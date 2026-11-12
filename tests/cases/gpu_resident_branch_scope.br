@@ -1,0 +1,28 @@
+# A GPU-resident local bound in one `if` branch (`weights`, a tuple-destructured resident result)
+# must not make a same-named host `[float32]` bound in the `else` branch "GPU-resident".
+pub req ([int32]'kernel'unified, [float32]'kernel'unified) routeGpu([float32]'kernel'global x, int n) throws:
+    kernel(block = 32, grid = 1):
+        mut [int32]'unified ids = [0 as int32 for ..<n]
+        mut [float32]'unified ws = [0.0 as float32 for ..<n]
+        let i = .thread.x
+        if i < n:
+            ws[i] = x[i] * 2.0
+        (ids, ws)
+
+pub ([int], [float32]) routeHost([float32] x):
+    ([0], x)
+
+pub req [float32]'kernel'unified branchScope([float32]'kernel'global x, int n, bool fast) throws:
+    mut [float32]'kernel'unified acc = []
+    if fast:
+        let ([int32]'kernel'unified ids, [float32]'kernel'unified weights) = routeGpu(x, n)
+        acc = weights
+    else:
+        let (chosen, weights) = routeHost([1.0, 2.0])
+        mut [float32] out = []
+        var int k = 0
+        while k < chosen.length:
+            out.push(weights[k])
+            k += 1
+        acc = x
+    acc

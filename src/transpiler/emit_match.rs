@@ -40,6 +40,9 @@ impl Transpiler {
             let kw = if i == 0 { "if" } else { "} else if" };
             let cond_s = self.emit_expr(cond);
             self.line(&format!("{} {} {{", kw, cond_s));
+            // A GPU-resident local bound inside this branch must not leak into a sibling branch
+            // that binds a same-named host value (`weights` below): scope the table per branch.
+            let saved_resident = self.resident_call_vars.clone();
             self.indent += 1;
             if use_value_body || use_throws_tail {
                 self.emit_body(body);
@@ -49,9 +52,11 @@ impl Transpiler {
                 self.emit_loop_body(body);
             }
             self.indent -= 1;
+            self.resident_call_vars = saved_resident;
         }
         if let Some(else_body) = &s.else_body {
             self.line("} else {");
+            let saved_resident = self.resident_call_vars.clone();
             self.indent += 1;
             if use_value_body || use_throws_tail {
                 self.emit_body(else_body);
@@ -59,6 +64,7 @@ impl Transpiler {
                 self.emit_loop_body(else_body);
             }
             self.indent -= 1;
+            self.resident_call_vars = saved_resident;
         }
         self.line("}");
     }
