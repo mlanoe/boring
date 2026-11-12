@@ -71,9 +71,9 @@ impl super::Checker {
 
     pub(super) fn check_host_tensor_call(&mut self, call: &Expr) {
         let ExprKind::MethodCall(_, method, args) = &call.kind else { return };
-        if !matches!(method.as_str(), "matmul" | "mma" | "linear") {
+        if !matches!(method.as_str(), "matmul" | "mma" | "linear" | "moe_linear") {
             self.error(
-                "host kernel.tensors calls must use matmul, mma, or linear; tile operations require a kernel entry point",
+                "host kernel.tensors calls must use matmul, mma, linear, or moe_linear; tile operations require a kernel entry point",
                 call.line,
                 call.col,
             );
@@ -85,10 +85,19 @@ impl super::Checker {
             && match method.as_str() {
                 "linear" => {
                     matches!(operand_count, 3 | 4)
-                        && matches!(labeled.len(), 3 | 4)
+                        && (3..=5).contains(&labeled.len())
                         && labeled.iter().all(|arg| {
                             arg.label.as_deref().is_some_and(|label| {
-                                matches!(label, "m" | "n" | "k" | "format")
+                                matches!(label, "m" | "n" | "k" | "format" | "byte_offset")
+                            })
+                        })
+                }
+                "moe_linear" => {
+                    operand_count == 4
+                        && (4..=6).contains(&labeled.len())
+                        && labeled.iter().all(|arg| {
+                            arg.label.as_deref().is_some_and(|label| {
+                                matches!(label, "m" | "n" | "k" | "count" | "format" | "byte_offset")
                             })
                         })
                 }
@@ -105,22 +114,24 @@ impl super::Checker {
             };
         if dynamic_call {
             let mut labels = std::collections::HashSet::new();
+            let required: &[&str] = if method == "moe_linear" { &["m", "n", "k", "count"] } else { &["m", "n", "k"] };
             if labeled.iter().any(|arg| !labels.insert(arg.label.as_deref().unwrap()))
-                || ["m", "n", "k"].iter().any(|label| !labels.contains(label)) {
+                || required.iter().any(|label| !labels.contains(label)) {
                 self.error(
-                    format!(
-                        "dynamic kernel.tensors.{method} requires distinct m, n, and k arguments{}",
-                        if method == "linear" { " (and at most one format)" } else { "" }
-                    ),
+                    match method.as_str() {
+                        "moe_linear" => "dynamic kernel.tensors.moe_linear requires distinct m, n, k, and count arguments (and optional format / byte_offset)".to_string(),
+                        "linear" => "dynamic kernel.tensors.linear requires distinct m, n, and k arguments (and optional format / byte_offset)".to_string(),
+                        _ => format!("dynamic kernel.tensors.{method} requires distinct m, n, and k arguments"),
+                    },
                     call.line,
                     call.col,
                 );
                 return;
             }
             let format = labeled.iter().find(|arg| arg.label.as_deref() == Some("format"));
-            let quantized = match format.map(|arg| &arg.value.kind) {
-                None => false,
-                Some(ExprKind::Str(value)) if crate::tensor_formats::quantized_linear_geometry(value).is_some() => true,
+            let format_str = match format.map(|arg| &arg.value.kind) {
+                None => None,
+                Some(ExprKind::Str(value)) if crate::tensor_formats::quantized_linear_geometry(value).is_some() => Some(value.as_str()),
                 Some(_) => {
                     self.error(
                         format!("unsupported quantized tensor linear format; expected one of: {}", crate::tensor_formats::SUPPORTED_QUANTIZED_LINEAR_FORMATS),
@@ -130,6 +141,7 @@ impl super::Checker {
                     return;
                 }
             };
+            let quantized = format_str.is_some();
             let mut dynamic_element = None;
             for (index, arg) in args[..operand_count].iter().enumerate() {
                 let ExprKind::Var(name) = &arg.value.kind else {
@@ -161,18 +173,31 @@ impl super::Checker {
                         return;
                     }
                 };
+                if method == "moe_linear" && index == 2 {
+                    let is_int_ids = matches!(elem, Type::Int | Type::Int32 | Type::Int64)
+                        || matches!(elem, Type::Named(name) if matches!(name.as_str(), "int" | "int32" | "int64" | "isize" | "i32" | "i64"));
+                    if !is_int_ids {
+                        self.error("moe_linear expert ids require an int or int32 array", call.line, call.col);
+                        return;
+                    }
+                    continue;
+                }
                 let uint8 = matches!(elem, Type::Uint8)
                     || matches!(elem, Type::Named(name) if name == "uint8" || name == "Uint8" || name == "u8");
                 let operand_element = TensorElement::from_type(elem);
                 let expected = if quantized && index == 1 {
-                    uint8
+                    uint8 || (format_str == Some("f16") && operand_element == Some(TensorElement::Float16))
                 } else {
                     operand_element.is_some()
                         && (dynamic_element.is_none() || dynamic_element == operand_element)
                 };
                 if !expected {
                     self.error(if quantized && index == 1 {
-                        "quantized tensor weights require a uint8 array"
+                        if format_str == Some("f16") {
+                            "f16 tensor weights require a uint8 or float16 array"
+                        } else {
+                            "quantized tensor weights require a uint8 array"
+                        }
                     } else {
                         "dynamic tensor operands require matching float16 or float32 arrays"
                     }, call.line, call.col);

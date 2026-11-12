@@ -340,6 +340,8 @@ fn lower_function_body(
                 index += 1;
                 continue;
             };
+            let weight_is_f16 = dynamic_weight_is_f16(dynamic.operands[1], dynamic.format, types);
+            let has_byte_offset = dynamic.byte_offset.is_some();
             let native_packed = tensor_config.native_dynamic_q8_linear
                 && element == TensorElement::Float32
                 && matches!(dynamic.format, Some("q8_0" | "q4_k" | "q5_k" | "q6_k"))
@@ -384,7 +386,7 @@ fn lower_function_body(
                 let mut failed = false;
                 let mut parsed_kernels = Vec::new();
                 for name in [&decode_name, &prefill_name] {
-                    match parse_dynamic_linear_kernel(name, quals.clone(), dynamic.bias.is_some(), dynamic.format, element, tensor_config) {
+                    match parse_dynamic_linear_kernel_ext(name, quals.clone(), dynamic.bias.is_some(), dynamic.format, element, tensor_config, weight_is_f16, has_byte_offset) {
                         Ok(kernel) => parsed_kernels.push(Item::Kernel(kernel)),
                         Err(message) => {
                             errors.push(super::TranspileError::at_line(message, call.line));
@@ -401,7 +403,7 @@ fn lower_function_body(
                 kernels.extend(parsed_kernels);
                 Some((decode_name, decode_instance, prefill_name, prefill_instance))
             } else {
-                match parse_dynamic_linear_kernel(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, element, tensor_config) {
+                match parse_dynamic_linear_kernel_ext(&kernel_name, quals, dynamic.bias.is_some(), dynamic.format, element, tensor_config, weight_is_f16, has_byte_offset) {
                     Ok(kernel) => kernels.push(Item::Kernel(kernel)),
                     Err(message) => {
                         errors.push(super::TranspileError::at_line(message, call.line));
@@ -415,12 +417,84 @@ fn lower_function_body(
             let q8_entrypoint_refs = q8_entrypoints.as_ref().map(|(dn, di, pn, pi)| {
                 (dn.as_str(), di.as_str(), pn.as_str(), pi.as_str())
             });
-            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, element, tensor_config, q8_entrypoint_refs) {
+            match parse_dynamic_replacement_stmts(&kernel_name, &instance, &dynamic, element, tensor_config, q8_entrypoint_refs, weight_is_f16) {
                 Ok(mut replacement) => {
                     let returns_destination = body.get(index + 1).is_some_and(|next| {
                         matches!(next, Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Var(name) if name == dynamic.operands[2]))
                     });
                     if returns_destination && !split_native_q8 {
+                        replacement.pop();
+                        out.extend(replacement);
+                        let next = match &body[index + 1] { Stmt::Expr(expr) => expr, _ => unreachable!() };
+                        out.push(Stmt::Expr(Expr {
+                            kind: ExprKind::Field(Box::new(Expr {
+                                kind: ExprKind::Var(instance), line: next.line, col: next.col, len: next.len,
+                            }), "c".into()),
+                            line: next.line, col: next.col, len: next.len,
+                        }));
+                        index += 2;
+                        continue;
+                    }
+                    out.extend(replacement);
+                }
+                Err(message) => {
+                    errors.push(super::TranspileError::at_line(message, call.line));
+                    out.push(stmt.clone());
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(moe) = dynamic_moe_linear_call(call) {
+            let Some(quals) = resolve_quals([moe.x, moe.w, moe.ids, moe.y], types) else {
+                errors.push(super::TranspileError::at_line(
+                    "unable to synthesize dynamic kernel.tensors.moe_linear from the declared operand types",
+                    call.line,
+                ));
+                out.push(stmt.clone());
+                index += 1;
+                continue;
+            };
+            let Some(element) = element_type_of_name(moe.x, types) else {
+                errors.push(super::TranspileError::at_line(
+                    "unable to resolve dynamic kernel.tensors.moe_linear element type",
+                    call.line,
+                ));
+                out.push(stmt.clone());
+                index += 1;
+                continue;
+            };
+            let Some(ids_type) = moe_ids_type_source(moe.ids, types) else {
+                errors.push(super::TranspileError::at_line(
+                    "moe_linear expert ids require an int or int32 array",
+                    call.line,
+                ));
+                out.push(stmt.clone());
+                index += 1;
+                continue;
+            };
+            let weight_is_f16 = dynamic_weight_is_f16(moe.w, moe.format, types);
+            let native_metal_moe = (tensor_config.native_dynamic_q8_linear || tensor_config.metal_blocked_prefill)
+                && element == TensorElement::Float32
+                && !tensor_config.wants_portable(moe.format)
+                && (moe.format.is_some() || tensor_config.native_dynamic_float_linear);
+            let prefix = if native_metal_moe { "BoringTensorMoeNative" } else { "BoringTensorMoeHost" };
+            let (kernel_name, instance) = allocate_names(ordinal, used_kernel_names, used_binding_names, prefix);
+            match parse_dynamic_moe_kernel(&kernel_name, quals, ids_type, moe.format, element, tensor_config, weight_is_f16, native_metal_moe) {
+                Ok(kernel) => kernels.push(Item::Kernel(kernel)),
+                Err(message) => {
+                    errors.push(super::TranspileError::at_line(message, call.line));
+                    out.push(stmt.clone());
+                    index += 1;
+                    continue;
+                }
+            }
+            match parse_moe_replacement_stmts(&kernel_name, &instance, &moe, element, tensor_config, weight_is_f16, native_metal_moe) {
+                Ok(mut replacement) => {
+                    let returns_destination = body.get(index + 1).is_some_and(|next| {
+                        matches!(next, Stmt::Expr(expr) if matches!(&expr.kind, ExprKind::Var(name) if name == moe.y))
+                    });
+                    if returns_destination {
                         replacement.pop();
                         out.extend(replacement);
                         let next = match &body[index + 1] { Stmt::Expr(expr) => expr, _ => unreachable!() };
@@ -614,6 +688,20 @@ struct DynamicLinearCall<'a> {
     n: String,
     k: String,
     format: Option<&'a str>,
+    byte_offset: Option<Expr>,
+}
+
+struct DynamicMoeLinearCall<'a> {
+    x: &'a str,
+    w: &'a str,
+    ids: &'a str,
+    y: &'a str,
+    m: String,
+    n: String,
+    k: String,
+    count: String,
+    format: Option<&'a str>,
+    byte_offset: Option<Expr>,
 }
 
 fn dimension_source(expr: &Expr) -> Option<String> {
@@ -644,11 +732,44 @@ fn dynamic_linear_call(expr: &Expr) -> Option<DynamicLinearCall<'_>> {
             _ => return None,
         },
     };
+    let byte_offset = args[operand_count..].iter()
+        .find(|arg| arg.label.as_deref() == Some("byte_offset"))
+        .map(|arg| arg.value.clone());
     let (operands, bias) = if operand_count == 4 { ([raw[0], raw[1], raw[3]], Some(raw[2])) } else { ([raw[0], raw[1], raw[2]], None) };
-    Some(DynamicLinearCall { operands, bias, m: dim("m")?, n: dim("n")?, k: dim("k")?, format })
+    Some(DynamicLinearCall { operands, bias, m: dim("m")?, n: dim("n")?, k: dim("k")?, format, byte_offset })
 }
 
-fn resolve_dynamic_quals(names: [&str; 3], types: &HashMap<String, Type>) -> Option<[GpuQual; 3]> {
+fn dynamic_moe_linear_call(expr: &Expr) -> Option<DynamicMoeLinearCall<'_>> {
+    let ExprKind::MethodCall(receiver, method, args) = &expr.kind else { return None };
+    if method != "moe_linear" { return None; }
+    if !matches!(&receiver.kind, ExprKind::Field(gpu, ns)
+        if ns == "tensor" && matches!(&gpu.kind, ExprKind::Var(name) if name == "gpu")) { return None; }
+    let operand_count = args.iter().position(|arg| arg.label.is_some())?;
+    if operand_count != 4 { return None; }
+    let raw: Vec<&str> = args[..operand_count].iter().map(|arg| match &arg.value.kind {
+        ExprKind::Var(name) if arg.label.is_none() => Some(name.as_str()),
+        _ => None,
+    }).collect::<Option<_>>()?;
+    let dim = |label: &str| args[operand_count..].iter().find(|arg| arg.label.as_deref() == Some(label))
+        .and_then(|arg| dimension_source(&arg.value));
+    let format = match args[operand_count..].iter().find(|arg| arg.label.as_deref() == Some("format")) {
+        None => None,
+        Some(arg) => match &arg.value.kind {
+            ExprKind::Str(value) if crate::tensor_formats::quantized_linear_geometry(value).is_some() => Some(value.as_str()),
+            _ => return None,
+        },
+    };
+    let byte_offset = args[operand_count..].iter()
+        .find(|arg| arg.label.as_deref() == Some("byte_offset"))
+        .map(|arg| arg.value.clone());
+    Some(DynamicMoeLinearCall {
+        x: raw[0], w: raw[1], ids: raw[2], y: raw[3],
+        m: dim("m")?, n: dim("n")?, k: dim("k")?, count: dim("count")?,
+        format, byte_offset,
+    })
+}
+
+fn resolve_quals<const N: usize>(names: [&str; N], types: &HashMap<String, Type>) -> Option<[GpuQual; N]> {
     names.map(|name| {
         let mut ty = types.get(name)?;
         while let Type::Mut(inner) = ty { ty = inner; }
@@ -661,11 +782,44 @@ fn resolve_dynamic_quals(names: [&str; 3], types: &HashMap<String, Type>) -> Opt
     }).into_iter().collect::<Option<Vec<_>>>()?.try_into().ok()
 }
 
-fn dynamic_element_type(call: &DynamicLinearCall<'_>, types: &HashMap<String, Type>) -> Option<TensorElement> {
-    let mut ty = types.get(call.operands[0])?;
+fn resolve_dynamic_quals(names: [&str; 3], types: &HashMap<String, Type>) -> Option<[GpuQual; 3]> {
+    resolve_quals(names, types)
+}
+
+fn element_type_of_name(name: &str, types: &HashMap<String, Type>) -> Option<TensorElement> {
+    let mut ty = types.get(name)?;
     while let Type::Mut(inner) | Type::Qualified(inner, _) = ty { ty = inner; }
     match ty {
         Type::Array(element) | Type::LabeledArray(element, _) => TensorElement::from_type(element),
+        _ => None,
+    }
+}
+
+fn dynamic_element_type(call: &DynamicLinearCall<'_>, types: &HashMap<String, Type>) -> Option<TensorElement> {
+    element_type_of_name(call.operands[0], types)
+}
+
+fn dynamic_weight_is_f16(weight_name: &str, format: Option<&str>, types: &HashMap<String, Type>) -> bool {
+    format == Some("f16") && element_type_of_name(weight_name, types) == Some(TensorElement::Float16)
+}
+
+fn moe_ids_type_source(ids_name: &str, types: &HashMap<String, Type>) -> Option<&'static str> {
+    let mut ty = types.get(ids_name)?;
+    while let Type::Mut(inner) | Type::Qualified(inner, _) = ty { ty = inner; }
+    let elem = match ty {
+        Type::Array(element) | Type::LabeledArray(element, _) => element.without_mut(),
+        _ => return None,
+    };
+    match elem {
+        Type::Int32 => Some("int32"),
+        Type::Int64 => Some("int64"),
+        Type::Int => Some("int"),
+        Type::Named(n) => match n.as_str() {
+            "int32" | "i32" => Some("int32"),
+            "int64" | "i64" => Some("int64"),
+            "int" | "isize" => Some("int"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -771,30 +925,49 @@ fn parse_kernel(name: &str, spec: &Spec, method: &str, config: &TensorLinearConf
 /// Boring source decoding the f16 at byte `blockByte + 2` into `dMin` (Q4_1/Q5_1's `m`).
 const F16_MIN_DECODE: &str = "                let minBits = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n";
 
-fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>, element: TensorElement, tensor_config: &TensorLinearConfig) -> Result<KernelDecl, String> {
-    let scalar_type = if element == TensorElement::Float16 { "float16" } else { "float32" };
-    let bias_field = if has_bias { format!("    let [{scalar_type}]'global bias\n") } else { String::new() };
-    let bias_param = if has_bias { format!(", [{scalar_type}]'global input_bias") } else { String::new() };
-    let bias_assign = if has_bias { "        bias = input_bias\n" } else { "" };
-    let initial = if has_bias && element == TensorElement::Float16 { "bias[col] as float32" } else if has_bias { "bias[col]" } else { "0.0" };
-    let weight_type = if quantized_format.is_some() { "uint8" } else { scalar_type };
+fn build_quantized_product(
+    quantized_format: Option<&str>,
+    weight_is_f16: bool,
+    element: TensorElement,
+    block_byte_prefix: &str,
+    elem_offset_prefix: &str,
+    flat_row_expr: &str,
+    act_row_expr: &str,
+) -> String {
     let geometry = quantized_format.and_then(crate::tensor_formats::quantized_linear_geometry);
     let block_bytes = geometry.map_or(0, |geometry| geometry.block_bytes);
-    let quantized_value_base: &str = match quantized_format {
-        Some("q8_0") => "                let raw = int(b[blockByte + 2 + flat % 32])\n                let quantized = if raw > 127: raw - 256 else: raw\n",
-        Some("q5_0") => "                let position = flat % 32\n                let qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                let packed = int(b[blockByte + 6 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n                let quantized = (nibble | (high << 4)) - 16\n",
-        Some("q4_0") => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = nibble - 8\n",
-        Some("iq4_nl") => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = if nibble == 0: -127 elif nibble == 1: -104 elif nibble == 2: -83 elif nibble == 3: -65 elif nibble == 4: -49 elif nibble == 5: -35 elif nibble == 6: -22 elif nibble == 7: -10 elif nibble == 8: 1 elif nibble == 9: 13 elif nibble == 10: 25 elif nibble == 11: 38 elif nibble == 12: 53 elif nibble == 13: 69 elif nibble == 14: 89 else: 113\n",
-        Some("q6_k") => "                let position = flat % 256\n                let iteration = position / 128\n                let within = position % 128\n                let group = within / 32\n                let lane = within % 32\n                let half = lane / 16\n                let qlBase = blockByte + iteration * 64\n                let qhBase = blockByte + 128 + iteration * 32\n                let scaleBase = blockByte + 192 + iteration * 8\n                let low0 = int(b[qlBase + lane])\n                let low32 = int(b[qlBase + lane + 32])\n                let nibble = if group == 0: low0 & 0xF elif group == 1: low32 & 0xF elif group == 2: (low0 >> 4) & 0xF else: (low32 >> 4) & 0xF\n                let highByte = int(b[qhBase + lane])\n                let high = (highByte >> ((group * 2) as uint32)) & 3\n                let scaleRaw = int(b[scaleBase + half + group * 2])\n                let subScale = if scaleRaw > 127: scaleRaw - 256 else: scaleRaw\n                let quantized = subScale * ((nibble | (high << 4)) - 32)\n",
-        Some("q3_k") => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleIndex = outer * 8 + group * 2 + sub\n                let scaleWord = scaleIndex / 4\n                let scaleLane = scaleIndex % 4\n                let scaleByte = int(b[blockByte + 96 + (scaleWord % 2) * 4 + scaleLane])\n                let scaleLow = if scaleWord < 2: scaleByte & 0xF else: (scaleByte >> 4) & 0xF\n                let scaleHigh = (int(b[blockByte + 104 + scaleLane]) >> ((scaleWord * 2) as uint32)) & 3\n                let subScale = (scaleLow | (scaleHigh << 4)) - 32\n                let packed = int(b[blockByte + 32 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let highMask = int(b[blockByte + sub * 16 + lane]) & ((1 as int) << ((outer * 4 + group) as uint32))\n                let highOffset = if highMask == 0: 4 else: 0\n                let quantized = subScale * (q - highOffset)\n",
-        Some("q2_k") => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleByte = int(b[blockByte + outer * 8 + group * 2 + sub])\n                let packed = int(b[blockByte + 16 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let minBits = int(b[blockByte + 82]) | (int(b[blockByte + 83]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * ((scaleByte >> 4) as float32)\n                let quantized = (scaleByte & 0xF) * q\n",
-        Some("f16") => "                let quantized = 1\n",
-        Some("bf16") => "                let bits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                let bfExponent = (bits >> 7) & 0xFF\n                let bfFraction = bits & 0x7F\n                if bfExponent == 0:\n                    scale = (bfFraction as float32) / 128.0 * 1.17549435e-38\n                elif bfExponent == 0xFF:\n                    scale = if bfFraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (bfFraction as float32) / 128.0\n                    var int bfPower = bfExponent - 127\n                    while bfPower > 0:\n                        scale *= 2.0\n                        bfPower -= 1\n                    while bfPower < 0:\n                        scale /= 2.0\n                        bfPower += 1\n                if (bits >> 15) == 1:\n                    scale = 0.0 - scale\n                let quantized = 1\n",
-        Some("q4_1") => "                let position = flat % 32\n                let packed = int(b[blockByte + 4 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n__F16_MIN__                minimum = 0.0 - dMin\n                let quantized = nibble\n",
-        Some("q5_1") => "                let position = flat % 32\n                let qh = int(b[blockByte + 4]) | (int(b[blockByte + 5]) << 8) | (int(b[blockByte + 6]) << 16) | (int(b[blockByte + 7]) << 24)\n                let packed = int(b[blockByte + 8 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n__F16_MIN__                minimum = 0.0 - dMin\n                let quantized = nibble | (high << 4)\n",
+    let block_elements = geometry.map_or(32, |geometry| geometry.block_elements);
+    let scale_offset = geometry.map_or(0, |geometry| geometry.scale_offset);
+    if weight_is_f16 {
+        return format!(
+            "                sum += {act_row_expr} * (b[{elem_offset_prefix}{flat_row_expr} + inner] as float32)\n"
+        );
+    }
+    let Some(fmt) = quantized_format else {
+        if element == TensorElement::Float16 {
+            return format!(
+                "                sum += ({act_row_expr} as float32) * (b[{elem_offset_prefix}{flat_row_expr} + inner] as float32)\n"
+            );
+        }
+        return format!(
+            "                sum += {act_row_expr} * b[{elem_offset_prefix}{flat_row_expr} + inner]\n"
+        );
+    };
+    let quantized_value_base: &str = match fmt {
+        "q8_0" => "                let raw = int(b[blockByte + 2 + flat % 32])\n                let quantized = if raw > 127: raw - 256 else: raw\n",
+        "q5_0" => "                let position = flat % 32\n                let qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                let packed = int(b[blockByte + 6 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n                let quantized = (nibble | (high << 4)) - 16\n",
+        "q4_0" => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = nibble - 8\n",
+        "iq4_nl" => "                let position = flat % 32\n                let packed = int(b[blockByte + 2 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let quantized = if nibble == 0: -127 elif nibble == 1: -104 elif nibble == 2: -83 elif nibble == 3: -65 elif nibble == 4: -49 elif nibble == 5: -35 elif nibble == 6: -22 elif nibble == 7: -10 elif nibble == 8: 1 elif nibble == 9: 13 elif nibble == 10: 25 elif nibble == 11: 38 elif nibble == 12: 53 elif nibble == 13: 69 elif nibble == 14: 89 else: 113\n",
+        "q6_k" => "                let position = flat % 256\n                let iteration = position / 128\n                let within = position % 128\n                let group = within / 32\n                let lane = within % 32\n                let half = lane / 16\n                let qlBase = blockByte + iteration * 64\n                let qhBase = blockByte + 128 + iteration * 32\n                let scaleBase = blockByte + 192 + iteration * 8\n                let low0 = int(b[qlBase + lane])\n                let low32 = int(b[qlBase + lane + 32])\n                let nibble = if group == 0: low0 & 0xF elif group == 1: low32 & 0xF elif group == 2: (low0 >> 4) & 0xF else: (low32 >> 4) & 0xF\n                let highByte = int(b[qhBase + lane])\n                let high = (highByte >> ((group * 2) as uint32)) & 3\n                let scaleRaw = int(b[scaleBase + half + group * 2])\n                let subScale = if scaleRaw > 127: scaleRaw - 256 else: scaleRaw\n                let quantized = subScale * ((nibble | (high << 4)) - 32)\n",
+        "q3_k" => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleIndex = outer * 8 + group * 2 + sub\n                let scaleWord = scaleIndex / 4\n                let scaleLane = scaleIndex % 4\n                let scaleByte = int(b[blockByte + 96 + (scaleWord % 2) * 4 + scaleLane])\n                let scaleLow = if scaleWord < 2: scaleByte & 0xF else: (scaleByte >> 4) & 0xF\n                let scaleHigh = (int(b[blockByte + 104 + scaleLane]) >> ((scaleWord * 2) as uint32)) & 3\n                let subScale = (scaleLow | (scaleHigh << 4)) - 32\n                let packed = int(b[blockByte + 32 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let highMask = int(b[blockByte + sub * 16 + lane]) & ((1 as int) << ((outer * 4 + group) as uint32))\n                let highOffset = if highMask == 0: 4 else: 0\n                let quantized = subScale * (q - highOffset)\n",
+        "q2_k" => "                let position = flat % 256\n                let outer = position / 128\n                let remainder = position % 128\n                let group = remainder / 32\n                let within32 = remainder % 32\n                let sub = within32 / 16\n                let lane = within32 % 16\n                let scaleByte = int(b[blockByte + outer * 8 + group * 2 + sub])\n                let packed = int(b[blockByte + 16 + outer * 32 + sub * 16 + lane])\n                let q = (packed >> ((group * 2) as uint32)) & 3\n                let minBits = int(b[blockByte + 82]) | (int(b[blockByte + 83]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * ((scaleByte >> 4) as float32)\n                let quantized = (scaleByte & 0xF) * q\n",
+        "f16" => "                let quantized = 1\n",
+        "bf16" => "                let bits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                let bfExponent = (bits >> 7) & 0xFF\n                let bfFraction = bits & 0x7F\n                if bfExponent == 0:\n                    scale = (bfFraction as float32) / 128.0 * 1.17549435e-38\n                elif bfExponent == 0xFF:\n                    scale = if bfFraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (bfFraction as float32) / 128.0\n                    var int bfPower = bfExponent - 127\n                    while bfPower > 0:\n                        scale *= 2.0\n                        bfPower -= 1\n                    while bfPower < 0:\n                        scale /= 2.0\n                        bfPower += 1\n                if (bits >> 15) == 1:\n                    scale = 0.0 - scale\n                let quantized = 1\n",
+        "q4_1" => "                let position = flat % 32\n                let packed = int(b[blockByte + 4 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n__F16_MIN__                minimum = 0.0 - dMin\n                let quantized = nibble\n",
+        "q5_1" => "                let position = flat % 32\n                let qh = int(b[blockByte + 4]) | (int(b[blockByte + 5]) << 8) | (int(b[blockByte + 6]) << 16) | (int(b[blockByte + 7]) << 24)\n                let packed = int(b[blockByte + 8 + position % 16])\n                let nibble = if position < 16: packed & 0xF else: (packed >> 4) & 0xF\n                let high = (qh >> (position as uint32)) & 1\n__F16_MIN__                minimum = 0.0 - dMin\n                let quantized = nibble | (high << 4)\n",
         _ => "                let position = flat % 256\n                let chunk = position / 64\n                let within = position % 64\n                let half = within / 32\n                let lane = within % 32\n                let subblock = chunk * 2 + half\n                let scalesBase = blockByte + 4\n                let subScale = if subblock < 4: int(b[scalesBase + subblock]) & 63 else: (int(b[scalesBase + subblock + 4]) & 0xF) | ((int(b[scalesBase + subblock - 4]) >> 6) << 4)\n                let subMin = if subblock < 4: int(b[scalesBase + subblock + 4]) & 63 else: (int(b[scalesBase + subblock + 4]) >> 4) | ((int(b[scalesBase + subblock]) >> 6) << 4)\n                let packed = int(b[blockByte + 16 + chunk * 32 + lane])\n                let nibble = if half == 0: packed & 0xF else: (packed >> 4) & 0xF\n                let minBits = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8)\n                let minSign = (minBits >> 15) & 1\n                let minExponent = (minBits >> 10) & 0x1F\n                let minFraction = minBits & 0x3FF\n                var float32 dMin = 0.0\n                if minExponent == 0:\n                    dMin = (minFraction as float32) / 16777216.0\n                else:\n                    dMin = 1.0 + (minFraction as float32) / 1024.0\n                    var int minPower = minExponent - 15\n                    while minPower > 0:\n                        dMin *= 2.0\n                        minPower -= 1\n                    while minPower < 0:\n                        dMin /= 2.0\n                        minPower += 1\n                if minSign == 1:\n                    dMin = 0.0 - dMin\n                minimum = dMin * (subMin as float32)\n                let quantized = subScale * nibble\n",
     };
-    let quantized_value = if quantized_format == Some("q5_k") {
+    let quantized_value = if fmt == "q5_k" {
         // Q5_K = Q4_K's scale/min packing plus a 32-byte high-bit plane (offset 16); the
         // 4-bit quants move from offset 16 to 48. Bit `2*chunk + half` of `qh[lane]` is bit 4.
         quantized_value_base.replace(
@@ -804,16 +977,42 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     } else {
         quantized_value_base.to_string()
     }.replace("__F16_MIN__", F16_MIN_DECODE);
-    let block_elements = geometry.map_or(32, |geometry| geometry.block_elements);
-    let scale_offset = geometry.map_or(0, |geometry| geometry.scale_offset);
-    let block_byte_expr = if matches!(quantized_format, Some("f16" | "bf16")) { "flat * 2".to_string() } else { format!("(flat / {block_elements}) * {block_bytes}") };
-    let product = if quantized_format.is_some() {
-        format!("                let flat = col * k + inner\n                let blockByte = {block_byte_expr}\n                let scaleOffset = blockByte + {scale_offset}\n                let scaleBits = int(b[scaleOffset]) | (int(b[scaleOffset + 1]) << 8)\n                let sign = (scaleBits >> 15) & 1\n                let exponent = (scaleBits >> 10) & 0x1F\n                let fraction = scaleBits & 0x3FF\n                var float32 scale = 0.0\n                if exponent == 0:\n                    scale = (fraction as float32) / 16777216.0\n                elif exponent == 0x1F:\n                    scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (fraction as float32) / 1024.0\n                    var int scaleExponent = exponent - 15\n                    while scaleExponent > 0:\n                        scale *= 2.0\n                        scaleExponent -= 1\n                    while scaleExponent < 0:\n                        scale /= 2.0\n                        scaleExponent += 1\n                if sign == 1:\n                    scale = 0.0 - scale\n                var float32 minimum = 0.0\n{quantized_value}                sum += a[row * k + inner] * ((quantized as float32) * scale - minimum)\n")
-    } else if element == TensorElement::Float16 {
-        "                sum += (a[row * k + inner] as float32) * (b[col * k + inner] as float32)\n".to_string()
-    } else {
-        "                sum += a[row * k + inner] * b[col * k + inner]\n".to_string()
-    };
+    let raw_block_byte_expr = if matches!(fmt, "f16" | "bf16") { "flat * 2".to_string() } else { format!("(flat / {block_elements}) * {block_bytes}") };
+    format!("                let flat = {flat_row_expr} + inner\n                let blockByte = {block_byte_prefix}{raw_block_byte_expr}\n                let scaleOffset = blockByte + {scale_offset}\n                let scaleBits = int(b[scaleOffset]) | (int(b[scaleOffset + 1]) << 8)\n                let sign = (scaleBits >> 15) & 1\n                let exponent = (scaleBits >> 10) & 0x1F\n                let fraction = scaleBits & 0x3FF\n                var float32 scale = 0.0\n                if exponent == 0:\n                    scale = (fraction as float32) / 16777216.0\n                elif exponent == 0x1F:\n                    scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                else:\n                    scale = 1.0 + (fraction as float32) / 1024.0\n                    var int scaleExponent = exponent - 15\n                    while scaleExponent > 0:\n                        scale *= 2.0\n                        scaleExponent -= 1\n                    while scaleExponent < 0:\n                        scale /= 2.0\n                        scaleExponent += 1\n                if sign == 1:\n                    scale = 0.0 - scale\n                var float32 minimum = 0.0\n{quantized_value}                sum += {act_row_expr} * ((quantized as float32) * scale - minimum)\n")
+}
+
+#[cfg(test)]
+fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, quantized_format: Option<&str>, element: TensorElement, tensor_config: &TensorLinearConfig) -> Result<KernelDecl, String> {
+    parse_dynamic_linear_kernel_ext(name, quals, has_bias, quantized_format, element, tensor_config, false, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_dynamic_linear_kernel_ext(
+    name: &str,
+    quals: [GpuQual; 3],
+    has_bias: bool,
+    quantized_format: Option<&str>,
+    element: TensorElement,
+    tensor_config: &TensorLinearConfig,
+    weight_is_f16: bool,
+    has_byte_offset: bool,
+) -> Result<KernelDecl, String> {
+    let scalar_type = if element == TensorElement::Float16 { "float16" } else { "float32" };
+    let bias_field = if has_bias { format!("    let [{scalar_type}]'global bias\n") } else { String::new() };
+    let bias_param = if has_bias { format!(", [{scalar_type}]'global input_bias") } else { String::new() };
+    let bias_assign = if has_bias { "        bias = input_bias\n" } else { "" };
+    let initial = if has_bias && element == TensorElement::Float16 { "bias[col] as float32" } else if has_bias { "bias[col]" } else { "0.0" };
+    let weight_type = if weight_is_f16 { "float16" } else if quantized_format.is_some() { "uint8" } else { scalar_type };
+    let offset_field = if has_byte_offset { "    let int byte_offset\n" } else { "" };
+    let offset_param = if has_byte_offset { ", int input_byte_offset" } else { "" };
+    let offset_assign = if has_byte_offset { "        byte_offset = input_byte_offset\n" } else { "" };
+    let elem_bytes = if weight_is_f16 || element == TensorElement::Float16 { 2 } else { 4 };
+    let block_byte_prefix = if has_byte_offset { "byte_offset + " } else { "" };
+    let elem_offset_prefix = if has_byte_offset { format!("byte_offset / {elem_bytes} + ") } else { String::new() };
+    let product = build_quantized_product(
+        quantized_format, weight_is_f16, element,
+        block_byte_prefix, &elem_offset_prefix, "col * k", "a[row * k + inner]",
+    );
     let warp_product = format!("        {}", product.replace("\n                ", "\n                        "));
     let nested_scalar_product = format!("    {}", product.replace("\n                ", "\n                    "));
     let q8_decode_algorithm = tensor_config.algorithm(Some("q8_0"), true);
@@ -881,7 +1080,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     };
     let mut body = if let Some((broadcast_block_bytes, broadcast_value_decode)) = scale_broadcast {
         format!(
-            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * {broadcast_block_bytes}\n                    var float32 scale = 0.0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                    scale = .warp.shuffle(scale, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += .warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = {block_byte_prefix}(flat / 32) * {broadcast_block_bytes}\n                    var float32 scale = 0.0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                    scale = .warp.shuffle(scale, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += .warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
             initial = initial,
             product = nested_scalar_product,
@@ -891,7 +1090,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
         )
     } else if quantized_format == Some("q5_0") && matches!(q5_decode_algorithm, "auto" | "warp" | "warp-broadcast") {
         format!(
-            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = (flat / 32) * 22\n                    var float32 scale = 0.0\n                    var int qh = 0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                        qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                    scale = .warp.shuffle(scale, scaleLane)\n                    qh = .warp.shuffle(qh, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += .warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
+            "        if m == 1:\n            let lane = .warp.lane\n            let warpLen = .warp.size\n            let warpInBlock = .thread.x / warpLen\n            let warpsPerBlock = .blockDim.x / warpLen\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = blockIndex * warpsPerBlock + warpInBlock\n            if cell < n:\n                let row = 0\n                let col = cell\n                var float32 sum = 0.0\n                var int base = 0\n                while base < k:\n                    let inner = base + lane\n                    let scaleLane = {scale_lane}\n                    let flat = col * k + inner\n                    let blockByte = {block_byte_prefix}(flat / 32) * 22\n                    var float32 scale = 0.0\n                    var int qh = 0\n                    if lane == scaleLane{scale_inner_guard}:\n                        let scaleBits = int(b[blockByte]) | (int(b[blockByte + 1]) << 8)\n                        let sign = (scaleBits >> 15) & 1\n                        let exponent = (scaleBits >> 10) & 0x1F\n                        let fraction = scaleBits & 0x3FF\n                        if exponent == 0:\n                            scale = (fraction as float32) / 16777216.0\n                        elif exponent == 0x1F:\n                            scale = if fraction == 0: 1.0 / 0.0 else: 0.0 / 0.0\n                        else:\n                            scale = 1.0 + (fraction as float32) / 1024.0\n                            var int scaleExponent = exponent - 15\n                            while scaleExponent > 0:\n                                scale *= 2.0\n                                scaleExponent -= 1\n                            while scaleExponent < 0:\n                                scale /= 2.0\n                                scaleExponent += 1\n                        if sign == 1:\n                            scale = 0.0 - scale\n                        qh = int(b[blockByte + 2]) | (int(b[blockByte + 3]) << 8) | (int(b[blockByte + 4]) << 16) | (int(b[blockByte + 5]) << 24)\n                    scale = .warp.shuffle(scale, scaleLane)\n                    qh = .warp.shuffle(qh, scaleLane)\n{value_decode}                    base += warpLen\n                var int offset = warpLen / 2\n                while offset > 0:\n                    sum += .warp.shuffleXor(sum, offset)\n                    offset /= 2\n                if lane == 0:\n                    c[col] = sum + {bias}\n        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             bias = if has_bias { "bias[col]" } else { "0.0" },
             initial = initial,
             product = nested_scalar_product,
@@ -988,7 +1187,7 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
             .replace("c[row * n + col] = sum\n", "c[row * n + col] = float16(sum)\n");
     }
     let source = format!(
-        "kernel {name}:\n    let [{scalar_type}]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [{scalar_type}]'{qc} c\n    let int m\n    let int n\n    let int k\n{tile_fields}    init([{scalar_type}]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n    def ():\n{body}",
+        "kernel {name}:\n    let [{scalar_type}]'{qa} a\n    let [{weight_type}]'{qb} b\n{bias_field}    mut [{scalar_type}]'{qc} c\n    let int m\n    let int n\n    let int k\n{offset_field}{tile_fields}    init([{scalar_type}]'{qa} input_a, [{weight_type}]'{qb} input_b{bias_param}, int input_m, int input_n, int input_k{offset_param}):\n        a = input_a\n        b = input_b\n{bias_assign}        c = [..<input_m * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n{offset_assign}    def ():\n{body}",
         qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]),
     );
     let parsed = crate::parser::parse(
@@ -997,6 +1196,69 @@ fn parse_dynamic_linear_kernel(name: &str, quals: [GpuQual; 3], has_bias: bool, 
     match parsed.items.into_iter().next() {
         Some(Item::Kernel(kernel)) => Ok(kernel),
         _ => Err("dynamic tensor kernel synthesis produced no kernel".into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_dynamic_moe_kernel(
+    name: &str,
+    quals: [GpuQual; 4],
+    ids_type: &str,
+    quantized_format: Option<&str>,
+    element: TensorElement,
+    tensor_config: &TensorLinearConfig,
+    weight_is_f16: bool,
+    native_metal_moe: bool,
+) -> Result<KernelDecl, String> {
+    let scalar_type = if element == TensorElement::Float16 { "float16" } else { "float32" };
+    let weight_type = if weight_is_f16 { "float16" } else if quantized_format.is_some() { "uint8" } else { scalar_type };
+    let body = if native_metal_moe {
+        let suffix = match quantized_format {
+            Some("q8_0") => match tensor_config.algorithm(Some("q8_0"), true) {
+                "rows" => "q8_0_rows",
+                "split-k" => "q8_0_splitk",
+                _ => "q8_0_splitk",
+            },
+            Some(fmt) => fmt,
+            None => "f32",
+        };
+        format!("        __boring_metal_moe_linear_{suffix}()\n")
+    } else {
+        let elem_bytes = if weight_is_f16 || element == TensorElement::Float16 { 2 } else { 4 };
+        let geometry = quantized_format.and_then(crate::tensor_formats::quantized_linear_geometry);
+        let expert_offset_setup = if quantized_format.is_some() && !weight_is_f16 {
+            let block_bytes = geometry.map_or(0, |g| g.block_bytes);
+            let block_elements = geometry.map_or(32, |g| g.block_elements);
+            let expert_bytes = if matches!(quantized_format, Some("f16" | "bf16")) {
+                "n * k * 2".to_string()
+            } else {
+                format!("(n * k / {block_elements}) * {block_bytes}")
+            };
+            format!("                let expertBase = byte_offset + expert * ({expert_bytes})\n")
+        } else {
+            format!("                let expertBase = byte_offset / {elem_bytes} + expert * n * k\n")
+        };
+        let product = format!(
+            "    {}",
+            build_quantized_product(
+                quantized_format, weight_is_f16, element,
+                "expertBase + ", "expertBase + ", "col * k", "a[row * k + inner]",
+            ).replace("\n                ", "\n                    ")
+        );
+        format!(
+            "        let blockIndex = .block.x + .block.y * .gridDim.x\n        let cell = .thread.x + blockIndex * .blockDim.x\n        if cell < count * n:\n            let slot = cell / n\n            let col = cell % n\n            let row = slot / (count / m)\n            let expert = int(ids[slot])\n            if expert < 0:\n                c[slot * n + col] = 0.0\n            else:\n{expert_offset_setup}                var float32 sum = 0.0\n                for inner in 0..<k:\n{product}                c[slot * n + col] = sum\n"
+        )
+    };
+    let source = format!(
+        "kernel {name}:\n    let [{scalar_type}]'{qa} a\n    let [{weight_type}]'{qb} b\n    let [{ids_type}]'{qc} ids\n    mut [{scalar_type}]'{qd} c\n    let int m\n    let int n\n    let int k\n    let int count\n    let int byte_offset\n    init([{scalar_type}]'{qa} input_a, [{weight_type}]'{qb} input_b, [{ids_type}]'{qc} input_ids, int input_m, int input_n, int input_k, int input_count, int input_byte_offset):\n        a = input_a\n        b = input_b\n        ids = input_ids\n        c = [..<input_count * input_n]\n        m = input_m\n        n = input_n\n        k = input_k\n        count = input_count\n        byte_offset = input_byte_offset\n    def ():\n{body}",
+        qa = qual_source(&quals[0]), qb = qual_source(&quals[1]), qc = qual_source(&quals[2]), qd = qual_source(&quals[3]),
+    );
+    let parsed = crate::parser::parse(
+        crate::lexer::lex(&source).map_err(|e| format!("dynamic moe tensor kernel lex error: {e:?}"))?
+    ).map_err(|e| format!("dynamic moe tensor kernel parse error: {}", e.msg()))?;
+    match parsed.items.into_iter().next() {
+        Some(Item::Kernel(kernel)) => Ok(kernel),
+        _ => Err("dynamic moe tensor kernel synthesis produced no kernel".into()),
     }
 }
 
@@ -1030,6 +1292,83 @@ fn parse_replacement_stmts(name: &str, instance: &str, operands: [&str; 3], spec
     }
 }
 
+fn build_weight_and_offset_guard(
+    weight: &str,
+    n: &str,
+    k: &str,
+    format: Option<&str>,
+    weight_is_f16: bool,
+    element: TensorElement,
+    offset_var: Option<&str>,
+) -> String {
+    let elem_bytes = if weight_is_f16 || element == TensorElement::Float16 { 2 } else { 4 };
+    let mut guards = String::new();
+    if let Some(ov) = offset_var {
+        guards.push_str(&format!("    guard {ov} >= 0 else throw \"tensor byte_offset must be non-negative\"\n"));
+        if (format.is_none() || weight_is_f16) && elem_bytes > 1 {
+            guards.push_str(&format!("    guard {ov} % {elem_bytes} == 0 else throw \"tensor byte_offset must be a multiple of {elem_bytes}\"\n"));
+        }
+    }
+    if let Some(fmt) = format {
+        if !weight_is_f16 {
+            let geometry = crate::tensor_formats::quantized_linear_geometry(fmt).unwrap();
+            let block_bytes = geometry.block_bytes;
+            let block_elements = geometry.block_elements;
+            guards.push_str(&format!(
+                "    guard {k} % {block_elements} == 0 else throw \"quantized tensor dimension k must be a multiple of {block_elements}\"\n"
+            ));
+            if let Some(ov) = offset_var {
+                guards.push_str(&format!(
+                    "    guard {ov} + ({n} * {k} / {block_elements}) * {block_bytes} <= {weight}.length else throw \"quantized tensor weight length mismatch\"\n"
+                ));
+            } else {
+                guards.push_str(&format!(
+                    "    guard {weight}.length == ({n} * {k} / {block_elements}) * {block_bytes} else throw \"quantized tensor weight length mismatch\"\n"
+                ));
+            }
+        } else if let Some(ov) = offset_var {
+            guards.push_str(&format!(
+                "    guard {ov} / {elem_bytes} + {n} * {k} <= {weight}.length else throw \"tensor weight length mismatch\"\n"
+            ));
+        } else {
+            guards.push_str(&format!(
+                "    guard {weight}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n"
+            ));
+        }
+    } else if let Some(ov) = offset_var {
+        guards.push_str(&format!(
+            "    guard {ov} / {elem_bytes} + {n} * {k} <= {weight}.length else throw \"tensor weight length mismatch\"\n"
+        ));
+    } else {
+        guards.push_str(&format!(
+            "    guard {weight}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n"
+        ));
+    }
+    guards
+}
+
+fn parse_dynamic_wrapper_body(source: &str, byte_offset: Option<(&str, &Expr)>) -> Result<Vec<Stmt>, String> {
+    let parsed = crate::parser::parse(
+        crate::lexer::lex(source).map_err(|e| format!("dynamic tensor dispatch lex error: {e:?}"))?
+    ).map_err(|e| format!("dynamic tensor dispatch parse error: {}", e.msg()))?;
+    let mut body = match parsed.items.into_iter().next() {
+        Some(Item::Fn(function)) => function.body,
+        _ => return Err("dynamic tensor dispatch synthesis produced no function body".into()),
+    };
+    if let Some((var_name, expr)) = byte_offset {
+        for stmt in &mut body {
+            if let Stmt::Let(binding) = stmt {
+                if binding.name == var_name {
+                    binding.value = Some(expr.clone());
+                    break;
+                }
+            }
+        }
+    }
+    Ok(body)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn parse_dynamic_replacement_stmts(
     name: &str,
     instance: &str,
@@ -1037,17 +1376,16 @@ fn parse_dynamic_replacement_stmts(
     element: TensorElement,
     tensor_config: &TensorLinearConfig,
     q8_entrypoints: Option<(&str, &str, &str, &str)>,
+    weight_is_f16: bool,
 ) -> Result<Vec<Stmt>, String> {
+    let offset_var = call.byte_offset.as_ref().map(|_| format!("{instance}_byte_offset"));
+    let offset_decl = offset_var.as_ref().map(|ov| format!("    let int {ov} = 0\n")).unwrap_or_default();
+    let offset_arg = offset_var.as_ref().map(|ov| format!(", {ov}")).unwrap_or_default();
     let bias_guard = call.bias.map(|bias| format!("    guard {bias}.length == {{n}} else throw \"tensor bias length mismatch\"\n")).unwrap_or_default().replace("{n}", &call.n);
     let bias_arg = call.bias.map(|bias| format!("{bias}, ")).unwrap_or_default();
-    let weight_guard = if let Some(format) = call.format {
-        let geometry = crate::tensor_formats::quantized_linear_geometry(format).unwrap();
-        let block_bytes = geometry.block_bytes;
-        let block_elements = geometry.block_elements;
-        format!("    guard {k} % {block_elements} == 0 else throw \"quantized tensor dimension k must be a multiple of {block_elements}\"\n    guard {b}.length == ({n} * {k} / {block_elements}) * {block_bytes} else throw \"quantized tensor weight length mismatch\"\n", k = call.k, b = call.operands[1], n = call.n)
-    } else {
-        format!("    guard {b}.length == {n} * {k} else throw \"tensor weight length mismatch\"\n", b = call.operands[1], n = call.n, k = call.k)
-    };
+    let weight_guard = build_weight_and_offset_guard(
+        call.operands[1], &call.n, &call.k, call.format, weight_is_f16, element, offset_var.as_deref(),
+    );
     let decode_algorithm = tensor_config.algorithm(call.format, true);
     let warp_decode = match call.format {
         Some("q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k" | "q5_k" | "q5_1" | "q4_1" | "f16" | "bf16") => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
@@ -1115,7 +1453,7 @@ fn parse_dynamic_replacement_stmts(
         format!("    kernel:\n        {instance}(block = 256, grid = {grid})\n")
     };
     let common = format!(
-        "def __tensor_wrapper() throws:\n    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n",
+        "def __tensor_wrapper() throws:\n{offset_decl}    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {a}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n{weight_guard}{bias_guard}    guard {c}.length == {m} * {n} else throw \"tensor destination length mismatch\"\n",
         a = call.operands[0], c = call.operands[2], m = call.m, n = call.n, k = call.k,
     );
     let source = if let Some((decode_name, decode_instance, prefill_name, prefill_instance)) = q8_entrypoints {
@@ -1126,23 +1464,59 @@ fn parse_dynamic_replacement_stmts(
             _ => format!("        kernel:\n            {decode_instance}(block = 128, grid = ({{n}} + 1) / 2)\n"),
         }.replace("{n}", &call.n).replace("{k}", &call.k);
         format!(
-            "{common}    if {m} == 1:\n        mut {decode_instance} = {decode_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{decode_launch}        {c} = {decode_instance}.c\n    else:\n        mut {prefill_instance} = {prefill_name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n        kernel:\n            {prefill_instance}(block = 256, grid = (({n} + 63) / 64, ({m} + {prefill_tail}) / {prefill_rows}))\n        {c} = {prefill_instance}.c\n",
+            "{common}    if {m} == 1:\n        mut {decode_instance} = {decode_name}({a}, {b}, {bias_arg}{m}, {n}, {k}{offset_arg})\n{decode_launch}        {c} = {decode_instance}.c\n    else:\n        mut {prefill_instance} = {prefill_name}({a}, {b}, {bias_arg}{m}, {n}, {k}{offset_arg})\n        kernel:\n            {prefill_instance}(block = 256, grid = (({n} + 63) / 64, ({m} + {prefill_tail}) / {prefill_rows}))\n        {c} = {prefill_instance}.c\n",
             a = call.operands[0], b = call.operands[1], c = call.operands[2], m = call.m, n = call.n, k = call.k,
             prefill_tail = prefill_rows - 1,
         )
     } else {
         format!(
-            "{common}    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k})\n{dispatch}{launch}    {c} = {instance}.c\n",
+            "{common}    mut {instance} = {name}({a}, {b}, {bias_arg}{m}, {n}, {k}{offset_arg})\n{dispatch}{launch}    {c} = {instance}.c\n",
             a = call.operands[0], b = call.operands[1], c = call.operands[2], m = call.m, n = call.n, k = call.k,
         )
     };
-    let parsed = crate::parser::parse(
-        crate::lexer::lex(&source).map_err(|e| format!("dynamic tensor dispatch lex error: {e:?}"))?
-    ).map_err(|e| format!("dynamic tensor dispatch parse error: {}", e.msg()))?;
-    match parsed.items.into_iter().next() {
-        Some(Item::Fn(function)) => Ok(function.body),
-        _ => Err("dynamic tensor dispatch synthesis produced no function body".into()),
-    }
+    parse_dynamic_wrapper_body(&source, offset_var.as_deref().zip(call.byte_offset.as_ref()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_moe_replacement_stmts(
+    name: &str,
+    instance: &str,
+    call: &DynamicMoeLinearCall<'_>,
+    element: TensorElement,
+    tensor_config: &TensorLinearConfig,
+    weight_is_f16: bool,
+    native_metal_moe: bool,
+) -> Result<Vec<Stmt>, String> {
+    let offset_var = format!("{instance}_byte_offset");
+    let offset_decl = format!("    let int {offset_var} = 0\n");
+    let weight_guard = build_weight_and_offset_guard(
+        call.w, &call.n, &call.k, call.format, weight_is_f16, element, Some(&offset_var),
+    );
+    let launch = if native_metal_moe {
+        let decode_algorithm = tensor_config.algorithm(call.format, true);
+        let (block, grid_x) = match call.format {
+            Some("q4_k" | "q5_k") => {
+                let rows = 8 * Q4K_ROWS_PER_SIMDGROUP;
+                (256, format!("({n} + {tail}) / {rows}", n = call.n, tail = rows - 1))
+            }
+            Some("q6_k") => {
+                let rows = 8 * Q6K_ROWS_PER_SIMDGROUP;
+                (256, format!("({n} + {tail}) / {rows}", n = call.n, tail = rows - 1))
+            }
+            Some("q8_0") if decode_algorithm != "rows" => {
+                (128, format!("({n} + 1) / 2", n = call.n))
+            }
+            _ => (256, format!("({n} + 31) / 32", n = call.n)),
+        };
+        format!("    kernel:\n        {instance}(block = {block}, grid = ({grid_x}, {count}))\n", count = call.count)
+    } else {
+        format!("    kernel:\n        {instance}(block = 256, grid = ({count} * {n} + 255) / 256)\n", count = call.count, n = call.n)
+    };
+    let source = format!(
+        "def __tensor_wrapper() throws:\n{offset_decl}    guard {m} > 0 else throw \"tensor dimension m must be positive\"\n    guard {n} > 0 else throw \"tensor dimension n must be positive\"\n    guard {k} > 0 else throw \"tensor dimension k must be positive\"\n    guard {count} > 0 else throw \"moe_linear count must be positive\"\n    guard {count} % {m} == 0 else throw \"moe_linear count must be a multiple of m\"\n    guard {x}.length == {m} * {k} else throw \"tensor left operand length mismatch\"\n    guard {ids}.length == {count} else throw \"moe_linear expert ids length mismatch\"\n{weight_guard}    guard {y}.length == {count} * {n} else throw \"tensor destination length mismatch\"\n    mut {instance} = {name}({x}, {w}, {ids}, {m}, {n}, {k}, {count}, {offset_var})\n{launch}    {y} = {instance}.c\n",
+        x = call.x, w = call.w, ids = call.ids, y = call.y, m = call.m, n = call.n, k = call.k, count = call.count,
+    );
+    parse_dynamic_wrapper_body(&source, call.byte_offset.as_ref().map(|expr| (offset_var.as_str(), expr)))
 }
 
 fn host_call(expr: &Expr) -> Option<(&str, [&str; 3])> {
@@ -1167,7 +1541,7 @@ fn item_uses_host_tensor(item: &Item) -> bool {
 
 fn stmt_uses_host_tensor(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Expr(expr) => host_call(expr).is_some() || dynamic_linear_call(expr).is_some(),
+        Stmt::Expr(expr) => host_call(expr).is_some() || dynamic_linear_call(expr).is_some() || dynamic_moe_linear_call(expr).is_some(),
         Stmt::If(value) => value.branches.iter().any(|(_, body)| body.iter().any(stmt_uses_host_tensor))
             || value.else_body.as_ref().is_some_and(|body| body.iter().any(stmt_uses_host_tensor)),
         Stmt::While(value) => value.body.iter().any(stmt_uses_host_tensor),

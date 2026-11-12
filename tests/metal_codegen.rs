@@ -5630,6 +5630,242 @@ def main() throws:
 }
 
 #[test]
+fn if_expr_cast_to_float32_in_host_and_gpu_helper() {
+    let src = r#"
+float32 int_sign_f32(int sc0_raw):
+    (if sc0_raw > 127: sc0_raw - 256 else: sc0_raw) as float32
+
+pub req [float32]'kernel'unified run_gpu(int raw) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 for ..<1]
+        if .thread.x == 0:
+            out[0] = int_sign_f32(raw)
+        out
+
+def main() throws:
+    let h = int_sign_f32(250)
+    let r = run_gpu(250)
+    with r:
+        print "{h} {r[0]}"
+"#;
+    let name = "if_expr_cast_to_float32_in_host_and_gpu_helper";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(!rs.contains(".trim().parse"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "-6 -6");
+}
+
+#[test]
+fn gpu_device_only_helper_with_warp_shuffle_not_emitted_in_host_rust() {
+    let src = r#"
+def float32 warp_row_dot(float32 v):
+    var float32 acc = v
+    acc += .warp.shuffleXor(acc, 1)
+    acc
+
+pub req [float32]'kernel'unified sum_pairs([float32]'kernel'global x) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 for ..<1]
+        let s = warp_row_dot(if .thread.x < x.length: x[.thread.x] else: 0.0)
+        if .thread.x == 0:
+            out[0] = s
+        out
+
+def main() throws:
+    let r = sum_pairs([3.0 as float32, 4.0 as float32])
+    with r:
+        print "{r[0]}"
+"#;
+    let name = "gpu_device_only_helper_with_warp_shuffle_not_emitted_in_host_rust";
+    let (_msl, rs, _toml) = run_metal(name, src);
+    assert!(!rs.contains("fn warp_row_dot"), "{rs}");
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "7");
+}
+
+#[test]
+fn mixed_host_and_gpu_param_resident_materializes_on_host_branch() {
+    let src = r#"
+pub req [float32]'kernel'unified scale_gpu([float32]'kernel'global src, int n) throws:
+    kernel(block = 32, grid = 1):
+        mut [float32]'unified out = [0.0 for ..<n]
+        let i = .thread.x
+        if i < n:
+            out[i] = src[i] * 2.0
+        out
+
+def float32 select_and_sum(bool use_gpu, [float32] pre_logits) throws:
+    var float32 total = 0.0
+    if use_gpu:
+        let r = scale_gpu(pre_logits, pre_logits.length)
+        with r:
+            total = r[0] + r[1]
+    else:
+        var [float32] logits = pre_logits
+        total = logits[0] + logits[1]
+    total
+
+def main() throws:
+    let a = [1.5 as float32, 2.5 as float32]
+    let g = select_and_sum(true, a)
+    let h = select_and_sum(false, a)
+    print "{g} {h}"
+"#;
+    let name = "mixed_host_and_gpu_param_resident_materializes_on_host_branch";
+    let (_msl, _rs, _toml) = run_metal(name, src);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "8 4");
+}
+
+#[test]
+fn tensor_linear_f16_float16_weights_and_byte_offset_on_metal() {
+    let src = r#"
+def run_f16([float32]'kernel'unified x, [float16]'kernel'global w, mut [float32]'kernel'unified y, int m, int n, int k, int off) throws:
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "f16", byte_offset = off)
+
+def run_q8([float32]'kernel'unified x, [uint8]'kernel'global w, mut [float32]'kernel'unified y, int m, int n, int k, int off) throws:
+    kernel.tensors.linear(x, w, y, m = m, n = n, k = k, format = "q8_0", byte_offset = off)
+
+def main() throws:
+    mut [float16]'kernel'global w_f16 = [float16(0.0) for ..<24]
+    # Place 2x8 weights starting at element 8 (byte_offset = 16)
+    # row 0: [1, 1, 1, 1, 0, 0, 0, 0], row 1: [0, 0, 0, 0, 2, 2, 2, 2]
+    for i in 0..<4:
+        w_f16[8 + i] = float16(1.0)
+        w_f16[16 + 4 + i] = float16(2.0)
+    let [float32]'kernel'unified x1 = [1.0, 2.0, 3.0, 4.0, 1.0, 1.0, 1.0, 1.0]
+    mut [float32]'kernel'unified y1 = [0.0, 0.0]
+    run_f16(x1, w_f16, y1, 1, 2, 8, 16)
+    let [float32]'kernel'unified x2 = [
+        1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0,
+        3.0, 3.0, 3.0, 3.0, 1.0, 2.0, 3.0, 4.0,
+    ]
+    mut [float32]'kernel'unified y2 = [0.0 for ..<4]
+    run_f16(x2, w_f16, y2, 2, 2, 8, 16)
+
+    # Q8_0: prefix 16 garbage bytes, then 2 rows of k=32 (2 blocks of 34 bytes = 68 bytes)
+    # f16(1.0) = 0x3C00 (0x00, 0x3C), i8 = 2 in row 0 and 3 in row 1
+    mut [uint8]'kernel'global w_q8 = [0 for ..<84]
+    w_q8[16] = 0x00
+    w_q8[17] = 0x3C
+    w_q8[50] = 0x00
+    w_q8[51] = 0x3C
+    for i in 0..<32:
+        w_q8[16 + 2 + i] = 2
+        w_q8[50 + 2 + i] = 3
+    let [float32]'kernel'unified x32 = [1.0 for ..<32]
+    mut [float32]'kernel'unified y_q8 = [0.0, 0.0]
+    run_q8(x32, w_q8, y_q8, 1, 2, 32, 16)
+    with y1, y2, y_q8:
+        print "{y1[0]} {y1[1]} | {y2[0]} {y2[1]} {y2[2]} {y2[3]} | {y_q8[0]} {y_q8[1]}"
+"#;
+    let name = "tensor_linear_f16_float16_weights_and_byte_offset_on_metal";
+    let (_msl, _rs, _toml) = run_metal(name, src);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "10 8 | 4 16 12 20 | 64 96");
+}
+
+#[test]
+fn tensor_moe_linear_q8_and_f16_on_metal() {
+    let src = r#"
+def run_moe_f16([float32]'kernel'unified x, [float16]'kernel'global w, [int32]'kernel'unified ids, mut [float32]'kernel'unified y, int m, int n, int k, int count, int off) throws:
+    kernel.tensors.moe_linear(x, w, ids, y, m = m, n = n, k = k, count = count, format = "f16", byte_offset = off)
+
+def run_moe_q8([float32]'kernel'unified x, [uint8]'kernel'global w, [int32]'kernel'unified ids, mut [float32]'kernel'unified y, int m, int n, int k, int count, int off) throws:
+    kernel.tensors.moe_linear(x, w, ids, y, m = m, n = n, k = k, count = count, format = "q8_0", byte_offset = off)
+
+def main() throws:
+    # 2 experts of shape (n=2, k=4) after a 4-elem (8-byte) header
+    mut [float16]'kernel'global w_f16 = [float16(0.0) for ..<20]
+    # expert 0: row0=[1,1,1,1], row1=[2,2,2,2]
+    # expert 1: row0=[3,3,3,3], row1=[4,4,4,4]
+    for i in 0..<4:
+        w_f16[4 + i] = float16(1.0)
+        w_f16[8 + i] = float16(2.0)
+        w_f16[12 + i] = float16(3.0)
+        w_f16[16 + i] = float16(4.0)
+    let [float32]'kernel'unified x = [
+        1.0, 1.0, 1.0, 1.0,
+        2.0, 2.0, 2.0, 2.0,
+    ]
+    let [int32]'kernel'unified ids = [1, 0, 0, 1]
+    mut [float32]'kernel'unified y_f16 = [0.0 for ..<8]
+    run_moe_f16(x, w_f16, ids, y_f16, 2, 2, 4, 4, 8)
+
+    # 2 experts of q8_0 shape (n=2, k=32) after 8 header bytes -> each expert is 2 * 34 = 68 bytes
+    mut [uint8]'kernel'global w_q8 = [0 for ..<144]
+    for e in 0..<2:
+        for r in 0..<2:
+            let blk = 8 + (e * 2 + r) * 34
+            w_q8[blk] = 0x00
+            w_q8[blk + 1] = 0x3C
+            let v = uint8(e * 2 + r + 1)
+            for q in 0..<32:
+                w_q8[blk + 2 + q] = v
+    let [float32]'kernel'unified x32 = [1.0 for ..<32]
+    let [int32]'kernel'unified ids1 = [1, 0]
+    mut [float32]'kernel'unified y_q8 = [0.0 for ..<4]
+    run_moe_q8(x32, w_q8, ids1, y_q8, 1, 2, 32, 2, 8)
+    with y_f16, y_q8:
+        print "{y_f16[0]} {y_f16[1]} {y_f16[2]} {y_f16[3]} {y_f16[4]} {y_f16[5]} {y_f16[6]} {y_f16[7]} | {y_q8[0]} {y_q8[1]} {y_q8[2]} {y_q8[3]}"
+"#;
+    let name = "tensor_moe_linear_q8_and_f16_on_metal";
+    let (_msl, _rs, _toml) = run_metal(name, src);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "Metal run failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "12 16 4 8 8 16 24 32 | 96 128 32 64");
+}
+
+#[test]
 fn plain_fn_kernel_global_param_with_block_stays_device_resident() {
     let src = r#"
 pub req [float32]'kernel'unified scale_gpu([float32]'kernel'global x, int n) throws:

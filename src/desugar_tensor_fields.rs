@@ -373,7 +373,7 @@ fn rewrite_call(call: &mut Expr, ctx: &Ctx, counter: &mut usize, out: &mut Field
     }
     let (line, col, len) = (call.line, call.col, call.len);
     let ExprKind::MethodCall(recv, method, args) = &mut call.kind else { return None };
-    if !matches!(method.as_str(), "matmul" | "mma" | "linear") { return None; }
+    if !matches!(method.as_str(), "matmul" | "mma" | "linear" | "moe_linear") { return None; }
     let ExprKind::Field(base, ns) = &recv.kind else { return None };
     if ns != "tensor" || !matches!(&base.kind, ExprKind::Var(n) if n == "gpu") { return None; }
     let operand_count = args.iter().position(|a| a.label.is_some()).unwrap_or(args.len());
@@ -518,7 +518,7 @@ fn lower_outside(call: &mut Expr, ctx: &Ctx, counter: &mut usize, out: &mut Fiel
     let ExprKind::MethodCall(recv, method, args) = &call.kind else {
         return None;
     };
-    if !matches!(method.as_str(), "matmul" | "mma" | "linear") {
+    if !matches!(method.as_str(), "matmul" | "mma" | "linear" | "moe_linear") {
         return None;
     }
     let ExprKind::Field(base, ns) = &recv.kind else {

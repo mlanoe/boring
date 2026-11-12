@@ -855,7 +855,7 @@ fn qualify(ty: Type, qual: OwnerQual) -> Type {
 
 fn tensor_call(e: &Expr) -> Option<&[Arg]> {
     let ExprKind::MethodCall(recv, method, args) = &e.kind else { return None };
-    if !matches!(method.as_str(), "matmul" | "mma" | "linear") { return None; }
+    if !matches!(method.as_str(), "matmul" | "mma" | "linear" | "moe_linear") { return None; }
     let ExprKind::Field(base, ns) = &recv.kind else { return None };
     // The parser spells `kernel.tensors` as `gpu.tensor`.
     if ns != "tensor" || !matches!(&base.kind, ExprKind::Var(n) if n == "gpu") { return None; }

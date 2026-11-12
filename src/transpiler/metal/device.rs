@@ -534,6 +534,7 @@ impl DeviceEmitter {
         }
 
         if decl.name.starts_with("BoringTensorDynamicQ8Native") {
+            self.emit_apply_b_byte_offset();
             let has_bias = decl.fields.iter().any(|field| field.name == "bias");
             if decl.name.ends_with("Decode") {
                 if decl.name.contains("SplitK") {
@@ -554,24 +555,28 @@ impl DeviceEmitter {
             return;
         }
         if decl.name.starts_with("BoringTensorDynamicQ4KNative") {
+            self.emit_apply_b_byte_offset();
             self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q4_k", !decl.name.contains("ScalarDecode"), &decl.name);
             self.indent -= 1;
             self.line("}");
             return;
         }
         if decl.name.starts_with("BoringTensorDynamicQ5KNative") {
+            self.emit_apply_b_byte_offset();
             self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q5_k", true, &decl.name);
             self.indent -= 1;
             self.line("}");
             return;
         }
         if decl.name.starts_with("BoringTensorDynamicQ6KNative") {
+            self.emit_apply_b_byte_offset();
             self.emit_dynamic_packed_linear_body(decl.fields.iter().any(|field| field.name == "bias"), "q6_k", !decl.name.contains("ScalarDecode"), &decl.name);
             self.indent -= 1;
             self.line("}");
             return;
         }
         if decl.name.starts_with("BoringTensorDynamicFloatNative") {
+            self.emit_apply_b_byte_offset();
             self.emit_dynamic_float_linear_body(decl.fields.iter().any(|field| field.name == "bias"));
             self.indent -= 1;
             self.line("}");
@@ -1428,8 +1433,16 @@ impl DeviceEmitter {
         self.line("if (bp_row + bp_r < (uint)m) {");
         self.indent += 1;
         self.line("device const float* bp_src_a = a + (ulong)(bp_row + bp_r) * (ulong)k + bp_base + bp_kq;");
+        self.line("if (bp_base + bp_kq + 8 <= (uint)k) {");
+        self.indent += 1;
         self.line(&format!("*(threadgroup {activation}4*)bp_dst_a = {activation}4(*(device const float4*)bp_src_a);"));
         self.line(&format!("*(threadgroup {activation}4*)(bp_dst_a + 4) = {activation}4(*(device const float4*)(bp_src_a + 4));"));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!("for (uint bp_i = 0; bp_i < 8; ++bp_i) {{ bp_dst_a[bp_i] = (bp_base + bp_kq + bp_i < (uint)k) ? {activation}(bp_src_a[bp_i]) : {activation}(0.0f); }}"));
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
@@ -1528,14 +1541,37 @@ impl DeviceEmitter {
             // Unquantized 16-bit weights: thread `bp_lane8` converts 8 consecutive k values of one
             // output column (two byte-aligned 4-wide loads).
             self.line("const ulong bp_elem = ((ulong)bp_output_col * (ulong)k + bp_base + bp_lane8 * 8) * 2;");
+            self.line("device const uchar* bp_b_bytes = (device const uchar*)b;");
+            self.line("if (bp_base + bp_lane8 * 8 + 8 <= (uint)k) {");
+            self.indent += 1;
             for half_index in 0..2 {
                 let off = half_index * 4;
                 if format == "f16" {
-                    self.line(&format!("*(threadgroup {weight}4*)(bp_dst_b0 + {off}) = {weight}4(float4(*(device const packed_half4*)(b + bp_elem + {})));", off * 2));
+                    self.line(&format!("*(threadgroup {weight}4*)(bp_dst_b0 + {off}) = {weight}4(float4(*(device const packed_half4*)(bp_b_bytes + bp_elem + {})));", off * 2));
                 } else {
-                    self.line(&format!("{{ const packed_ushort4 bp_u = *(device const packed_ushort4*)(b + bp_elem + {}); *(threadgroup {weight}4*)(bp_dst_b0 + {off}) = {weight}4(as_type<float4>(uint4(bp_u) << 16)); }}", off * 2));
+                    self.line(&format!("{{ const packed_ushort4 bp_u = *(device const packed_ushort4*)(bp_b_bytes + bp_elem + {}); *(threadgroup {weight}4*)(bp_dst_b0 + {off}) = {weight}4(as_type<float4>(uint4(bp_u) << 16)); }}", off * 2));
                 }
             }
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+            self.line("for (uint bp_i = 0; bp_i < 8; ++bp_i) {");
+            self.indent += 1;
+            self.line("float bp_v = 0.0f;");
+            self.line("if (bp_base + bp_lane8 * 8 + bp_i < (uint)k) {");
+            self.indent += 1;
+            if format == "f16" {
+                self.line("bp_v = float(*(device const half*)(bp_b_bytes + bp_elem + bp_i * 2));");
+            } else {
+                self.line("bp_v = as_type<float>(uint(*(device const ushort*)(bp_b_bytes + bp_elem + bp_i * 2)) << 16);");
+            }
+            self.indent -= 1;
+            self.line("}");
+            self.line(&format!("bp_dst_b0[bp_i] = {weight}(bp_v);"));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
         } else if matches!(format, "q4_0" | "iq4_nl" | "q5_0" | "q4_1" | "q5_1") {
             // 32-element blocks: one block per K step, each thread fills 8 consecutive k values
             // (`bp_lane8 * 8 ..`) of one output column. Elements 0..15 are the low nibbles of
@@ -1782,6 +1818,11 @@ impl DeviceEmitter {
     /// (`k` is a multiple of 32, rows start at 64-byte multiples). The activation slice is loaded
     /// once per step and reused for all four rows.
     fn emit_half_rows_decode(&mut self, has_bias: bool, format: &str) {
+        self.emit_unquantized_rows_decode(has_bias, format);
+    }
+
+    fn emit_unquantized_rows_decode(&mut self, has_bias: bool, format: &str) {
+        let elem_bytes = if format == "f32" { 4 } else { 2 };
         self.line("constexpr uint bp_rows = 4;");
         self.line("const uint bp_lane = __simd_lane_id;");
         self.line("const uint bp_warp = __thread_pos.x / 32;");
@@ -1792,21 +1833,43 @@ impl DeviceEmitter {
         self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
         self.indent += 1;
         self.line("bp_sumf[bp_r] = 0.0f;");
-        self.line("bp_rowp[bp_r] = b + min(bp_row0 + bp_r, (ulong)n - 1) * (ulong)k * 2;");
+        self.line(&format!("bp_rowp[bp_r] = (device const uchar*)b + min(bp_row0 + bp_r, (ulong)n - 1) * (ulong)k * {elem_bytes};"));
         self.indent -= 1;
         self.line("}");
-        self.line("for (ulong bp_i = bp_lane * 4; bp_i < (ulong)k; bp_i += 128) {");
+        self.line("for (ulong bp_i = bp_lane * 4; bp_i + 3 < (ulong)k; bp_i += 128) {");
         self.indent += 1;
         self.line("const float4 bp_y = *(device const float4*)(a + bp_i);");
         self.line("#pragma clang loop unroll(full)");
         self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
         self.indent += 1;
-        if format == "f16" {
-            self.line("const float4 bp_w = float4(*(device const packed_half4*)(bp_rowp[bp_r] + bp_i * 2));");
-        } else {
-            self.line("const float4 bp_w = as_type<float4>(uint4(*(device const packed_ushort4*)(bp_rowp[bp_r] + bp_i * 2)) << 16);");
+        match format {
+            "f16" => self.line("const float4 bp_w = float4(*(device const packed_half4*)(bp_rowp[bp_r] + bp_i * 2));"),
+            "bf16" => self.line("const float4 bp_w = as_type<float4>(uint4(*(device const packed_ushort4*)(bp_rowp[bp_r] + bp_i * 2)) << 16);"),
+            _ => self.line("const float4 bp_w = float4(*(device const packed_float4*)(bp_rowp[bp_r] + bp_i * 4));"),
         }
         self.line("bp_sumf[bp_r] += dot(bp_w, bp_y);");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("if ((ulong)k % 4 != 0) {");
+        self.indent += 1;
+        self.line("const ulong bp_tail_start = ((ulong)k / 4) * 4;");
+        self.line("if (bp_tail_start + bp_lane < (ulong)k) {");
+        self.indent += 1;
+        self.line("const ulong bp_i = bp_tail_start + bp_lane;");
+        self.line("const float bp_y = a[bp_i];");
+        self.line("#pragma clang loop unroll(full)");
+        self.line("for (uint bp_r = 0; bp_r < bp_rows; ++bp_r) {");
+        self.indent += 1;
+        match format {
+            "f16" => self.line("const float bp_w = float(*(device const half*)(bp_rowp[bp_r] + bp_i * 2));"),
+            "bf16" => self.line("const float bp_w = as_type<float>(uint(*(device const ushort*)(bp_rowp[bp_r] + bp_i * 2)) << 16);"),
+            _ => self.line("const float bp_w = *(device const float*)(bp_rowp[bp_r] + bp_i * 4);"),
+        }
+        self.line("bp_sumf[bp_r] += bp_w * bp_y;");
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -1826,6 +1889,68 @@ impl DeviceEmitter {
         self.line("}");
         self.indent -= 1;
         self.line("}");
+    }
+
+    fn emit_apply_b_byte_offset(&mut self) {
+        if self.current_fields.iter().any(|f| f.name == "byte_offset") {
+            if let Some(b_field) = self.current_fields.iter().find(|f| f.name == "b") {
+                let elem = elem_msl_type(&b_field.ty);
+                self.line(&format!("b = (device const {elem}*)((device const uchar*)b + (ulong)byte_offset);"));
+            }
+        }
+    }
+
+    fn emit_moe_linear_native(&mut self, format: &str) {
+        let b_elem = self.current_fields.iter().find(|f| f.name == "b")
+            .map(|f| elem_msl_type(&f.ty))
+            .unwrap_or_else(|| "uchar".into());
+        let (block_elements, block_bytes) = match format {
+            "q8_0" | "q8_0_rows" | "q8_0_splitk" => (32usize, 34usize),
+            "q4_k" => (256, 144),
+            "q5_k" => (256, 176),
+            "q6_k" => (256, 210),
+            "q3_k" => (256, 110),
+            "q2_k" => (256, 84),
+            "q4_0" => (32, 18),
+            "q5_0" => (32, 22),
+            "q4_1" => (32, 20),
+            "q5_1" => (32, 24),
+            "iq4_nl" => (32, 18),
+            "f16" | "bf16" => (1, 2),
+            _ => (1, 4),
+        };
+        self.line("const ulong moe_slot = (ulong)__block_pos.y;");
+        self.line("const ulong moe_row = moe_slot / (ulong)(count / m);");
+        self.line("const long moe_expert = (long)ids[moe_slot];");
+        self.line("c += moe_slot * (ulong)n;");
+        self.line("if (moe_expert < 0) {");
+        self.indent += 1;
+        self.line("if (__block_pos.x == 0) {");
+        self.indent += 1;
+        self.line("for (uint moe_i = __thread_pos.x; moe_i < (uint)n; moe_i += __block_dim.x) { c[moe_i] = 0.0f; }");
+        self.indent -= 1;
+        self.line("}");
+        self.line("return;");
+        self.indent -= 1;
+        self.line("}");
+        self.line("a += moe_row * (ulong)k;");
+        self.line(&format!(
+            "const ulong moe_expert_bytes = ((ulong)n * (ulong)k / {block_elements}) * {block_bytes};"
+        ));
+        self.line(&format!(
+            "b = (device const {b_elem}*)((device const uchar*)b + (ulong)byte_offset + (ulong)moe_expert * moe_expert_bytes);"
+        ));
+        match format {
+            "q8_0_rows" => self.emit_q8_rows_decode(false, false),
+            "q8_0" | "q8_0_splitk" => self.emit_q8_split_k_decode(false),
+            "q4_k" => self.emit_q4_k_rows_decode(false, false),
+            "q5_k" => self.emit_q4_k_rows_decode(false, true),
+            "q6_k" => self.emit_q6_k_rows_decode(false),
+            "q4_0" | "q5_0" | "q4_1" | "q5_1" | "iq4_nl" => self.emit_small_block_rows_decode(false, format),
+            "q3_k" | "q2_k" => self.emit_q3_q2_k_rows_decode(false, format),
+            "f16" | "bf16" | "f32" => self.emit_unquantized_rows_decode(false, format),
+            _ => unreachable!("unexpected moe_linear format: {format}"),
+        }
     }
 
     /// Matrix-vector schedule for Q3_K / Q2_K: four output rows per SIMD group, four 256-element
@@ -2015,6 +2140,7 @@ impl DeviceEmitter {
             }
             Stmt::Expr(e) => {
                 if let Some(format) = rows_decode_marker(e) {
+                    self.emit_apply_b_byte_offset();
                     let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
                     if matches!(format, "q3_k" | "q2_k") {
                         self.emit_q3_q2_k_rows_decode(has_bias, format);
@@ -2025,8 +2151,13 @@ impl DeviceEmitter {
                 }
                 if let Some(format) = blocked_prefill_marker(e) {
                     // Float SIMD-group prefill for a 32-element-block format without a native kernel.
+                    self.emit_apply_b_byte_offset();
                     let has_bias = self.current_fields.iter().any(|f| f.name == "bias");
                     self.emit_blocked_quant_prefill(has_bias, format, "float", "float");
+                    return;
+                }
+                if let Some(format) = moe_linear_marker(e) {
+                    self.emit_moe_linear_native(format);
                     return;
                 }
                 if crate::checker::tensor::is_tensor_call(e) {
@@ -3454,6 +3585,30 @@ fn rows_decode_marker(expr: &Expr) -> Option<&'static str> {
         "__boring_metal_rows_decode_iq4_nl" => Some("iq4_nl"),
         "__boring_metal_rows_decode_q3_k" => Some("q3_k"),
         "__boring_metal_rows_decode_q2_k" => Some("q2_k"),
+        _ => None,
+    }
+}
+
+fn moe_linear_marker(expr: &Expr) -> Option<&'static str> {
+    let ExprKind::Call(callee, _) = &expr.kind else { return None };
+    let ExprKind::Var(name) = &callee.kind else { return None };
+    match name.as_str() {
+        "__boring_metal_moe_linear_q8_0" => Some("q8_0"),
+        "__boring_metal_moe_linear_q8_0_rows" => Some("q8_0_rows"),
+        "__boring_metal_moe_linear_q8_0_splitk" => Some("q8_0_splitk"),
+        "__boring_metal_moe_linear_q4_k" => Some("q4_k"),
+        "__boring_metal_moe_linear_q5_k" => Some("q5_k"),
+        "__boring_metal_moe_linear_q6_k" => Some("q6_k"),
+        "__boring_metal_moe_linear_q3_k" => Some("q3_k"),
+        "__boring_metal_moe_linear_q2_k" => Some("q2_k"),
+        "__boring_metal_moe_linear_q4_0" => Some("q4_0"),
+        "__boring_metal_moe_linear_q5_0" => Some("q5_0"),
+        "__boring_metal_moe_linear_q4_1" => Some("q4_1"),
+        "__boring_metal_moe_linear_q5_1" => Some("q5_1"),
+        "__boring_metal_moe_linear_iq4_nl" => Some("iq4_nl"),
+        "__boring_metal_moe_linear_f16" => Some("f16"),
+        "__boring_metal_moe_linear_bf16" => Some("bf16"),
+        "__boring_metal_moe_linear_f32" => Some("f32"),
         _ => None,
     }
 }
