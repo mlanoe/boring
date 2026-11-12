@@ -1,8 +1,0 @@
-pub def string greet(string name):
-    "Hello, {name}!"
-
-pub struct Greeter:
-    pub string prefix
-
-    pub req string say(string name):
-        "{prefix}, {name}!"

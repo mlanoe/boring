@@ -297,18 +297,13 @@ boring build        # emit Cargo project
 
 Source: `docs/book.md` for the full language reference.
 
-## Self-hosted interpreter (`boring/interpreter/`)
+## Self-hosted interpreter (moved)
 
-The interpreter/stdlib written **in Boring itself** lives under `boring/interpreter/` (`.br` files: `lexer.br`, `parser_core.br`, `parser_exprstmt.br`, `ast.br`, `exec.br`, `eval.br`, `methods.br`, `stdlib.br`, `main.br`). It is never run directly with `boring run` for validation — it must always be **transpiled then compiled**:
-
-1. `boring build [--threading multi|single] [--mode strict|managed]` from `boring/interpreter/` → emits a Cargo project (`main_rust`, `main_rust_single`, `main_rust_managed`, `main_rust_managed_single`).
-2. `cargo build` on that generated project.
-
-`tests/interpreter_build.rs` does step 1+2 for all four mode/threading combinations; `tests/interpreter_functional.rs` then runs `tests/cases/*.br` against all four compiled binaries and checks output against `.expected` files. That functional suite is what actually validates the self-hosted interpreter — always run both (`cargo test --test interpreter_build` before `cargo test --test interpreter_functional`) after changing anything under `boring/interpreter/`, not just `boring run` on the `.br` sources.
+The interpreter written in Boring itself now lives in the sibling project `../boring-self-interpreter` (it depends on this repository — the compiler binary and the `tests/cases` corpus — and nothing here depends on it). It is no longer built or tested from here. After a transpiler change that could affect it, run that project's suites against this checkout (`cargo build --release` here, then `cargo test --test interpreter_build -- --test-threads=1` and `cargo test --test interpreter_functional` there). Fixtures only the self-hosted interpreter uses (`string_slice_clamp`, `array_slice_clamp`, `use_modules/`, `numeric_literal_overflow/`, `error_type_diagnostic/`, `use_boring_stdlib_unsupported/`) stay in `tests/cases` for now.
 
 ## Running tests and disk usage
 
-Tests generate Cargo projects with their own build dirs (`target/tmp`, `target/transpile-cases`, `target/*_test_scratch`, `boring/interpreter/*_rust*/target`) — tens of GB on a full run. Launch them through the wrappers so these are purged afterwards, even on failure or Ctrl-C:
+Tests generate Cargo projects with their own build dirs (`target/tmp`, `target/transpile-cases`, `target/*_test_scratch`) — tens of GB on a full run. Launch them through the wrappers so these are purged afterwards, even on failure or Ctrl-C:
 
 - `tools/test.sh [cargo test args]` — e.g. `tools/test.sh --test metal_codegen`.
 - `tools/test-transpile.sh` — transpiler suite (forces `--test-threads=1`).
@@ -316,6 +311,6 @@ Tests generate Cargo projects with their own build dirs (`target/tmp`, `target/t
 
 `BORING_FULL_CONFIGS=1` runs all four strict/managed × single/multi configs per transpile case; by default (`tests/transpile.rs`'s `config_enabled`) only `strict+multi` and `managed+single` run, which together cover each axis once and halve the number of generated cargo builds. A skipped config returns early and is reported as `ok`, not `ignored`, so a default `cargo test` pass proves only those two. CI sets the variable (`.github/workflows/ci.yml`).
 
-**Cutting a version** (adding a `## [x.y.z]` section to `CHANGELOG.md`, i.e. renaming `[Unreleased]`) requires a full run first: `BORING_FULL_CONFIGS=1 tools/test.sh` (plus the self-hosted interpreter suites, see above), and the pass count recorded in the version header comes from that run, not from a default one.
+**Cutting a version** (adding a `## [x.y.z]` section to `CHANGELOG.md`, i.e. renaming `[Unreleased]`) requires a full run first: `BORING_FULL_CONFIGS=1 tools/test.sh` (plus the self-hosted interpreter suites of `../boring-self-interpreter`, see above), and the pass count recorded in the version header comes from that run, not from a default one.
 
-`BORING_TEST_KEEP=1` keeps the artifacts for faster re-runs. A bare `cargo test` cleans nothing (CI does this on purpose, to keep its cache). Prefer the wrappers over bare `cargo test` for suites that build generated projects (`transpile`, `*_codegen`, `interpreter_build`, `interpreter_functional`, `screen_*`).
+`BORING_TEST_KEEP=1` keeps the artifacts for faster re-runs. A bare `cargo test` cleans nothing (CI does this on purpose, to keep its cache). Prefer the wrappers over bare `cargo test` for suites that build generated projects (`transpile`, `*_codegen`, `screen_*`).

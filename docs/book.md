@@ -5356,7 +5356,7 @@ A **bare, single-segment `use <name>`** (no dot at all) is a third, distinct
 import form — separate from `mod name: ...` blocks, multi-segment `use
 module.item`, and the `[deps]`/`use boring.<module>` forms above. It lets a
 single project split its source across multiple sibling `.br` files with no
-`boring.toml` setup at all — used throughout `boring/interpreter/` itself
+`boring.toml` setup at all — used throughout the self-hosted interpreter (`boring-self-interpreter`)
 (`main.br` does `use tokens`, `use ast`, `use lexer`, … against sibling
 `tokens.br`/`ast.br`/`lexer.br` files) and in `scratch-boring/boring/
 scratch.br` + `sb3_loader.br`.
@@ -10748,9 +10748,6 @@ Portable kernel syntax, memory qualifiers, dispatch, synchronization, atomics, s
 Backend-specific behavior is documented separately for [CUDA](cuda-module.html), [ROCm](rocm-backend.html), [Metal](metal-backend.html), [wgpu](wgpu-backend.html), and [CPU SIMD](simd-backend.html). See also [GPU display](gpu-display.html), [warp-level primitives](warp-level-primitives.html), and [tensor operations](tensor-operations.html).
 
 ### Language internals
-
-**[Interpreter parity audit](interpreter-parity.html)**
-The current comparison between transpiled execution, the Rust interpreter, and the self-hosted interpreter, including its architecture, implementation tradeoffs, and known semantic gaps.
 
 **[Cross-project code sharing](cross-project-code-sharing-gap.html)**
 The implemented `[deps]` and embedded-stdlib model, its resolution rules, and the limitations that remain compared with a package manager.

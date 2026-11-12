@@ -891,10 +891,10 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
 - **Threading:** `&dyn Trait` is `Send` only if the trait is `Sync`; a param captured by a
   `task`/`spawn` is consumed, so it stays `Box<dyn Trait + Send>`-compatible. Verify the existing
   `dyn Trait` object-bound emission for multi-thread before enabling.
-- **Self-hosted interpreter (`boring/interpreter/`):** declares no traits, so it exercises none of
-  this directly, but the changed call-site code path is shared: `interpreter_build` (4 modes) then
+- **Self-hosted interpreter (now `../boring-self-interpreter`):** declares no traits, so it exercises none of
+  this directly, but the changed call-site code path is shared: its `interpreter_build` (4 modes) then
   `interpreter_functional` are required gates, not optional.
-- **`interpreter-parity`/`boring run`:** the tree-walk interpreter has no borrow notion; no change.
+- **`boring run` / interpreter parity:** the tree-walk interpreter has no borrow notion; no change.
 
 #### Risks
 
@@ -987,7 +987,7 @@ by value. (c) is the part that is not "clearly safe" today: external Rust types 
 
 
 Gates per phase: `cargo test` (cases snapshot suites), `interpreter_build` then
-`interpreter_functional`, and `boring build --compile` on boring-ui.
+`interpreter_functional` (in `../boring-self-interpreter`), and `boring build --compile` on boring-ui.
 
 ### Struct field inference
 

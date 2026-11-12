@@ -18,20 +18,6 @@ examples/*_rust_managed/
 examples/*_rust_managed_single/
 stdlib/*_rust/
 # Scratch Cargo projects generated per .br file (boring build <file.br>)
-boring/interpreter/ast_rust/
-boring/interpreter/eval_rust/
-boring/interpreter/exec_rust/
-boring/interpreter/lexer_rust/
-boring/interpreter/methods_rust/
-boring/interpreter/parser_core_rust/
-boring/interpreter/parser_exprstmt_rust/
-boring/interpreter/stdlib_rust/
-boring/interpreter/tokens_rust/
-boring/interpreter/value_rust/
-boring/interpreter/main_rust/
-boring/interpreter/main_rust_single/
-boring/interpreter/main_rust_managed/
-boring/interpreter/main_rust_managed_single/
 # Scratch project-mode Cargo project for tests/transpile.rs's `ext_const_promotion` case
 # (needs a real `boring.toml` project dir, unlike every other `tests/cases/*_rust/` case
 # above, which is a single flat `.br` file `--emit-rust` never nests under `src/`).
