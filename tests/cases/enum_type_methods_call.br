@@ -1,5 +1,5 @@
-# `Method.call` on an enum's type-level method (build only: `FieldValue` is a
-# generated-code type; `boring run` takes raw values instead).
+# `Method.call` on an enum's type-level method, through `FieldValue` (`boring run` and
+# `boring build`).
 enum Shape as Introspect:
     Circle(float radius)
     Unit

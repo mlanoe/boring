@@ -952,17 +952,10 @@ impl Interpreter {
     ///
     /// v2 design (handle-based, see `boring_introspect_trait_design` memo's "FINAL v2
     /// design"): builds a real `IntrospectInfo`/`Field`/`Method` VALUE (`Value::Object`,
-    /// via the shared `make_object` helper) rather than a Rust struct — no `FieldValue`
-    /// tagged union is needed here, unlike the transpiler's Rust-facing design
-    /// (`src/transpiler/mod.rs`'s `emit_introspect_prelude` doc comment): the interpreter's
-    /// one dynamic `Value` type already covers every field value shape directly. `get()`/
-    /// `request()`/etc. (handled by `try_introspect_handle_call` below) return the raw
-    /// `Value` directly rather than a `FieldValue`-wrapped one — a deliberate, documented
-    /// asymmetry with `boring build`'s output (same asymmetry v1 already accepted for
-    /// `getField`), meaning a `.br` script using `FieldValue.Int(...)` literal construction
-    /// to build `request()`/`modify()` call arguments (needed under `boring build`) is
-    /// NOT portable to `boring run` as-is — under the interpreter, pass plain values
-    /// directly (`m.request(instance, [5])`, not `[FieldValue.Int(5)]`).
+    /// via the shared `make_object` helper) rather than a Rust struct. `get()`/`request()`/
+    /// etc. (handled by `try_introspect_handle_call` below) exchange values through the
+    /// built-in `FieldValue` enum, same variants as `boring build`'s (see `introspect_wrap`);
+    /// arguments may also be plain values, which only the interpreter accepts.
     ///
     /// Each `Field`/`Method` object carries two hidden bookkeeping fields alongside the
     /// five/four documented ones — `__ownerType` (the struct/enum name, needed by the
@@ -1165,16 +1158,24 @@ impl Interpreter {
         let instance = args.first().ok_or_else(|| err("get() requires an instance argument", line))?;
         match instance {
             Value::Object(inner_rc) => {
-                let inner = inner_rc.borrow();
-                inner.fields.iter().find(|(n, _)| n == field_name).map(|(_, v)| v.clone())
-                    .ok_or_else(|| err(format!("no field '{}' on instance", field_name), line))
+                let (type_name, value) = {
+                    let inner = inner_rc.borrow();
+                    (inner.type_name.clone(), inner.fields.iter().find(|(n, _)| n == field_name).map(|(_, v)| v.clone()))
+                };
+                let value = value.ok_or_else(|| err(format!("no field '{}' on instance", field_name), line))?;
+                let ty = self.introspect_struct_field_ty(&type_name, field_name);
+                Ok(self.introspect_wrap(value, ty.as_ref(), true))
             }
             Value::EnumVariant { type_name, variant, fields } => {
-                let idx = self.enums.get(type_name)
-                    .and_then(|d| d.variants.iter().find(|v| &v.name == variant))
+                let decl_variant = self.enums.get(type_name)
+                    .and_then(|d| d.variants.iter().find(|v| &v.name == variant));
+                let idx = decl_variant
                     .and_then(|v| v.fields.iter().position(|f| f.name.as_deref() == Some(field_name)));
-                idx.and_then(|i| fields.get(i).cloned())
-                    .ok_or_else(|| err(format!("field '{}' is not present on the current runtime variant", field_name), line))
+                let value = idx.and_then(|i| fields.get(i).cloned())
+                    .ok_or_else(|| introspect_throw(format!("field '{}' is not present on the current runtime variant", field_name)))?;
+                // An enum variant's field never becomes `Nested` (same scope as `boring build`).
+                let ty = decl_variant.and_then(|v| idx.map(|i| v.fields[i].ty.clone()));
+                Ok(self.introspect_wrap(value, ty.as_ref(), false))
             }
             _ => Err(err("get() requires a struct/enum instance argument", line)),
         }
@@ -1182,18 +1183,150 @@ impl Interpreter {
 
     fn introspect_type_field_get(&self, owner_type: &str, field_name: &str, line: usize) -> Eval {
         let key = format!("{}::{}", owner_type, field_name);
-        self.type_var_store.get(&key).cloned()
-            .ok_or_else(|| err(format!("no type-level field '{}' on '{}'", field_name, owner_type), line))
+        let value = self.type_var_store.get(&key).cloned()
+            .ok_or_else(|| err(format!("no type-level field '{}' on '{}'", field_name, owner_type), line))?;
+        let ty = match self.global.borrow().get(owner_type) {
+            Some(Value::Struct { decl, .. }) => decl.type_vars.iter().find(|t| t.name == field_name).and_then(|t| t.ty.clone()),
+            _ => None,
+        };
+        Ok(self.introspect_wrap(value, ty.as_ref(), true))
+    }
+
+    /// Declared type of field `field_name` of struct `type_name`, when both are known.
+    fn introspect_struct_field_ty(&self, type_name: &str, field_name: &str) -> Option<Type> {
+        match self.global.borrow().get(type_name) {
+            Some(Value::Struct { decl, .. }) => decl.fields.iter().find(|f| f.name == field_name).map(|f| f.ty.clone()),
+            _ => None,
+        }
+    }
+
+    /// Wraps a reflected value in the `FieldValue` variant `boring build` gives it, chosen
+    /// from the DECLARED type like the transpiler's `introspect_field_value_expr` (so an
+    /// `int?` holding 3 is `Other("Some(3)")`, not `Int(3)`); from the value's own kind only
+    /// when no type is written. `allow_nested` is true for a struct's field (instance or
+    /// `type let`), the only place a type declaring `as Introspect` becomes
+    /// `Nested`/`Actor`/`Guard`; everything else is `Other` with the value's Rust-`Debug` text.
+    fn introspect_wrap(&self, value: Value, ty: Option<&Type>, allow_nested: bool) -> Value {
+        let fv = |variant: &str, v: Value| Value::EnumVariant {
+            type_name: "FieldValue".to_string(), variant: variant.to_string(), fields: vec![v],
+        };
+        let mut resolved = ty.map(|t| self.resolve_type(t));
+        while let Some(Type::Mut(inner)) = resolved { resolved = Some(*inner); }
+        let declared_kind = resolved.as_ref().map(Self::introspect_prim_kind);
+        let (value_kind, payload) = match &value {
+            Value::Int(n) | Value::Int64(n) => (Some("int"), Value::Int(*n)),
+            Value::Uint(n) | Value::Uint64(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Uint8(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Int8(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Int16(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Int32(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Uint16(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Uint32(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Int128(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Uint128(n) => (Some("int"), Value::Int(*n as i64)),
+            Value::Float32(f) => (Some("float"), Value::Float64(*f as f64)),
+            Value::Float64(f) => (Some("float"), Value::Float64(*f)),
+            Value::Bool(_) => (Some("bool"), value.clone()),
+            Value::Str(_) => (Some("string"), value.clone()),
+            _ => (None, Value::Nil),
+        };
+        let kind = match declared_kind {
+            None => value_kind,                                   // no written type
+            Some(k) if k == value_kind => k,
+            Some(Some("float")) if value_kind == Some("int") => Some("float"),
+            Some(_) => None,
+        };
+        match kind {
+            Some("int") => return fv("Int", payload),
+            Some("float") => return fv("Float", match payload { Value::Int(n) => Value::Float64(n as f64), p => p }),
+            Some("bool") => return fv("Bool", payload),
+            Some("string") => return fv("Str", payload),
+            _ => {}
+        }
+        if allow_nested {
+            let nested = match resolved.as_ref() {
+                Some(Type::Named(n)) => Some(("Nested", n)),
+                Some(Type::Qualified(inner, q)) => match (inner.as_ref(), q) {
+                    (Type::Named(n), OwnerQual::Inline | OwnerQual::Owned | OwnerQual::Shared) => Some(("Nested", n)),
+                    (Type::Named(n), OwnerQual::Actor | OwnerQual::ActorTask) => Some(("Actor", n)),
+                    (Type::Named(n), OwnerQual::Guard | OwnerQual::GuardTask) => Some(("Guard", n)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((variant, name)) = nested {
+                let declares = match self.global.borrow().get(name) {
+                    Some(Value::Struct { decl, .. }) => decl.protocols.iter().any(|p| p == "Introspect"),
+                    Some(Value::EnumNamespace { protocols, .. }) => protocols.iter().any(|p| p == "Introspect"),
+                    _ => false,
+                };
+                if declares && matches!(value, Value::Object(_) | Value::EnumVariant { .. }) {
+                    return fv(variant, value);
+                }
+            }
+        }
+        fn debug_text(v: &Value, ty: Option<&Type>) -> String {
+            match (v, ty) {
+                (Value::Void, _) => "()".to_string(),
+                (Value::Nil, Some(Type::Optional(_))) | (Value::Nil, None) => "None".to_string(),
+                (v, Some(Type::Optional(inner))) => format!("Some({})", debug_text(v, Some(inner))),
+                (v, _) => super::debug_repr(v),
+            }
+        }
+        fv("Other", Value::Str(debug_text(&value, resolved.as_ref())))
+    }
+
+    /// The reverse: an argument written `FieldValue.Int(5)` gives its payload and its variant
+    /// name; a plain value (the form `boring run` took before it had `FieldValue`) is kept.
+    fn introspect_unwrap(value: Value) -> (Value, Option<String>) {
+        match value {
+            Value::EnumVariant { type_name, variant, mut fields } if type_name == "FieldValue" && fields.len() == 1 =>
+                (fields.pop().unwrap(), Some(variant)),
+            other => (other, None),
+        }
+    }
+
+    /// Checks an unwrapped argument against the primitive kind of its declared type, with
+    /// the transpiler's own message; a type that is not a primitive/string is not checked.
+    fn introspect_check_kind(&self, ty: Option<&Type>, value: &Value, variant: Option<&str>, label: &str) -> Result<(), Signal> {
+        let Some(kind) = ty.map(|t| self.resolve_type(t)).as_ref().and_then(Self::introspect_prim_kind) else { return Ok(()); };
+        let value_ok = matches!((kind, value),
+            ("int", Value::Int(_) | Value::Uint(_) | Value::Uint8(_) | Value::Int8(_) | Value::Int16(_) | Value::Int32(_)
+                | Value::Int64(_) | Value::Int128(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_))
+            | ("float", Value::Float32(_) | Value::Float64(_))
+            | ("bool", Value::Bool(_)) | ("string", Value::Str(_)));
+        let variant_ok = match variant {
+            None => true,
+            Some(v) => matches!((kind, v), ("int", "Int") | ("float", "Float") | ("bool", "Bool") | ("string", "Str")),
+        };
+        if value_ok && variant_ok { return Ok(()); }
+        let expected = match kind { "int" => "an integer", "float" => "a float", "bool" => "a bool", _ => "a string" };
+        Err(introspect_throw(format!("wrong argument type for '{}': expected {}", label, expected)))
+    }
+
+    /// Unwraps the `[FieldValue]` arguments of `request`/`modify`/`call` and checks each
+    /// against its parameter's declared type.
+    fn introspect_call_args(&self, args: Vec<Value>, params: &[Param]) -> Result<Vec<Value>, Signal> {
+        args.into_iter().enumerate().map(|(i, a)| {
+            let (v, variant) = Self::introspect_unwrap(a);
+            if let Some(p) = params.get(i) {
+                self.introspect_check_kind(p.ty.as_ref(), &v, variant.as_deref(), &p.name)?;
+            }
+            Ok(v)
+        }).collect()
     }
 
     fn introspect_field_set(&self, args: &[Value], field_name: &str, is_rebindable: bool, line: usize) -> Eval {
         if !is_rebindable {
-            return Err(err(format!("field '{}' is not rebindable", field_name), line));
+            return Err(introspect_throw(format!("field '{}' is not rebindable", field_name)));
         }
         let instance = args.first().ok_or_else(|| err("set() requires an instance argument", line))?;
-        let value = args.get(1).cloned().unwrap_or(Value::Nil);
+        let (value, variant) = Self::introspect_unwrap(args.get(1).cloned().unwrap_or(Value::Nil));
         match instance {
             Value::Object(inner_rc) => {
+                let type_name = inner_rc.borrow().type_name.clone();
+                let ty = self.introspect_struct_field_ty(&type_name, field_name);
+                self.introspect_check_kind(ty.as_ref(), &value, variant.as_deref(), field_name)?;
                 let mut inner = inner_rc.borrow_mut();
                 match inner.fields.iter_mut().find(|(n, _)| n == field_name) {
                     Some(slot) => { slot.1 = value; Ok(Value::Void) }
@@ -1218,6 +1351,10 @@ impl Interpreter {
             Type::Float32 | Type::Float64 => Some("float"),
             Type::Bool => Some("bool"),
             Type::Str => Some("string"),
+            // `string` resolves to `Str'shared` (Rc<str>); a plain pointer qualifier doesn't
+            // change how the leaf round-trips through `FieldValue`.
+            Type::Qualified(inner, OwnerQual::Inline | OwnerQual::Owned | OwnerQual::Shared) =>
+                Self::introspect_prim_kind(inner),
             Type::Named(n) => match n.as_str() {
                 "int" | "uint" | "int8" | "int16" | "int32" | "int64" | "int128"
                 | "uint8" | "uint16" | "uint32" | "uint64" | "uint128" | "byte" => Some("int"),
@@ -1236,9 +1373,10 @@ impl Interpreter {
     /// primitive kind → "wrong argument type" (parity with `boring build`).
     fn introspect_type_field_set(&mut self, owner_type: &str, field_name: &str, is_rebindable: bool, args: &[Value], line: usize) -> Eval {
         if !is_rebindable {
-            return Err(err(format!("field '{}' is not rebindable", field_name), line));
+            return Err(introspect_throw(format!("field '{}' is not rebindable", field_name)));
         }
-        let value = args.first().cloned().ok_or_else(|| err("set() requires a value argument", line))?;
+        let (value, variant) = Self::introspect_unwrap(
+            args.first().cloned().ok_or_else(|| err("set() requires a value argument", line))?);
         let found = self.global.borrow().get(owner_type);
         let Some(Value::Struct { decl, captured }) = found else {
             return Err(err(format!("unknown type '{}'", owner_type), line));
@@ -1247,19 +1385,9 @@ impl Interpreter {
             return Err(err(format!("no type-level field '{}' on '{}'", field_name, owner_type), line));
         };
         if !tv.mutable {
-            return Err(err(format!("field '{}' is not rebindable", field_name), line));
+            return Err(introspect_throw(format!("field '{}' is not rebindable", field_name)));
         }
-        if let Some(kind) = tv.ty.as_ref().and_then(Self::introspect_prim_kind) {
-            let ok = matches!((kind, &value),
-                ("int", Value::Int(_) | Value::Uint(_) | Value::Uint8(_) | Value::Int8(_) | Value::Int16(_) | Value::Int32(_)
-                    | Value::Int64(_) | Value::Int128(_) | Value::Uint16(_) | Value::Uint32(_) | Value::Uint64(_) | Value::Uint128(_))
-                | ("float", Value::Float32(_) | Value::Float64(_))
-                | ("bool", Value::Bool(_)) | ("string", Value::Str(_)));
-            if !ok {
-                let expected = match kind { "int" => "an integer", "float" => "a float", "bool" => "a bool", _ => "a string" };
-                return Err(err(format!("wrong argument type for '{}': expected {}", field_name, expected), line));
-            }
-        }
+        self.introspect_check_kind(tv.ty.as_ref(), &value, variant.as_deref(), field_name)?;
         let setter = decl.type_methods.iter()
             .find(|m| m.kind == TypeMethodKind::Set && m.name == field_name).cloned();
         if let Some(setter) = setter {
@@ -1280,11 +1408,13 @@ impl Interpreter {
         let (fn_decl, captured) = self.introspect_resolve_instance_method(&instance, method_name, line)?;
         Self::introspect_check_callable(&fn_decl, line)?;
         if fn_decl.mutating {
-            return Err(err(format!("method '{}' requires mutable access — use modify()", method_name), line));
+            return Err(introspect_throw(format!("method '{}' requires mutable access — use modify()", method_name)));
         }
+        let call_args = self.introspect_call_args(call_args, &fn_decl.params)?;
         let fn_env = Env::child(captured);
         fn_env.borrow_mut().define_mut("self", instance);
-        self.call_fn(&fn_decl, fn_env, call_args, line, false)
+        let result = self.call_fn(&fn_decl, fn_env, call_args, line, false)?;
+        Ok(self.introspect_wrap(result, fn_decl.return_ty.as_ref(), false))
     }
 
     fn introspect_method_modify(&mut self, args: &[Value], method_name: &str, line: usize) -> Eval {
@@ -1292,9 +1422,11 @@ impl Interpreter {
         let call_args = Self::introspect_unpack_call_args(args.get(1));
         let (fn_decl, captured) = self.introspect_resolve_instance_method(&instance, method_name, line)?;
         Self::introspect_check_callable(&fn_decl, line)?;
+        let call_args = self.introspect_call_args(call_args, &fn_decl.params)?;
         let fn_env = Env::child(captured);
         fn_env.borrow_mut().define_mut("self", instance);
-        self.call_fn(&fn_decl, fn_env, call_args, line, false)
+        let result = self.call_fn(&fn_decl, fn_env, call_args, line, false)?;
+        Ok(self.introspect_wrap(result, fn_decl.return_ty.as_ref(), false))
     }
 
     /// `request`/`modify`/type-level `call()`'s shared "is this actually callable"
@@ -1305,10 +1437,11 @@ impl Interpreter {
     /// `call_fn` itself couldn't run either kind of body here.
     fn introspect_check_callable(fn_decl: &FnDecl, line: usize) -> Result<(), Signal> {
         if fn_decl.task || fn_decl.stream {
-            return Err(err(format!(
+            let _ = line;
+            return Err(introspect_throw(format!(
                 "method '{}' is not callable via reflection — task/stream methods cannot be invoked this way",
                 fn_decl.name
-            ), line));
+            )));
         }
         Ok(())
     }
@@ -1325,12 +1458,14 @@ impl Interpreter {
             return Err(err(format!("no type method '{}' on '{}'", method_name, owner_type), line));
         };
         if tm.task {
-            return Err(err(format!(
+            return Err(introspect_throw(format!(
                 "method '{}' is not callable via reflection — task methods cannot be invoked this way",
                 tm.name
-            ), line));
+            )));
         }
-        self.call_type_method(owner_type, &tm, call_args, captured, line)
+        let call_args = self.introspect_call_args(call_args, &tm.params)?;
+        let result = self.call_type_method(owner_type, &tm, call_args, captured, line)?;
+        Ok(self.introspect_wrap(result, tm.return_ty.as_ref(), false))
     }
 
     /// `request`/`modify`'s second argument and `call`'s first argument are each a Boring
@@ -1455,15 +1590,16 @@ impl Interpreter {
         };
         match method {
             "len" => Ok(Some(Value::Int(s.chars().count() as i64))),
+            "count" if args.is_empty() => Ok(Some(Value::Int(s.chars().count() as i64))),
             "contains" => {
                 let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.contains(sub.as_str()))))
             }
-            "startsWith" => {
+            "startsWith" | "hasPrefix" => {
                 let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.starts_with(sub.as_str()))))
             }
-            "endsWith" => {
+            "endsWith" | "hasSuffix" => {
                 let sub = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Bool(s.ends_with(sub.as_str()))))
             }
@@ -1478,7 +1614,7 @@ impl Interpreter {
             "as_bytes" | "asBytes" | "into_bytes" | "intoBytes" => Ok(Some(Value::ByteArray(Rc::new(s.as_bytes().to_vec())))),
             "upper" | "toUpper" | "toUpperCase" | "uppercased" => Ok(Some(Value::Str(s.to_uppercase()))),
             "lower" | "toLower" | "toLowerCase" | "lowercased" => Ok(Some(Value::Str(s.to_lowercase()))),
-            "replace" => {
+            "replace" | "replaceAll" => {
                 let from = self.expect_str(args.first().cloned().unwrap_or(Value::Nil), line)?;
                 let to = self.expect_str(args.get(1).cloned().unwrap_or(Value::Nil), line)?;
                 Ok(Some(Value::Str(s.replace(from.as_str(), to.as_str()))))
@@ -1657,7 +1793,51 @@ impl Interpreter {
                 }
                 Ok(Some(Value::Array(result.into())))
             }
-            "reduce" => {
+            // In-place mutators (the caller writes the returned array back): same semantics as
+            // the `Vec` methods the transpiler maps them to.
+            "dedup" if args.is_empty() => {
+                let mut new_arr = Value::rc_vec_into_owned(arr);
+                new_arr.dedup();
+                Ok(Some(Value::Array(new_arr.into())))
+            }
+            "swap" => {
+                if args.len() != 2 { return Err(err("swap: expected two indices", line)); }
+                let len = arr.len() as i64;
+                let i = self.expect_int(args[0].clone(), line)?;
+                let j = self.expect_int(args[1].clone(), line)?;
+                for k in [i, j] {
+                    if k < 0 || k >= len {
+                        return Err(err(format!("swap: index {k} out of range for array of length {len}"), line));
+                    }
+                }
+                let mut new_arr = Value::rc_vec_into_owned(arr);
+                new_arr.swap(i as usize, j as usize);
+                Ok(Some(Value::Array(new_arr.into())))
+            }
+            "truncate" => {
+                let n = self.expect_int(args.into_iter().next().unwrap_or(Value::Nil), line)?;
+                if n < 0 { return Err(err("truncate: length must not be negative", line)); }
+                let mut new_arr = Value::rc_vec_into_owned(arr);
+                new_arr.truncate(n as usize);
+                Ok(Some(Value::Array(new_arr.into())))
+            }
+            "fill" => {
+                if args.len() != 1 { return Err(err("fill: expected one value", line)); }
+                let v = args.into_iter().next().unwrap();
+                let n = arr.len();
+                drop(arr);
+                Ok(Some(Value::Array(vec![v; n].into())))
+            }
+            "retain" => {
+                let closure = args.into_iter().next().unwrap_or(Value::Nil);
+                let mut result = Vec::new();
+                for item in Value::rc_vec_into_owned(arr) {
+                    let r = self.call_value(closure.clone(), vec![item.clone()], line, false)?;
+                    if self.expect_bool(r, line)? { result.push(item); }
+                }
+                Ok(Some(Value::Array(result.into())))
+            }
+            "reduce" | "fold" => {
                 // reduce(init, closure) — initial value first, closure second
                 let init = args.first().cloned().unwrap_or(Value::Nil);
                 let closure = args.get(1).cloned().unwrap_or(Value::Nil);
@@ -4233,4 +4413,10 @@ fn numeric_as_i128(v: &Value) -> Option<i128> {
         Value::Uint128(n) => i128::try_from(*n).ok()?,
         _ => return None,
     })
+}
+
+/// A reflection failure `boring build` returns as an `Err` (`IntrospectError`): thrown, so
+/// `try`/`try?`/`catch` see it under `boring run` too.
+fn introspect_throw(message: String) -> Signal {
+    Signal::Exception(Value::Str(message))
 }

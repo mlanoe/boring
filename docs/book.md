@@ -3572,15 +3572,15 @@ Every method appears in `info.methods` — **`native`** (its body is runtime-imp
 
 Calling `request`/`modify`/`call` on an `isCallable: false` `Method` throws a clear `"method '<name>' is not callable via reflection — ..."` error — never a silent wrong result, a panic, or a mis-dispatch to the wrong call shape.
 
-> **`throws` methods are genuinely callable, not just visible.** `request`/`modify` on a `throws`-backed `Method` actually calls the underlying method and propagates any thrown error as a real error from `request`/`modify` itself — catchable with `try`/`try?`, same as calling the method directly would be. (Under `boring run`, an `isCallable: false` call is a hard interpreter error instead, not a language-level `throw` — see the callout further below.)
+> **`throws` methods are genuinely callable, not just visible.** `request`/`modify` on a `throws`-backed `Method` actually calls the underlying method and propagates any thrown error as a real error from `request`/`modify` itself — catchable with `try`/`try?`, same as calling the method directly would be.
 
 > **Note** — a struct/enum/`ext` method can be declared `stream` (see [§17](#17-streams-stream--yield)), and `MethodKind.Stream` is wired end-to-end on both backends: such a `Method` reports `kind: Stream`. (A `stream` signature in a `trait` is still rejected.)
 
 > **Limitation — literal `FieldValue` arguments.** Building `request`/`modify`/`set` call arguments (`FieldValue.Str("hi")`) with a string LITERAL directly runs into an auto-promotion mismatch: a literal argument to any Boring-declared-type call is auto-promoted to `Arc<str>`/`Rc<str>`, which doesn't always line up cleanly with what the receiving parameter expects. Route the value through a variable first when in doubt.
 >
-> **`boring run` — skip `FieldValue` entirely for arguments.** Every example below that constructs a `FieldValue.Int(...)`/`FieldValue.Str(...)` value to pass into `set`/`modify`/`call` is `boring build`-only for that construction — `FieldValue` is a transpiler-only Rust type with no interpreter equivalent, so `FieldValue.Int(100)` is an "undefined variable" error under `boring run`. The interpreter's `get`/`request`/etc. work with plain runtime values directly instead (`f.set(instance, 100)`, `m.request(instance, [5])` — no wrapper), matching how `get()`'s *return* value is already a plain value there too (see "On enums").
+> **`boring run` — same `FieldValue`.** `FieldValue` is a built-in enum under `boring run` too: `get`/`request`/`modify`/`call` return the same variants as `boring build` (`Int(5)`, `Str("a")`, `Other("[1, 2]")`...), and `set`/`request`/`modify`/`call` take `FieldValue.Int(100)`-style arguments. The interpreter also accepts a plain value there (`f.set(instance, 100)`, `m.request(instance, [5])`), which `boring build` does not: write the `FieldValue` form for a program meant for both.
 >
-> **`boring run` — an `isCallable: false` call is a hard error, not a catchable `throw`.** Under `boring build`, `request`/`modify`/`call` on a non-callable `Method` returns a real `IntrospectError` through the normal `Result`/`?` machinery — catchable with `try`/`try?` like any other thrown error. The interpreter's equivalent check raises a genuine interpreter runtime error instead (the same kind raised for e.g. "no field '…' on instance"), which **cannot** be caught with `try`/`try?`/`catch` — it stops the program. A `throws`-method's own thrown error, in contrast, propagates as a normal catchable throw on both backends (see the example below).
+> **Reflection errors are catchable in both modes.** `request`/`modify`/`call` on a non-callable `Method`, `set` on a non-rebindable field, an argument of the wrong kind, `request` on a `def`-backed method: each is a thrown error under `boring run` as under `boring build`, caught by `try`/`try?`/`catch`.
 
 Example — a `task` method's `Method` entry, and a `throws` method actually being called:
 
@@ -3611,7 +3611,7 @@ def main() throws:
 # risky(0) threw: true
 ```
 
-(`FieldValue.Int(...)` above is `boring build`-only, per the callout above — under `boring run`, pass `[5]`/`[0]` directly instead; both were verified with a real `cargo build`+run and `boring run` before being written here.)
+(Verified with a real `cargo build`+run and with `boring run`.)
 
 **Rust equivalent** (abridged)
 ```rust
@@ -3743,7 +3743,7 @@ Both examples are `boring build`-verified (real `cargo build`+run); see [`exampl
 >
 > **Scope, this round** — read-only: `get()` produces `Nested`/`Actor`/`Guard`, but `set()` on a nested-Introspect-typed field is not attempted (same as any other `Other`-falling-back field). Struct fields only — an enum's own variant fields (`Circle(Point center)`) keep falling back to `Other`; a `type let` field of a struct gets the same treatment as an ordinary field for free (it goes through the identical codegen path).
 >
-> **`boring run`** — needs no special handling at all: the interpreter's one dynamic `Value` type already represents every struct instance the same way regardless of qualifier, so `get()` on a nested field just returns the live nested value directly — calling `.introspect()` on it recurses for free. The one asymmetry: there is no `FieldValue`-style tagging to `match` against under the interpreter (`Nested(x)`/`Actor(x)`/`Guard(x)` patterns never match — `get()`'s return value isn't wrapped at all), so a `match` written for the transpiler backend always falls through to `_` under `boring run`; use the returned value directly instead (`let v = f.get(o); let vi = v.introspect()`, no `match` needed).
+> **`boring run`** — same variants: `get()` on such a field returns `Nested(x)`/`Actor(x)`/`Guard(x)` from the field's declared qualifier, so a `match` written for one mode works in the other, and it prints the same (`Nested(Counter)`). Two differences remain: the interpreter does not apply the `Clone` requirement of `'inline`/`'owned` (a non-`Clone` nested type is `Nested` there, `Other` in generated Rust), and recursing through an `Actor`/`Guard` payload succeeds there instead of failing cleanly.
 
 #### On enums
 
@@ -3819,7 +3819,7 @@ struct Config as Introspect:
 def main() throws:
     let info = Config(id = 1).introspect()
     for f in info.fields:
-        if f.name == "count": f.set(FieldValue.Int(42))   # `boring run`: f.set(42)
+        if f.name == "count": f.set(FieldValue.Int(42))
     print "{Config.count}"    # 42
 ```
 

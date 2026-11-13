@@ -2092,9 +2092,8 @@ fn test_introspect_struct_get_field() {
     // Interpreter mirror of the transpiler's v2 `emit_introspect_struct_impl` (see
     // src/transpiler/mod.rs's `introspect_struct_impl_synthesizes_typed_field_lookup`) —
     // `introspect()` returns a real `IntrospectInfo`/`Field` value (`Value::Object`), and
-    // `Field.get(instance)` returns the raw runtime `Value` directly (no `FieldValue`
-    // tagged union; the interpreter has only one dynamic value type — see
-    // `Interpreter::try_introspect_method`'s doc comment). A plain `let` binding (no
+    // `Field.get(instance)` returns a `FieldValue`-wrapped value, same as `boring build`
+    // (see `Interpreter::introspect_wrap`). A plain `let` binding (no
     // `mut`) must be able to call `introspect()`/`get()` — read-only, registered via
     // `BUILTIN_NON_MUTATING` in eval_expr.rs (`introspect`; `get`/`request`/etc. need no
     // entry there at all, see `try_introspect_handle_call`'s doc comment).
@@ -2120,8 +2119,12 @@ let _label = _field1.get(p)
     assert_eq!(get_var(&interp, "_x_name"), Value::Str("x".to_string()));
     assert_eq!(get_var(&interp, "_x_rebindable"), Value::Bool(true), "`var int x` grants set()");
     assert_eq!(get_var(&interp, "_label_rebindable"), Value::Bool(false), "`let string label` does not");
-    assert_eq!(get_var(&interp, "_x"), Value::Int(1));
-    assert_eq!(get_var(&interp, "_label"), Value::Str("hi".to_string()));
+    assert_eq!(get_var(&interp, "_x"), field_value("Int", Value::Int(1)));
+    assert_eq!(get_var(&interp, "_label"), field_value("Str", Value::Str("hi".to_string())));
+}
+
+fn field_value(variant: &str, v: Value) -> Value {
+    Value::EnumVariant { type_name: "FieldValue".to_string(), variant: variant.to_string(), fields: vec![v] }
 }
 
 #[test]
@@ -2144,19 +2147,25 @@ struct Inner as Introspect:
 struct Outer as Introspect:
     Inner inner
 
+let nested_placeholder = 0
 let o = Outer(inner = Inner(value = 42, label = \"hi\"))
 let info = o.introspect()
 let field0 = info.fields[0]
-let nested = field0.get(o)
-let nested_info = nested.introspect()
-let _nested_type_name = nested_info.typeName
-let nested_field0 = nested_info.fields[0]
-let _nested_value = nested_field0.get(nested)
+var _nested_type_name = \"\"
+var _nested_value = nested_placeholder
+match field0.get(o):
+    Nested(nested):
+        let nested_info = nested.introspect()
+        _nested_type_name = nested_info.typeName
+        let nested_field0 = nested_info.fields[0]
+        _nested_value = nested_field0.get(nested)
+    _:
+        pass
 ";
     let (interp, res) = run(src);
     res.expect("no runtime error");
     assert_eq!(get_var(&interp, "_nested_type_name"), Value::Str("Inner".to_string()));
-    assert_eq!(get_var(&interp, "_nested_value"), Value::Int(42));
+    assert_eq!(get_var(&interp, "_nested_value"), field_value("Int", Value::Int(42)));
 }
 
 #[test]
@@ -2185,7 +2194,7 @@ for m in info.methods:
     let (interp, res) = run(src);
     res.expect("no runtime error");
     assert_eq!(get_var(&interp, "_after_set"), Value::Int(41));
-    assert_eq!(get_var(&interp, "_doubled"), Value::Int(82));
+    assert_eq!(get_var(&interp, "_doubled"), field_value("Int", Value::Int(82)));
 }
 
 #[test]
@@ -2221,8 +2230,8 @@ let _origin_num_fields = oi.fields.length
     res.expect("no runtime error");
     assert_eq!(get_var(&interp, "_variant"), Value::Str("Circle".to_string()));
     assert_eq!(get_var(&interp, "_idx"), Value::Int(0));
-    assert_eq!(get_var(&interp, "_radius"), Value::Float64(2.0));
-    assert_eq!(get_var(&interp, "_kind"), Value::Str("shape".to_string()));
+    assert_eq!(get_var(&interp, "_radius"), field_value("Float", Value::Float64(2.0)));
+    assert_eq!(get_var(&interp, "_kind"), field_value("Str", Value::Str("shape".to_string())));
     assert_eq!(get_var(&interp, "_origin_variant"), Value::Str("Origin".to_string()));
     assert_eq!(get_var(&interp, "_origin_idx"), Value::Int(1));
     assert_eq!(get_var(&interp, "_origin_num_fields"), Value::Int(0),
@@ -2319,7 +2328,7 @@ for m in info.methods:
 ";
     let (interp, res) = run(src);
     res.expect("no runtime error");
-    assert_eq!(get_var(&interp, "_ok_result"), Value::Int(20));
+    assert_eq!(get_var(&interp, "_ok_result"), field_value("Int", Value::Int(20)));
     assert_eq!(get_var(&interp, "_threw"), Value::Bool(true),
         "a thrown error from a genuinely-callable throws method must be catchable via try?");
 }

@@ -516,7 +516,11 @@ interp_test!(enum_type_def);
 // pairs with tests/transpile.rs's registration below.
 interp_test!(enum_type_def_throws);
 interp_test!(enum_type_methods_introspect);
-interp_test!(type_var_introspect_set_run);
+// Reflection exchanges `FieldValue` under `boring run` as under `boring build`: the same
+// fixtures as tests/transpile.rs.
+interp_test!(type_var_introspect_set);
+interp_test!(enum_type_methods_call);
+interp_test!(introspect_thread_safety);
 interp_test!(match_inline_guard_alt);
 interp_test!(generic_type_method_call);
 

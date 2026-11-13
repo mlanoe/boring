@@ -673,7 +673,7 @@ impl Value {
 /// Used **only** for the payload fields of `Value::EnumVariant` (see the `Display` impl
 /// below), so printing a bare `[int]`/`{string=int}` on its own keeps its existing
 /// Boring-`Display` spelling. See docs/interpreter-untagged-enum-fromjson-mismatch.md.
-fn debug_repr(v: &Value) -> String {
+pub(crate) fn debug_repr(v: &Value) -> String {
     match v {
         // `{:?}` on a str/f32/f64 is exactly Rust's derived-Debug rendering:
         // `"two"` (quoted, escaped) and `1.0` (trailing `.0` kept).
@@ -715,8 +715,10 @@ fn debug_repr(v: &Value) -> String {
                 format!("{} {{ {} }}", obj.type_name, inner.join(", "))
             }
         }
-        Value::EnumVariant { variant, fields, .. } => {
-            if fields.is_empty() {
+        Value::EnumVariant { type_name, variant, fields } => {
+            if let Some(name) = field_value_handle_name(type_name, variant, fields) {
+                format!("{}({})", variant, name)
+            } else if fields.is_empty() {
                 variant.clone()
             } else {
                 let inner: Vec<String> = fields.iter().map(debug_repr).collect();
@@ -726,6 +728,18 @@ fn debug_repr(v: &Value) -> String {
         // Everything else (bools, every integer width, and the non-data values that
         // have no Rust-`Debug` analogue at all) renders identically under both.
         other => other.to_string(),
+    }
+}
+
+/// `FieldValue.Nested`/`Actor`/`Guard` print the wrapped value's type name only
+/// (`Nested(Counter)`), as the hand-written `Debug` of generated Rust does: the payload is a
+/// type-erased `Introspect` handle there, with no `Debug` of its own.
+fn field_value_handle_name(type_name: &str, variant: &str, fields: &[Value]) -> Option<String> {
+    if type_name != "FieldValue" || !matches!(variant, "Nested" | "Actor" | "Guard") { return None; }
+    match fields.first()? {
+        Value::Object(o) => Some(o.borrow().type_name.clone()),
+        Value::EnumVariant { type_name, .. } => Some(type_name.clone()),
+        _ => None,
     }
 }
 
@@ -827,6 +841,9 @@ impl fmt::Display for Value {
                     if let Some(msg) = builtin_error_message(variant) {
                         return write!(f, "{}", msg);
                     }
+                }
+                if let Some(name) = field_value_handle_name(type_name, variant, fields) {
+                    return write!(f, "{}({})", variant, name);
                 }
                 if fields.is_empty() {
                     write!(f, "{}", variant)
@@ -2954,6 +2971,45 @@ impl Interpreter {
         }
     }
 
+    /// Build the AST for the synthetic `FieldValue` enum, the tagged union reflection
+    /// (`Field.get`/`set`, `Method.request`/`modify`/`call`) exchanges values through, same
+    /// variants as the `enum FieldValue` of generated Rust (`emit_introspect_prelude`). A
+    /// real `EnumDecl`, so `FieldValue.Int(3)` construction, `==` and `match` need nothing
+    /// special; only `Nested`/`Actor`/`Guard` print differently (see `field_value_handle_name`).
+    fn builtin_field_value_enum_decl() -> EnumDecl {
+        let payload = |variant: &str| match variant {
+            "Int" => Type::Int,
+            "Float" => Type::Float64,
+            "Bool" => Type::Bool,
+            "Str" | "Other" => Type::Str,
+            _ => Type::Named("Introspect".to_string()),
+        };
+        EnumDecl {
+            name: "FieldValue".to_string(),
+            is_pub: true,
+            is_native: false,
+            type_params: vec![],
+            protocols: vec![],
+            variants: ["Int", "Float", "Bool", "Str", "Other", "Nested", "Actor", "Guard"]
+                .iter()
+                .map(|name| EnumVariant {
+                    name: name.to_string(),
+                    fields: vec![VariantField { name: None, ty: payload(name) }],
+                    attrs: vec![],
+                    line: 0,
+                    col: 0,
+                })
+                .collect(),
+            methods: vec![],
+            setters: vec![],
+            conversions: vec![],
+            type_methods: vec![],
+            attrs: vec![],
+            line: 0,
+            col: 0,
+        }
+    }
+
     pub fn exec_program(&mut self, program: &Program) -> Result<(), RuntimeError> {
         // Make `user_args` (set by `main.rs::run_file` before calling here) visible
         // to the `args()`/`raw_args()` builtins — see `PROGRAM_ARGS`'s doc comment.
@@ -2968,6 +3024,12 @@ impl Interpreter {
         // Same for `MethodKind` (`Method.kind`'s type — see `builtin_method_kind_enum_decl`).
         let builtin_method_kind = Self::builtin_method_kind_enum_decl();
         if let Err(Signal::Error(e)) = self.exec_item(&Item::Enum(builtin_method_kind), Rc::clone(&self.global)) {
+            return Err(e);
+        }
+
+        // Same for `FieldValue` (see `builtin_field_value_enum_decl`).
+        let builtin_field_value = Self::builtin_field_value_enum_decl();
+        if let Err(Signal::Error(e)) = self.exec_item(&Item::Enum(builtin_field_value), Rc::clone(&self.global)) {
             return Err(e);
         }
 

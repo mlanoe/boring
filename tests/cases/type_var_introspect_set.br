@@ -1,4 +1,4 @@
-# `Field.set` on `type var` via reflection — build variant (`FieldValue`; `boring run` takes raw values: type_var_introspect_set_run.br).
+# `Field.set` on `type var` via reflection, through `FieldValue` (`boring run` and `boring build`).
 struct Config as Introspect:
     int id
 
