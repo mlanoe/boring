@@ -1,0 +1,72 @@
+# A non-`Clone` std handle (`TcpListener`/`TcpStream`) kept in a struct dict field, read back
+# and written through (loopback 127.0.0.1, ephemeral port). Covers:
+#  - `dict.get(k)` of a `{K=TcpStream}` lends the value (`Option<&V>`) instead of `.cloned()`
+#    (E0277 `TcpStream: Clone`); the struct derives only what its fields support
+#  - `{K=TcpListener'actor}`: `if let`/`guard let` of `get` is typed as the shared handle,
+#    so method calls lock it, and re-declaring / `T'actor?`-binding one does not re-wrap it
+#  - `Read`/`Write` come from `use std.io.Write, Read` (a std trait must be imported explicitly)
+
+use std.net.TcpListener, TcpStream
+use std.io.Write, Read
+
+struct Streams:
+    var {int=TcpStream} conns = {=}
+    var {int=TcpListener'actor} listeners = {=}
+
+    def int addListener(TcpListener'actor l):
+        let int id = listeners.len() as int
+        listeners.set(id, l)
+        return id
+
+    def addConn(int id, TcpStream s):
+        conns.set(id, s)
+
+    # `let T'actor x = <already an actor>` / `T'actor? o = get(k)` neither re-wrap nor double-`Some`.
+    req bool viaRedeclared(int id):
+        guard let lh0 = listeners.get(id) else return false
+        let TcpListener'actor lh = lh0
+        let x = try? lh.local_addr()
+        return x != nil
+
+    req bool viaOptional(int id):
+        let TcpListener'actor? o = listeners.get(id)
+        guard let lh = o else return false
+        let x = try? lh.local_addr()
+        return x != nil
+
+    req bool listening(int id):
+        guard let lh = listeners.get(id) else return false
+        let a = try? lh.local_addr()
+        return a != nil
+
+def main() throws:
+    var mut reg = Streams()
+    let l = try? TcpListener.bind("127.0.0.1:0")
+    guard let l else throw "bind failed"
+    let a = try? l.local_addr()
+    guard let addr = a else throw "addr failed"
+    let TcpListener'actor la = l
+    let lid = reg.addListener(la)
+    print reg.listening(lid)
+    print reg.listening(99)
+    print reg.viaRedeclared(lid)
+    print reg.viaOptional(lid)
+    print reg.viaOptional(99)
+
+    let c = try? TcpStream.connect(addr)
+    guard let cl = c else throw "connect failed"
+    reg.addConn(1, cl)
+    if let lh = reg.listeners.get(lid):
+        let p = try? lh.accept()
+        guard let pair = p else throw "accept failed"
+        reg.addConn(2, pair.0)
+
+    if let client = reg.conns.get(1):
+        let w = try? client.write_all("ping".as_bytes())
+        guard let w else throw "write failed"
+    if let server = reg.conns.get(2):
+        var mut [uint8] buf = [0 as uint8 for i in 0..<4]
+        let ok = try? server.read_exact(buf)
+        guard let ok else throw "read failed"
+        print buf[0] as int
+        print buf[3] as int

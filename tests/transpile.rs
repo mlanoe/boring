@@ -492,6 +492,7 @@ transpile_test!(view_state_string_split);
 transpile_test!(view_scenarios);
 transpile_test!(fn_scenarios_2);
 transpile_test!(misc_scenarios_6);
+transpile_test!(external_non_clone_collection);
 transpile_test!(view_env_provide);
 transpile_test!(actor_scenarios);
 transpile_test!(actor_slot_double_read);

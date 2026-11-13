@@ -384,6 +384,14 @@ impl Transpiler {
                             if let ExprKind::Var(src) = &expr.kind {
                                 if let Some(Type::Optional(inner)) = self.local_type(src.as_str()).cloned() {
                                         self.var_types.insert(name.clone(), *inner.clone());
+                                        // `guard let lh = o` of an `Actor?`: `lh` is the lock handle.
+                                        if matches!(inner.without_mut(), Type::Qualified(_, crate::ast::OwnerQual::Actor)) {
+                                            match self.config.threading {
+                                                crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.clone()); }
+                                                crate::transpiler::ThreadingMode::Multi => { self.managed_mutex_vars.insert(name.clone()); }
+                                            }
+                                            self.var_mutex_types.insert(name.clone());
+                                        }
                                         if Self::is_string_type(&inner) {
                                             self.string_vars.insert(name.clone());
                                         }
@@ -420,6 +428,20 @@ impl Transpiler {
                                     }
                                 }
                             } else if let ExprKind::MethodCall(recv, method, _) = &expr.kind {
+                                // `guard let lh = map.get(k)` of a `{K=V'actor}`: `lh` is the shared
+                                // handle, tracked like an `if let` binding of an actor field so a
+                                // method call locks it.
+                                if let Some(t) = self.actor_dict_get_std_type(expr) {
+                                    self.var_std_types.insert(name.clone(), t);
+                                }
+                                if self.expr_yields_actor(expr) {
+                                    match self.config.threading {
+                                        crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.clone()); }
+                                        crate::transpiler::ThreadingMode::Multi => { self.managed_mutex_vars.insert(name.clone()); }
+                                    }
+                                    // An existing lock handle: a later `let T'actor x = name` must not re-wrap it.
+                                    self.var_mutex_types.insert(name.clone());
+                                }
                                 // `guard let b = recv.method()` where `method`'s declared
                                 // return type is `T?` — mirror the `Var`/`Call` branches
                                 // above using the method's own declared return type
@@ -490,7 +512,8 @@ impl Transpiler {
                             // hit exactly this without parens. Wrapping is valid Rust for any
                             // expression shape, so do it unconditionally rather than pattern-
                             // matching which shapes need it.
-                            self.line(&format!("let Some({}) = ({}) else {{", name, val));
+                            let pat = if self.is_non_clone_dict_get(expr) { format!("mut {}", name) } else { name.clone() };
+                            self.line(&format!("let Some({}) = ({}) else {{", pat, val));
                             self.known_local_vars.insert(name.clone());
                             self.indent += 1;
                             self.emit_body(&s.else_body);

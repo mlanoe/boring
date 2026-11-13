@@ -43,8 +43,25 @@ impl Transpiler {
                     elem.without_mut(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())))
                 || field_is_boxed_trait(ty, &self.trait_method_names).is_some()
                 || self.type_holds_dyn(ty, false, &mut vec![s.name.clone()])
+                // `TcpStream`/`File`/... directly or inside a collection (`{int=TcpStream}`).
+                || self.type_holds_external_non_clone(ty)
         })
         }
+
+    /// Whether `ty` is, or holds by value (optional/array/set/dict/tuple/owned), a std type from
+    /// `EXTERNAL_NON_CLONE_TYPES`. A shared handle (`'actor`/`'shared`/`'weak`) is `Clone`
+    /// whatever it wraps, so it stops the search.
+    pub(crate) fn type_holds_external_non_clone(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Mut(i) | Type::Optional(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::Set(i) =>
+                self.type_holds_external_non_clone(i),
+            Type::Dict(k, v) => self.type_holds_external_non_clone(k) || self.type_holds_external_non_clone(v),
+            Type::Tuple(es) => es.iter().any(|e| self.type_holds_external_non_clone(e)),
+            Type::Qualified(i, q) => !matches!(q, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Shared | OwnerQual::Weak)
+                && self.type_holds_external_non_clone(i),
+            _ => self.is_external_non_clone_type(Some(ty)),
+        }
+    }
 
     /// True when the `#[derive(..)]` the struct `name` ends up with lacks `PartialEq` — decided
     /// from its own fields (same rules `emit_struct` applies) and transitively from the structs

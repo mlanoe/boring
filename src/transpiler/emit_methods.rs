@@ -2970,6 +2970,11 @@ impl Transpiler {
             }
             "get" if args.len() == 1 => {
                 let key_s = self.emit_dict_key_borrow(&args[0].value);
+                // Non-`Clone` std handle values (`{int=TcpListener}`): lend `Option<&V>` instead of
+                // cloning (E0277); method calls auto-borrow through the reference.
+                if self.dict_value_is_external_non_clone(obj) {
+                    return Some(format!("{}.get({})", obj_s, key_s));
+                }
                 return Some(format!("{}.get({}).cloned()", obj_s, key_s));
             }
             "set" | "put" if args.len() >= 2 => {
@@ -3697,6 +3702,11 @@ impl Transpiler {
         "JoinHandle", "Receiver", "Mutex", "RwLock",
     ];
 
+    /// Whether the dict expression `obj` has a declared value type from `EXTERNAL_NON_CLONE_TYPES`.
+    pub(crate) fn dict_value_is_external_non_clone(&self, obj: &Expr) -> bool {
+        self.dict_value_type(obj).is_some_and(|v| self.is_external_non_clone_type(Some(&v)))
+    }
+
     /// Whether `ty` names a std type from `EXTERNAL_NON_CLONE_TYPES` that no Boring `struct`/
     /// `enum`/`trait` shadows.
     pub(crate) fn is_external_non_clone_type(&self, ty: Option<&Type>) -> bool {
@@ -4020,13 +4030,17 @@ impl Transpiler {
     /// The value stored into `dict[key] = v` / `dict.set(k, v)`: wrapped for a `'shared`/`'actor`/
     /// `'owned` struct value type (see `emit_qualified_struct_store`), plainly owned otherwise.
     pub(crate) fn emit_dict_value_store(&self, dict: &Expr, value: &Expr) -> String {
+        // A non-`Clone` std handle is moved into the dict, never `.clone()`d (E0599).
+        if self.dict_value_is_external_non_clone(dict) {
+            return self.emit_expr(value);
+        }
         self.dict_value_type(dict)
             .and_then(|vt| self.emit_qualified_struct_store(&vt, value))
             .unwrap_or_else(|| self.emit_expr_owned(value))
     }
 
     /// Value type of a dict-typed expression, resolving a bare name as an implicit-self field too.
-    fn dict_value_type(&self, dict: &Expr) -> Option<Type> {
+    pub(crate) fn dict_value_type(&self, dict: &Expr) -> Option<Type> {
         let ty = self.resolve_expr_type(dict).or_else(|| match &dict.kind {
             ExprKind::Var(f) if !self.known_local_vars.contains(f.as_str()) => self.self_type.as_ref()
                 .and_then(|t| self.struct_fields.get(t))
@@ -5809,6 +5823,7 @@ impl Transpiler {
                     && !matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)));
                 let emitted = if emitted_needs_clone {
                     match &a.value.kind {
+                        ExprKind::Field(..) if self.let_field_read_is_external_non_clone(None, &a.value) => emitted,
                         ExprKind::Field(..) => format!("{}.clone()", emitted),
                         ExprKind::Var(vname) if
                             self.is_struct_local(vname)
@@ -7488,8 +7503,32 @@ impl Transpiler {
                     })
                     .unwrap_or(false)
             }
+            // `dict.get(k)` of a `{K=V'actor}`: the (optional) value is the shared handle itself.
+            ExprKind::MethodCall(recv, m, margs) if m == "get" && margs.len() == 1 && self.expr_is_dict(recv) => {
+                matches!(self.resolve_expr_type(recv).as_ref().map(Type::without_mut),
+                    Some(Type::Dict(_, v)) if matches!(v.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
+            }
             _ => false,
         }
+    }
+
+    /// Std type wrapped by the actor value of a `dict.get(k)` over `{K=V'actor}` (`TcpListener`
+    /// for `{int=TcpListener'actor}`), so `infer_std_type` can follow calls made on the binding.
+    pub(crate) fn actor_dict_get_std_type(&self, expr: &Expr) -> Option<Type> {
+        let ExprKind::MethodCall(recv, m, margs) = &expr.kind else { return None };
+        if m != "get" || margs.len() != 1 || !self.expr_is_dict(recv) { return None; }
+        match self.dict_value_type(recv)? {
+            Type::Qualified(inner, OwnerQual::Actor) => Some(inner.without_mut().clone()),
+            _ => None,
+        }
+    }
+
+    /// `dict.get(k)` over a `{K=V}` whose `V` is a non-`Clone` std handle: it yields `Option<&V>`
+    /// (no `.cloned()`), so the `if let`/`guard let` binding is a `&V` that is declared `mut` for
+    /// `&mut self` calls through `impl Read/Write for &TcpStream` / `&File`.
+    pub(crate) fn is_non_clone_dict_get(&self, expr: &Expr) -> bool {
+        matches!(&expr.kind, ExprKind::MethodCall(recv, m, margs)
+            if m == "get" && margs.len() == 1 && self.expr_is_dict(recv) && self.dict_value_is_external_non_clone(recv))
     }
 
     /// Return true when `expr` produces a `HashSet` value.

@@ -2254,6 +2254,10 @@ impl Transpiler {
         // `Some(...)` below (it's already Option-shaped). Mirrors the identical check in
         // emit_stmt.rs's tail-return and emit_flow.rs's `return` — see map_method's
         // `want_raw_option` doc for why the suffix needs suppressing here specifically.
+        // `let T'actor? o = map.get(k)` over `{K=T'actor}`: already `Option<Arc<..>>`, not wrapped in `Some`.
+        if self.actor_dict_get_std_type(value).is_some() {
+            return self.emit_expr_owned(value);
+        }
         if is_bare_pop_call(value) {
             self.want_raw_option_pop.set(true);
             let raw = self.emit_expr_owned(value);

@@ -2966,6 +2966,12 @@ impl Transpiler {
                 let field_s = if is_user_field { field.as_str() } else { map_field(field) };
                 let field_holds_dyn = is_user_field && self.resolve_expr_type(expr)
                     .is_some_and(|t| self.type_holds_dyn(&t, false, &mut vec![]));
+                // `pair.0` of an `accept()` tuple, or a field declared `TcpStream`: not `Clone`, so a
+                // by-value read is a move (`EXTERNAL_NON_CLONE_TYPES`).
+                let field_holds_dyn = field_holds_dyn
+                    || self.let_field_read_is_external_non_clone(None, expr)
+                    || (is_user_field && self.resolve_expr_type(expr)
+                        .is_some_and(|t| self.is_external_non_clone_type(Some(&t))));
                 let result = if field_holds_dyn {
                     // Not `Clone` (holds a trait object): read in place, never `.clone()`.
                     format!("{}.{}", obj_s, field_s)

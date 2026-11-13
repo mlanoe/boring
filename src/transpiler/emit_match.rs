@@ -186,7 +186,11 @@ impl Transpiler {
         }
         // If the expression is an optional actor field, track the binding as managed.
         let is_actor = self.expr_yields_actor(expr);
+        if let Some(t) = self.actor_dict_get_std_type(expr) {
+            self.var_std_types.insert(name.to_string(), t);
+        }
         if is_actor {
+            if self.actor_dict_get_std_type(expr).is_some() { self.var_mutex_types.insert(name.to_string()); }
             match self.config.threading {
                 crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.to_string()); }
                 crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.to_string()); }
@@ -455,7 +459,8 @@ impl Transpiler {
                 } else {
                     expr_s
                 };
-                format!("let Some({}) = {}", name, expr_s)
+                let pat = if self.is_non_clone_dict_get(expr) { format!("mut {}", name) } else { name.clone() };
+                format!("let Some({}) = {}", pat, expr_s)
             }
             CondClause::LetPat(pat, expr) => {
                 format!("let {} = {}", self.emit_pattern(pat), self.emit_expr(expr))
