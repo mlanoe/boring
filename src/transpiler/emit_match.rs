@@ -956,7 +956,7 @@ impl Transpiler {
             } else {
                 // Check if the variable's declared type is a type parameter.
                 // Param types can be Type::Named("S") or Type::TypeParam("S").
-                let ty_name = self.var_types.get(vname.as_str()).and_then(|t| match t {
+                let ty_name = self.local_type(vname.as_str()).and_then(|t| match t {
                     Type::Named(n) => Some(n.as_str()),
                     Type::TypeParam(n) => Some(n.as_str()),
                     _ => None,
@@ -1079,7 +1079,7 @@ impl Transpiler {
         };
         // If the match subject is Rc<T> or Arc<T>, dereference it so patterns can match T.
         let subj_ty = if let ExprKind::Var(vname) = &s.subject.kind {
-            self.var_types.get(vname.as_str()).cloned()
+            self.local_type(vname.as_str()).cloned()
         } else {
             None
         };
@@ -1199,7 +1199,7 @@ impl Transpiler {
     pub(crate) fn infer_match_enum(&self, subject: &Expr, arms: &[crate::ast::MatchArm]) -> Option<String> {
         // Strategy 1: subject is a named variable with a known type (from var_types).
         if let ExprKind::Var(vname) = &subject.kind {
-            if let Some(ty) = self.var_types.get(vname.as_str()) {
+            if let Some(ty) = self.local_type(vname.as_str()) {
                 // Helper: extract the base type name, unwrapping smart-pointer qualifiers.
                 let tname = match ty {
                     Type::Named(n) => Some(n.as_str()),
@@ -1512,7 +1512,7 @@ impl Transpiler {
                     && !expr_s.starts_with("Some(")
                     && !matches!(&e.kind, ExprKind::Nil)
                     && !matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
-                    && !matches!(&e.kind, ExprKind::Var(v) if self.var_types.get(v.as_str())
+                    && !matches!(&e.kind, ExprKind::Var(v) if self.local_type(v.as_str())
                         .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
                     && !matches!(&e.kind, ExprKind::Call(callee, _)
                         if matches!(&callee.kind, ExprKind::Var(fn_name)

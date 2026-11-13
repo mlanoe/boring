@@ -42,7 +42,7 @@ impl Transpiler {
                 if !visiting.insert(v.clone()) {
                     return None;
                 }
-                let r = self.var_init_exprs.get(v.as_str()).and_then(|init| self.fixed_fmt_of_expr_inner(init, visiting));
+                let r = self.local_init_expr(v.as_str()).and_then(|init| self.fixed_fmt_of_expr_inner(init, visiting));
                 visiting.remove(v.as_str());
                 r
             }
@@ -50,7 +50,7 @@ impl Transpiler {
             ExprKind::Field(inner, idx) if idx.parse::<usize>().is_ok() && self.resolve_expr_type(e).is_none() => {
                 let ExprKind::Var(v) = &inner.kind else { return None };
                 if !visiting.insert(v.clone()) { return None; }
-                let r = match self.var_init_exprs.get(v.as_str()).map(|i| &i.kind) {
+                let r = match self.local_init_expr(v.as_str()).map(|i| &i.kind) {
                     Some(ExprKind::Tuple(elems)) => elems.get(idx.parse::<usize>().ok()?)
                         .and_then(|el| self.fixed_fmt_of_expr_inner(el, visiting)),
                     _ => None,

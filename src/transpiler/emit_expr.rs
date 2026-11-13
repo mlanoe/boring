@@ -50,6 +50,8 @@ fn builtin_min_arity(name: &str) -> Option<usize> {
 
 impl Transpiler {
     pub(crate) fn emit_expr(&self, expr: &Expr) -> String {
+        // The furthest position entered in this body (a node the transpiler made up, at (1, 1), never moves it back).
+        if (expr.line, expr.col) > self.cur_pos.get() { self.cur_pos.set((expr.line, expr.col)); }
         match &expr.kind {
             ExprKind::Int(n)   => n.to_string(),
             // Oversized decimal literal (overflows `i64`, fits `u64`). Must
@@ -128,7 +130,7 @@ impl Transpiler {
                     if self.with_open_names.contains(n.as_str()) {
                         return format!("(*{})", n);
                     }
-                    if self.var_mutex_types.contains(n.as_str()) || self.var_mutex_task_types.contains(n.as_str()) {
+                    if self.is_mutex_local(n.as_str()) || self.var_mutex_task_types.contains(n.as_str()) {
                         return format!("*{}", self.mutex_var_read(n, n));
                     }
                     if self.var_rwlock_types.contains(n.as_str()) || self.var_rwlock_task_types.contains(n.as_str()) {
@@ -576,7 +578,7 @@ impl Transpiler {
                             || self.vec_vars.contains(vname.as_str())
                             || self.string_arc_vars.contains(vname.as_str())
                             || matches!(
-                                self.fn_current_params.get(vname.as_str()).or_else(|| self.var_types.get(vname.as_str())),
+                                self.fn_current_params.get(vname.as_str()).or_else(|| self.local_type(vname.as_str())),
                                 Some(Type::Named(_) | Type::Array(_) | Type::Dict(..) | Type::Set(_))
                             ),
                         _ => false,
@@ -1302,7 +1304,7 @@ impl Transpiler {
             ExprKind::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
                 | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr, l, r) =>
                 self.is_definitely_numeric_expr(l) && self.is_definitely_numeric_expr(r),
-            ExprKind::Var(v) => self.var_types.get(v.as_str())
+            ExprKind::Var(v) => self.local_type(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))
                 .map(|t| is_known_numeric_scalar_type(t.without_mut())).unwrap_or(false),
             ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::Field(..)
@@ -1369,7 +1371,7 @@ impl Transpiler {
                         }
                     }
                 }
-                self.var_types.get(v.as_str()).cloned()
+                self.local_type(v.as_str()).cloned()
             }
             ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::LabeledIndex(..)
                 | ExprKind::Call(..) | ExprKind::MethodCall(..) => self.resolve_expr_type(e),
@@ -1439,7 +1441,7 @@ impl Transpiler {
             ExprKind::Var(v) =>
                 self.is_struct_local(v)
                 || self.var_struct_type.contains_key(v.as_str())
-                || matches!(self.var_types.get(v.as_str()),
+                || matches!(self.local_type(v.as_str()),
                     Some(Type::Named(n)) if self.struct_fields.contains_key(n.as_str())),
             ExprKind::Field(_, _) => true, // field access on struct
             _ => false,
@@ -1570,7 +1572,7 @@ impl Transpiler {
         }
         // Known-numeric variable (tracked in var_types as Int/Float/Uint/...) → cast with `as T`
         let src_var_is_numeric = matches!(&e.kind, ExprKind::Var(v) if {
-            self.var_types.get(v.as_str()).map(is_known_numeric_scalar_type).unwrap_or(false)
+            self.local_type(v.as_str()).map(is_known_numeric_scalar_type).unwrap_or(false)
         });
         if src_var_is_numeric && is_float_ty {
             return format!("({} as {})", src, dst);
@@ -1754,8 +1756,8 @@ impl Transpiler {
             ExprKind::Str(_) | ExprKind::StringInterp(_) | ExprKind::Bool(_) => true,
             ExprKind::Var(v) => {
                 self.string_vars.contains(v.as_str())
-                    || matches!(self.var_types.get(v.as_str()), Some(Type::Str))
-                    || matches!(self.var_types.get(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
+                    || matches!(self.local_type(v.as_str()), Some(Type::Str))
+                    || matches!(self.local_type(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
             }
             // A struct field / array / dict element access whose declared type is
             // `string` (e.g. the `t.text` in `guard let n = (t.text as int) else ...`)
@@ -1828,8 +1830,8 @@ impl Transpiler {
             ExprKind::Str(_) => true,
             ExprKind::Var(v) => {
                 self.string_vars.contains(v.as_str())
-                    || matches!(self.var_types.get(v.as_str()), Some(Type::Str))
-                    || matches!(self.var_types.get(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
+                    || matches!(self.local_type(v.as_str()), Some(Type::Str))
+                    || matches!(self.local_type(v.as_str()), Some(Type::Named(n)) if n == "string" || n == "str")
             }
             ExprKind::Field(inner_obj, field_name) => self
                 .resolve_struct_name(inner_obj)
@@ -1871,8 +1873,8 @@ impl Transpiler {
                 ExprKind::Str(_) => true,
                 ExprKind::Var(v) =>
                     self.string_vars.contains(v.as_str())
-                    || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Str))
-                    || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Named(n)) if n == "string" || n == "str"),
+                    || matches!(self.local_type(v.as_str()), Some(crate::ast::Type::Str))
+                    || matches!(self.local_type(v.as_str()), Some(crate::ast::Type::Named(n)) if n == "string" || n == "str"),
                 _ => false,
             };
             let obj_s = self.emit_expr(obj);
@@ -1982,8 +1984,8 @@ impl Transpiler {
             ExprKind::Str(_) => true,
             ExprKind::Var(v) =>
                 self.string_vars.contains(v.as_str())
-                || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Str))
-                || matches!(self.var_types.get(v.as_str()), Some(crate::ast::Type::Named(n)) if n == "string" || n == "str"),
+                || matches!(self.local_type(v.as_str()), Some(crate::ast::Type::Str))
+                || matches!(self.local_type(v.as_str()), Some(crate::ast::Type::Named(n)) if n == "string" || n == "str"),
             _ => false,
         };
         if is_str {
@@ -2081,7 +2083,7 @@ impl Transpiler {
                 // (arrays require an integer index), so treat it as one too.
                 let idx_is_string = match &idx.kind {
                     ExprKind::Var(v) => {
-                        let vt = self.var_types.get(v.as_str());
+                        let vt = self.local_type(v.as_str());
                         matches!(vt, Some(crate::ast::Type::Str))
                         || matches!(vt, Some(crate::ast::Type::Named(n)) if n == "string" || n == "str")
                         || self.string_vars.contains(v.as_str())
@@ -2489,9 +2491,9 @@ impl Transpiler {
             let r_is_arc_str = !r_is_raw_lit && self.is_string_expr(r);
             // Check if either side is a &str (str-ref) typed variable — skip wrapping.
             let l_is_str_ref = matches!(&l.kind, ExprKind::Var(v)
-                if self.var_types.get(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
+                if self.local_type(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
             let r_is_str_ref = matches!(&r.kind, ExprKind::Var(v)
-                if self.var_types.get(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
+                if self.local_type(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
             // Wrap into Arc<str> when any side is a string literal or known Arc<str>,
             // unless a side is a &str variable (which rejects Arc<str> comparisons).
             let should_wrap = !l_is_str_ref && !r_is_str_ref
@@ -2873,13 +2875,13 @@ impl Transpiler {
             if let ExprKind::Var(v) = &obj.kind {
                 let is_known_struct = self.is_struct_local(v)
                     || self.struct_fields.contains_key(v.as_str())
-                    || self.var_types.get(v.as_str()).map(|t| {
+                    || self.local_type(v.as_str()).map(|t| {
                         if let Type::Named(tn) = t { self.struct_fields.contains_key(tn.as_str()) } else { false }
                     }).unwrap_or(false);
                 let is_task = self.task_vars.contains(v.as_str());
                 if is_task
                     && v != "self"
-                    && !self.var_mutex_types.contains(v.as_str())
+                    && !self.is_mutex_local(v.as_str())
                     && !is_known_struct
                 {
                     return self.emit_plain_task_await(&obj_s, field);
@@ -2902,7 +2904,7 @@ impl Transpiler {
                     .map(|type_name| self.struct_getters.contains(&format!("{}::{}", type_name, field)))
                     .unwrap_or(false);
                 let from_enum = if !from_struct {
-                    if let Some(Type::Named(type_name)) = self.var_types.get(v.as_str()) {
+                    if let Some(Type::Named(type_name)) = self.local_type(v.as_str()) {
                         self.struct_getters.contains(&format!("{}::{}", type_name, field))
                     } else { false }
                 } else { false };
@@ -2916,7 +2918,7 @@ impl Transpiler {
             let type_name = if v == "self" {
                 self.self_type.clone()
             } else {
-                self.var_types.get(v.as_str()).and_then(|t| {
+                self.local_type(v.as_str()).and_then(|t| {
                     if let Type::Named(n) = t { Some(n.clone()) } else { None }
                 })
             };
@@ -2933,12 +2935,12 @@ impl Transpiler {
         }
         // Mutex var access: w.field → w.lock().await.field (multi) or w.borrow().field (single)
         if let ExprKind::Var(v) = &obj.kind {
-            if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+            if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                 let access = self.mutex_var_read(v, v);
                 // If the field is itself an Rc/Arc<RefCell/Mutex<T>> (actor/guard),
                 // we must clone it to avoid moving out of the borrow/lock guard.
                 let tracked_struct = self.local_struct(v);
-                let field_is_shared = self.var_types.get(v.as_str())
+                let field_is_shared = self.local_type(v.as_str())
                         .and_then(|t| match t { Type::Named(n) => Some(n.as_str()), Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None }, _ => None })
                         .or(tracked_struct.as_deref())
                         .and_then(|tname| self.struct_fields.get(tname))
@@ -3102,7 +3104,7 @@ impl Transpiler {
         let field_is_arc = if let ExprKind::Var(v) = &obj.kind {
             let struct_name = self.local_struct(v).as_ref()
                 .cloned()
-                .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                .or_else(|| self.local_type(v.as_str()).and_then(|t| match t {
                     Type::Named(n) => Some(n.clone()),
                     Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None },
                     _ => None,
@@ -3163,7 +3165,7 @@ impl Transpiler {
         if let ExprKind::Var(v) = &obj.kind {
             if v == "self" { return; }
             let owner_struct = self.local_struct(v)
-                .or_else(|| self.var_types.get(v.as_str()).and_then(&named))
+                .or_else(|| self.local_type(v.as_str()).and_then(&named))
                 .or_else(|| self.fn_current_params.get(v.as_str()).and_then(&named));
             if let Some(sn) = owner_struct {
                 let key = format!("{}::{}", sn, field);
@@ -3595,7 +3597,7 @@ impl Transpiler {
             // the `Arc<Mutex<T>>`/`Arc<RwLock<T>>` handle (doesn't compile: no
             // `AddAssign`/plain-assign target on the handle type itself).
             if self.var_lock_scalar.contains(var_name.as_str()) {
-                let lock_is_f16 = self.var_types.get(var_name.as_str()).is_some_and(|ty| {
+                let lock_is_f16 = self.local_type(var_name.as_str()).is_some_and(|ty| {
                     let inner = match ty.without_mut() {
                         Type::Qualified(inner, _) => inner.without_mut(),
                         ty => ty,
@@ -3618,7 +3620,7 @@ impl Transpiler {
                     let val_s = coerce_value(self.emit_expr_owned(value));
                     return format!("*{} = {}", var_name, val_s);
                 }
-                if self.var_mutex_types.contains(var_name.as_str()) || self.var_mutex_task_types.contains(var_name.as_str()) {
+                if self.is_mutex_local(var_name.as_str()) || self.var_mutex_task_types.contains(var_name.as_str()) {
                     // Evaluate the RHS into a temp *before* taking the write guard: it
                     // may itself read through the same lock (e.g. `x = x * 2`), and a
                     // non-reentrant Mutex self-deadlocks if that read tries to lock
@@ -3708,7 +3710,7 @@ impl Transpiler {
         // `return` early, so the check lives here rather than in the generic diagnostic further down.
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
-                let is_lock = self.var_mutex_types.contains(v.as_str())
+                let is_lock = self.is_mutex_local(v.as_str())
                     || self.var_mutex_task_types.contains(v.as_str())
                     || self.var_rwlock_types.contains(v.as_str())
                     || self.var_rwlock_task_types.contains(v.as_str());
@@ -3734,7 +3736,7 @@ impl Transpiler {
         // Mutex field write: w.field = v
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
-                if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                     // Non-reassignable (`let`/`mut`, no `var`) field diagnostic — this branch
                     // `return`s below, so without this check it would otherwise silently skip
                     // past the "Diagnostic: assigning to a non-reassignable struct field" check
@@ -3864,7 +3866,7 @@ impl Transpiler {
             if let Some(sn) = self.resolve_struct_name(obj) {
                 let key = format!("{}::{}", sn, field);
                 let rhs_already_wrapped = matches!(&value.kind, ExprKind::Var(vn)
-                    if self.var_mutex_types.contains(vn.as_str())
+                    if self.is_mutex_local(vn.as_str())
                         || self.var_mutex_task_types.contains(vn.as_str())
                         || self.var_rwlock_types.contains(vn.as_str())
                         || self.var_rwlock_task_types.contains(vn.as_str())
@@ -3950,7 +3952,7 @@ impl Transpiler {
                 if v != "self"
                     && self.fn_current_params.contains_key(v.as_str())
                     && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
-                    && !self.var_mutex_types.contains(v.as_str())
+                    && !self.is_mutex_local(v.as_str())
                     && !self.var_mutex_task_types.contains(v.as_str())
                     && !self.var_rwlock_types.contains(v.as_str())
                     && !self.var_rwlock_task_types.contains(v.as_str())
@@ -3968,7 +3970,7 @@ impl Transpiler {
                     && self.known_local_vars.contains(v.as_str())
                     && !self.content_mutable_local_vars.contains(v.as_str())
                     && self.mut_checked_local_vars.contains(v.as_str())
-                    && !self.var_mutex_types.contains(v.as_str())
+                    && !self.is_mutex_local(v.as_str())
                     && !self.var_mutex_task_types.contains(v.as_str())
                     && !self.var_rwlock_types.contains(v.as_str())
                     && !self.var_rwlock_task_types.contains(v.as_str())
@@ -3977,7 +3979,7 @@ impl Transpiler {
                     // than a parameter — see the matching comment in
                     // `emit_methods.rs`'s `emit_method_call_fallback`.
                     let struct_name = self.local_struct(v)
-                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                        .or_else(|| self.local_type(v.as_str()).and_then(|t| {
                             if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                         }));
                     if let Some(sn) = struct_name {
@@ -3992,7 +3994,7 @@ impl Transpiler {
                 // `emit_method_call_fallback`): the collection's own declared
                 // element type must grant `mut`.
                 if let ExprKind::Var(coll_name) = &inner_obj.kind {
-                    if let Some(coll_ty) = self.var_types.get(coll_name.as_str()) {
+                    if let Some(coll_ty) = self.local_type(coll_name.as_str()) {
                         if let Some(elem_ty) = coll_ty.index_element_type() {
                             if !elem_ty.grants_mut() {
                                 self.push_error(obj.line, obj.col, format!(
@@ -4036,7 +4038,7 @@ impl Transpiler {
                     || self.is_string_expr(rhs)
                     || self.is_string_expr(target)
                     || matches!(&target.kind, ExprKind::Var(v)
-                        if self.var_types.get(v.as_str())
+                        if self.local_type(v.as_str())
                             .map(|t| matches!(t, Type::Named(n) if n == "string"))
                             .unwrap_or(false)));
             if !is_string_add {
@@ -4447,7 +4449,7 @@ impl Transpiler {
             if !target_is_resident
                 && self.is_gpu_target
                 && !self.config.is_simd_target
-                && self.var_types.get(name.as_str()).is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
+                && self.local_type(name.as_str()).is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
                 && (rhs_resident_var.is_some() || self.try_materialize_resident_call(value).is_some())
             {
                 self.push_warning(target.line, target.col, format!(
@@ -4502,7 +4504,7 @@ impl Transpiler {
                     }
                 }
                 if self.known_local_vars.contains(name.as_str()) {
-                    if let Some(ty) = self.var_types.get(name.as_str()) {
+                    if let Some(ty) = self.local_type(name.as_str()) {
                         if matches!(ty.without_mut(), Type::Qualified(..)) || self.is_boxed_trait_type(ty) {
                             return self.emit_let_value(Some(ty), value);
                         }
@@ -4540,7 +4542,7 @@ impl Transpiler {
         // so the original binding remains usable after the assignment. Arc::clone is cheap.
         let rhs_s = if matches!(&target.kind, ExprKind::Field(..))
             && matches!(&value.kind, ExprKind::Var(vn)
-                if (self.var_mutex_types.contains(vn.as_str())
+                if (self.is_mutex_local(vn.as_str())
                     || self.var_mutex_task_types.contains(vn.as_str()))
                     && !rhs_s.ends_with(".clone()"))
         {
@@ -4578,7 +4580,7 @@ impl Transpiler {
         // both local variables and explicit/implicit user-struct fields.
         let target_scalar_ty = match &target.kind {
             ExprKind::Var(name) if self.known_local_vars.contains(name.as_str()) => {
-                self.var_types.get(name.as_str())
+                self.local_type(name.as_str())
             }
             _ => target_field_ty.as_ref(),
         };
@@ -4618,7 +4620,7 @@ impl Transpiler {
                 || matches!(&value.kind, ExprKind::Nil)
                 || matches!(&value.kind, ExprKind::Var(vn)
                     if self.optional_vars.contains(vn.as_str())
-                    || self.var_types.get(vn.as_str())
+                    || self.local_type(vn.as_str())
                         .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
                 // RHS is a call to a function that returns Optional — no extra Some() needed.
                 || matches!(&value.kind, ExprKind::Call(callee, _)
@@ -5042,7 +5044,7 @@ impl Transpiler {
 
     /// The function type of a param/local `name` declared with one (inline or via a `use` alias).
     pub(crate) fn local_fn_type(&self, name: &str) -> Option<Type> {
-        self.fn_current_params.get(name).or_else(|| self.var_types.get(name))
+        self.fn_current_params.get(name).or_else(|| self.local_type(name))
             .and_then(|t| self.resolve_fn_field_type(t))
     }
 
@@ -5488,7 +5490,7 @@ impl Transpiler {
                     } else if self.struct_mutex_fields.contains(&mutex_key) {
                         // If the value is already an actor/rc variable, just clone the Rc pointer.
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_mutex_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            if self.is_mutex_local(v.as_str()) || self.rc_vars.contains(v.as_str()))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_fields);
                         if already_rc {
                             // A view state's own cell (`NameEditor(name = st.name)`) is passed as the cell.
@@ -6122,7 +6124,7 @@ impl Transpiler {
         match &e.kind {
             ExprKind::Var(v) if v == "self" => self.self_type.clone(),
             ExprKind::Var(v) => self.local_struct(v)
-                .or_else(|| self.var_types.get(v.as_str()).and_then(&named)),
+                .or_else(|| self.local_type(v.as_str()).and_then(&named)),
             ExprKind::Field(base, field) => {
                 let struct_name = self.resolve_struct_name(base)?;
                 self.struct_fields.get(struct_name.as_str())?
@@ -6171,7 +6173,7 @@ impl Transpiler {
         match &e.kind {
             ExprKind::Cast(_, ty) => width_of(ty),
             ExprKind::Var(v) => {
-                if let Some(w) = self.var_types.get(v.as_str()).and_then(width_of) {
+                if let Some(w) = self.local_type(v.as_str()).and_then(width_of) {
                     return Some(w);
                 }
                 // Implicit self field access inside a struct method — a bare `x` inside
@@ -6197,7 +6199,7 @@ impl Transpiler {
                 if !visiting.insert(v.clone()) {
                     return None;
                 }
-                let result = self.var_init_exprs.get(v.as_str()).and_then(|init| self.infer_float_width_inner(init, visiting));
+                let result = self.local_init_expr(v.as_str()).and_then(|init| self.infer_float_width_inner(init, visiting));
                 visiting.remove(v.as_str());
                 result
             }
@@ -6221,7 +6223,7 @@ impl Transpiler {
             ExprKind::Array(elems) => elems.iter()
                 .find_map(|elem| self.infer_float_width_inner(elem, visiting)),
             ExprKind::Index(base, _) => match &base.kind {
-                ExprKind::Var(v) => match self.var_types.get(v.as_str()).map(Type::without_mut) {
+                ExprKind::Var(v) => match self.local_type(v.as_str()).map(Type::without_mut) {
                     Some(Type::Array(elem)) => width_of(elem),
                     _ => None,
                 },
@@ -6440,7 +6442,7 @@ impl Transpiler {
                 // For actor (Arc<Mutex<T>>) variables, lock first.
                 if let Some(first) = args.first() {
                     if let ExprKind::Var(v) = &first.value.kind {
-                        if (self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())) && self.in_async {
+                        if (self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())) && self.in_async {
                             return format!("{}.len()", self.mutex_var_read(v, v));
                         }
                     }

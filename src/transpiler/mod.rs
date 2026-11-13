@@ -528,7 +528,11 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     match std::env::var("BORING_TYPE_TABLE").as_deref() {
         Ok("walk") => t.type_table_mode = type_table::TypeTableMode::Walk,
         Ok("check") => t.type_table_mode = type_table::TypeTableMode::Check,
-        _ => {}
+        // The walk is the source of types by default (`off` goes back to the emitter's own tables alone, for
+        // bisecting a difference).
+        Ok("off") => {}
+        Ok("replay") | Ok("stats") => {}
+        _ => t.type_table_mode = type_table::TypeTableMode::Walk,
     }
     if let (Some((table, built)), Some(mode)) = (recorded, replay) {
         if mode == "stats" {
@@ -580,11 +584,11 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     }
     if matches!(t.type_table_mode, type_table::TypeTableMode::Replay | type_table::TypeTableMode::Walk) && std::env::var_os("BORING_TYPE_TABLE_STATS").is_some() {
         let tt = t.type_table.borrow();
-        eprintln!("type table {:?}: {} hits, {} misses, {} of them known to the emitter", t.type_table_mode, tt.hits, tt.misses, tt.missed_known);
+        eprintln!("type table {:?}: {} hits, {} misses, {} of them known to the emitter; {} top-level declared types answered; {} stale initialisers withheld; {} last-use sets from the table; {} representation tests from the decisions", t.type_table_mode, tt.hits, tt.misses, tt.missed_known, tt.vt_walk_answers, tt.init_dropped, tt.lu_table_answers, tt.rep_decided);
     }
     if t.type_table_mode == type_table::TypeTableMode::Check && std::env::var_os("BORING_TYPE_TABLE_STATS").is_some() {
         let tt = t.type_table.borrow();
-        eprintln!("type table check: {} positions agree, {} differ; {} by-name reads agree, {} differ; {} decisions agree, {} differ", tt.hits, tt.conflicts, tt.local_hits, tt.local_conflicts, tt.decision_hits, tt.decision_conflicts);
+        eprintln!("type table check: {} positions agree, {} differ; {} by-name reads agree, {} differ; {} decisions agree, {} differ; {} declared-type reads agree, {} same type other representation, {} differ, {} walk only; {} scalar-type reads agree, {} differ, {} walk only; {} std-type reads, {} with an entry, {} agree, {} differ, {} walk only; {} initialiser reads with an entry: {} agree, {} differ, {} unsure, {} stray; {} last-use sets agree, {} differ; {} last-use representation tests agree, {} differ, {} of them forbidding the move; {} lock reads agree, {} differ", tt.hits, tt.conflicts, tt.local_hits, tt.local_conflicts, tt.decision_hits, tt.decision_conflicts, tt.vt_hits, tt.vt_repr, tt.vt_conflicts, tt.vt_walk_only, tt.sc_hits, tt.sc_conflicts, tt.sc_walk_only, tt.std_reads, tt.std_reads_known, tt.std_hits, tt.std_conflicts, tt.std_walk_only, tt.init_reads, tt.init_hits, tt.init_conflicts, tt.init_unsure, tt.init_stray, tt.lu_hits, tt.lu_conflicts, tt.rep_hits, tt.rep_conflicts, tt.rep_blocked, tt.lock_hits, tt.lock_conflicts);
     }
     let apply_single_thread_fixups = |s: String| -> String {
         s
@@ -1241,6 +1245,8 @@ struct Transpiler {
     /// provably last use of their (owned, let-bound) variable — by-value reads there may be a
     /// Rust move instead of a `.clone()`. See `last_use.rs`; empty outside a function body.
     pub(crate) last_use_sites: last_use::LastUseSites,
+    /// Last-use sites by scope, made by the decisions pass (`None`: two bodies share the scope).
+    pub(crate) last_use_table: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Option<last_use::LastUseSites>>>>,
     /// Local variables and parameters that are immutable (`let` binding, or plain param without
     /// `mut`/`var`). Used to reject passing an immutable variable to a `mut` or `var` parameter.
     pub(crate) immutable_local_vars: std::collections::HashSet<String>,
@@ -1368,6 +1374,15 @@ struct Transpiler {
     /// The qualifiers decided per body before emission (see `decided_qual`).
     pub(crate) decision_table: std::rc::Rc<std::cell::RefCell<type_table::Decisions>>,
     pub(crate) built_locals: std::rc::Rc<std::cell::RefCell<type_table::Locals>>,
+    /// Declared types of the file's own top-level statements' locals (walk scope `""`), read by `local_type` in walk mode.
+    pub(crate) walk_top_types: std::rc::Rc<std::collections::HashMap<String, Option<Type>>>,
+    pub(crate) built_binders: std::rc::Rc<std::cell::RefCell<type_table::Binders>>,
+    /// Position of the expression or statement being emitted (the latest one entered), for the by-position tables.
+    pub(crate) cur_pos: std::cell::Cell<(usize, usize)>,
+    pub(crate) built_inits: std::rc::Rc<std::cell::RefCell<type_table::LocalInits>>,
+    pub(crate) built_std_types: std::rc::Rc<std::cell::RefCell<type_table::LocalTypes>>,
+    pub(crate) built_scalar_types: std::rc::Rc<std::cell::RefCell<type_table::LocalTypes>>,
+    pub(crate) built_local_types: std::rc::Rc<std::cell::RefCell<type_table::LocalTypes>>,
     pub(crate) built_struct_names: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<type_table::Key, Option<String>>>>,
     /// fn_name → ordered parameter names (for reordering named/labeled call arguments).
     pub(crate) fn_param_names: std::collections::HashMap<String, Vec<String>>,
@@ -2025,6 +2040,7 @@ impl Transpiler {
             unlent_method_params: std::collections::HashSet::new(),
             unlent_probe: std::collections::HashSet::new(),
             last_use_sites: std::collections::HashSet::new(),
+            last_use_table: Default::default(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),
             content_mutable_local_vars: std::collections::HashSet::new(),
@@ -2068,6 +2084,13 @@ impl Transpiler {
             type_scope: String::new(),
             built_struct_names: Default::default(),
             built_locals: Default::default(),
+            walk_top_types: Default::default(),
+            built_binders: Default::default(),
+            cur_pos: Default::default(),
+            built_inits: Default::default(),
+            built_std_types: Default::default(),
+            built_scalar_types: Default::default(),
+            built_local_types: Default::default(),
             decision_table: Default::default(),
             fn_param_names: std::collections::HashMap::new(),
             user_defines_box: false,
@@ -3246,7 +3269,27 @@ impl Transpiler {
     fn emit_program_items(&mut self, program: &Program, emit_main: bool) {
         if matches!(self.type_table_mode, type_table::TypeTableMode::Record | type_table::TypeTableMode::Walk | type_table::TypeTableMode::Check) {
             let imported = crate::infer_return_types::collect_inference_imports(&program.items, &self.source_dir, &self.deps);
-            let (built, locals) = type_table::build_struct_names(program, &imported);
+            let (built, locals, local_types, declared_types, scalar_types, std_types, init_table, binder_table) = type_table::build_struct_names(program, &imported);
+            if self.type_table_mode == type_table::TypeTableMode::Walk {
+                let top = std::rc::Rc::make_mut(&mut self.walk_top_types);
+                for ((scope, name), ty) in &declared_types {
+                    if !scope.is_empty() { continue; }
+                    match top.get(name) {
+                        Some(prev) if prev != ty => { top.insert(name.clone(), None); }
+                        Some(_) => {}
+                        None => { top.insert(name.clone(), ty.clone()); }
+                    }
+                }
+            }
+            {
+                // Several files (or a body emitted twice) must not interleave their events: replace by scope.
+                let mut b = self.built_binders.borrow_mut();
+                for (k, v) in binder_table { b.insert(k, v); }
+            }
+            self.built_inits.borrow_mut().extend(init_table);
+            self.built_std_types.borrow_mut().extend(std_types);
+            self.built_scalar_types.borrow_mut().extend(scalar_types);
+            self.built_local_types.borrow_mut().extend(local_types);
             self.built_struct_names.borrow_mut().extend(built);
             self.built_locals.borrow_mut().extend(locals);
             self.decide_program(program);
@@ -3458,6 +3501,8 @@ impl Transpiler {
             }).collect();
             self.infer_qualifiers(&main_infer_stmts);
             self.scan_atomic_promotions(&main_infer_stmts);
+            // The synthesized `main` is a body of its own: the by-position tables start again at its first line.
+            self.cur_pos.set((0, 0));
             let needs_async = items_have_task(&stmts)
                 || body_has_stream_for(&top_stmts, &self.stream_fns, &self.stream_async_method_names)
                 || items_have_task_call(&stmts, &self.task_fns);

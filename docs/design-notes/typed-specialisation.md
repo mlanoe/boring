@@ -1105,3 +1105,279 @@ ambiguous because a name is reused in a body (`s` as a closure parameter and as 
 fields of such receivers. The 23 + 138 are the emitter's own inconsistencies (a parameter `Counter c` is a struct
 for it in one function and unknown in another); settling them means choosing which answer is right, which can
 change the Rust, so they are a list to review, not rules to add.
+
+### 20. The walk is the default (2026-11-13)
+
+`BORING_TYPE_TABLE` unset now means `walk` (`off` is the escape hatch; `replay`, `stats` and `check` unchanged). Measured
+before the switch: walk against `off` over `tests/cases` and `examples` (645 files): same Rust, the only two differences
+(`generics`, `supertraits`) being hash-map order that also varies between two runs of `off`. `check` over `tests/cases`
+logs 209 lines, all "the walk claims a struct (or by-name local), the emitter says unknown": 124 by-name locals (16 `c`
+of `TraitBorrowMutCounter`, parameters of `mut`-wrapped struct type among them: `emit_top` registers only `Named` and
+`Qualified(Named, Borrow)` parameters in `var_struct_types`, not `mut T`, which is the quirk) and 85 by position. In walk
+mode the walk's claim already wins, and the Rust is the same, so these are quirks of the emitter's tables, not
+contradictions.
+
+What this is not: the emitter's tables are still the fallback, and the other families (`var_types`, `var_scalar_types`,
+`var_std_types`, `var_init_exprs`, clone and lock choices) are not read through an accessor yet. The bug category
+(E0382, missing clones, wrong qualifiers) comes from those, so the single-source goal is not reached; the next
+families to move are `var_types` (80 reads) and the clone decisions, each behind an accessor with `check` as the gate.
+
+### 20.1 `var_types` behind an accessor (2026-11-13)
+
+All 111 reads of `var_types` by variable name (`get`, `contains_key`) go through `Transpiler::local_type` /
+`has_local_type`; the 74 writes and the whole-table uses (`&self.var_types` handed to a helper, the per-function
+`take`/restore) are untouched. The walk now also builds a table of declared types per `(scope, name)`
+(`LocalTypes`, from the same env as the struct walk; a name two bodies of one scope bind differently, overloads, is
+bound to none; a trait-typed `let` keeps the trait as its declared type, unlike the struct question). In `check`
+mode `local_type` compares the walk's type with the emitter's and logs `TYPEVARMISMATCH` / `TYPEVARWALKONLY`;
+the accessor still answers from the emitter's table in every mode (a reference into a `RefCell` cannot be returned,
+and the walk is not yet allowed to answer).
+
+Measured over `tests/cases` (526 programs that emit): Rust identical with the accessor in every mode (`generics`
+and `supertraits` aside, hash-map order). Declared types agree with the emitter's once two things are normalised:
+a builtin spelled as `Named` (`int`, `string`, `float32`) against its variant, and the representation the
+emitter adds (`'inline` on a bare struct: 449 of the first 530 distinct differences; borrows from the lent-parameter
+decisions, `'shared`, `'owned`, `mut`). After that **4 distinct differences remain over the corpus**, all emitter
+quirks: two locals whose type the emitter keeps as emitted Rust text (`Rc<CDog { name: .. }>`), a labelled array, and
+an `if let` binding the emitter leaves `Optional`. The first measurement had 8,031 log lines.
+
+So the finding of 16.8 holds for `var_types` too: it is declared type x representation, and the type half is the
+walk's. What the walk adds that the emitter lacks (368 distinct `TYPEVARWALKONLY`): the top-level statements
+(scope `""`, which the emitter keeps in `global_var_types`) and function locals the emitter never registers
+(scalars read from calls, `let n = f()`). Letting the walk answer those would change what `known_local_vars`-style
+decisions see, so it is the next step to try behind `check`, not a given.
+
+Test: `check_finds_no_declared_type_the_walk_contradicts` in `tests/type_table.rs`.
+
+### 20.2 The walk answers for the top-level locals (2026-11-13)
+
+In walk mode `local_type` answers from the walk where the emitter has no declared type and the emitter is in the
+file's own statements (`type_scope` empty, no `self_type`): a table `walk_top_types`, filled per emitted program from
+the walk's scope `""`. First attempt took every binding the walk types: two programs changed (`structs`:
+`println!("{}", sa.name.clone())` for `let sa = x as T`; `fixed_point_wide`: `sum += v.clone()` for a loop variable).
+The emitter keeps a declared type only for a name bound with a *written* type (an annotated `let`, a parameter), not
+for one the walk infers from a value (a cast, a loop element, a call), and what it clones depends on knowing it. The
+table therefore holds only written-type bindings (`declared` of `build_struct_names`; a name bound with a written type
+and also bound without one in the same body is kept, the conflict rule of the other tables applies to differing
+types only). Over `tests/cases`, `examples` (645 files): identical Rust, 164 top-level declared types answered by the
+walk (`BORING_TYPE_TABLE_STATS=1` prints the count).
+
+The rule worth keeping: *the walk may answer what the emitter tracks by declaration; what the emitter tracks by
+inference is a decision about representation and stays a separate question.* Function-scope locals keep the emitter's
+table (the 368 `TYPEVARWALKONLY` lines of 20.1 are mostly of the inferred kind).
+
+### 20.3 `var_scalar_types` behind an accessor (2026-11-13)
+
+The smallest family: one read (`overload_local_or_method_type`, the `Var` arm), now `local_scalar_type`; four writes
+(`emit_let_inner`, the `for` loop) untouched. It holds the overload-resolution type of an unannotated local bound from a
+literal (`Int`, `Float64`, `Bool`, `Str`) or a built-in method result (`text.graphemeSlice(..)`), and of a loop variable
+over a typed array; the emitter removes the entry at every rebinding of the name. The walk builds the same table
+(`scalar` of `build_struct_names`: the literal case through the emitter's own `infer_overload_expr_type`, a method
+result through `builtin_method_result_type` on the walk's receiver type, a loop element through `loop_element_type`;
+a name bound to different things in a body, or by two overloads, is bound to none). `check` compares (`TYPESCALARMISMATCH`,
+`TYPESCALARWALKONLY`).
+
+Over `tests/cases`: 6 reads reach the accessor, all agree, no difference, no walk-only claim; Rust identical. The
+walk does not answer in walk mode: it would have answered 0 reads in the corpus (the emitter already holds every
+entry the walk claims), and a behaviour change nothing exercises is not shipped. The overloading cases are in the
+`check` test.
+
+### 20.4 `var_std_types` behind an accessor (2026-11-13)
+
+Two reads (`resolve_expr_type`'s `Var` arm and `infer_std_type`), now `local_std_type`; three writes untouched
+(`track_std_binding` for a `let` and a `guard let`, and the two bindings of an actor dict's `get`, which hold the
+shared handle `V'actor`, not a std type). The family holds the std type (`TcpListener`, `(TcpStream, SocketAddr)?`,
+`Child`'s streams) of a local bound from a std call chain, through the emitter's small table of std returns.
+The walk gets its own `std_type_of`, a copy of `infer_std_type`'s rules on the walk's environment (declared types for
+written-type bindings, earlier std bindings, a bare std type name, `try?`, tuple elements, `Child` streams; a Boring
+type of the same name shadows) and the same `std_call_return_type`, which is now `pub(crate)` so there is one table.
+
+Over `tests/cases`: 17,008 reads reach the accessor, 62 find an entry (3 files: `external_non_clone_collection`,
+`misc_scenarios_6`, `reserved_word_identifiers`); 54 are compared with a walk claim and agree, none differs; the 8 left
+are the actor-dict handles, which the walk does not model (they are a representation decision). Two walk-only claims
+(`let a2 = a` of an `'actor` local, in `var_rebind_alias_independent`): the emitter tracks the alias by its own
+tables. Rust identical. The walk does not answer here either: the table is small, the emitter's rules are the same
+rules, and there is no read the walk would add.
+
+### 20.5 `var_init_exprs` behind an accessor, and a stale-entry leak (2026-11-13)
+
+Not a type table: a flat `name -> latest initialiser expression` (written for every `let` and for the slots of a tuple
+destructuring), read at six places (`infer_float_width_inner`, `fixed_fmt_of_expr_inner`, the owned-collection test of
+`emit_let`, the destructuring slots, a loop-shape test), now `local_init_expr`. The walk records, per `(scope, name)`, the
+position of the initialiser of the one `let` that binds the name (`LocalInits`; several bindings, or a binder that is
+not a `let` with a value, make it `None`; a sentinel entry marks a scope as walked, so that absence means "this body
+does not bind the name"). `check` classifies each read that finds an entry: agrees / differs / unsure / stray.
+
+Over `tests/cases`: 2,802 reads find an entry: 2,700 agree, 0 differ, 87 are unsure (the name is bound more than once in
+the body, or the top-level statements of several inlined files share scope `""`), 15 are **stray**. A stray read is a
+real leak, not a disagreement of opinion: the emitter's table is never reset between bodies, so a name the current
+body does not bind (a bare field of `self`, a name some other function bound) answers with the initialiser of a `let`
+elsewhere (`mut_scenarios_3`, `misc_scenarios_7`, `self_scenarios`; the minimal case is a `let n = 2.0` in one function
+and a bare field `n: float32` of a method emitted later). This is the shape of the bugs the CHANGELOG lists (a decision
+taken from the wrong binding). In walk mode `local_init_expr` withholds the entry for such a read (15 reads in the corpus);
+the Rust is identical over `tests/cases` and `examples`, so the corpus does not show a case where the stale initialiser
+changed the output: the leak is found and closed, no corpus program was wrong because of it.
+Tuple destructurings are now bound by the walk (slot position when the value is a tuple literal).
+Test: `a_stale_initialiser_is_reported_and_withheld`.
+
+### 20.6 The clone decisions: last-use sites come from the decisions pass (2026-11-13)
+
+What decides clone against move at a by-value read of a local is not one table but a chain of predicates
+(`is_last_use_move`, `is_reused_var`, `field_read_needs_clone`, `is_owned_collection_local`, ...). Looked at one by one:
+the type-shaped inputs of those predicates are the tables already behind accessors (`local_type`, `local_init_expr`,
+`local_struct`), and the representation inputs (`arc_vars`, `var_mutex_types`, the borrowed and primitive parameters) are
+decisions of `infer_qualifiers`, still read directly. The one input that is a pure function of the body, position-keyed, and
+used by nine reads, is `last_use_sites` (`last_use.rs`, "this `Var` is the last thing that can touch its variable").
+`emit_fn` computed it just before emitting each body.
+
+It is now made by the decisions pass, with the qualifier decisions (`last_use_table`, keyed by scope; two bodies of a scope,
+overloads, are bound to none), and `emit_fn` asks `last_use_for(f)`: walk mode reads the table, `check` computes the
+emitter's own set as well and compares them (`LASTUSEMISMATCH`). Over `tests/cases`: 8,408 function bodies, the table equals
+the emitter's own set for every one (0 differ), and walk mode answers all 8,408 from the table; Rust identical over
+`tests/cases` and `examples`. This is the expected result (the function takes the same parameters and body), so the value is
+not in an agreement that was in doubt: the move-or-clone choice of a by-value read is now known before emission, a table the
+`.bri` can print, and a body that emission changes after the pass would show as a `LASTUSEMISMATCH` in `check`.
+
+What is not moved: the predicates' representation conditions. `is_last_use_move` still ends with the emitter's `arc_vars`,
+`var_mutex_types`, `var_primitive_params` and `fn_current_params`, which is the part of the choice that depends on how a
+local is represented and is the remaining work of the clone decisions (and of the lock ones, which read the same sets).
+
+### 20.7 The representation half of `is_last_use_move` (2026-11-13)
+
+`is_last_use_move` was a site test (20.6) and four emitter sets: `arc_vars`, `var_mutex_types`, `var_primitive_params`,
+`fn_current_params`. They are now one predicate, `last_use_representation_ok`. The same answer from the decisions pass: the
+local is not a parameter and `decision_table` did not decide an `'actor`, `'guard`, atomic, `'shared` or task qualifier
+for it (a written qualifier is read by the type test that follows in `is_last_use_move`). Parameters are in the signature
+and primitive parameters are parameters, so only `arc_vars` and `var_mutex_types` are replaced by a decision.
+
+`check` compares the two per read (`LASTUSEREPMISMATCH`). Over `tests/cases`: 1,669 reads reach the test with a last-use
+site, all agree, **none of them forbids the move**: the branch that matters is not exercised by the corpus (the analysis
+only marks syntactically owned locals, and a written-qualifier or actor local is not one). An agreement in which the
+interesting side never happens is not evidence, so the edge was built: a `var mut [int]` that a `task:` captures and
+that is then passed by value (`tests/type_table.rs`, `a_last_use_the_decisions_do_not_allow_to_move_is_cloned`). There the
+two disagree: the decisions pass says `'actor`, the emitter's sets do not hold the local, `off` emits
+`Bag { xs: xs }` after `xs` was moved into the spawned task (rustc E0382), and the decisions say not to move.
+
+Walk mode therefore moves only when both agree (`own && by_decision`), the rule `last_use.rs` follows itself: every doubt
+resolves to clone, never to move. Rust is identical over `tests/cases` and `examples`; on the edge program walk mode emits
+`xs.clone()`, which is still wrong there (the value was moved into the task before the call), so this is not a fix of that
+program but a refusal to add a move the decisions do not allow. The inconsistency it found is real and open: a local
+decided `'actor` whose emission does not use the lock (`task:` capturing a collection), a case for the lock decisions.
+
+### 20.8 The lock decisions: `var_mutex_types` behind an accessor (2026-11-13)
+
+The 45 reads of `var_mutex_types` by name (every method call and field access on an `'actor` local asks it: take the lock or
+not) go through `is_mutex_local`; the 18 writes (one per way a local becomes an actor: written type, result of a call, a
+parameter, a loop variable, an optional binding of an actor field or dict entry, a pattern payload) and the neighbouring sets
+(`var_mutex_task_types`, `var_rwlock_types`, `arc_vars`, `var_lock_scalar`) are untouched. `check` compares each answer with
+the decisions' (the walk's declared outer qualifier when the local has one, else the qualifier `infer_qualifiers` chose for
+it, `Actor` meaning a mutex) and logs `LOCKMISSING` (the emitter holds a lock the walk does not see) and `LOCKEXTRA`.
+
+Over `tests/cases`: 16,394 reads agree, 29 differ (13 distinct, 8 files), and they fall in four classes, none of them a
+contradiction of the type but each a thing the walk does not model:
+- **Top-level statements** (`relay_c` of `auto_ref_infer`, `a`, `c`, `d` of `with_stmt`, `a` of `qualifier_group_local_caller`):
+  `decide_program` covers function and method bodies only, so no decision exists for a top-level local (20.x, "not covered");
+  a written top-level `'actor` is a global static, not a local lock. A decisions pass over the file's own body would close it.
+- **Bindings made by a pattern or an optional binding from an actor-typed value**: `guard let lh = listeners.get(id)` over a
+  `{K=TcpListener'actor}`, `Slot.Full(z)` of a `Slot<elem'actor>`, `V.Obj(inner)`. The emitter registers the binding as a lock
+  from the subject's *type*; the walk types a pattern from declared payloads, not from a generic's instance or a dict's `get`.
+- **Qualifier-generic locals** (`Point'q pt` in `qualifier_defaults_chains`, `p` in `qualifier_infer`): instances of one
+  function share a scope name, so the walk has one table for several qualifiers and answers none.
+- One precedence bug of the first version (a written `'guard` against a decided `'actor`), fixed: a written qualifier wins.
+
+So the walk reproduces the emitter's lock set exactly for locals that are written, inferred or plainly not actors, and not
+yet for the three classes above. The walk does not answer here: a wrong answer is a missing or an extra `.lock()`, which is a
+rustc error, not a style difference. Test: `check_finds_no_lock_the_decisions_contradict_for_plain_actor_locals`.
+Open from 20.7: the `task:`-captured collection (`xs` decided `'actor`, not held behind a lock by the emitter) is not among
+these reads, it never reached `is_mutex_local` as a lock: the emitter treats it as a plain `Vec` and moves it into the task.
+
+### 20.9 A decisions pass for the file's own statements (2026-11-13)
+
+`decide_program` covered function and method bodies; the statements of the file itself (the synthesized `main`, the walk's
+scope `""`) were inferred only at emission, by `emit_program_items`'s own `infer_qualifiers` call. It now also infers them,
+on a clean sub-transpiler (no parameters, no `self`), with the top-level `let`s as `Stmt::Let`, and keeps the result under
+scope `""` in `decision_table` (replaced for each program, since each inlined file has its own body). `decided_qual` then
+reads them like any other body's.
+
+Over `tests/cases`: 1,317 decision reads agree with the emitter's own, none differs (1,303 before: the 14 more are
+top-level reads); Rust identical over `tests/cases` and `examples`; the edge that motivated the old comment in
+`emit_program_items` (a top-level local named like the previous function's auto-ref parameter, `items`) and a top-level local
+made `'actor` by a `task:` both agree (`top_level_statements_get_their_own_decisions`). In the lock check of 20.8 the
+top-level class is gone except for `with`: `with c:` rebinds `c` to the unlocked guard inside its body (the emitter removes it
+from `var_mutex_types` there), and the walk, which sees a declared `'actor`, says lock (`a`, `c`, `d`, `x` of `with_stmt`). That
+is a scope the walk does not model, not a disagreement about the type. The candidate-set qualifier of a qualifier group
+(`Union([Shared, Actor, Guard])`) is resolved by the decision in the lock check, which removed two more differences.
+
+### 20.10 Pattern and dict-`get` bindings in the walk (2026-11-13)
+
+Two gaps of the walk, both found by `LOCKMISSING` in 20.8, closed:
+- **Variant pattern names.** `bind_pattern` read the enum out of `Enum.Variant` only. The parser also writes `Enum::Variant` and
+  `Enum<elem'actor>::Variant` (the spelling `rewrite_variant_patterns` already handles); `Slot.Full(z)` of a `Slot<elem'actor>` and
+  `V.Obj(inner)` bound nothing, so no payload type, so no `'actor`. `split_variant` reads the three spellings (generic arguments
+  dropped). This also gives the walk the payload type of every such binding, not only the actor ones.
+- **`dict.get(k)`.** `type_of` types a `get` of one argument on a `{K=V}` as `V?` (before the user-method rule: a dict's own
+  members come first), so `guard let lh = listeners.get(id)` and `if let lh = reg.listeners.get(lid)` bind `V`, here a
+  `TcpListener'actor`.
+
+Over `tests/cases`: lock reads 16,413 agree, 10 differ (29 before); Rust identical over `tests/cases` and `examples`; none of
+the other families' check numbers moved (struct names, declared types, std types, initialisers). The 10 are two classes:
+- the `with` bodies of 20.9 (`a`, `c`, `d`, `x` of `with_stmt`: inside `with c:` the emitter removes `c` from the lock set, the
+  walk keeps the declared `'actor`);
+- **a name bound to different qualifiers in one body**: `Full(pt)` in several `match` arms over instances of a qualifier-generic
+  enum (`qualifier_defaults_chains`, `qualifier_infer`). The walk is flow-insensitive, one type per name per body, so the
+  qualifiers cancel (the name is bound to none). The emitter registers the lock per arm. A table keyed by the binder's
+  position instead of the name would answer; that is the same granularity change `with` needs (a scope inside the body), and
+  the next step for the lock family.
+
+### 20.11 A table by the position of the binding (2026-11-13)
+
+The lock check of 20.8 to 20.10 was by name: one type per name per body. The last ten differences were names the body binds in
+more than one way (a `match` arm's pattern per arm with another qualifier each; a `with` name, unlocked in its body only). The
+walk now also records `Binder`s: for each `(scope, name)`, in source order, a `let` (from its position to the end of the
+body), the names of a match arm's patterns (for the arm: `arm.line/col` to the furthest position in its body), a `with` name
+(unlocked, for the body, starting just after the statement's own position since the header asks the lock state at that
+position) and the parameters (the whole body). `is_mutex_local` asks the one in force at the position the emitter has reached.
+
+The emitter side of "where is it": `Transpiler::cur_pos`, the furthest `(line, col)` of an expression or statement entered in
+the body being emitted (a `Cell`, set by `emit_expr` and `emit_stmt`, reset by `emit_fn`). It is monotone on purpose: the first
+version took the latest node entered and the transpiler's own synthetic nodes, at (1, 1) and (1, 3), moved it back before
+every binder. The emitter also asks the lock state of the *name*, never of an expression, so a position is the only way to
+say which binding it means; the sequential registration of the emitter (a later binding replaces an earlier one until it is
+removed) is exactly "the latest binding in source order whose region contains here".
+
+Over `tests/cases`: lock reads 16,417 agree, 6 differ (4 distinct, all in `with_stmt`; 10 before, 29 at the start of 20.8);
+Rust identical over `tests/cases` and `examples`. The `with` and `match`-arm classes are closed. What is left, both at the top
+level of `with_stmt`:
+- a **written** `'actor` at the top level (`var mut c'actor`, `a`, `d`): the emitter does not hold it in `var_mutex_types`
+  at all, not even at the `with` header, so it is emitted by another path (a global); the walk reads the declared qualifier;
+- a top-level `var int x` the decisions pass chose `'actor` for, because a `with` guards it: a decision the emitter does not
+  act on, the same shape as the `task:`-captured collection of 20.7.
+Both are cases for the decisions themselves (what is a global, what is promoted), not for the typing.
+Tests: `the_lock_state_of_a_name_follows_its_binding_by_position`, and the lock check test now includes the two
+qualifier-generic cases.
+
+### 20.12 The written top-level `'actor`: not a decision, a position (2026-11-13), and a correction of 20.11
+
+20.11 left two differences in `with_stmt` and read them as decisions: a written top-level `'actor` the emitter "does not hold ...
+emitted by another path (a global)", and a scalar the decisions promote. Looked at with a backtrace of the read
+(`BORING_TYPE_TABLE_BACKTRACE=1` prints one at each lock difference), the first reading was wrong:
+- The top-level `var mut c'actor` is not a global. It is a local of the synthesized `main` (`let mut c: Arc<Mutex<Counter>> = ..`)
+  that `emit_let` registers like any other; inside `with c:` the emitter takes it out of the set (the body sees the guard) and puts it
+  back after. The reads that differed were the ones *inside* a `with` body at the top level.
+- The walk's answer for them was wrong because the position it was given was: `cur_pos` was never reset for `main` (it is not an
+  `emit_fn`), so it held the end of the file, outside every region. `emit_program_items` now resets it where `main` starts emitting.
+  The statement "the walk reads the declared qualifier of something the emitter emits elsewhere" in 20.11 should be disregarded; what
+  was open was the input of the by-position lookup, not the decisions.
+- The scalar (`var int x` under `with x:`) is real: `infer_qualifiers` says `'actor` because a `with` over an unqualified name
+  "requires lock semantics" (`collect_with_await_signals`), the emitter emits `let mut x: isize = 1` and a plain block. An inferred
+  `'actor` on a value with no fields is not a lock; a *written* scalar `int'actor` is (`var_lock_scalar`, it agreed all along). The
+  comparison now counts a decided `'actor` as a lock only for a type that is not `Copy`. This is the same shape as 20.7's `task:`
+  collection: a decision of `infer_qualifiers` the emitter does not act on. It is left as it is: acting on it would change the Rust of a
+  working program, and what is wrong is the decision's name, not the output.
+- A name with binding events but none in force yet (a read before its `let`, as a pre-scan does) is not a lock.
+
+Over `tests/cases`: **16,423 lock reads agree, 0 differ**; Rust identical over `tests/cases` and `examples`. The walk does not answer
+for `is_mutex_local` in walk mode: it would give the emitter's answer on every read of the corpus, so there is no read gained, and a wrong
+answer is a missing or an extra `.lock()` (a rustc error) for programs the corpus does not hold. The check is the gate: `check` over a
+suite is how a program with another shape would show up.
+

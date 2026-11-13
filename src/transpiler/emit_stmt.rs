@@ -25,7 +25,7 @@ impl Transpiler {
             || is_try_optional(e)
             || matches!(&e.kind, ExprKind::Var(v)
                 if self.optional_vars.contains(v.as_str())
-                || self.var_types.get(v.as_str())
+                || self.local_type(v.as_str())
                     .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
             || matches!(&e.kind, ExprKind::Call(callee, _)
                 if matches!(&callee.kind, ExprKind::Var(fn_name)
@@ -63,6 +63,7 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt, is_last: bool) {
+        { let p = stmt.line_col(); if p > self.cur_pos.get() { self.cur_pos.set(p); } }
         match stmt {
             Stmt::Let(s) => if let Some(v) = &s.value { self.hoist_external_borrowed_arrays(v) },
             Stmt::Expr(e) => self.hoist_external_borrowed_arrays(e),
@@ -583,7 +584,7 @@ impl Transpiler {
                 continue;
             }
 
-            let is_mutex = self.var_mutex_types.contains(name.as_str());
+            let is_mutex = self.is_mutex_local(name.as_str());
             let is_mutex_task = self.var_mutex_task_types.contains(name.as_str());
             let is_rwlock = self.var_rwlock_types.contains(name.as_str());
             let is_rwlock_task = self.var_rwlock_task_types.contains(name.as_str());
@@ -786,7 +787,7 @@ impl Transpiler {
         if let Some(q) = self.inferred_qualifiers.get(v.as_str()) {
             return q.is_owned_or_new();
         }
-        if let Some(ty) = self.var_types.get(v.as_str()) {
+        if let Some(ty) = self.local_type(v.as_str()) {
             return matches!(ty.without_mut(), Type::Qualified(_, q) if q.is_owned_or_new());
         }
         false
@@ -959,7 +960,7 @@ impl Transpiler {
     pub(crate) fn operand_struct_type(&self, v: &str) -> Option<String> {
         if let Some(t) = self.local_struct(v).as_ref() { return Some(t.clone()); }
         self.managed_owned_var_src(v)?;
-        match self.var_types.get(v).map(Type::without_mut) {
+        match self.local_type(v).map(Type::without_mut) {
             Some(Type::Qualified(inner, _)) => match inner.as_ref() {
                 Type::Named(n) => Some(n.clone()),
                 _ => None,
@@ -1183,7 +1184,7 @@ impl Transpiler {
     pub(crate) fn get_expr_rust_type(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) => {
-                if let Some(ty) = self.var_types.get(v.as_str()) {
+                if let Some(ty) = self.local_type(v.as_str()) {
                     let rust_ty = match ty {
                         Type::Named(n) => normalize_type_name(n, self.use_rc_str()),
                         _ => self.emit_type(ty),

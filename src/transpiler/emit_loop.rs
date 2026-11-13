@@ -46,11 +46,11 @@ impl Transpiler {
             known_local_vars: self.known_local_vars.contains(name),
             mut_checked_local_vars: self.mut_checked_local_vars.contains(name),
             content_mutable_local_vars: self.content_mutable_local_vars.contains(name),
-            var_types: self.var_types.get(name).cloned(),
+            var_types: self.local_type(name).cloned(),
             var_struct_types: self.local_struct(name),
             string_vars: self.string_vars.contains(name),
             optional_vars: self.optional_vars.contains(name),
-            var_mutex_types: self.var_mutex_types.contains(name),
+            var_mutex_types: self.is_mutex_local(name),
             managed_refcell_vars: self.managed_refcell_vars.contains(name),
             managed_mutex_vars: self.managed_mutex_vars.contains(name),
         }
@@ -89,7 +89,7 @@ impl Transpiler {
             // referenced bare was invisible to the dict-shape check below, so a 2-var
             // `for k, v in dict_field:` wrongly fell through to the array auto-enumerate
             // path. See docs/self-field-loop-match-borrow-bug.md (repro 2).
-            ExprKind::Var(v) => self.var_types.get(v.as_str())
+            ExprKind::Var(v) => self.local_type(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))
                 .cloned()
                 .or_else(|| self.bare_self_field_type(v)),
@@ -156,7 +156,7 @@ impl Transpiler {
         }
         if let ExprKind::Var(v) = &iterable.kind {
             if self.dict_vars.contains(v.as_str()) { return true; }
-            if let Some(shape) = self.var_init_exprs.get(v.as_str())
+            if let Some(shape) = self.local_init_expr(v.as_str())
                 .and_then(|init| self.literal_shape_is_tuples(init))
             {
                 return shape;
@@ -388,7 +388,7 @@ impl Transpiler {
                             _ => None,
                         })
                 }),
-                ExprKind::Var(v) => self.var_types.get(v.as_str())
+                ExprKind::Var(v) => self.local_type(v.as_str())
                     .or_else(|| self.fn_current_params.get(v.as_str()))
                     .and_then(|ty| match ty.without_mut() {
                         Type::Array(elem) => Some(elem.as_ref().clone()),
@@ -589,7 +589,7 @@ impl Transpiler {
         // Lock the mutex, iterate with `.iter().cloned()` to keep items as owned values.
         if let ExprKind::Var(actor_name) = &s.iterable.kind {
             let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
-            if self.var_mutex_types.contains(actor_name.as_str()) || self.var_mutex_task_types.contains(actor_name.as_str())
+            if self.is_mutex_local(actor_name.as_str()) || self.var_mutex_task_types.contains(actor_name.as_str())
             {
                 let vars = if s.vars.is_empty() {
                     "_".into()
@@ -694,7 +694,7 @@ impl Transpiler {
         // the field access moves out of the MutexGuard. Clone the field first.
         if let ExprKind::Field(obj, field_name) = &s.iterable.kind {
             if let ExprKind::Var(v) = &obj.kind {
-                if self.var_mutex_types.contains(v.as_str()) || self.managed_mutex_vars.contains(v.as_str()) {
+                if self.is_mutex_local(v.as_str()) || self.managed_mutex_vars.contains(v.as_str()) {
                     let access = self.mutex_var_read(v, v);
                     let cloned_field = format!("{}.{}.clone()", access, field_name);
                     let tmp = format!("__iter_{}", v);
@@ -886,7 +886,7 @@ impl Transpiler {
         // instantiation" note.
         let pat = if s.vars.len() > 1 {
             let mut_flags: Option<Vec<bool>> = match &s.iterable.kind {
-                ExprKind::Var(v) => self.var_types.get(v.as_str())
+                ExprKind::Var(v) => self.local_type(v.as_str())
                     .or_else(|| self.fn_current_params.get(v.as_str()))
                     .and_then(Type::tuple_slot_mut_flags),
                 _ => None,

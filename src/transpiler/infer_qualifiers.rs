@@ -1837,7 +1837,7 @@ impl Transpiler {
         if let Some(q) = self.inferred_qualifiers.get(name) {
             return Some(q.clone());
         }
-        if let Some(ty) = self.var_types.get(name) {
+        if let Some(ty) = self.local_type(name) {
             return qual_of_type(ty);
         }
         None
@@ -1845,7 +1845,7 @@ impl Transpiler {
 
     /// If the variable has a Union qualifier (declared), return the member list.
     fn var_union<'a>(&'a self, name: &str) -> Option<&'a Vec<OwnerQual>> {
-        let ty = self.fn_current_params.get(name).or_else(|| self.var_types.get(name))?;
+        let ty = self.fn_current_params.get(name).or_else(|| self.local_type(name))?;
         if let Type::Qualified(_, OwnerQual::Union(members)) = ty.without_mut() {
             return Some(members);
         }

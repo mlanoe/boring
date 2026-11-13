@@ -191,7 +191,7 @@ impl Transpiler {
         }
         let ExprKind::Var(v) = &value.kind else { return None };
         let known = match (guard, is_task) {
-            (false, false) => self.var_mutex_types.contains(v.as_str()),
+            (false, false) => self.is_mutex_local(v.as_str()),
             (false, true) => self.var_mutex_task_types.contains(v.as_str()),
             (true, false) => self.var_rwlock_types.contains(v.as_str()),
             (true, true) => self.var_rwlock_task_types.contains(v.as_str()),
@@ -760,7 +760,7 @@ impl Transpiler {
         if s.ty.is_none() {
             if let ExprKind::Array(elems) = &s_value.kind {
                 if let [Expr { kind: ExprKind::Var(tn), .. }] = elems.as_slice() {
-                    if self.struct_fields.contains_key(tn.as_str()) && !self.var_types.contains_key(&s.name) {
+                    if self.struct_fields.contains_key(tn.as_str()) && !self.has_local_type(&s.name) {
                         self.var_types.insert(s.name.clone(), Type::Array(Box::new(Type::Named(tn.clone()))));
                     }
                 }
@@ -936,7 +936,7 @@ impl Transpiler {
         // survive into this fresh binding (`let result = call_method(..)` → `Value`), or
         // `match result:` would be emitted with `Some(..)` arms against a plain value. The
         // `Optional`-return arms below re-record it when this binding really is optional.
-        if s.ty.is_none() && matches!(self.var_types.get(s.name.as_str()), Some(Type::Optional(_))) {
+        if s.ty.is_none() && matches!(self.local_type(s.name.as_str()), Some(Type::Optional(_))) {
             self.var_types.remove(s.name.as_str());
         }
         // Track variables bound to user struct/enum constructors for getter and method dispatch
@@ -1501,7 +1501,7 @@ impl Transpiler {
                     let is_str_field = if let ExprKind::Field(obj, field_name) = &recv_expr.kind {
                         if let ExprKind::Var(v) = &obj.kind {
                             let tracked_struct = self.local_struct(v);
-                            let struct_name = self.var_types.get(v.as_str())
+                            let struct_name = self.local_type(v.as_str())
                                 .and_then(|t| match t {
                                     Type::Named(n) => Some(n.as_str()),
                                     Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.as_str()) } else { None },
@@ -1521,7 +1521,7 @@ impl Transpiler {
             }
             // Propagate actor/rc type when `let g = f` where f is already an actor var.
             if let ExprKind::Var(src) = &s_value.kind {
-                if self.var_mutex_types.contains(src.as_str()) {
+                if self.is_mutex_local(src.as_str()) {
                     self.var_mutex_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                     if self.rc_vars.contains(src.as_str()) {
@@ -1557,7 +1557,7 @@ impl Transpiler {
                 if self.string_vars.contains(src.as_str()) {
                     self.string_vars.insert(s.name.clone());
                 }
-                if let Some(ty) = self.var_types.get(src.as_str()).cloned() {
+                if let Some(ty) = self.local_type(src.as_str()).cloned() {
                     self.var_types.insert(s.name.clone(), ty);
                 }
             }
@@ -1590,10 +1590,10 @@ impl Transpiler {
             }
             if let ExprKind::Field(obj_expr, field_name) = &s_value.kind {
                 if let ExprKind::Var(v) = &obj_expr.kind {
-                    if self.var_mutex_types.contains(v.as_str()) {
+                    if self.is_mutex_local(v.as_str()) {
                         let struct_ty_name = self.local_struct(v).as_ref()
                             .cloned()
-                            .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                            .or_else(|| self.local_type(v.as_str()).and_then(|t| match t {
                                 Type::Named(n) => Some(n.clone()),
                                 Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None },
                                 _ => None,
@@ -1631,7 +1631,7 @@ impl Transpiler {
                     let struct_ty_name = self.local_struct(v).as_ref()
                         .cloned()
                         .or_else(|| self.var_struct_type.get(v.as_str()).cloned())
-                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                        .or_else(|| self.local_type(v.as_str()).and_then(|t| match t {
                             Type::Named(n) => Some(n.clone()),
                             Type::Qualified(inner, _) => if let Type::Named(n) = inner.as_ref() { Some(n.clone()) } else { None },
                             _ => None,
@@ -1675,7 +1675,7 @@ impl Transpiler {
         // type so a later `f(m)` to a `Trait&` parameter reborrows through the `Arc` (`&*m`)
         // instead of unsizing the `Arc` itself. (The one-level `v.field` case is handled above.)
         if let ExprKind::Field(obj_expr, field_name) = &s_value.kind {
-            if !matches!(obj_expr.kind, ExprKind::Var(_)) && !self.var_types.contains_key(s.name.as_str()) {
+            if !matches!(obj_expr.kind, ExprKind::Var(_)) && !self.has_local_type(s.name.as_str()) {
                 let field_ty = self.resolve_expr_struct_type(obj_expr)
                     .and_then(|sn| self.struct_fields.get(sn.as_str()))
                     .and_then(|fs| fs.iter().find(|(f, _)| f == field_name))
@@ -1699,7 +1699,7 @@ impl Transpiler {
         // borrowed `str::split` (`Vec<&str>`). Once the declared/inferred type is known to be
         // scalar string, it is authoritative: clear the contradictory collection metadata.
         let is_typed_string = s.ty.as_ref().is_some_and(Self::is_string_type)
-            || self.var_types.get(s.name.as_str()).is_some_and(Self::is_string_type);
+            || self.local_type(s.name.as_str()).is_some_and(Self::is_string_type);
         if is_typed_string {
             self.vec_vars.remove(s.name.as_str());
             self.collection_vars.remove(s.name.as_str());
@@ -2227,14 +2227,14 @@ impl Transpiler {
         if self.arc_vars.contains(v) {
             return false;
         }
-        match self.var_types.get(v).map(Type::without_mut) {
+        match self.local_type(v).map(Type::without_mut) {
             Some(Type::Array(_) | Type::Dict(..) | Type::Set(_)) => true,
             Some(_) => false,
             // An unannotated `let b = [1, 2, 3]` never gets a `var_types` entry; its initializer
             // (recorded for every let) still says it is an owned collection.
             None => !self.fn_current_params.contains_key(v)
                 && matches!(
-                    self.var_init_exprs.get(v).map(|e| &e.kind),
+                    self.local_init_expr(v).map(|e| &e.kind),
                     Some(
                         ExprKind::Array(_) | ExprKind::Dict(_) | ExprKind::Set(_)
                         | ExprKind::ArrayFill { .. } | ExprKind::ArrayAlloc { .. }
@@ -2350,7 +2350,7 @@ impl Transpiler {
         let already_opt = inner_val.starts_with("Some(") || inner_val == "None"
             || is_try_optional(value)
             || matches!(&value.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str())
-                || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
+                || self.local_type(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
             || inner_val.ends_with(".ok()")
             || inner_val.ends_with(".map(|i| i as isize)")
             || inner_val.ends_with(".map(|i| __s[..i].chars().count() as isize) }")
@@ -2483,7 +2483,7 @@ impl Transpiler {
             let inner = self.emit_expr(value);
             let is_existing_rc = inner.starts_with("Rc::clone(") || inner.starts_with("Rc::new(")
                 || matches!(&value.kind, ExprKind::Var(v)
-                    if self.var_mutex_types.contains(v.as_str())
+                    if self.is_mutex_local(v.as_str())
                     || self.var_rwlock_types.contains(v.as_str())
                     || self.rc_vars.contains(v.as_str()))
                 || (matches!(&value.kind, ExprKind::Field(..))
@@ -2492,7 +2492,7 @@ impl Transpiler {
                 || matches!(&value.kind, ExprKind::MethodCall(obj, m, args)
                     if m == "clone" && args.is_empty()
                     && matches!(&obj.kind, ExprKind::Var(v)
-                        if self.var_mutex_types.contains(v.as_str())
+                        if self.is_mutex_local(v.as_str())
                         || self.var_rwlock_types.contains(v.as_str())
                         || self.rc_vars.contains(v.as_str())));
             return if is_existing_rc {
@@ -2511,14 +2511,14 @@ impl Transpiler {
         }
         // If the value is an existing Arc variable, clone it instead of moving.
         let is_existing_arc =
-            (is_actor && matches!(&value.kind, ExprKind::Var(v) if self.var_mutex_types.contains(v.as_str())))
+            (is_actor && matches!(&value.kind, ExprKind::Var(v) if self.is_mutex_local(v.as_str())))
             || (is_guard && matches!(&value.kind, ExprKind::Var(v) if self.var_rwlock_types.contains(v.as_str())))
             || matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()))
             // MethodCall(obj, "clone", []) on a known arc_var — already Arc<Mutex<T>>
             || matches!(&value.kind, ExprKind::MethodCall(obj, m, args)
                 if m == "clone" && args.is_empty()
                 && matches!(&obj.kind, ExprKind::Var(v)
-                    if self.var_mutex_types.contains(v.as_str()) || self.arc_vars.contains(v.as_str())))
+                    if self.is_mutex_local(v.as_str()) || self.arc_vars.contains(v.as_str())))
             // A struct field that is itself a lock handle, written or inferred (`svc.stats`).
             || (matches!(&value.kind, ExprKind::Field(..))
                 && self.resolve_lock_field_ref(value).is_some_and(|r| r.rwlock == is_guard))
@@ -2527,7 +2527,7 @@ impl Transpiler {
                 if matches!(&obj.kind, ExprKind::Var(v) if {
                     let sn = self.local_struct(v).as_ref()
                         .cloned()
-                        .or_else(|| self.var_types.get(v.as_str()).and_then(|t| match t {
+                        .or_else(|| self.local_type(v.as_str()).and_then(|t| match t {
                             Type::Named(n) => Some(n.clone()),
                             _ => None,
                         }));
@@ -2631,7 +2631,7 @@ impl Transpiler {
             Type::Qualified(i, OwnerQual::Shared)
                 if matches!(i.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str())));
         if let ExprKind::Var(v) = &value.kind {
-            if self.var_types.get(v.as_str()).is_some_and(&is_shared_trait)
+            if self.local_type(v.as_str()).is_some_and(&is_shared_trait)
                 || self.fn_current_params.get(v.as_str()).is_some_and(&is_shared_trait)
             {
                 return true;
@@ -2657,7 +2657,7 @@ impl Transpiler {
             _ => false,
         };
         if let ExprKind::Var(v) = &value.kind {
-            if self.var_types.get(v.as_str()).is_some_and(&same_trait) {
+            if self.local_type(v.as_str()).is_some_and(&same_trait) {
                 // `Box<dyn Trait>` is not `Clone`: forward the box itself (a move)
                 // instead of the `.clone()` `emit_expr_owned` would add.
                 return self.emit_expr(value);
@@ -2749,10 +2749,10 @@ impl Transpiler {
     pub(crate) fn expr_already_owned_repr(&self, value: &Expr) -> bool {
         if let ExprKind::Var(v) = &value.kind {
             // A bare-trait (or `Trait'owned`) variable/param is itself a `Box<dyn Trait>`.
-            let own_ty = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()));
+            let own_ty = self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str()));
             if own_ty.is_some_and(|t| self.is_boxed_trait_type(t)) { return true; }
             let has_qualified_own_type = matches!(
-                self.var_types.get(v.as_str()).map(Type::without_mut),
+                self.local_type(v.as_str()).map(Type::without_mut),
                 Some(Type::Qualified(_, _))
             );
             let is_param = self.fn_current_params.contains_key(v.as_str());
@@ -3058,9 +3058,9 @@ impl Transpiler {
             }
             Some(Type::Qualified(_, OwnerQual::Actor)) => {
                 if let ExprKind::Var(v) = &value.kind {
-                    let is_owned_actor = self.var_mutex_types.contains(v.as_str())
+                    let is_owned_actor = self.is_mutex_local(v.as_str())
                         && !self.fn_current_params.contains_key(v.as_str());
-                    let is_borrowed_actor = self.var_mutex_types.contains(v.as_str())
+                    let is_borrowed_actor = self.is_mutex_local(v.as_str())
                         && self.fn_current_params.contains_key(v.as_str())
                         || matches!(self.inferred_qualifiers.get(v.as_str()), Some(crate::ast::OwnerQual::Actor | crate::ast::OwnerQual::ActorTask));
                     if is_owned_actor { format!("&{}", v) }
@@ -3070,7 +3070,7 @@ impl Transpiler {
                     // `actor_var.clone()` already produces Arc<Mutex<T>> — don't double-wrap.
                     if method == "clone" {
                         if let ExprKind::Var(v) = &recv.kind {
-                            if self.var_mutex_types.contains(v.as_str()) {
+                            if self.is_mutex_local(v.as_str()) {
                                 return format!("{}.clone()", v);
                             }
                         }
@@ -3198,7 +3198,7 @@ impl Transpiler {
             Some(Type::Qualified(inner_ty, OwnerQual::Shared))
                 if matches!(inner_ty.as_ref(), Type::Named(n) if self.trait_method_names.contains_key(n.as_str()))
                     && matches!(&value.kind, ExprKind::Var(v)
-                        if self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()))
+                        if self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str()))
                             .is_some_and(|t| self.is_boxed_trait_type(t))) =>
             {
                 let ptr = match self.config.threading {
@@ -3233,7 +3233,7 @@ impl Transpiler {
                 // `'many` parameter that resolved `'shared` and to another that resolved `'actor`):
                 // the callee gets an immutable snapshot of the value under the lock.
                 if let ExprKind::Var(v) = &value.kind {
-                    if self.var_mutex_types.contains(v.as_str()) && !self.fn_current_params.contains_key(v.as_str()) {
+                    if self.is_mutex_local(v.as_str()) && !self.fn_current_params.contains_key(v.as_str()) {
                         return match self.config.threading {
                             crate::transpiler::ThreadingMode::Single => format!("Rc::new({v}.borrow().clone())"),
                             crate::transpiler::ThreadingMode::Multi => format!("Arc::new({v}.lock().unwrap().clone())"),
@@ -3245,7 +3245,7 @@ impl Transpiler {
                         let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")
                             || Self::do_block_tail_is_shared_pointer(value, &inner);
                         let is_existing_shared_var = matches!(&value.kind, ExprKind::Var(v)
-                                if matches!(self.var_types.get(v.as_str()),
+                                if matches!(self.local_type(v.as_str()),
                                     Some(Type::Qualified(_, OwnerQual::Shared))));
                         if already_rc_expr {
                             inner
@@ -3448,7 +3448,7 @@ impl Transpiler {
         if let ExprKind::Var(v) = &value.kind {
             if self.is_struct_local(v)
                 && !self.arc_vars.contains(v.as_str())
-                && !self.var_mutex_types.contains(v.as_str())
+                && !self.is_mutex_local(v.as_str())
                 && !self.var_primitive_params.contains(v.as_str())
                 && !s.ends_with(".clone()")
                 && !self.is_last_use_move(value)
@@ -3508,7 +3508,7 @@ impl Transpiler {
         {
             let elems = match &s.value.kind {
                 ExprKind::Tuple(es) => Some(es.clone()),
-                ExprKind::Var(v) => match self.var_init_exprs.get(v.as_str()).map(|e| &e.kind) {
+                ExprKind::Var(v) => match self.local_init_expr(v.as_str()).map(|e| &e.kind) {
                     Some(ExprKind::Tuple(es)) => Some(es.clone()),
                     _ => None,
                 },

@@ -204,7 +204,7 @@ impl Transpiler {
                     // given a `var_struct_types` entry — including a `T&`/`mut T&` param or
                     // alias and `let p = params[i]` over `[Param]`. Peel `mut` and ownership
                     // qualifiers before checking the pointee/element's real struct name.
-                    if let Some(n) = self.var_types.get(v.as_str()).and_then(receiver_type_name) {
+                    if let Some(n) = self.local_type(v.as_str()).and_then(receiver_type_name) {
                         if self.struct_fields.contains_key(n.as_str()) {
                             return Some(n);
                         }
@@ -264,7 +264,7 @@ impl Transpiler {
     /// string/array method call (`text.graphemeSlice(i, i + 1)`), typed from its receiver.
     pub(crate) fn overload_local_or_method_type(&self, e: &Expr) -> Option<Type> {
         match &e.kind {
-            ExprKind::Var(v) => self.var_scalar_types.get(v.as_str()).cloned(),
+            ExprKind::Var(v) => self.local_scalar_type(v.as_str()),
             ExprKind::MethodCall(recv, m, _) => {
                 let recv_ty = self.overload_arg_type(recv)?;
                 builtin_method_result_type(&recv_ty, m)
@@ -355,9 +355,9 @@ impl Transpiler {
                 _ => None,
             },
             ExprKind::Var(v) if v == "self" => self.self_type.clone().map(Type::Named),
-            ExprKind::Var(v) => self.var_types.get(v.as_str())
+            ExprKind::Var(v) => self.local_type(v.as_str())
                 .or_else(|| self.fn_current_params.get(v.as_str()))
-                .or_else(|| self.var_std_types.get(v.as_str()))
+                .or_else(|| self.local_std_type(v.as_str()))
                 .cloned()
                 .or_else(|| self.local_struct(v).map(Type::Named))
                 .or_else(|| self.bare_self_field_type(v))
@@ -634,7 +634,7 @@ impl Transpiler {
     pub(crate) fn resolve_expr_external_type_name(&self, expr: &Expr) -> Option<String> {
         match &expr.kind {
             ExprKind::Var(v) => {
-                if let Some(Type::Named(n)) = self.var_types.get(v.as_str()) {
+                if let Some(Type::Named(n)) = self.local_type(v.as_str()) {
                     return Some(n.clone());
                 }
                 None
@@ -643,7 +643,7 @@ impl Transpiler {
                 let rust_method = camel_to_snake(method);
                 if let ExprKind::Var(t) = &obj.kind {
                     let is_type_path = t.chars().next().is_some_and(|c| c.is_uppercase())
-                        && !self.var_types.contains_key(t.as_str())
+                        && !self.has_local_type(t.as_str())
                         && !self.known_local_vars.contains(t.as_str())
                         && !self.is_known_user_type(t);
                     if !is_type_path { return None; }
@@ -673,7 +673,7 @@ impl Transpiler {
                 let rust_method = camel_to_snake(method);
                 let qualifier = match &obj.kind {
                     ExprKind::Var(t) if t.chars().next().is_some_and(|c| c.is_uppercase())
-                        && !self.var_types.contains_key(t.as_str())
+                        && !self.has_local_type(t.as_str())
                         && !self.known_local_vars.contains(t.as_str())
                         && !self.is_known_user_type(t) => Some(t.clone()),
                     _ => self.resolve_expr_external_type_name(obj),
@@ -751,7 +751,7 @@ impl Transpiler {
                     self.self_type.as_deref()
                         .map(|t| self.is_known_user_type(t))
                         .unwrap_or(false)
-                } else if self.var_types.get(v.as_str()).is_some_and(Self::is_weak_qualified) {
+                } else if self.local_type(v.as_str()).is_some_and(Self::is_weak_qualified) {
                     // A `T'weak` local is a `Weak<T>`, not a `T`: its only operations are
                     // `.upgrade()`/`.clone()` (see the checker's `'weak` rule), so it must go
                     // through `map_method` (which unwraps `upgrade()`'s `Option`), never be
@@ -775,8 +775,8 @@ impl Transpiler {
                     // `.remove` codegen below instead of dispatching to `Widgets`'s own `remove`
                     // method, even though the wrapper is fully deref-transparent to `Widgets`.
                     let type_name = self.local_struct(v)
-                        .or_else(|| self.var_types.get(v.as_str()).and_then(receiver_type_name))
-                        .or_else(|| self.var_types.get(v.as_str())
+                        .or_else(|| self.local_type(v.as_str()).and_then(receiver_type_name))
+                        .or_else(|| self.local_type(v.as_str())
                             .and_then(transparent_wrapper_inner_name)
                             .map(|n| n.to_string()));
                     type_name.map(|t| self.is_known_user_type(t.as_str())).unwrap_or(false)
@@ -896,7 +896,7 @@ impl Transpiler {
         match &expr.kind {
             ExprKind::Var(v) if v == "self" => None,
             ExprKind::Var(v) => {
-                if let Some(t) = self.var_types.get(v.as_str()) { return Some(t.clone()); }
+                if let Some(t) = self.local_type(v.as_str()) { return Some(t.clone()); }
                 if !self.known_local_vars.contains(v.as_str()) {
                     let sn = self.self_type.as_ref()?;
                     let (_, fty) = self.struct_fields.get(sn.as_str())?
@@ -952,7 +952,7 @@ impl Transpiler {
             // declared `T?`.
             ExprKind::Var(v) => {
                 self.optional_vars.contains(v.as_str())
-                    || self.var_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)
+                    || self.local_type(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)
                     || (!self.known_local_vars.contains(v.as_str())
                         && self.self_type.as_ref()
                             .and_then(|sn| self.struct_fields.get(sn.as_str()))
@@ -1840,7 +1840,7 @@ impl Transpiler {
                 // its own lock first, which this branch does not do.
                 let outer_type: Option<String> = if v == "self" {
                     self.self_type.clone()
-                } else if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
+                } else if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
                     || self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
                     || self.managed_mutex_vars.contains(v.as_str()) || self.managed_refcell_vars.contains(v.as_str())
                 {
@@ -1960,7 +1960,7 @@ impl Transpiler {
     fn try_emit_mutex_method(&self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
         // Mutex local var method: w.method(args) → w.lock().await.method(args)
         if let ExprKind::Var(v) = &obj.kind {
-            if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+            if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                 // Resolved once up front — used both by the mut-gating diagnostic below
                 // and by the user-struct-name-preservation check just after it.
                 let struct_name = self.resolve_receiver_type_name(v.as_str());
@@ -2304,10 +2304,10 @@ impl Transpiler {
                     .or_else(|| {
                         if self.managed_refcell_vars.contains(v.as_str())
                             || self.managed_mutex_vars.contains(v.as_str())
-                            || self.var_mutex_types.contains(v.as_str())
+                            || self.is_mutex_local(v.as_str())
                             || self.var_mutex_task_types.contains(v.as_str())
                         {
-                            self.var_types.get(v.as_str()).and_then(|t| {
+                            self.local_type(v.as_str()).and_then(|t| {
                                 match t {
                                     crate::ast::Type::Named(n) => Some(n.clone()),
                                     crate::ast::Type::Qualified(inner, _) => {
@@ -2378,7 +2378,7 @@ impl Transpiler {
                         // field on the Arc/Rc wrapper itself). Lock/borrow `v` first in that
                         // case, mirroring the `MUTATING_COLLECTION_METHODS` branch just below,
                         // which already does this correctly for the same shape of receiver.
-                        let outer_access = if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                        let outer_access = if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                             self.mutex_var_read(v.as_str(), v.as_str())
                         } else if self.managed_mutex_vars.contains(v.as_str()) {
                             format!("{}.lock().unwrap()", v)
@@ -2417,7 +2417,7 @@ impl Transpiler {
         if MUTATING_COLLECTION_METHODS.contains(&method) {
             if let ExprKind::Field(inner_obj, field_name) = &obj.kind {
                 if let ExprKind::Var(v) = &inner_obj.kind {
-                    if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+                    if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                         let (rust_method, extra_wrap) = map_method(method, args.len(), self.want_raw_option_pop.get());
                         let mut args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
                         // An argument reading `v` again must be evaluated before the write guard.
@@ -2679,7 +2679,7 @@ impl Transpiler {
                 let not_collection = !self.vec_vars.contains(v.as_str())
                     && !self.collection_vars.contains(v.as_str());
                 let type_confirms = {
-                    let vt = self.var_types.get(v.as_str());
+                    let vt = self.local_type(v.as_str());
                     vt.is_none()
                     || matches!(vt, Some(Type::Str))
                     || matches!(vt, Some(Type::Named(n)) if n == "string" || n == "str")
@@ -2755,7 +2755,7 @@ impl Transpiler {
     pub(crate) fn try_emit_string_prop(&self, obj: &Expr, field: &str) -> Option<String> {
         if !matches!(field, "length" | "len" | "count" | "graphemeCount" | "displayWidth") { return None; }
         if let ExprKind::Var(v) = &obj.kind {
-            if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
+            if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str()) {
                 return None;
             }
         }
@@ -3518,7 +3518,7 @@ impl Transpiler {
             ExprKind::Int(_) | ExprKind::UInt64(_) => true,
             ExprKind::Cast(_, ty) => Self::numeric_scalar_is_float(ty) == Some(false),
             ExprKind::Var(v) => {
-                if let Some(ty) = self.var_types.get(v.as_str()) {
+                if let Some(ty) = self.local_type(v.as_str()) {
                     return Self::numeric_scalar_is_float(ty) == Some(false);
                 }
                 if !self.known_local_vars.contains(v.as_str()) {
@@ -3713,7 +3713,7 @@ impl Transpiler {
     /// field-read `.clone()` of `let s = pair.0` (E0599 on a non-`Clone` handle) can be skipped for
     /// the well-known tuple/struct results below (`infer_std_type`). A receiver type enters it only
     /// through a std constructor (`TcpListener.bind`), a declared type, or another table hit.
-    fn std_call_return_type(recv_ty: &str, method: &str) -> Option<Type> {
+    pub(crate) fn std_call_return_type(recv_ty: &str, method: &str) -> Option<Type> {
         let named = |n: &str| Type::Named(n.to_string());
         match (recv_ty, method) {
             ("TcpListener", "accept") => Some(Type::Tuple(vec![named("TcpStream"), named("SocketAddr")])),
@@ -3741,8 +3741,8 @@ impl Transpiler {
             }
         };
         let ty = match &expr.kind {
-            ExprKind::Var(v) => self.var_types.get(v.as_str())
-                .or_else(|| self.var_std_types.get(v.as_str()))
+            ExprKind::Var(v) => self.local_type(v.as_str())
+                .or_else(|| self.local_std_type(v.as_str()))
                 .or_else(|| (!self.known_local_vars.contains(v.as_str()))
                     .then(|| self.fn_current_params.get(v.as_str())).flatten())
                 .map(|t| t.without_mut().clone()),
@@ -3753,7 +3753,7 @@ impl Transpiler {
                 let recv_ty = match &recv.kind {
                     // `TcpListener.bind(..)`: a bare type name that is not a local.
                     ExprKind::Var(v) if !self.known_local_vars.contains(v.as_str())
-                        && !self.var_types.contains_key(v.as_str())
+                        && !self.has_local_type(v.as_str())
                         && v.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => v.clone(),
                     _ => match self.infer_std_type(recv)? {
                         Type::Named(n) => n,
@@ -3837,7 +3837,7 @@ impl Transpiler {
     /// call is rejected with a diagnostic. `None` = not a mutable-capable array binding (not an
     /// array, or an immutable `let`/plain parameter, left to rustc as before).
     fn array_buffer_binding(&self, name: &str) -> Option<(bool, bool)> {
-        let ty = self.var_types.get(name)?;
+        let ty = self.local_type(name)?;
         if !matches!(ty.without_mut(), Type::Array(_)) { return None; }
         // `var` (rebindable) params are `&mut Vec<_>`; so are `mut` (content-mutable) array
         // params, which the qualifier inference types as `BorrowMut`.
@@ -3972,9 +3972,9 @@ impl Transpiler {
             ExprKind::Var(v) if self.fn_current_params.contains_key(v.as_str()) =>
                 self.fn_current_params.get(v.as_str()).is_some_and(qualified_ty),
             ExprKind::Var(v) => self.inferred_qualifiers.get(v.as_str()).is_some_and(|q| !matches!(q, OwnerQual::Inline))
-                || self.var_types.get(v.as_str()).is_some_and(qualified_ty)
+                || self.local_type(v.as_str()).is_some_and(qualified_ty)
                 || self.arc_vars.contains(v.as_str()) || self.rc_vars.contains(v.as_str())
-                || self.var_mutex_types.contains(v.as_str()) || self.var_rwlock_types.contains(v.as_str()),
+                || self.is_mutex_local(v.as_str()) || self.var_rwlock_types.contains(v.as_str()),
             _ => self.resolve_expr_type(value).is_some_and(|t| qualified_ty(&t)),
         };
         if already {
@@ -4333,7 +4333,7 @@ impl Transpiler {
                     .collect();
                 let names = names?;
                 let element_type = |name: &str| -> Option<&Type> {
-                    let mut ty = self.var_types.get(name)
+                    let mut ty = self.local_type(name)
                         .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))?;
                     while let Type::Qualified(inner, _) | Type::Mut(inner) = ty { ty = inner; }
                     match ty {
@@ -4387,7 +4387,7 @@ impl Transpiler {
             }).collect();
             let names = names?;
             let element_type = |name: &str| -> Option<&Type> {
-                let mut ty = self.var_types.get(name)
+                let mut ty = self.local_type(name)
                     .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))?;
                 while let Type::Qualified(inner, _) | Type::Mut(inner) = ty { ty = inner; }
                 match ty {
@@ -4452,7 +4452,7 @@ impl Transpiler {
         }).collect();
         let names = names?;
         let type_of = |name: &str| {
-            self.var_types.get(name)
+            self.local_type(name)
                 .or_else(|| self.global_var_types.get(name).and_then(|ty| ty.as_ref()))
         };
         let element_type = |name: &str| -> Option<&Type> {
@@ -4650,7 +4650,7 @@ impl Transpiler {
             if v != "self"
                 && self.fn_current_params.contains_key(v.as_str())
                 && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
-                && !self.var_mutex_types.contains(v.as_str())
+                && !self.is_mutex_local(v.as_str())
                 && !self.var_mutex_task_types.contains(v.as_str())
                 && !self.var_rwlock_types.contains(v.as_str())
                 && !self.var_rwlock_task_types.contains(v.as_str())
@@ -4680,7 +4680,7 @@ impl Transpiler {
                 && self.known_local_vars.contains(v.as_str())
                 && !self.content_mutable_local_vars.contains(v.as_str())
                 && self.mut_checked_local_vars.contains(v.as_str())
-                && !self.var_mutex_types.contains(v.as_str())
+                && !self.is_mutex_local(v.as_str())
                 && !self.var_mutex_task_types.contains(v.as_str())
                 && !self.var_rwlock_types.contains(v.as_str())
                 && !self.var_rwlock_task_types.contains(v.as_str())
@@ -4693,7 +4693,7 @@ impl Transpiler {
                 // is `let mut` either way — see `BindingKind::is_mutable`'s
                 // doc), so this has to be a Boring-level check.
                 let struct_name = self.local_struct(v)
-                    .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                    .or_else(|| self.local_type(v.as_str()).and_then(|t| {
                         if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                     }));
                 if let Some(sn) = struct_name {
@@ -4723,7 +4723,7 @@ impl Transpiler {
             let owner_struct: Option<String> = match &inner_obj.kind {
                 ExprKind::Var(v) if v == "self" => self.self_type.clone(),
                 ExprKind::Var(v) => self.local_struct(v)
-                    .or_else(|| self.var_types.get(v.as_str()).and_then(|t| {
+                    .or_else(|| self.local_type(v.as_str()).and_then(|t| {
                         if let crate::ast::Type::Named(n) = t.without_mut() { Some(n.clone()) } else { None }
                     })),
                 _ => None,
@@ -4774,7 +4774,7 @@ impl Transpiler {
         // identical scope in `eval_expr.rs`.
         if let ExprKind::Index(inner_obj, _idx) = &obj.kind {
             if let ExprKind::Var(coll_name) = &inner_obj.kind {
-                if let Some(coll_ty) = self.var_types.get(coll_name.as_str()) {
+                if let Some(coll_ty) = self.local_type(coll_name.as_str()) {
                     if let Some(elem_ty) = coll_ty.index_element_type() {
                         if !elem_ty.grants_mut() {
                             let elem_struct_name = match elem_ty.without_mut() {
@@ -5099,7 +5099,7 @@ impl Transpiler {
             // desugaring (`desugar_array_block`), which pushes each element
             // raw and relies on this to box it.
             let trait_name = match &obj.kind {
-                ExprKind::Var(v) => self.var_types.get(v.as_str()).and_then(|t| match t.without_mut() {
+                ExprKind::Var(v) => self.local_type(v.as_str()).and_then(|t| match t.without_mut() {
                     Type::Array(inner) => match inner.without_mut() {
                         Type::Named(n) if self.trait_method_names.contains_key(n.as_str()) => Some(n.clone()),
                         _ => None,
@@ -5384,7 +5384,7 @@ impl Transpiler {
         let external_throws = method == "durationSince" && match &obj.kind {
             ExprKind::MethodCall(base, static_method, _) if static_method == "now" =>
                 matches!(&base.kind, ExprKind::Var(type_name) if type_name == "SystemTime"),
-            ExprKind::Var(name) => matches!(self.var_types.get(name.as_str()),
+            ExprKind::Var(name) => matches!(self.local_type(name.as_str()),
                 Some(Type::Named(type_name)) if type_name == "SystemTime"),
             _ => false,
         };
@@ -5456,7 +5456,7 @@ impl Transpiler {
         let kind = match &arg.kind {
             ExprKind::Var(v) => {
                 if self.var_mutex_task_types.contains(v.as_str()) { K::ActorTask }
-                else if self.var_mutex_types.contains(v.as_str()) { K::Actor }
+                else if self.is_mutex_local(v.as_str()) { K::Actor }
                 else if self.var_rwlock_task_types.contains(v.as_str()) { K::GuardTask }
                 else if self.var_rwlock_types.contains(v.as_str()) { K::Guard }
                 else {
@@ -5700,7 +5700,7 @@ impl Transpiler {
                 // upgrade() returns Option — the transpiler cannot insert it implicitly.
                 if let ExprKind::Var(vname) = &a.value.kind {
                     let arg_ty = self.fn_current_params.get(vname.as_str())
-                        .or_else(|| self.var_types.get(vname.as_str()));
+                        .or_else(|| self.local_type(vname.as_str()));
                     let arg_is_weak = matches!(arg_ty, Some(Type::Qualified(_, OwnerQual::Weak)));
                     let param_is_non_weak = matches!(param_ty,
                         Some(Type::Qualified(_, OwnerQual::Shared | OwnerQual::Actor | OwnerQual::Guard)) |
@@ -5825,9 +5825,9 @@ impl Transpiler {
                             ) && !self.is_external_non_clone_type(self.fn_current_params.get(vname.as_str()))
                             // Local variables whose type was tracked as a named/collection type.
                             || matches!(
-                                self.var_types.get(vname.as_str()),
+                                self.local_type(vname.as_str()),
                                 Some(Type::Named(_) | Type::Generic(..) | Type::Array(_) | Type::Dict(..) | Type::Set(_) | Type::Optional(_))
-                            ) && !self.is_external_non_clone_type(self.var_types.get(vname.as_str())) => {
+                            ) && !self.is_external_non_clone_type(self.local_type(vname.as_str())) => {
                             format!("{}.clone()", emitted)
                         }
                         _ => emitted,
@@ -5871,7 +5871,7 @@ impl Transpiler {
                     let _borrow_placeholder;
                     let _borrow_mut_placeholder;
                     let arg_qual = if let ExprKind::Var(vname) = &a.value.kind {
-                        if self.var_mutex_types.contains(vname.as_str()) {
+                        if self.is_mutex_local(vname.as_str()) {
                             _actor_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Actor);
                             Some(&_actor_placeholder)
                         } else if self.var_rwlock_types.contains(vname.as_str()) {
@@ -5888,7 +5888,7 @@ impl Transpiler {
                             Some(&_borrow_mut_placeholder)
                         } else {
                             self.fn_current_params.get(vname.as_str())
-                                .or_else(|| self.var_types.get(vname.as_str()))
+                                .or_else(|| self.local_type(vname.as_str()))
                         }
                     } else { None };
                     // Q4: 'shared → mut Counter& is a compile error — 'shared has no interior mutability.
@@ -6623,7 +6623,7 @@ impl Transpiler {
         let ExprKind::Var(v) = &arg.kind else {
             return Some(format!("{}{}", r, self.emit_expr(arg)));
         };
-        let decl = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()))
+        let decl = self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str()))
             .map(Type::without_mut);
         let inferred = self.inferred_qualifiers.get(v.as_str());
         let is_ref_mut = matches!(decl, Some(Type::Qualified(_, OwnerQual::BorrowMut)))
@@ -6679,9 +6679,9 @@ impl Transpiler {
         match &arg.kind {
             ExprKind::Var(v) if !mutable && self.boxed_trait_ref_vars.contains(v.as_str())
                 && !self.fn_current_params.contains_key(v.as_str())
-                && !self.var_types.contains_key(v.as_str()) => format!("&**{}", v),
+                && !self.has_local_type(v.as_str()) => format!("&**{}", v),
             ExprKind::Var(v) => {
-                let ty = self.fn_current_params.get(v.as_str()).or_else(|| self.var_types.get(v.as_str()));
+                let ty = self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str()));
                 match ty {
                     Some(t) if is_dyn_ref(t) => {
                         if mutable { format!("&mut *{}", v) } else { self.emit_expr(arg) }
@@ -6902,7 +6902,7 @@ impl Transpiler {
         let l_lit = matches!(&l.kind, ExprKind::Str(_));
         let r_lit = matches!(&r.kind, ExprKind::Str(_));
         let is_str_ref = |e: &Expr| matches!(&e.kind, ExprKind::Var(v)
-            if self.var_types.get(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
+            if self.local_type(v.as_str()).map(Self::is_str_ref_type).unwrap_or(false));
         let wrap = (l_lit != r_lit) && !is_str_ref(l) && !is_str_ref(r);
         let emit = |e: &Expr, is_lit: bool| match (&e.kind, is_lit && wrap) {
             (ExprKind::Str(s), true) => self.str_from(&escape_str(s)),
@@ -7267,7 +7267,7 @@ impl Transpiler {
             ExprKind::Field(inner, f) => {
                 // A receiver that is itself a lock handle is not a plain struct place.
                 if let ExprKind::Var(v) = &inner.kind {
-                    if self.var_mutex_types.contains(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
+                    if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
                         || self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
                         || self.managed_mutex_vars.contains(v.as_str()) || self.managed_refcell_vars.contains(v.as_str())
                         || self.managed_param_shadows.contains_key(v.as_str())
@@ -7408,7 +7408,7 @@ impl Transpiler {
     /// Read guard (`.lock().unwrap()` / `.read().unwrap()` / `.borrow()`) of a resolved lock field.
     /// Declared type of `field` on the struct behind the `'actor` local/param `var`.
     pub(crate) fn var_mutex_field_type(&self, var: &str, field: &str) -> Option<Type> {
-        let tname = self.var_types.get(var).and_then(|t| {
+        let tname = self.local_type(var).and_then(|t| {
             let mut cur = t.without_mut();
             while let Type::Qualified(inner, _) = cur { cur = inner.without_mut(); }
             if let Type::Named(n) = cur { Some(n.clone()) } else { None }
@@ -7464,7 +7464,7 @@ impl Transpiler {
         use crate::ast::{ExprKind, Type, OwnerQual};
         match &expr.kind {
             ExprKind::Var(v) => {
-                if let Some(ty) = self.var_types.get(v.as_str()) {
+                if let Some(ty) = self.local_type(v.as_str()) {
                     let ty = ty.without_mut();
                     return matches!(ty, Type::Qualified(_, OwnerQual::Actor))
                         || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, OwnerQual::Actor)));
@@ -7728,6 +7728,13 @@ impl Transpiler {
             type_scope: self.type_scope.clone(),
             built_struct_names: self.built_struct_names.clone(),
             built_locals: self.built_locals.clone(),
+            built_local_types: self.built_local_types.clone(),
+            built_scalar_types: self.built_scalar_types.clone(),
+            built_std_types: self.built_std_types.clone(),
+            built_inits: self.built_inits.clone(),
+            built_binders: self.built_binders.clone(),
+            cur_pos: std::cell::Cell::new(self.cur_pos.get()),
+            walk_top_types: self.walk_top_types.clone(),
             decision_table: self.decision_table.clone(),
             fn_param_names: self.fn_param_names.clone(),
             user_defines_box: self.user_defines_box,
@@ -7819,6 +7826,7 @@ impl Transpiler {
             unlent_method_params: self.unlent_method_params.clone(),
             unlent_probe: std::collections::HashSet::new(),
             last_use_sites: self.last_use_sites.clone(),
+            last_use_table: self.last_use_table.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),
             mut_local_vars: self.mut_local_vars.clone(),
             content_mutable_local_vars: self.content_mutable_local_vars.clone(),

@@ -77,7 +77,7 @@ impl Transpiler {
                     let already_opt = inner.starts_with("Some(") || inner == "None"
                         || is_try_optional(e)
                         || matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
-                        || matches!(&e.kind, ExprKind::Var(v) if self.var_types.get(v.as_str())
+                        || matches!(&e.kind, ExprKind::Var(v) if self.local_type(v.as_str())
                             .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
                         || matches!(&e.kind, ExprKind::Call(callee, _)
                             if matches!(&callee.kind, ExprKind::Var(fn_name)
@@ -382,7 +382,7 @@ impl Transpiler {
                             // Track the inner type of the optional — after the guard let,
                             // `name` has the unwrapped type (e.g. string? → string).
                             if let ExprKind::Var(src) = &expr.kind {
-                                if let Some(Type::Optional(inner)) = self.var_types.get(src.as_str()).cloned() {
+                                if let Some(Type::Optional(inner)) = self.local_type(src.as_str()).cloned() {
                                         self.var_types.insert(name.clone(), *inner.clone());
                                         if Self::is_string_type(&inner) {
                                             self.string_vars.insert(name.clone());
@@ -644,7 +644,7 @@ impl Transpiler {
                                         "Float" | "float" | "Float64" | "float64" | "f64" => Some(Type::Float64),
                                         _ => None,
                                     };
-                                    let previous_error_ty = self.var_types.get("error").cloned();
+                                    let previous_error_ty = self.local_type("error").cloned();
                                     if let Some(ty) = catch_float_ty.clone() {
                                         self.var_types.insert("error".into(), ty);
                                     }
