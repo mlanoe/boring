@@ -1,0 +1,53 @@
+# A `'guard` / `'actor` value carried by an enum payload and bound in a pattern must be
+# registered as a lock local, so a method call on the binding locks it (match arm, if let,
+# guard let over an optional).
+struct Cell:
+    var int value = 0
+
+    req int peek():
+        value
+
+enum Slot:
+    Empty
+    Full(Cell'guard)
+
+enum ASlot:
+    Empty
+    Full(Cell'actor)
+
+def show(Slot s):
+    match s:
+        Empty: print "empty"
+        Full(c): print "full {c.peek()}"
+
+def showActor(ASlot s):
+    match s:
+        Empty: print "empty"
+        Full(c): print "actor full {c.peek()}"
+
+struct Holder:
+    var Cell'guard? slot = nil
+
+    req peekIfLet():
+        if let c = slot:
+            print "if-let {c.peek()}"
+        else:
+            print "if-let none"
+
+    req peekGuardLet():
+        guard let c = slot else:
+            print "guard-let none"
+            return
+        print "guard-let {c.peek()}"
+
+def main():
+    show(Slot.Full(Cell(3)))
+    show(Slot.Empty)
+    showActor(ASlot.Full(Cell(4)))
+    var mut Holder h = Holder()
+    h.peekIfLet()
+    h.peekGuardLet()
+    mut Cell'guard shared = Cell(5)
+    var mut Holder h2 = Holder(slot=shared)
+    h2.peekIfLet()
+    h2.peekGuardLet()

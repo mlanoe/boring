@@ -7476,14 +7476,30 @@ impl Transpiler {
     /// Return true when `expr` yields an actor-qualified value (Rc<RefCell<T>> or Arc<Mutex<T>>).
     /// Used to detect if-let bindings that need to be tracked as managed vars.
     pub(crate) fn expr_yields_actor(&self, expr: &crate::ast::Expr) -> bool {
+        self.expr_yields_qual(expr, crate::ast::OwnerQual::Actor)
+    }
+
+    /// `expr_yields_actor` for any one owner qualifier (`'guard` for the read-write lock family).
+    pub(crate) fn expr_yields_qual(&self, expr: &crate::ast::Expr, qual: crate::ast::OwnerQual) -> bool {
         use crate::ast::{ExprKind, Type, OwnerQual};
         match &expr.kind {
             ExprKind::Var(v) => {
                 if let Some(ty) = self.local_type(v.as_str()) {
                     let ty = ty.without_mut();
-                    return matches!(ty, Type::Qualified(_, OwnerQual::Actor))
-                        || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, OwnerQual::Actor)));
+                    return matches!(ty, Type::Qualified(_, q) if *q == qual)
+                        || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, q) if *q == qual));
                 }
+                // A bare name that is a field of `self` (implicit `self.field`).
+                let bare_field = self.self_type.as_ref()
+                    .and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == v.as_str()))
+                    .map(|(_, ty)| {
+                        let ty = ty.without_mut();
+                        matches!(ty, Type::Qualified(_, q) if *q == qual)
+                            || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, q) if *q == qual))
+                    });
+                if let Some(b) = bare_field { return b; }
+                if qual == OwnerQual::Guard { return self.var_rwlock_types.contains(v.as_str()); }
                 self.managed_refcell_vars.contains(v.as_str()) || self.managed_mutex_vars.contains(v.as_str())
             }
             ExprKind::Field(obj, field_name) => {
@@ -7498,8 +7514,8 @@ impl Transpiler {
                     .and_then(|fs| fs.iter().find(|(n, _)| n == field_name))
                     .map(|(_, ty)| {
                         let ty = ty.without_mut();
-                        matches!(ty, Type::Qualified(_, OwnerQual::Actor))
-                            || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
+                        matches!(ty, Type::Qualified(_, q) if *q == qual)
+                            || matches!(ty, Type::Optional(inner) if matches!(inner.without_mut(), Type::Qualified(_, q) if *q == qual))
                     })
                     .unwrap_or(false)
             }

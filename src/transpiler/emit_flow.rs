@@ -375,6 +375,10 @@ impl Transpiler {
                     match clause {
                         CondClause::Let(name, expr) => {
                             self.track_std_binding(name, expr, true);
+                            // `guard let c = g` over an optional `'guard`: the binding is a lock local.
+                            if self.expr_yields_qual(expr, crate::ast::OwnerQual::Guard) {
+                                self.var_rwlock_types.insert(name.clone());
+                            }
                             match self.opt_fn_handle_req(expr) {
                                 Some(req) => { self.fn_handle_vars.insert(name.clone(), req); }
                                 None => { self.fn_handle_vars.remove(name.as_str()); }

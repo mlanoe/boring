@@ -189,11 +189,16 @@ impl Transpiler {
         if let Some(t) = self.actor_dict_get_std_type(expr) {
             self.var_std_types.insert(name.to_string(), t);
         }
-        if is_actor {
-            if self.actor_dict_get_std_type(expr).is_some() { self.var_mutex_types.insert(name.to_string()); }
-            match self.config.threading {
-                crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.to_string()); }
-                crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.to_string()); }
+        // A `'guard` (read-write lock) source: the binding is a lock local too.
+        let is_guard = self.expr_yields_qual(expr, crate::ast::OwnerQual::Guard);
+        if is_guard { self.var_rwlock_types.insert(name.to_string()); }
+        if is_actor || is_guard {
+            if is_actor {
+                if self.actor_dict_get_std_type(expr).is_some() { self.var_mutex_types.insert(name.to_string()); }
+                match self.config.threading {
+                    crate::transpiler::ThreadingMode::Single => { self.managed_refcell_vars.insert(name.to_string()); }
+                    crate::transpiler::ThreadingMode::Multi  => { self.managed_mutex_vars.insert(name.to_string()); }
+                }
             }
             // Also track the inner struct type so method return types can be inferred.
             // e.g. `if let p = self.parent:` where parent: Env'actor? → var_struct_types["p"] = "Env"
@@ -387,6 +392,7 @@ impl Transpiler {
         self.string_vars.remove(name);
         self.optional_vars.remove(name);
         self.var_mutex_types.remove(name);
+        self.var_rwlock_types.remove(name);
         self.managed_refcell_vars.remove(name);
         self.managed_mutex_vars.remove(name);
     }
@@ -1426,6 +1432,17 @@ impl Transpiler {
                 }
             }
         }
+        // `'guard` payloads (Arc<RwLock<T>>): same registration as `'actor` above, in the
+        // read-write lock set, so a method call on the binding locks it instead of being emitted
+        // on the Arc itself. (`'task` payloads are not covered: an enum carrying one does not
+        // compile, its derived `PartialEq` has no impl for tokio's lock.)
+        let mut bound_guards: Vec<String> = Vec::new();
+        for (name, ty) in &bound_types {
+            if matches!(ty.without_mut(), Type::Qualified(_, crate::ast::OwnerQual::Guard)) {
+                self.var_rwlock_types.insert(name.clone());
+                bound_guards.push(name.clone());
+            }
+        }
         // Collect boxed bindings — pattern vars bound from recursive (Box<T>) fields.
         // We emit `let x = *x;` (or `let x = x.map(|b| *b);` for a `T?` field stored as
         // `Option<Box<T>>`) at the top of the arm body to auto-unbox them.
@@ -1573,6 +1590,9 @@ impl Transpiler {
         }
         for name in &bound_optionals {
             self.optional_vars.remove(name.as_str());
+        }
+        for name in &bound_guards {
+            self.var_rwlock_types.remove(name.as_str());
         }
         // Remove actor tracking added for this arm (scoped to the arm body).
         for name in &bound_actors {
