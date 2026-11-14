@@ -2382,7 +2382,7 @@ still named values the painter reads. Platform themes ship as overrides on the b
 system accent is applied as light and dark variant overrides because a variant override outranks an every-variant one.
 Method-form modifiers (`Button(...).styled(...)`) now also resolve views imported from another file (compiler commit `9ea0b443`); boring-ui has
 not switched to it yet. The draft's `.style(...)` name is still not available (a `Button` has a `style` field) and neither are the
-`.buttonStyle(...)` provider names. Not done: styles that return views (`<View> body(Context)`), a text-scale preference read from the system,
+`.buttonStyle(...)` provider names. Styles that return views exist for Button and Toggle (2026-11-12): `ControlStyle.body(StyleContext)` returns `[View]`, mounted as the control's `children` and built again when hover, focus or press change. Not done: view-returning styles for TextField and List; a text-scale preference read from the system,
 and a live update when the system appearance changes (that needs the delayed wake of the wgpu host, `screen.requestRedrawAfter`, which is being
 added).
 

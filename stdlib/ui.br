@@ -325,11 +325,16 @@ pub view Button:
     UIAction onActivate
     ButtonRole role = .Normal
     ButtonStyle style = .Inherit
+    # The presentation subtree a view-returning style supplies (set by the runtime, not by the application): laid out
+    # inside the button, painted over its face; pointer, focus and keyboard stay with the button.
+    [View] children = []
     body(): native
 
 pub view Toggle:
     bind bool value
     string label
+    # The presentation subtree a view-returning style supplies (see `Button.children`): it composes the whole control, label included.
+    [View] children = []
     body(): native
 
 pub view TextField:
