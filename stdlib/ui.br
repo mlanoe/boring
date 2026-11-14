@@ -343,6 +343,9 @@ pub view TextField:
     string placeholder = ""
     # Enter's semantic action ("submit"); without one, Enter falls through to the scope's default action.
     UIAction? onSubmit = nil
+    # The decoration subtree a view-returning style supplies: it fills the field's box, painted over the style's face and under the text, caret
+    # and selection, which stay the host's.
+    [View] children = []
     body(): native
 
 # ── Interaction modifiers (docs/design-notes/boring-ui-draft.md, "Button", "Event dispatch") ───────────
