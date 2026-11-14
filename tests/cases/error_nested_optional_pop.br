@@ -1,0 +1,6 @@
+# `pop()` of an array of optionals is an optional of an optional too (`[]` pops nothing, `[nil]`
+# pops a `nil`), so the checker refuses a `pop()` whose result is used.
+def main():
+    mut [int?] xs = [1, nil]
+    let last = xs.pop()
+    print last

@@ -1,0 +1,16 @@
+# What the optional-of-an-optional rule leaves alone: a `pop()` whose result is discarded, the
+# element reads that never nest (`xs[i]`, `contains(nil)`, `length`), 
+# and `pop()`/`first()`/`get(k)` over a collection of non-optional elements.
+def main():
+    mut [int?] xs = [1, nil, 3]
+    xs.pop()
+    xs.pop()
+    print "{xs.length} {xs[0]:?} {xs.contains(nil)}"
+
+    let {string=int?} table = {"a" = nil}
+    print "{table.contains("a")} {table.length}"
+
+    mut [int] plain = [4, 5]
+    print "{plain.first():?} {plain.pop():?} {plain.length}"
+    let {string=int} counts = {"x" = 1}
+    print "{counts.get("x"):?} {counts.get("y"):?}"

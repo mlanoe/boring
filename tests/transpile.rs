@@ -1732,3 +1732,4 @@ transpile_test!(typed_empty_array);
 transpile_test!(interp_builtin_parity);
 transpile_test!(interp_builtin_parity_2);
 transpile_test!(build_builtin_parity);
+transpile_test!(optional_array_discarded_pop);

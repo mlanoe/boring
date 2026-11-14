@@ -1264,3 +1264,11 @@ interp_test!(view_scenarios_2);
 interp_test!(view_state_param_stays_lent);
 interp_test!(interp_builtin_parity_2);
 interp_test!(build_builtin_parity);
+
+error_test!(error_nested_optional_first);
+error_test!(error_nested_optional_find_field);
+
+error_test!(error_nested_optional_pop);
+error_test!(error_nested_optional_dict_get);
+interp_test!(optional_array_discarded_pop);
+error_test!(error_nested_optional_dict_get_default);

@@ -1,0 +1,5 @@
+# The same for the one-argument `get(k)` of a dict whose values are optional: a missing key and a
+# key holding `nil` would both be `nil`.
+def main():
+    let {string=int?} table = {"a" = nil, "b" = 2}
+    print "{table.get("a")}"

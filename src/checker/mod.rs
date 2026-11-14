@@ -282,6 +282,10 @@ struct Checker {
     in_qual_generic_decl: bool,
     /// Name of the struct whose inits/methods are being checked (`None` outside one).
     current_struct: Option<String>,
+    /// Position of the call that is the whole of the expression statement being checked: its
+    /// result is discarded (`xs.pop()` on its own line), which is what exempts it from the
+    /// optional-of-an-optional rule below.
+    discarded_stmt_call: Option<(usize, usize)>,
     /// Names of every user struct and enum — what makes a `mut T` parameter a lent `&mut T`
     /// (mirrors `Transpiler::is_lent_param`'s `all_struct_types` / `all_enum_types`).
     user_types: std::collections::HashSet<String>,
@@ -398,6 +402,7 @@ impl Checker {
             current_struct_fields: std::collections::HashSet::new(),
             in_qual_generic_decl: false,
             current_struct: None,
+            discarded_stmt_call: None,
             user_types: std::collections::HashSet::new(),
             api_types: HashMap::new(),
             type_traits: crate::downcast::TypeTraits::default(),
@@ -2084,6 +2089,64 @@ impl Checker {
         self.report_arg_mismatches(&name.clone(), &params, args);
     }
 
+    /// The declared type of a collection receiver, where the checker knows it: a binding with a
+    /// written type (`let [int?] xs`), a parameter, or a field of the struct being checked
+    /// (`items` / `self.items`).
+    fn declared_receiver_type(&self, recv: &Expr) -> Option<Type> {
+        let field_of_current = |name: &str| -> Option<Type> {
+            let sname = self.current_struct.as_ref()?;
+            self.struct_field_types.get(sname)?.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
+        };
+        match &recv.kind {
+            ExprKind::Var(n) => match self.lookup(n) {
+                Some(b) => b.ty.clone(),
+                None => field_of_current(n),
+            },
+            ExprKind::Field(obj, f) if matches!(&obj.kind, ExprKind::Var(v) if v == "self") => field_of_current(f),
+            _ => None,
+        }
+    }
+
+    /// `first()`, `last()`, `find(pred)` and `pop()` of an array whose element is itself optional, and
+    /// `get(k)` / `get(k, default)` of a dict whose value is, would be an optional of an optional:
+    /// absent (`[]`), present but `nil` (`[nil, 2]`), present with a value. Boring has no `T??` --
+    /// it is not even a type you can write -- and `boring run` represents both absences as
+    /// `nil`, so the first two would be indistinguishable there while `boring build` tells them
+    /// apart. Refused rather than guessed. A `pop()` whose result is discarded (`xs.pop()` as a
+    /// statement) asks nothing of the result and stays allowed.
+    fn check_nested_optional_element(&mut self, recv: &Expr, method: &str, nargs: usize, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        let is_array_method = matches!((method, nargs), ("first" | "last" | "pop", 0) | ("find", 1));
+        let is_dict_get = method == "get" && (nargs == 1 || nargs == 2);
+        if !is_array_method && !is_dict_get { return; }
+        if method == "pop" && self.discarded_stmt_call == Some((line, col)) { return; }
+        let Some(ty) = self.declared_receiver_type(recv) else { return };
+        let ty = Self::strip_qualifiers(ty.without_mut()).clone();
+        let elem = match &ty {
+            Type::Array(e) | Type::ArrayN(e, _) | Type::ArrayNExpr(e, _) if is_array_method => Some(e),
+            Type::Dict(_, v) if is_dict_get => Some(v),
+            _ => None,
+        };
+        let Some(elem) = elem else { return };
+        if !matches!(Self::strip_qualifiers(elem.without_mut()), Type::Optional(_)) { return; }
+        let (what, fix) = match method {
+            "get" => ("a dict whose values are optional",
+                "test the key with `d.contains(k)`, then read `d[k]`, or keep a plain `{K=V}` dict"),
+            "pop" => ("an array of optionals",
+                "read the last element by index (`xs[xs.length - 1]`, after a `length` check) before removing it, \
+                 or keep a plain `[T]` array; a `pop()` whose result is discarded is fine"),
+            _ => ("an array of optionals",
+                "look the element up by index (`xs[0]`, after a `length` check), or keep a plain `[T]` array"),
+        };
+        self.error(
+            format!(
+                "`.{method}()` on {what} would be an optional of an optional, which Boring has no type for \
+                 (an absent element and a present `nil` could not be told apart); fix: {fix}"
+            ),
+            line, col,
+        );
+    }
+
     fn check_method_arg_types(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
         if args.iter().any(|a| a.spread || a.default_rest) { return; }
         let Some((ArgClass::User(s), _)) = self.arg_class(recv) else { return };
@@ -2252,7 +2315,11 @@ impl Checker {
         match stmt {
             Stmt::Let(s) => self.check_let_stmt(s),
             Stmt::LetDestructure(s) => self.check_let_destructure(s),
-            Stmt::Expr(e)      => self.check_expr(e),
+            Stmt::Expr(e)      => {
+                self.discarded_stmt_call = Some((e.line, e.col));
+                self.check_expr(e);
+                self.discarded_stmt_call = None;
+            }
             Stmt::Return(r)    => {
                 if let Some(v) = &r.value {
                     self.check_expr(v);
@@ -2897,6 +2964,7 @@ impl Checker {
                     );
                 }
                 if matches!(&expr.kind, ExprKind::MethodCall(..)) {
+                    self.check_nested_optional_element(recv, method, args.len(), expr.line, expr.col);
                     self.check_same_object_lend(recv, method, args);
                     self.check_actor_param_args(recv, method, args);
                     self.check_method_arg_types(recv, method, args);

@@ -1,0 +1,7 @@
+# `first()` of an array of optionals would be an optional of an optional: absent (`[]`), present
+# but `nil` (`[nil, 2]`), or present with a value. Boring has no `T??`, and `boring run` stores
+# the first two as the same `nil`, so the checker refuses it (also `last()` and `find()`).
+def main():
+    let [int?] xs = [nil, 2]
+    let head = xs.first()
+    print head

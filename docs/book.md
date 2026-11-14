@@ -529,7 +529,7 @@ println!("Next year: {}", age + 1);
 
 **Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type and recurses through nested arrays/dicts/sets, tuples (`([1], [a])`) and optionals (`nil` when absent), including `for` loop variables over collections; a hole whose type it cannot resolve falls back to Rust's `{:?}` (strings quoted).
 
-**Optionals in a debug hole.** `"{x}"` renders an optional as `nil` or its value, but the debug form `"{x:?}"` is Rust's `{:?}` of the `Option`: `Some(4)` / `None`, with the width and fill of the spec applied to the payload (`{x:>8?}` is `Some(       4)`), and the same wherever the type says `T?` inside an array, tuple, dict value or struct field (`[Some(1), None]`, `Link { next: Some(2), v: 7 }`). Both modes agree for a hole whose type is written or evident: a `T?` binding, parameter, field or return type, `first()`/`last()`/`find()`/`indexOf()`/`get(k)`/`parseInt()`, `try?`, and an untyped binding initialised from one of these. One case differs: an optional of an optional (`[int?].first()`, an `int??`) prints `Some(1)` under `boring run`, which has no run-time tag to tell `nil` from `Some(nil)`, and `Some(Some(1))` under `boring build`.
+**Optionals in a debug hole.** `"{x}"` renders an optional as `nil` or its value, but the debug form `"{x:?}"` is Rust's `{:?}` of the `Option`: `Some(4)` / `None`, with the width and fill of the spec applied to the payload (`{x:>8?}` is `Some(       4)`), and the same wherever the type says `T?` inside an array, tuple, dict value or struct field (`[Some(1), None]`, `Link { next: Some(2), v: 7 }`). Both modes agree for a hole whose type is written or evident: a `T?` binding, parameter, field or return type, `first()`/`last()`/`find()`/`indexOf()`/`get(k)`/`parseInt()`, `try?`, and an untyped binding initialised from one of these. An optional of an optional (an `int??`) cannot arise from a written type, and `first()`/`last()`/`find()` of a `[int?]` is refused by the checker, so the two modes cannot disagree on one.
 
 ### Multi-line strings — `"""..."""`
 
@@ -5542,6 +5542,9 @@ for genuinely *importable* `boring.*` modules (see above).
 |---|---|---|
 | `push(item)`, `insert(i, item)`, `append(other)`, `reverse()`, `sort()` | `void` (`def`) | mutating |
 | `pop()`, `first()`, `last()` | `T?` | nil if empty |
+
+On an array whose element type is itself optional (`[int?]`), `first()`, `last()`, `find(pred)` and a `pop()` whose result is used are a checker error (so are `get(k)` and `get(k, default)` of a dict whose values are optional, `{K=V?}`): the result would be an optional of an optional (absent, present but `nil`, present with a value), which Boring has no type for and which `boring run` cannot tell apart. Index it instead (`xs[0]`, after a `length` check; for a dict, `contains(k)` then `d[k]`). A `pop()` on a line of its own, with the result discarded, is fine.
+
 | `find(pred)` | `T?` | first match, nil if none |
 | `indexOf(item)` | `int?` | `nil` if absent |
 | `reversed()`, `sorted()`, `sortedBy(key)`, `slice(from, to)`, `take(n)`, `drop(n)`, `filter(pred)` | `[T]` | new array |

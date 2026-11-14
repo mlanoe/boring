@@ -1,0 +1,11 @@
+# The same refusal for `find()` on a field of the struct being checked.
+struct Bag:
+    var mut [string?] items = []
+
+    req bool hasX():
+        let hit = items.find((s): s == "x")
+        return hit != nil
+
+def main():
+    let b = Bag()
+    print b.hasX()

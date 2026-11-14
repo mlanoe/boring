@@ -1,0 +1,6 @@
+# `get(k, default)` over optional values is the same optional of an optional (a key holding `nil`:
+# the default, or `nil`?), and the generated Rust `Option<Option<T>>.unwrap_or(7)` did not compile.
+def main():
+    let {string=int?} table = {"a" = nil}
+    let v = table.get("a", 7)
+    print v
