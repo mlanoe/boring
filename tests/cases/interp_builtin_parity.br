@@ -1,0 +1,35 @@
+# Built-ins `boring build` already accepted and `boring run` rejected ("no method ..."):
+# the array mutators of the book's content-mutation list, `fold`, the `hasPrefix`/
+# `hasSuffix`/`replaceAll` aliases, `toString`, and the `int`/`float` scalar methods.
+struct Bag:
+    var [int] xs = []
+
+def main():
+    mut [int] a = [5, 5, 3, 5, 1]
+    a.dedup()
+    print "{a:?}"
+    a.swap(0, 1)
+    print "{a:?}"
+    a.truncate(2)
+    print "{a:?}"
+    a.fill(7)
+    print "{a:?}"
+
+    mut bag = Bag()
+    bag.xs = [1, 1, 2, 3]
+    bag.xs.dedup()
+    bag.xs.swap(0, 2)
+    print "{bag.xs:?}"
+
+    let [int] nums = [3, 1, 2]
+    let int zero = 0
+    print "{nums.fold(zero, (acc, n): acc + n)}"
+
+    let s = "hello"
+    print "{s.hasPrefix("he")} {s.hasSuffix("lo")} {s.replaceAll("l", "L")}"
+    print "{s.toString()} {s.count()} {s.len()}"
+
+    let float f = 2.5
+    print "{f.min(1.0)} {f.max(9.0)} {f.powf(2.0)} {f.powi(2)}"
+    let int i = -5
+    print "{i.abs()} {i.pow(2)} {i.min(3)} {i.max(3)}"

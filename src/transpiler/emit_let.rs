@@ -2389,6 +2389,9 @@ impl Transpiler {
             // declared type is `T?` — see `expr_is_declared_optional`'s doc and
             // docs/option-return-double-some-wrap-bug.md.
             || self.expr_is_declared_optional(value)
+            // A built-in method call the resolver types as `T?` (`arr.first()`, `arr.find(..)`).
+            || (matches!(&value.kind, ExprKind::MethodCall(..))
+                && matches!(self.resolve_expr_type(value).as_ref().map(Type::without_mut), Some(Type::Optional(_))))
             // If-expression whose branches already produce Option (nil/some/method branches)
             || matches!(&value.kind, ExprKind::If(if_stmt) if {
                 fn body_ends_optional(body: &[Stmt]) -> bool {

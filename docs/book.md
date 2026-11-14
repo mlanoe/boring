@@ -529,6 +529,8 @@ println!("Next year: {}", age + 1);
 
 **Collections** can be interpolated too, identically under `boring run` and `boring build`: arrays render as `[1, 2, 3]`, string elements unquoted (`[a, b]`), dicts as `{k: 1, j: 2}`, sets as `{7, 8}`. Dict and set iteration order is unspecified, so print a one-element dict/set, or sort first, when the output must be deterministic (e.g. in tests). The transpiler picks the formatter from the hole's static type and recurses through nested arrays/dicts/sets, tuples (`([1], [a])`) and optionals (`nil` when absent), including `for` loop variables over collections; a hole whose type it cannot resolve falls back to Rust's `{:?}` (strings quoted).
 
+**Optionals in a debug hole.** `"{x}"` renders an optional as `nil` or its value, but the debug form `"{x:?}"` is Rust's `{:?}` of the `Option`: `Some(4)` / `None`, with the width and fill of the spec applied to the payload (`{x:>8?}` is `Some(       4)`), and the same wherever the type says `T?` inside an array, tuple, dict value or struct field (`[Some(1), None]`, `Link { next: Some(2), v: 7 }`). Both modes agree for a hole whose type is written or evident: a `T?` binding, parameter, field or return type, `first()`/`last()`/`find()`/`indexOf()`/`get(k)`/`parseInt()`, `try?`, and an untyped binding initialised from one of these. One case differs: an optional of an optional (`[int?].first()`, an `int??`) prints `Some(1)` under `boring run`, which has no run-time tag to tell `nil` from `Some(nil)`, and `Some(Some(1))` under `boring build`.
+
 ### Multi-line strings — `"""..."""`
 
 Triple-quoted strings span multiple lines. The indentation of the closing `"""` is stripped from every content line automatically, so the string body can be aligned with the surrounding code.
@@ -1080,9 +1082,11 @@ let f = a[1..=3].to_vec();
 | `arr.append(other)`         | `arr.extend(other)`               |
 | `arr.insert(i, v)`          | `arr.insert(i, v)`                |
 | `arr.remove(i)`             | `arr.remove(i)`                   |
+| `arr.drain(a..<b)`          | `arr.drain(a..b).collect::<Vec<_>>()` — removes the range, returns the removed elements |
 | `arr.contains(v)`           | `arr.contains(&v)`                |
 | `arr.sort()`                | `arr.sort()`                      |
 | `arr.reverse()`             | `arr.reverse()`                   |
+| `arr.shuffle()`             | in-place Fisher–Yates shuffle on a built-in generator (no `rand` dependency); a different order on every call |
 | `arr.map((x): expr)`        | `arr.iter().map(\|x\| expr).collect()` |
 | `arr.filter((x): cond)`     | `arr.iter().filter(\|x\| cond).cloned().collect()` |
 | `arr.reduce(init, (a,b): expr)` | `arr.iter().fold(init, \|a,b\| expr)` |
@@ -5539,7 +5543,7 @@ for genuinely *importable* `boring.*` modules (see above).
 | `push(item)`, `insert(i, item)`, `append(other)`, `reverse()`, `sort()` | `void` (`def`) | mutating |
 | `pop()`, `first()`, `last()` | `T?` | nil if empty |
 | `find(pred)` | `T?` | first match, nil if none |
-| `indexOf(item)` | `int` | `-1` if absent |
+| `indexOf(item)` | `int?` | `nil` if absent |
 | `reversed()`, `sorted()`, `sortedBy(key)`, `slice(from, to)`, `take(n)`, `drop(n)`, `filter(pred)` | `[T]` | new array |
 | `map(f)`, `flatMap(f)`, `flat()`, `zip(other)`, `enumerate()` | `[any]` | new array |
 | `reduce(init, f)` | `any` | fold left |

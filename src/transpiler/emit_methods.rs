@@ -458,6 +458,38 @@ impl Transpiler {
                     _ => None,
                 }
             }
+            // `arr.indexOf(x)` is `int?` (`nil` when absent), in both modes.
+            ExprKind::MethodCall(recv, method, margs)
+                if method == "indexOf" && margs.len() == 1 && self.array_elem_type(recv).is_some() =>
+            {
+                Some(Type::Optional(Box::new(Type::Int)))
+            }
+            // The string methods that return an optional: `indexOf`, `parseInt`, `parseFloat*`.
+            ExprKind::MethodCall(recv, method, margs)
+                if matches!((method.as_str(), margs.len()),
+                        ("indexOf", 1) | ("parseInt", 0) | ("parseFloat", 0) | ("parseFloat32", 0))
+                    && self.expr_is_string_receiver(recv) =>
+            {
+                Some(Type::Optional(Box::new(match method.as_str() {
+                    "parseFloat" => Type::Float64,
+                    "parseFloat32" => Type::Float32,
+                    _ => Type::Int,
+                })))
+            }
+            // `arr.first()`/`last()`/`find(..)` are `T?` of the element type: a print or an
+            // interpolation hole then renders `nil` or the value instead of handing rustc an
+            // `Option<T>` with no `Display`. (`pop` is not here: outside an optional context
+            // it is emitted unwrapped.)
+            ExprKind::MethodCall(recv, method, margs)
+                if matches!((method.as_str(), margs.len()), ("first" | "last", 0) | ("find", 1))
+                    && !self.expr_receiver_is_known_user_type(recv) =>
+            {
+                match self.resolve_expr_type(recv)?.without_mut() {
+                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) =>
+                        Some(Type::Optional(Box::new(inner.without_mut().clone()))),
+                    _ => None,
+                }
+            }
             ExprKind::MethodCall(recv, method, _)
                 if matches!(method.as_str(), "sum" | "min" | "max") =>
             {
@@ -862,6 +894,12 @@ impl Transpiler {
                 // array receiver.
                 const ALWAYS_OPTION: &[&str] = &["pop", "first", "last", "find", "parseInt", "parseFloat", "parseFloat16", "parseFloat32"];
                 if ALWAYS_OPTION.contains(&method.as_str()) { return true; }
+                // `indexOf` is `int?` on the built-in array and string; a user type may
+                // declare its own with another return type, hence the receiver check.
+                if method == "indexOf" && args.len() == 1
+                    && (self.array_elem_type(recv).is_some() || self.expr_is_string_receiver(recv)) {
+                    return true;
+                }
                 // `get(k)` (1-arg dict form, try_emit_dict_method) is the same story as the
                 // names above -- always Option<T>. The 2-arg `get(k, default)` form unwraps
                 // instead (`.unwrap_or(default)`), so only the 1-arg call is unconditionally
@@ -2486,6 +2524,57 @@ impl Transpiler {
         // used to have no receiver-type check at all (unlike try_emit_dict_method/
         // try_emit_set_method/try_emit_array_special_method, each gated on their own
         // `expr_is_*`/`expr_receiver_is_known_user_type` check).
+        // `arr.reduce(0, (acc, n): acc + n)` over an integer array: the accumulator's type
+        // comes from the seed alone, and an untyped literal leaves `acc.wrapping_add(n)` on an
+        // ambiguous `{integer}` (E0689). Pin the seed to the element type.
+        if matches!(method, "reduce" | "fold") && args.len() == 2 {
+            let seed = &args[0].value;
+            let literal = match &seed.kind {
+                ExprKind::Int(_) | ExprKind::UInt64(_) => true,
+                ExprKind::UnaryOp(UnaryOp::Neg, inner) => matches!(inner.kind, ExprKind::Int(_) | ExprKind::UInt64(_)),
+                _ => false,
+            };
+            if literal && self.int_array_elem_rust_ty(obj).is_some() {
+                if let Some(elem) = self.array_elem_type(obj) {
+                    let mut pinned = args.to_vec();
+                    pinned[0].value = Expr { kind: ExprKind::Cast(Box::new(seed.clone()), elem), ..seed.clone() };
+                    return Some(self.emit_method_call_inner(obj, method, &pinned));
+                }
+            }
+        }
+        // `arr.shuffle()`: `Vec` has no `shuffle` (that is the `rand` crate's). In-place
+        // Fisher-Yates on xorshift64, seeded from the OS entropy behind `RandomState` -- the
+        // same generator as the interpreter's (`call_array_method`), no dependency.
+        if method == "shuffle" && args.is_empty() && self.array_elem_type(obj).is_some() {
+            return Some(format!(
+                "{{ let __v = &mut {}; let mut __s = {{ use std::hash::{{BuildHasher, Hasher}}; std::collections::hash_map::RandomState::new().build_hasher().finish() }} | 1; for __i in (1..__v.len()).rev() {{ __s ^= __s << 13; __s ^= __s >> 7; __s ^= __s << 17; __v.swap(__i, (__s % (__i as u64 + 1)) as usize); }} }}",
+                self.emit_expr(obj)
+            ));
+        }
+        // `arr.drain(a..<b)`: the removed elements as an array. `Vec::drain` wants a
+        // `Range<usize>` (Boring's bounds are `int`) and returns a lazy iterator.
+        if method == "drain" && args.len() == 1 && self.array_elem_type(obj).is_some() {
+            if let ExprKind::Range { start, end, inclusive } = &args[0].value.kind {
+                return Some(format!(
+                    "{}.drain((({}) as usize)..{}(({}) as usize)).collect::<Vec<_>>()",
+                    self.emit_expr(obj), self.emit_expr(start), if *inclusive { "=" } else { "" }, self.emit_expr(end)
+                ));
+            }
+        }
+        // `find`/`retain` hand the predicate a `&T` like `filter` below does: same owned
+        // rebinding, or a scalar comparison (`x > 1`) compares a reference with a value.
+        if matches!(method, "find" | "retain") && args.len() == 1 && !self.is_option_expr(obj)
+            && !self.expr_is_dict(obj) && !self.expr_receiver_is_known_user_type(obj)
+            && self.array_elem_type(obj).is_some() {
+            if let Some(closure_s) = self.emit_owned_closure(&args[0], 0) {
+                let obj_s = self.emit_expr(obj);
+                return Some(if method == "find" {
+                    format!("{}.iter().cloned().find({})", obj_s, closure_s)
+                } else {
+                    format!("{}.retain({})", obj_s, closure_s)
+                });
+            }
+        }
         if method == "filter" && !self.is_option_expr(obj) && !self.expr_is_dict(obj)
             && !self.expr_receiver_is_known_user_type(obj) {
             if let Some(first_arg) = args.first() {
@@ -2509,6 +2598,22 @@ impl Transpiler {
             }
         }
         None
+    }
+
+    /// The element type of a receiver positively known to be an array.
+    fn array_elem_type(&self, obj: &Expr) -> Option<Type> {
+        match self.resolve_expr_type(obj)?.without_mut() {
+            Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) =>
+                Some(inner.without_mut().clone()),
+            _ => None,
+        }
+    }
+
+    /// The Rust type of the elements of an array of integers (`isize` for `[int]`), `None`
+    /// for any other receiver.
+    fn int_array_elem_rust_ty(&self, obj: &Expr) -> Option<String> {
+        let ty = self.emit_type(&self.array_elem_type(obj)?);
+        super::helpers::is_integer_rust_type(&ty).then_some(ty)
     }
 
     /// Emits a closure argument with its first (and optionally second) parameter rebound
@@ -2871,6 +2976,13 @@ impl Transpiler {
                     start_s, str_ty, obj_s, end_s
                 ));
             }
+            // `s.lines()` is a `[string]` like `split` (the book's string reference), not Rust's
+            // lazy `Lines` iterator, which has no `len()` and yields `&str`.
+            "lines" if args.is_empty() => {
+                let is_single = matches!(self.config.threading, crate::transpiler::ThreadingMode::Single);
+                let str_ty = if is_single { "Rc::<str>" } else { "Arc::<str>" };
+                return Some(format!("{}.lines().map(|p| {}::from(p)).collect::<Vec<_>>()", obj_s, str_ty));
+            }
             // Pattern methods: Rc<str>/Arc<str> doesn't implement Pattern, need .as_ref().
             // For &str literals, no coercion needed (already &str which implements Pattern).
             "split" => {
@@ -3050,6 +3162,12 @@ impl Transpiler {
                     .unwrap_or_else(|| "Default::default()".to_string());
                 return Some(format!("{}.difference(&{}).cloned().collect::<HashSet<_>>()", obj_s, other_s));
             }
+            // `HashSet::is_subset` takes the other set by reference.
+            "isSubset" | "isSuperset" if args.len() == 1 => {
+                let other_s = self.emit_expr(&args[0].value);
+                let rust = if method == "isSubset" { "is_subset" } else { "is_superset" };
+                return Some(format!("{}.{}(&{})", obj_s, rust, other_s));
+            }
             "add" | "insert" if !args.is_empty() => {
                 let val_s = self.emit_expr_owned(&args[0].value);
                 return Some(format!("{}.insert({})", obj_s, val_s));
@@ -3058,7 +3176,7 @@ impl Transpiler {
                 let val_s = self.emit_expr_owned(&args[0].value);
                 return Some(format!("{}.remove(&{})", obj_s, val_s));
             }
-            "contains" if !args.is_empty() => {
+            "contains" | "has" if !args.is_empty() => {
                 let val_s = self.emit_expr_owned(&args[0].value);
                 return Some(format!("{}.contains(&{})", obj_s, val_s));
             }
@@ -3306,7 +3424,11 @@ impl Transpiler {
         // known to be a float array.
         if method == "sum" && args.is_empty() {
             let obj_s = self.emit_expr(obj);
-            let elem_ty = self.float_array_elem_ty(obj).unwrap_or("i64");
+            // An integer array sums in its own element type (`[int]` is `Vec<isize>`: there is
+            // no `Sum<isize>` for `i64`).
+            let elem_ty = self.float_array_elem_ty(obj).map(str::to_string)
+                .or_else(|| self.int_array_elem_rust_ty(obj))
+                .unwrap_or_else(|| "i64".to_string());
             return Some(format!("{}.iter().cloned().sum::<{}>()", obj_s, elem_ty));
         }
         // `indexOf(val)` on arrays → iter().position(|x| *x == val).map(|i| i as i64)
@@ -6989,6 +7111,15 @@ impl Transpiler {
         }
     }
 
+    /// `"12" as int` outside a `try:` body is emitted as `.trim().parse::<T>().ok()`: an
+    /// `Option<T>` (`nil` when the text is not a number), although the cast's own type is `T`.
+    /// `emitted` is the cast's emitted Rust.
+    pub(crate) fn cast_is_string_parse(&self, e: &Expr, emitted: &str) -> bool {
+        matches!(&e.kind, ExprKind::Cast(..))
+            && emitted.contains(".trim().parse::<")
+            && (emitted.ends_with(">().ok()") || emitted.ends_with(".ok().map(half::f16::from_f32)"))
+    }
+
     /// An interpolation hole whose resolved type is `T?` (e.g. `d.get("k") as float64`,
     /// `int? o`): `Option<T>` has no `Display`, so render `nil` or the value like the interpreter.
     /// Collection-bearing optionals are left to `typed_collection_fmt`.
@@ -7000,7 +7131,7 @@ impl Transpiler {
                     Some(Type::Optional(t)) if super::emit_expr::is_known_numeric_scalar_type(t.without_mut())),
             _ => false,
         };
-        if cast_opt {
+        if cast_opt || self.cast_is_string_parse(e, expr_s) {
             return Some(format!("({}).as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", expr_s));
         }
         let ty = self.resolve_expr_type(e)?;
@@ -7520,9 +7651,11 @@ impl Transpiler {
                     .unwrap_or(false)
             }
             // `dict.get(k)` of a `{K=V'actor}`: the (optional) value is the shared handle itself.
+            // Compared with `qual`, not `'actor`: asked about `'guard`, an actor value must
+            // answer no, or its binding is registered as a read-write lock (`.write()` on a mutex).
             ExprKind::MethodCall(recv, m, margs) if m == "get" && margs.len() == 1 && self.expr_is_dict(recv) => {
                 matches!(self.resolve_expr_type(recv).as_ref().map(Type::without_mut),
-                    Some(Type::Dict(_, v)) if matches!(v.without_mut(), Type::Qualified(_, OwnerQual::Actor)))
+                    Some(Type::Dict(_, v)) if matches!(v.without_mut(), Type::Qualified(_, q) if *q == qual))
             }
             _ => false,
         }

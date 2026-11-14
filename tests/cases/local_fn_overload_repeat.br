@@ -1,0 +1,16 @@
+# A function local to another function's body can be overloaded under `boring run` (the
+# second `def` used to replace the first), and running the enclosing function again
+# re-declares the same two overloads instead of piling up ambiguous ones.
+# Run only: `boring build` emits both as nested `fn show` (E0428).
+def describe(int round):
+    def string show(int x):
+        "int {x}"
+
+    def string show(string s):
+        "string {s}"
+
+    print "{round}: {show(1)}, {show("w")}"
+
+def main():
+    describe(1)
+    describe(2)

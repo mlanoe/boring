@@ -272,6 +272,26 @@ impl Interpreter {
                     }
                     unreachable!()
                 }
+                // `drain(a..<b)` removes that range and returns the removed elements, like
+                // `Vec::drain` collected: same shape as `pop` (shortened receiver + a result).
+                if method == "drain" {
+                    if let Value::Array(arr_rc) = obj {
+                        let (start, end) = match args.first() {
+                            Some(Value::Range { start, end, inclusive }) =>
+                                (*start, if *inclusive { *end + 1 } else { *end }),
+                            _ => return Err(err("drain: expected a range (`arr.drain(0..<2)`)", line)),
+                        };
+                        let len = arr_rc.len() as i64;
+                        if start < 0 || end < start || end > len {
+                            return Err(err(format!("drain: range {}..{} out of bounds (len {})", start, end, len), line));
+                        }
+                        let mut arr_owned = Value::rc_vec_into_owned(arr_rc);
+                        let removed: Vec<Value> = arr_owned.drain(start as usize..end as usize).collect();
+                        *out_self = Some(Value::Array(arr_owned.into()));
+                        return Ok(Value::Array(removed.into()));
+                    }
+                    unreachable!()
+                }
                 if method == "remove" {
                     if let Value::Array(arr_rc) = obj {
                         let mut arr_owned = Value::rc_vec_into_owned(arr_rc);
@@ -301,13 +321,14 @@ impl Interpreter {
                     "zip", "enumerate", "slice", "insert", "remove", "append", "extend", "count", "min", "max", "sum",
                     "isEmpty", "reversed", "sorted", "sortedBy", "take", "drop", "joined",
                     "firstIndex", "nextIndex", "removeAt", "getAt", "move", "removeIndices",
+                    "dedup", "swap", "truncate", "fill", "retain", "fold", "shuffle",
                 ];
                 if KNOWN_ARRAY_METHODS.contains(&method) {
                     let result = match self.call_array_method(obj, method, args, line)? {
                         Some(result) => result,
                         None => return Err(err(format!("no method '{}' on Array", method), line)),
                     };
-                    const MUTATING: &[&str] = &["push", "append", "extend", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
+                    const MUTATING: &[&str] = &["push", "append", "extend", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices", "dedup", "swap", "truncate", "fill", "retain", "shuffle"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -317,7 +338,7 @@ impl Interpreter {
                 }
                 if let Some(result) = self.call_array_method(obj.clone(), method, args.clone(), line)? {
                     // For mutating array methods, set out_self so the caller can write back.
-                    const MUTATING: &[&str] = &["push", "append", "extend", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices"];
+                    const MUTATING: &[&str] = &["push", "append", "extend", "insert", "sort", "sortBy", "reverse", "removeAt", "move", "removeIndices", "dedup", "swap", "truncate", "fill", "retain", "shuffle"];
                     if MUTATING.contains(&method) {
                         if let Value::Array(_) = &result {
                             *out_self = Some(result.clone());
@@ -339,7 +360,7 @@ impl Interpreter {
             }
             Value::Set(_) => {
                 if let Some(result) = self.call_set_method(obj.clone(), method, args.clone(), line)? {
-                    const MUTATING: &[&str] = &["add", "remove", "removeAt"];
+                    const MUTATING: &[&str] = &["add", "insert", "remove", "removeAt"];
                     if MUTATING.contains(&method) {
                         if let Value::Set(_) = &result {
                             *out_self = Some(result.clone());
@@ -356,6 +377,8 @@ impl Interpreter {
                     "floor" => Some(Value::Float64(f.floor())),
                     "ceil"  => Some(Value::Float64(f.ceil())),
                     "round" => Some(Value::Float64(f.round())),
+                    "trunc" => Some(Value::Float64(f.trunc())),
+                    "fract" => Some(Value::Float64(f.fract())),
                     "exp"   => Some(Value::Float64(f.exp())),
                     "exp2"  => Some(Value::Float64(f.exp2())),
                     "ln"    => Some(Value::Float64(f.ln())),
@@ -375,6 +398,18 @@ impl Interpreter {
                     "isInfinite" | "is_infinite" => Some(Value::Bool(f.is_infinite())),
                     "isFinite" | "is_finite" => Some(Value::Bool(f.is_finite())),
                     "toInt" | "int" => Some(Value::Int(*f as i64)),
+                    "min" | "max" => {
+                        let o = match args.first() {
+                            Some(Value::Float64(o)) => *o,
+                            Some(Value::Int(n)) => *n as f64,
+                            _ => return Err(err(format!("{}: argument must be a number", method), line)),
+                        };
+                        Some(Value::Float64(if method == "min" { f.min(o) } else { f.max(o) }))
+                    }
+                    "powi" => match args.first() {
+                        Some(Value::Int(n)) => Some(Value::Float64(f.powi(*n as i32))),
+                        _ => return Err(err("powi: argument must be an integer", line)),
+                    },
                     "pow" | "powf" => {
                         let exp = args.first().cloned().unwrap_or(Value::Float64(1.0));
                         let e = match exp {
@@ -423,6 +458,8 @@ impl Interpreter {
                     "floor" => Some(Value::Float32(f.floor())),
                     "ceil"  => Some(Value::Float32(f.ceil())),
                     "round" => Some(Value::Float32(f.round())),
+                    "trunc" => Some(Value::Float32(f.trunc())),
+                    "fract" => Some(Value::Float32(f.fract())),
                     "exp"   => Some(Value::Float32(f.exp())),
                     "exp2"  => Some(Value::Float32(f.exp2())),
                     "ln"    => Some(Value::Float32(f.ln())),
@@ -442,6 +479,19 @@ impl Interpreter {
                     "isInfinite" | "is_infinite" => Some(Value::Bool(f.is_infinite())),
                     "isFinite" | "is_finite" => Some(Value::Bool(f.is_finite())),
                     "toInt" | "int" => Some(Value::Int(*f as i64)),
+                    "min" | "max" => {
+                        let o = match args.first() {
+                            Some(Value::Float32(o)) => *o,
+                            Some(Value::Float64(o)) => *o as f32,
+                            Some(Value::Int(n)) => *n as f32,
+                            _ => return Err(err(format!("{}: argument must be a number", method), line)),
+                        };
+                        Some(Value::Float32(if method == "min" { f.min(o) } else { f.max(o) }))
+                    }
+                    "powi" => match args.first() {
+                        Some(Value::Int(n)) => Some(Value::Float32(f.powi(*n as i32))),
+                        _ => return Err(err("powi: argument must be an integer", line)),
+                    },
                     "pow" | "powf" => {
                         let exp = args.first().cloned().unwrap_or(Value::Float32(1.0));
                         let e = match exp {
@@ -498,6 +548,8 @@ impl Interpreter {
                     "floor" => Some(Value::Float16(half::f16::from_f32(value.floor()))),
                     "ceil" => Some(Value::Float16(half::f16::from_f32(value.ceil()))),
                     "round" => Some(Value::Float16(half::f16::from_f32(value.round()))),
+                    "trunc" => Some(Value::Float16(half::f16::from_f32(value.trunc()))),
+                    "fract" => Some(Value::Float16(half::f16::from_f32(value.fract()))),
                     "exp" => Some(Value::Float16(half::f16::from_f32(value.exp()))),
                     "exp2" => Some(Value::Float16(half::f16::from_f32(value.exp2()))),
                     "ln" => Some(Value::Float16(half::f16::from_f32(value.ln()))),
@@ -561,6 +613,33 @@ impl Interpreter {
                 };
                 if let Some(v) = result { return Ok(v); }
             }
+            // `int` scalar methods the transpiler maps onto `isize`'s own (`abs`, `pow`, `min`,
+            // `max`, `clamp`, `signum`), with the same overflow behaviour as the arithmetic
+            // operators' debug-build panic: an error rather than a silent wrap.
+            Value::Int(n) => {
+                let int_arg = |i: usize| match args.get(i) {
+                    Some(Value::Int(v)) => Ok(*v),
+                    _ => Err(err(format!("{}: argument must be an integer", method), line)),
+                };
+                let result = match method {
+                    "abs" => Some(n.checked_abs().ok_or_else(|| err("abs: integer overflow", line))?),
+                    "pow" => {
+                        let e = int_arg(0)?;
+                        let e = u32::try_from(e).map_err(|_| err("pow: exponent must be between 0 and 2^32 - 1", line))?;
+                        Some(n.checked_pow(e).ok_or_else(|| err("pow: integer overflow", line))?)
+                    }
+                    "min" => Some((*n).min(int_arg(0)?)),
+                    "max" => Some((*n).max(int_arg(0)?)),
+                    "clamp" => {
+                        let (lo, hi) = (int_arg(0)?, int_arg(1)?);
+                        if lo > hi { return Err(err("clamp: min must not be greater than max", line)); }
+                        Some((*n).clamp(lo, hi))
+                    }
+                    "sign" | "signum" => Some(n.signum()),
+                    _ => None,
+                };
+                if let Some(v) = result { return Ok(Value::Int(v)); }
+            }
             Value::Channel { buf, is_sender, .. }
                 if method == "send" => {
                     if !is_sender {
@@ -588,6 +667,15 @@ impl Interpreter {
                     return Ok(buf.borrow_mut().pop_front().unwrap_or(Value::Nil));
                 }
             _ => {}
+        }
+
+        // `.toString()` on a scalar or a string: its interpolated form (`"{x}"`), as
+        // `to_string()` gives in generated Rust.
+        if method == "toString" && args.is_empty()
+            && matches!(&obj, Value::Str(_) | Value::Bool(_) | Value::Int(_) | Value::Uint(_)
+                | Value::Float16(_) | Value::Float32(_) | Value::Float64(_))
+        {
+            return Ok(Value::Str(format!("{}", obj)));
         }
 
         // `.upgrade()` — weak reference upgrade: returns the object if still live, else Nil.
@@ -1814,6 +1902,22 @@ impl Interpreter {
                 new_arr.swap(i as usize, j as usize);
                 Ok(Some(Value::Array(new_arr.into())))
             }
+            // In-place Fisher-Yates shuffle, on the same generator `boring build` emits:
+            // xorshift64 seeded from the OS entropy behind `RandomState` (no dependency).
+            // The order differs on every call, in both modes.
+            "shuffle" => {
+                if !args.is_empty() { return Err(err("shuffle: takes no argument", line)); }
+                use std::hash::{BuildHasher, Hasher};
+                let mut state = std::collections::hash_map::RandomState::new().build_hasher().finish() | 1;
+                let mut new_arr = Value::rc_vec_into_owned(arr);
+                for i in (1..new_arr.len()).rev() {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    new_arr.swap(i, (state % (i as u64 + 1)) as usize);
+                }
+                Ok(Some(Value::Array(new_arr.into())))
+            }
             "truncate" => {
                 let n = self.expect_int(args.into_iter().next().unwrap_or(Value::Nil), line)?;
                 if n < 0 { return Err(err("truncate: length must not be negative", line)); }
@@ -2072,7 +2176,7 @@ impl Interpreter {
                     (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                    _ => std::cmp::Ordering::Equal,
+                    _ => super::eval_expr::numeric_order(a, b).unwrap_or(std::cmp::Ordering::Equal),
                 }).cloned().unwrap_or(Value::Nil);
                 Ok(Some(result))
             }
@@ -2082,11 +2186,17 @@ impl Interpreter {
                     (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                    _ => std::cmp::Ordering::Equal,
+                    _ => super::eval_expr::numeric_order(a, b).unwrap_or(std::cmp::Ordering::Equal),
                 }).cloned().unwrap_or(Value::Nil);
                 Ok(Some(result))
             }
             "sum" => {
+                // Sized integers (`[uint]`, `[int32]`, ...) sum in their own width.
+                if !matches!(arr.first(), Some(Value::Int(_)) | None) {
+                    if let Some(total) = super::eval_expr::sum_integers(&arr) {
+                        return Ok(Some(total));
+                    }
+                }
                 let mut int_sum = 0i64;
                 let mut float_sum = 0.0f64;
                 let mut float32_sum = 0.0f32;
@@ -2410,7 +2520,8 @@ impl Interpreter {
         };
         match method {
             "clear" if args.is_empty() => Ok(Some(Value::Set(Vec::new()))),
-            "add" => {
+            // `insert` is the name `HashSet` gives it, which `boring build` accepts as is.
+            "add" | "insert" => {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
                 let mut new_set = set;
                 if !new_set.iter().any(|x| Value::key_eq(x, &val)) { new_set.push(val); }
@@ -2421,7 +2532,8 @@ impl Interpreter {
                 let new_set: Vec<Value> = set.into_iter().filter(|v| !Value::key_eq(v, &val)).collect();
                 Ok(Some(Value::Set(new_set)))
             }
-            "contains" => {
+            // `has` is the alias the book gives `contains` for dicts and sets alike.
+            "contains" | "has" => {
                 let val = args.into_iter().next().unwrap_or(Value::Nil);
                 Ok(Some(Value::Bool(set.iter().any(|x| Value::key_eq(x, &val)))))
             }

@@ -6323,6 +6323,23 @@ impl Transpiler {
         }
     }
 
+    /// `min(1.5, x)`/`max(1.5, 2.5)`: `f64::max` is an inherent method, so a bare float
+    /// literal receiver is an ambiguous `{float}` (E0689). Give it the width of the other
+    /// operands, `f64` when they are literals too.
+    fn pin_float_literal_receiver(&self, args: &[Arg], rendered: String) -> String {
+        let literal = match &args[0].value.kind {
+            ExprKind::Float(_) => true,
+            ExprKind::UnaryOp(UnaryOp::Neg, inner) => matches!(inner.kind, ExprKind::Float(_)),
+            _ => false,
+        };
+        if !literal { return rendered; }
+        match args.iter().find_map(|a| self.infer_float_width(&a.value)) {
+            Some("f16") => rendered,
+            Some("f32") => format!("{} as f32", rendered),
+            _ => format!("{} as f64", rendered),
+        }
+    }
+
     pub(crate) fn emit_builtin_call(&self, name: &str, args: &[Arg]) -> String {
         // Half math is evaluated through f32 because `half::f16` has no native
         // transcendental methods, but its observable result remains float16.
@@ -6589,7 +6606,7 @@ impl Transpiler {
                             format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e))
                         } else { self.emit_expr(e) }
                     };
-                    let a = render(&args[0].value);
+                    let a = self.pin_float_literal_receiver(args, render(&args[0].value));
                     let b = render(&args[1].value);
                     format!("({}).min({})", a, b)
                 }
@@ -6604,7 +6621,7 @@ impl Transpiler {
                             format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e))
                         } else { self.emit_expr(e) }
                     };
-                    let a = render(&args[0].value);
+                    let a = self.pin_float_literal_receiver(args, render(&args[0].value));
                     let b = render(&args[1].value);
                     format!("({}).max({})", a, b)
                 }
@@ -6620,7 +6637,7 @@ impl Transpiler {
                         format!("half::f16::from_f32(({}) as f32)", self.emit_expr(e))
                     } else { self.emit_expr(e) }
                 };
-                let x  = render(&args[0].value);
+                let x  = self.pin_float_literal_receiver(args, render(&args[0].value));
                 let lo = render(&args[1].value);
                 let hi = render(&args[2].value);
                 format!("({}).clamp({}, {})", x, lo, hi)
@@ -6629,7 +6646,7 @@ impl Transpiler {
             "floatToBits" if self.infer_float_width(&args[0].value) == Some("f16") =>
                 format!("(f32::from({}).to_bits() as isize)", self.emit_expr(&args[0].value)),
             "floatToBits" => format!("(({} as f32).to_bits() as isize)", self.emit_expr(&args[0].value)),
-            "sign"       => format!("({}).signum()", self.emit_expr(&args[0].value)),
+            "sign"       => format!("({}).signum()", self.pin_float_literal_receiver(args, self.emit_expr(&args[0].value))),
             "isNaN"      => format!("({}).is_nan()", self.emit_expr(&args[0].value)),
             "isInfinite" => format!("({}).is_infinite()", self.emit_expr(&args[0].value)),
             "readLine"   => {
@@ -6792,7 +6809,10 @@ impl Transpiler {
                 // Anything else whose resolved type is `T?` (`let q = try? f(0)`, `int? z`,
                 // an optional struct field): printed as `nil` or the value, like the interpreter.
                 || self.resolve_expr_type(&a.value)
-                    .is_some_and(|ty| matches!(ty.without_mut(), Type::Optional(_)));
+                    .is_some_and(|ty| matches!(ty.without_mut(), Type::Optional(_)))
+                // `print s as int`: a string parse, `nil` when the text is not a number.
+                || (matches!(&a.value.kind, ExprKind::Cast(..))
+                    && self.cast_is_string_parse(&a.value, &self.emit_expr(&a.value)));
             if is_optional {
                 let raw = self.emit_expr(&a.value);
                 if let Some(r) = self.typed_collection_fmt(&a.value, &raw) { return r; }

@@ -1,0 +1,19 @@
+# `[T]{}` is the empty `[T]` for a struct or an enum, in `boring run` as in `boring build`
+# (the interpreter used to build a one-element array holding the type itself).
+struct Decl:
+    string name
+
+enum Kind:
+    A
+    B
+
+def main():
+    mut decls = [Decl]{}
+    print decls.len()
+    decls.push(Decl(name= "a"))
+    for d in decls:
+        print d.name
+
+    mut kinds = [Kind]{}
+    kinds.push(Kind.B)
+    print kinds.len()

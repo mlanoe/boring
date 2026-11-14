@@ -289,6 +289,24 @@ impl Parser {
             _ => {
                 let line = self.line();
                 let col = self.col();
+                // `print -x` / `write -x`: a command-style call whose first argument starts with a
+                // unary minus. Parsed as an expression first, it reads as the subtraction
+                // `print - x` ("cannot subtract print and Int"), which no program can mean.
+                let negative_command = matches!(self.peek(), TokenKind::Ident(n) if n == "print" || n == "write")
+                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Minus));
+                if negative_command {
+                    let name = match self.peek() { TokenKind::Ident(n) => n.clone(), _ => unreachable!() };
+                    self.advance();
+                    let callee = Expr { kind: ExprKind::Var(name), line, col, len: self.tok_len() };
+                    let mut args = Vec::new();
+                    loop {
+                        let arg = self.parse_or()?;
+                        args.push(Arg { label: None, value: arg, spread: false, default_rest: false });
+                        if !self.eat(&TokenKind::Comma) { break; }
+                    }
+                    self.expect_newline()?;
+                    return Ok(Stmt::Expr(Expr { kind: ExprKind::Call(Box::new(callee), args), line, col, len: self.tok_len() }));
+                }
                 // Parse lhs (no assignment — parse_expr doesn't produce Assign nodes)
                 let lhs = self.parse_expr()?;
 

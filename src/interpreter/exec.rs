@@ -75,6 +75,8 @@ impl Interpreter {
                 } else { val };
                 let inferred_coll = if s.ty.is_none() { self.infer_collection_type(s_val, &env) } else { None };
                 target_env.borrow_mut().set_inferred_type(&s.name, inferred_coll);
+                let inferred_opt = s.ty.is_none() && self.expr_is_optional(s_val, &env);
+                target_env.borrow_mut().set_inferred_optional(&s.name, inferred_opt);
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_ty = s.ty.as_ref().map(|ty| {
@@ -254,7 +256,7 @@ impl Interpreter {
                 // The receiver expression is evaluated exactly ONCE here; calling
                 // `eval_expr(e)` a second time would re-evaluate it (bug for
                 // non-idempotent receivers like `getArray().push(x)`).
-                const MUTATING: &[&str] = &["push", "append", "extend", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop", "move", "removeIndices", "clear"];
+                const MUTATING: &[&str] = &["push", "append", "extend", "insert", "remove", "sort", "sortBy", "reverse", "add", "removeAt", "pop", "move", "removeIndices", "clear", "dedup", "swap", "truncate", "fill", "retain", "drain", "shuffle"];
                 // "set"/"put" are mutating on Dict/Set but NOT on user-defined structs
                 const MUTATING_COLL_ONLY: &[&str] = &["set", "put"];
                 if let ExprKind::MethodCall(obj_expr, method, args) = &e.kind {
@@ -313,7 +315,9 @@ impl Interpreter {
                             //  (a) push/append/insert/sort/… → result IS the new collection
                             //  (b) pop/remove/removeAt → result is the extracted element;
                             //      call_method sets out_self to the shortened collection
-                            if matches!(result, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
+                            // (`drain` is case (b) although its result is an array: the removed
+                            // elements, not the receiver.)
+                            if method != "drain" && matches!(result, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
                                 self.assign_content(obj_expr, result, Rc::clone(&env), line)?;
                             } else if let Some(new_coll) = out_self {
                                 if matches!(new_coll, Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Set(_)) {
@@ -359,7 +363,30 @@ impl Interpreter {
             }
             Stmt::Guard(g) => self.exec_guard(g, env),
             Stmt::Fn(decl) => {
-                let val = Value::Fn { decl: Box::new(decl.clone()), captured: Rc::clone(&env) };
+                // A second same-named `def` in this scope is an overload (resolved against this
+                // scope only, as for top-level functions); the same declaration executed again
+                // (a `def` in a loop body) replaces its previous value instead.
+                let new_variant = (decl.clone(), Rc::clone(&env));
+                let existing = env.borrow().vars.get(&decl.name).cloned();
+                let val = match existing {
+                    Some(Value::Fn { decl: prev, captured }) if prev.line != decl.line => {
+                        super::check_overload_conflict_or_exit(&prev, decl, 0);
+                        Value::OverloadedFn { name: decl.name.clone(), variants: vec![(*prev, captured), new_variant] }
+                    }
+                    Some(Value::OverloadedFn { name, mut variants }) => {
+                        match variants.iter().position(|(d, _)| d.line == decl.line) {
+                            Some(i) => variants[i] = new_variant,
+                            None => {
+                                for (prev, _) in &variants {
+                                    super::check_overload_conflict_or_exit(prev, decl, 0);
+                                }
+                                variants.push(new_variant);
+                            }
+                        }
+                        Value::OverloadedFn { name, variants }
+                    }
+                    _ => Value::Fn { decl: Box::new(decl.clone()), captured: Rc::clone(&env) },
+                };
                 env.borrow_mut().define(&decl.name, val);
                 Ok(())
             }
@@ -1892,6 +1919,13 @@ impl Interpreter {
     /// type:  x/X (hex) | b (binary) | o (octal) | e/E (scientific)
     ///        % (percent) | ? (debug) | (empty = Display)
     pub(crate) fn apply_format(val: Value, spec: &str, line: usize) -> Result<String, Signal> {
+        Self::apply_format_hole(val, spec, line, None)
+    }
+
+    /// `apply_format` for an interpolation hole. `debug_body`, when given, is the hole's debug
+    /// text (`{x:?}`) computed from its static type (`Interpreter::debug_typed`), which the
+    /// width/fill of the spec is then applied to.
+    pub(crate) fn apply_format_hole(val: Value, spec: &str, line: usize, debug_body: Option<String>) -> Result<String, Signal> {
         let s = spec.trim();
         if s.is_empty() {
             return Ok(format!("{}", val));
@@ -2015,7 +2049,10 @@ impl Interpreter {
             '?' => {
                 // debug repr: strings get quotes, floats keep a trailing `.0`, etc.
                 // (matches Rust's derived Debug — see `debug_repr` in interpreter/mod.rs)
-                debug_repr(&val)
+                match debug_body {
+                    Some(body) => body,
+                    None => debug_repr(&val),
+                }
             }
             // default Display — with optional precision for floats
             _ => {

@@ -1,0 +1,148 @@
+# Built-in calls `boring run` executed and `boring build` turned into Rust that rustc
+# rejected: a scalar predicate in `find`/`retain` (the closure got a reference), `reduce`
+# seeded with an integer literal, `sum` of an `[int]`, `min`/`max` of two float literals,
+# printing the `T?` of `first`/`last`/`find` or of a string parsed with `as`, `lines()` as an
+# array -- and `drain(range)` and `shuffle()`, which neither mode had.
+struct Point:
+    int v
+
+struct Bag:
+    var mut [int] xs = []
+
+@derive(Debug)
+struct Link:
+    int? next
+    int v
+
+def main():
+    let [int] a = [3, 1, 2]
+    let [uint] u = [1, 2]
+    let [float] fl = [1.5, 2.5]
+    let [Point] ps = [Point(1), Point(2)]
+
+    mut [int] m = [3, 1, 2, 2]
+    m.retain((x): x > 1)
+    print "{m:?}"
+    mut [Point] mp = [Point(1), Point(2)]
+    mp.retain((p): p.v > 1)
+    print mp.length
+
+    print a.reduce(0, (x, y): x + y)
+    print a.reduce(-1, (x, y): x + y)
+    print "{fl.reduce(0.0, (x, y): x + y)}"
+    print "{a.sum()} {fl.sum()}"
+    let int total = a.sum()
+    print total
+
+    print max(1.5, 2.5)
+    print min(-1.5, 2.5)
+    let float q = 2.0
+    print "{max(2.5, q)} {min(q, 2.5)} {max(1, 2)}"
+
+    print a.first()
+    print a.last()
+    print "{a.first()} {a.find((x): x > 2)} {a.find((x): x > 5)}"
+    let int? found = a.find((x): x > 1)
+    print found
+    let int? head = a.first()
+    print head
+    if let p = ps.find((p): p.v > 1):
+        print p.v
+    let [int] none = []
+    print none.first()
+
+    let s = "12"
+    print "{"12" as int} {s as int} {"x" as int}"
+    print s as int
+    print "{"1.5" as float}"
+
+    let text = "a\nb\nc"
+    print "{text.lines().length}"
+    for l in text.lines():
+        print l
+
+    mut [int] d = [3, 1, 2, 2, 7]
+    let cut = d.drain(1..<3)
+    print "{cut:?} {d:?}"
+    d.drain(0..=0)
+    print "{d:?}"
+    mut bag = Bag()
+    bag.xs = [1, 2, 3, 4]
+    let taken = bag.xs.drain(0..<2)
+    print "{taken:?} {bag.xs:?}"
+    print u.length
+
+    # `shuffle()`: a different order on every call, so only what it keeps is checked.
+    mut [int] deck = [i for i in 0..<50]
+    deck.shuffle()
+    print deck.length
+    print deck.sum()
+    print "{deck != [i for i in 0..<50]}"
+    deck.sort()
+    print "{deck == [i for i in 0..<50]}"
+    bag.xs = [5, 6, 7]
+    bag.xs.shuffle()
+    print "{bag.xs.sum()} {bag.xs.length}"
+    mut [int] one = [1]
+    one.shuffle()
+    print "{one:?}"
+
+    # Second pass. `indexOf` (array, string) and `parseInt`/`parseFloat` are optionals that
+    # print as `nil` or the value; `isSubset`; `sign`/`clamp` of a float literal; and, on the
+    # interpreter side, `sum`/`min`/`max` of sized integers and of two float widths.
+    print a.indexOf(1)
+    print a.indexOf(9)
+    print "{a.indexOf(2)} {a.indexOf(7)}"
+    let at = a.indexOf(9)
+    print at
+    let int? where = a.indexOf(1)
+    print where
+    let hello = "Hello World"
+    print hello.indexOf("W")
+    print "{hello.indexOf("o")} {hello.indexOf("zz")}"
+    print "12".parseInt()
+    print "x".parseInt()
+    print "{"1.5".parseFloat()} {"1.5".parseFloat32()}"
+    let parsed = "12".parseInt() else 0
+    print parsed + 1
+
+    let {int} low = {1, 2}
+    let {int} high = {2, 3}
+    print "{low.isSubset(high)} {low.intersection(high).isSubset(low)}"
+
+    print sign(-2.5)
+    print clamp(2.5, 0.0, 1.0)
+    let float32 w = 1.5
+    print "{clamp(w, 0.0, 1.0)} {max(2.5, w)} {min(w, 0.5)}"
+    print u.sum()
+    print "{u.min()} {u.max()}"
+
+    # Third pass, both modes at once: `print -x` is a print of a negative value (it parsed
+    # as the subtraction `print - x`), and `has` is `contains` on a set as on a dict.
+    print -7 / 2
+    print -2 + 5
+    print -total, total
+    let float neg = 1.5
+    print -neg
+    print low.has(1)
+    print "{low.has(3)} {high.has(3)}"
+
+    # `:?` of an optional is `Some(v)` / `None` in both modes (the interpreter used to print
+    # the bare value / `nil`), at the top and inside collections, tuples and struct fields.
+    let int? o = 4
+    let int? no = nil
+    print "{o:?} {no:?} {o:>8?}|"
+    print "{a.first():?} {none.first():?} {a.find((x): x > 9):?} {a.indexOf(1):?}"
+    print "{"12".parseInt():?} {"x".parseInt():?}"
+    let maybe = a.last()
+    print "{maybe:?}"
+    let [int?] holes = [1, nil]
+    print "{holes:?} {holes[0]:?}"
+    let (int?, int) pair = (nil, 1)
+    print "{pair:?}"
+    let {string=int?} table = {"k" = nil}
+    print "{table:?}"
+    let Link link = Link(next = 2, v = 7)
+    print "{link:?} {link.next:?}"
+    let Link? opt = Link(next = nil, v = 1)
+    print "{opt:?}"

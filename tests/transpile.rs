@@ -1717,8 +1717,8 @@ transpile_project_test!(qualifier_fns_xfile);
 
 // Four codegen bugs found porting `view` into the self-hosted interpreter: a `for` var over
 // `mut xs = [Decl]{}` (optional field not re-wrapped), `if let`/`match` on a local read again
-// later (no move), and `arr + [x]` on a `[T]` parameter. Transpile-only: the Rust interpreter
-// doesn't evaluate the `[Decl]{}` idiom. See tests/cases/optional_reuse_and_array_concat.br.
+// later (no move), and `arr + [x]` on a `[T]` parameter. See
+// tests/cases/optional_reuse_and_array_concat.br (also an interpreter case in tests/run.rs).
 transpile_test!(optional_reuse_and_array_concat);
 transpile_test!(lock_handle_field_argument);
 transpile_test!(task_local_to_task_param);
@@ -1726,3 +1726,9 @@ transpile_test!(trait_shared_array_inferred_push);
 transpile_test!(view_state_param_stays_lent);
 transpile_test!(var_mut_param_forwarded);
 transpile_test!(for_var_shadows_float_local);
+
+// Same output as `boring run` (tests/run.rs) for the built-ins and idioms the interpreter gained.
+transpile_test!(typed_empty_array);
+transpile_test!(interp_builtin_parity);
+transpile_test!(interp_builtin_parity_2);
+transpile_test!(build_builtin_parity);

@@ -2404,7 +2404,7 @@ pub(crate) fn builtin_method_result_type(recv: &Type, method: &str) -> Option<Ty
             | "graphemeSlice" => Some(Type::Str),
             "length" | "count" | "graphemeCount" | "displayWidth" => Some(Type::Int),
             "indexOf" => Some(Type::Optional(Box::new(Type::Int))),
-            "split" | "chars" | "graphemes" => Some(Type::Array(Box::new(Type::Str))),
+            "split" | "chars" | "graphemes" | "lines" => Some(Type::Array(Box::new(Type::Str))),
             _ => None,
         };
     }

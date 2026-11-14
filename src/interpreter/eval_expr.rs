@@ -114,6 +114,36 @@ fn value_as_i128(v: &Value) -> Option<i128> {
     })
 }
 
+/// Ordering of two numbers of any width (sized integers, floats), for the `min`/`max`
+/// built-ins: integers compare exactly, anything involving a float compares as `f64`.
+pub(crate) fn numeric_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    if let (Some(x), Some(y)) = (value_as_i128(a), value_as_i128(b)) {
+        return Some(x.cmp(&y));
+    }
+    numeric_as_f64(a)?.partial_cmp(&numeric_as_f64(b)?)
+}
+
+/// Any number as an `f64` (`None` for a non-number).
+pub(crate) fn numeric_as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Float64(f) => Some(*f),
+        Value::Float32(f) => Some(*f as f64),
+        Value::Float16(f) => Some(f.to_f64()),
+        other => value_as_i128(other).map(|n| n as f64),
+    }
+}
+
+/// The sum of an array of integers of one width, in that width (`[uint]` sums to a `uint`).
+/// `None` when an element is not an integer.
+pub(crate) fn sum_integers(items: &[Value]) -> Option<Value> {
+    let kind = NumKind::of(items.first()?)?;
+    let mut total: i128 = 0;
+    for v in items {
+        total = total.wrapping_add(value_as_i128(v)?);
+    }
+    Some(i128_to_kind(kind, total))
+}
+
 /// Narrow an i128 staging value back into `kind`'s native Value (wrapping, matching
 /// the `wrapping_*` semantics used throughout the same-kind arithmetic arms).
 fn i128_to_kind(kind: NumKind, x: i128) -> Value {
@@ -599,6 +629,155 @@ impl Interpreter {
                 self.struct_field_type(&pty, f)
             }
             _ => None,
+        }
+    }
+
+    /// The declared type of an interpolation hole's expression, where one is written: a typed
+    /// binding or field, or the return type of the function or method it calls. Nothing is
+    /// evaluated.
+    fn hole_static_type(&self, e: &Expr, env: &EnvRef) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Var(_) | ExprKind::Field(..) => self.declared_container_type(e, env),
+            // `xs[i]` of a typed collection: its element (or dict value) type.
+            ExprKind::Index(base, _) => match self.resolve_type(&self.hole_static_type(base, env)?).without_mut() {
+                Type::Array(elem) => Some((**elem).clone()),
+                Type::Dict(_, value) => Some((**value).clone()),
+                _ => None,
+            },
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Var(f) = &callee.kind else { return None };
+                match self.global.borrow().get(f.as_str()) {
+                    Some(Value::Fn { decl, .. }) => decl.return_ty.clone(),
+                    _ => None,
+                }
+            }
+            ExprKind::MethodCall(recv, m, _) => {
+                let Value::Object(o) = self.peek_path(recv, env)? else { return None };
+                let pty = o.borrow().type_name.clone();
+                let global = self.global.borrow();
+                let Some(Value::Struct { decl, .. }) = global.get(&pty) else { return None };
+                decl.methods.iter().find(|f| f.name == *m).and_then(|f| f.return_ty.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `debug_repr` driven by a declared type: an optional renders as `Some(v)`/`None` wherever
+    /// the type says `T?` -- at the top, as an array/set element, a tuple slot, a dict value or a
+    /// struct field (a struct value carries its own field types) -- as Rust's `{:?}` prints the
+    /// compiled program's `Option<T>`. Without a type the bare value is printed.
+    pub(crate) fn debug_typed(&self, v: &Value, ty: Option<&Type>) -> String {
+        let resolved = ty.map(|t| self.resolve_type(t));
+        let ty = resolved.as_ref().map(|t| match t.without_mut() {
+            Type::Qualified(inner, _) => inner.without_mut(),
+            other => other,
+        });
+        if let Some(Type::Optional(inner)) = ty {
+            return match v {
+                Value::Nil => "None".to_string(),
+                v => format!("Some({})", self.debug_typed(v, Some(inner))),
+            };
+        }
+        match v {
+            Value::Array(elems) => {
+                let et = match ty { Some(Type::Array(e)) => Some(&**e), _ => None };
+                let inner: Vec<String> = elems.iter().map(|x| self.debug_typed(x, et)).collect();
+                format!("[{}]", inner.join(", "))
+            }
+            Value::Set(elems) => {
+                let et = match ty { Some(Type::Set(e)) => Some(&**e), _ => None };
+                let inner: Vec<String> = elems.iter().map(|x| self.debug_typed(x, et)).collect();
+                format!("{{{}}}", inner.join(", "))
+            }
+            Value::Tuple(elems) => {
+                let ts = match ty { Some(Type::Tuple(ts)) => Some(ts), _ => None };
+                let inner: Vec<String> = elems.iter().enumerate()
+                    .map(|(i, x)| self.debug_typed(x, ts.and_then(|ts| ts.get(i))))
+                    .collect();
+                format!("({})", inner.join(", "))
+            }
+            Value::Dict(pairs) => {
+                let (kt, vt) = match ty { Some(Type::Dict(k, v)) => (Some(&**k), Some(&**v)), _ => (None, None) };
+                let inner: Vec<String> = pairs.iter()
+                    .map(|(k, val)| format!("{}: {}", self.debug_typed(k, kt), self.debug_typed(val, vt)))
+                    .collect();
+                format!("{{{}}}", inner.join(", "))
+            }
+            Value::Object(obj) => {
+                let obj = obj.borrow();
+                if obj.fields.is_empty() { return obj.type_name.clone(); }
+                let inner: Vec<String> = obj.fields.iter()
+                    .map(|(k, val)| {
+                        let ft = self.struct_field_type(&obj.type_name, k);
+                        format!("{}: {}", k, self.debug_typed(val, ft.as_ref()))
+                    })
+                    .collect();
+                format!("{} {{ {} }}", obj.type_name, inner.join(", "))
+            }
+            other => debug_repr(other),
+        }
+    }
+
+    /// Whether `e` is statically a `T?` in the compiled program: a binding, parameter or field
+    /// declared optional, an untyped binding initialised from one (`set_inferred_optional`), a
+    /// call whose function or method declares a `T?` return, `try? f()`, a string parsed with
+    /// `as`, or one of the built-in methods that return an optional (`first`, `last`, `find`,
+    /// `indexOf`, a dict's one-argument `get`, `parseInt`/`parseFloat*`). Nothing is evaluated.
+    /// Only used to render `{e:?}` as `Some(v)`/`None`; an expression it cannot classify keeps
+    /// the bare value.
+    pub(crate) fn expr_is_optional(&self, e: &Expr, env: &EnvRef) -> bool {
+        let is_opt = |t: &Type| matches!(self.resolve_type(t).without_mut(), Type::Optional(_));
+        match &e.kind {
+            ExprKind::Var(n) => {
+                if let Some(t) = env.borrow().get_declared_type(n) { return is_opt(&t); }
+                if env.borrow().is_inferred_optional(n) { return true; }
+                if n != "self" && env.borrow().resolves_to_self_field(n) {
+                    let Some(Value::Object(o)) = env.borrow().get("self") else { return false };
+                    let pty = o.borrow().type_name.clone();
+                    return self.struct_field_type(&pty, n).is_some_and(|t| is_opt(&t));
+                }
+                false
+            }
+            ExprKind::Field(inner, f) => {
+                let Some(Value::Object(o)) = self.peek_path(inner, env) else { return false };
+                let pty = o.borrow().type_name.clone();
+                self.struct_field_type(&pty, f).is_some_and(|t| is_opt(&t))
+            }
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Var(f) = &callee.kind else { return false };
+                match self.global.borrow().get(f.as_str()) {
+                    Some(Value::Fn { decl, .. }) => decl.return_ty.as_ref().is_some_and(|t| is_opt(t)),
+                    _ => false,
+                }
+            }
+            ExprKind::TryElse(_, default) => matches!(default.kind, ExprKind::Nil),
+            ExprKind::Cast(inner, ty) => {
+                let numeric = matches!(self.resolve_type(ty).without_mut(),
+                    Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64
+                    | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
+                    | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128);
+                let from_text = matches!(&inner.kind, ExprKind::Str(_) | ExprKind::StringInterp(_))
+                    || matches!(self.peek_path(inner, env), Some(Value::Str(_)));
+                (numeric && from_text) || matches!(self.resolve_type(ty).without_mut(), Type::Optional(_))
+            }
+            ExprKind::MethodCall(recv, m, args) => {
+                // A user type's own method: its declared return type decides.
+                if let Some(Value::Object(o)) = self.peek_path(recv, env) {
+                    let pty = o.borrow().type_name.clone();
+                    let global = self.global.borrow();
+                    if let Some(Value::Struct { decl, .. }) = global.get(&pty) {
+                        return decl.methods.iter().find(|f| f.name == *m)
+                            .and_then(|f| f.return_ty.as_ref())
+                            .is_some_and(|t| is_opt(t));
+                    }
+                    return false;
+                }
+                matches!((m.as_str(), args.len()),
+                    ("first" | "last" | "parseInt" | "parseFloat" | "parseFloat16" | "parseFloat32", 0)
+                    | ("find" | "indexOf", 1))
+                    || (m == "get" && args.len() == 1 && matches!(self.peek_path(recv, env), Some(Value::Dict(_))))
+            }
+            _ => false,
         }
     }
 
@@ -1842,8 +2021,33 @@ impl Interpreter {
                             result.push_str(&self.display_value(v, line)?);
                         }
                         StringSegment::FormattedExpr(e, fmt) => {
+                            // The debug form (`{e:?}`) follows the hole's static type, read
+                            // before the evaluation (which may change what a receiver holds).
+                            let debug = fmt.trim().ends_with('?');
+                            let static_ty = if debug { self.hole_static_type(e, &env) } else { None };
+                            let optional = debug && (self.expr_is_optional(e, &env)
+                                || static_ty.as_ref().is_some_and(|t| matches!(self.resolve_type(t).without_mut(), Type::Optional(_))));
                             let v = self.eval_expr(e, Rc::clone(&env))?;
-                            let formatted = Self::apply_format(v, fmt, line)?;
+                            let formatted = if !debug {
+                                Self::apply_format(v, fmt, line)?
+                            } else if optional {
+                                // Rust's `Debug` for `Option` hands the width/fill to the payload
+                                // (`Some(   4)`) and writes `None` unpadded.
+                                let inner_ty = static_ty.as_ref().and_then(|t| match self.resolve_type(t).without_mut() {
+                                    Type::Optional(inner) => Some((**inner).clone()),
+                                    _ => None,
+                                });
+                                match v {
+                                    Value::Nil => "None".to_string(),
+                                    v => {
+                                        let body = self.debug_typed(&v, inner_ty.as_ref());
+                                        format!("Some({})", Self::apply_format_hole(v, fmt, line, Some(body))?)
+                                    }
+                                }
+                            } else {
+                                let body = self.debug_typed(&v, static_ty.as_ref());
+                                Self::apply_format_hole(v, fmt, line, Some(body))?
+                            };
                             result.push_str(&formatted);
                         }
                     }
@@ -2190,6 +2394,16 @@ impl Interpreter {
 
 
             ExprKind::Array(elems) => {
+                // `[TypeName]{}`: the typed-empty-array idiom. The parser splits it into `[T]`
+                // + `{}`, so a one-element literal naming a struct/enum type is the empty
+                // array, same as the transpiler's `Vec::<T>::new()`.
+                if let [only] = elems.as_slice() {
+                    if let ExprKind::Var(name) = &only.kind {
+                        if matches!(env.borrow().get(name), Some(Value::Struct { .. } | Value::EnumNamespace { .. })) {
+                            return Ok(Value::Array(Vec::new().into()));
+                        }
+                    }
+                }
                 let mut vals = Vec::new();
                 for e in elems {
                     let v = self.eval_expr(e, Rc::clone(&env))?;

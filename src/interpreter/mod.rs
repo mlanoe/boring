@@ -1252,6 +1252,29 @@ impl Env {
         }
     }
 
+    /// Marks an untyped binding whose initializer is statically an optional (`let x = arr.first()`),
+    /// or clears a stale mark. Optionals carry no tag at run time (`nil` or the bare value), so
+    /// this is what lets `"{x:?}"` render `Some(3)`/`None` like the compiled program. Kept under
+    /// a key no source name can have.
+    pub fn set_inferred_optional(&mut self, name: &str, optional: bool) {
+        let key = format!("\u{1}o:{name}");
+        if optional {
+            self.declared_types.insert(key, Type::Optional(Box::new(Type::Named("\u{1}any".into()))));
+        } else {
+            self.declared_types.remove(&key);
+        }
+    }
+
+    pub fn is_inferred_optional(&self, name: &str) -> bool {
+        if self.vars.contains_key(name) {
+            self.declared_types.contains_key(&format!("\u{1}o:{name}"))
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().is_inferred_optional(name)
+        } else {
+            false
+        }
+    }
+
     pub fn get_inferred_type(&self, name: &str) -> Option<Type> {
         if self.vars.contains_key(name) {
             self.declared_types.get(&format!("\u{1}t:{name}")).cloned()
@@ -1823,7 +1846,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                         (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                        _ => std::cmp::Ordering::Equal,
+                        _ => eval_expr::numeric_order(a, b).unwrap_or(std::cmp::Ordering::Equal),
                     }).cloned().unwrap_or(Value::Nil)),
                     _ => Err(Signal::Error(RuntimeError { message: "min: expected array or two values".into(), line, col: 0, len: 0, file: None })),
                 }
@@ -1842,7 +1865,11 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     (Value::Float64(x), Value::Int(y)) => Ok(if *x <= (*y as f64) { a } else { b }),
                     (Value::Int(x), Value::Float32(y)) => Ok(if (*x as f32) <= *y { a } else { b }),
                     (Value::Float32(x), Value::Int(y)) => Ok(if *x <= (*y as f32) { a } else { b }),
-                    _ => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0, file: None })),
+                    // Any other pair of numbers: sized integers, or floats of two widths.
+                    _ => match eval_expr::numeric_order(&a, &b) {
+                        Some(ord) => Ok(if ord != std::cmp::Ordering::Greater { a } else { b }),
+                        None => Err(Signal::Error(RuntimeError { message: "min: expected numbers".into(), line, col: 0, len: 0, file: None })),
+                    },
                 }
             }
         },
@@ -1857,7 +1884,7 @@ fn register_string_and_math_builtins(e: &mut Env) {
                         (Value::Float16(x), Value::Float16(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                         (Value::Float32(x), Value::Float32(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                        _ => std::cmp::Ordering::Equal,
+                        _ => eval_expr::numeric_order(a, b).unwrap_or(std::cmp::Ordering::Equal),
                     }).cloned().unwrap_or(Value::Nil)),
                     _ => Err(Signal::Error(RuntimeError { message: "max: expected array or two values".into(), line, col: 0, len: 0, file: None })),
                 }
@@ -1875,7 +1902,11 @@ fn register_string_and_math_builtins(e: &mut Env) {
                     (Value::Float64(x), Value::Int(y)) => Ok(if *x >= (*y as f64) { a } else { b }),
                     (Value::Int(x), Value::Float32(y)) => Ok(if (*x as f32) >= *y { a } else { b }),
                     (Value::Float32(x), Value::Int(y)) => Ok(if *x >= (*y as f32) { a } else { b }),
-                    _ => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0, file: None })),
+                    // Any other pair of numbers: sized integers, or floats of two widths.
+                    _ => match eval_expr::numeric_order(&a, &b) {
+                        Some(ord) => Ok(if ord != std::cmp::Ordering::Less { a } else { b }),
+                        None => Err(Signal::Error(RuntimeError { message: "max: expected numbers".into(), line, col: 0, len: 0, file: None })),
+                    },
                 }
             }
         },
@@ -2243,6 +2274,13 @@ fn register_string_and_math_builtins(e: &mut Env) {
                 // instead of rejecting it as "not a number".
                 (Some(Value::Float32(x)), Some(Value::Float32(lo)), Some(Value::Float32(hi))) =>
                     Ok(Value::Float32(x.clamp(*lo, *hi))),
+                // A `float32` value keeps its width whatever the bounds are written as
+                // (`clamp(w, 0.0, 1.0)`: the literals are `float32` in generated Rust too).
+                (Some(Value::Float32(x)), Some(lo), Some(hi)) =>
+                    match (eval_expr::numeric_as_f64(lo), eval_expr::numeric_as_f64(hi)) {
+                        (Some(lo), Some(hi)) => Ok(Value::Float32(x.clamp(lo as f32, hi as f32))),
+                        _ => Err(err("clamp: expected (number, min, max)", line)),
+                    },
                 _ => Err(err("clamp: expected (number, min, max)", line)),
             }
         },
@@ -2476,6 +2514,7 @@ fn register_result_and_args_builtins(e: &mut Env) {
 fn register_misc_globals(e: &mut Env) {
     e.define("PI",  Value::Float64(std::f64::consts::PI));
     e.define("E",   Value::Float64(std::f64::consts::E));
+    e.define("TAU", Value::Float64(std::f64::consts::TAU));
     e.define("INF", Value::Float64(f64::INFINITY));
     e.define("NAN", Value::Float64(f64::NAN));
 
@@ -3781,6 +3820,8 @@ impl Interpreter {
                 } else { val };
                 let inferred_coll = if stmt.ty.is_none() { self.infer_collection_type(stmt_value, &env) } else { None };
                 env.borrow_mut().set_inferred_type(&stmt.name, inferred_coll);
+                let inferred_opt = stmt.ty.is_none() && self.expr_is_optional(stmt_value, &env);
+                env.borrow_mut().set_inferred_optional(&stmt.name, inferred_opt);
                 // Capture copy-ness before `val` is consumed by define()
                 let val_is_copy = Self::is_copy_value(&val);
                 let is_shared_ty = stmt.ty.as_ref().map(|ty| {

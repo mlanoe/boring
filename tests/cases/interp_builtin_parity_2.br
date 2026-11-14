@@ -1,0 +1,17 @@
+# Second pass of `interp_builtin_parity`: built-ins `boring build` accepted and `boring run`
+# rejected -- the `TAU` constant of the book's math table, `trunc`/`fract` on a float, and
+# `insert` on a set (the name Rust's `HashSet` gives `add`).
+def main():
+    print TAU
+    print "{TAU / 2.0 == PI}"
+
+    let float f = -2.75
+    print "{f.trunc()} {f.fract()}"
+    let float32 g = 2.5
+    print "{g.trunc()} {g.fract()}"
+
+    mut {int} seen = {1, 2}
+    seen.insert(3)
+    seen.insert(1)
+    print seen.length
+    print seen.contains(3)
