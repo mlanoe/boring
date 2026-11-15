@@ -1,0 +1,27 @@
+# What the optional-into-plain-type rule leaves alone: an optional stored in a `T?` binding or
+# unwrapped (`else`, `if let`), returned from a function declared `int?`, and a user type's own
+# `first`/`indexOf` that return plain values or optionals of their own.
+struct Stack:
+    var mut [int] items = []
+    req int? indexOf(int x): 0
+    req int first(): 7
+
+int? opt([int] xs, int x):
+    return xs.indexOf(x)
+
+def main():
+    let [int] a = [3, 1]
+    let int? j = a.indexOf(1)
+    let k = a.indexOf(9)
+    let int e = a.indexOf(9) else -1
+    let int? f = a.first()
+    let string s = "12"
+    let int? n = s.parseInt()
+    let int m = s.parseInt() else 0
+    let st = Stack()
+    let int plain = st.first()
+    let int mine = st.indexOf(1) else 5
+    if let w = a.find((x): x > 1):
+        print w
+    print k
+    print "{j} {e} {f} {n} {m} {plain} {mine} {opt(a, 1)}"

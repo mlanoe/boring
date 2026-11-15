@@ -1,0 +1,1 @@
+`.first()` returns an optional (`nil` when the array is empty), but its result is stored in `h`, declared `int`

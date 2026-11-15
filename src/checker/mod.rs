@@ -2107,6 +2107,83 @@ impl Checker {
         }
     }
 
+    /// The built-in method call `e` is, when it always returns an optional (`T?`: `nil` when there is
+    /// nothing to return): `indexOf(x)` of an array or a string, `first()`, `last()` and `find(pred)`
+    /// of an array, `parseInt()` / `parseFloat*()` of a string. The receiver has to be positively a
+    /// built-in array or string (a literal, a binding with a written or evident type, a field of the
+    /// struct being checked): a user type may declare a method of the same name returning a plain
+    /// value. Returns the method name.
+    fn optional_builtin_call(&self, e: &Expr) -> Option<&'static str> {
+        #[derive(PartialEq)]
+        enum Recv { Array, Str }
+        let ExprKind::MethodCall(recv, method, args) = &e.kind else { return None };
+        let name: &'static str = match (method.as_str(), args.len()) {
+            ("indexOf", 1) => "indexOf",
+            ("first", 0) => "first",
+            ("last", 0) => "last",
+            ("find", 1) => "find",
+            ("parseInt", 0) => "parseInt",
+            ("parseFloat", 0) => "parseFloat",
+            ("parseFloat16", 0) => "parseFloat16",
+            ("parseFloat32", 0) => "parseFloat32",
+            _ => return None,
+        };
+        let recv_kind = match &recv.kind {
+            ExprKind::Array(_) => Some(Recv::Array),
+            ExprKind::Str(_) | ExprKind::StringInterp(_) => Some(Recv::Str),
+            _ => match self.declared_receiver_type(recv) {
+                Some(ty) => match Self::strip_qualifiers(ty.without_mut()) {
+                    Type::Array(_) | Type::ArrayN(..) | Type::ArrayNExpr(..) => Some(Recv::Array),
+                    Type::Str => Some(Recv::Str),
+                    Type::Named(n) if n == "string" => Some(Recv::Str),
+                    _ => None,
+                },
+                // An untyped binding: a collection literal / call, or a string value.
+                None => match &recv.kind {
+                    ExprKind::Var(n) => match self.lookup(n) {
+                        Some(b) if b.ctor_type.is_some() => None,
+                        Some(b) if b.builtin_collection => Some(Recv::Array),
+                        Some(_) => match self.arg_class(recv) {
+                            Some((ArgClass::Str, _)) => Some(Recv::Str),
+                            _ => None,
+                        },
+                        None => None,
+                    },
+                    _ => None,
+                },
+            },
+        };
+        match (name, recv_kind) {
+            ("indexOf", Some(_)) => Some(name),
+            ("first" | "last" | "find", Some(Recv::Array)) => Some(name),
+            ("parseInt" | "parseFloat" | "parseFloat16" | "parseFloat32", Some(Recv::Str)) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// An optional-returning built-in call (`optional_builtin_call`) stored in a binding, or returned
+    /// from a function, whose declared type is not optional: `let int j = a.indexOf(1)`. `boring run`
+    /// lets the `nil` through, `boring build` emits an `Option<isize>` for an `isize` (E0308), and the
+    /// program is wrong either way when the item is absent. `context` completes "... `{context}` `T`".
+    fn check_optional_into_plain(&mut self, value: &Expr, declared: &Type, context: &str, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+        let Some(method) = self.optional_builtin_call(value) else { return };
+        let Some((_, tyname)) = self.type_class(declared) else { return };
+        let (absent, unwrap) = match method {
+            "indexOf" => ("the item is absent", "`let int j = a.indexOf(x) else -1`, or `if let j = a.indexOf(x):`"),
+            "first" | "last" => ("the array is empty", "`let T v = xs.first() else fallback`, or `if let v = xs.first():`"),
+            "find" => ("nothing matches", "`let T v = xs.find(pred) else fallback`, or `if let v = xs.find(pred):`"),
+            _ => ("the text is not a number", "`let int n = s.parseInt() else 0`, or `if let n = s.parseInt():`"),
+        };
+        self.error(
+            format!(
+                "`.{method}()` returns an optional (`nil` when {absent}), but its result is {context} `{tyname}`; \
+                 fix: declare the type `{tyname}?`, or unwrap it first: {unwrap}"
+            ),
+            line, col,
+        );
+    }
+
     /// `first()`, `last()`, `find(pred)` and `pop()` of an array whose element is itself optional, and
     /// `get(k)` / `get(k, default)` of a dict whose value is, would be an optional of an optional:
     /// absent (`[]`), present but `nil` (`[nil, 2]`), present with a value. Boring has no `T??` --
@@ -2323,7 +2400,10 @@ impl Checker {
             Stmt::Return(r)    => {
                 if let Some(v) = &r.value {
                     self.check_expr(v);
-                    if let Some(rt) = self.current_return_ty.clone() { self.check_dot_variant(v, &rt); }
+                    if let Some(rt) = self.current_return_ty.clone() {
+                        self.check_dot_variant(v, &rt);
+                        self.check_optional_into_plain(v, &rt, "returned from a function declared to return", v.line, v.col);
+                    }
                 }
             }
             Stmt::Throw(t)     => { if let Some(v) = &t.value { self.check_expr(v); } }
@@ -2409,7 +2489,10 @@ impl Checker {
         self.check_atomic_compatibility(&s.ty, s.line, s.col);
         self.check_observed_compatibility(&s.ty, s.line, s.col);
         if let Some(v) = &s.value { self.check_expr(v); }
-        if let (Some(ty), Some(v)) = (&s.ty, &s.value) { self.check_dot_variant(v, ty); }
+        if let (Some(ty), Some(v)) = (&s.ty, &s.value) {
+            self.check_dot_variant(v, ty);
+            self.check_optional_into_plain(v, ty, &format!("stored in `{}`, declared", s.name), v.line, v.col);
+        }
         // Labeled multi-dim array cross-label check — only when this `let` has
         // an explicit type annotation to check the initializer against.
         if let (Some(target_ty), Some(v)) = (&s.ty, &s.value) {

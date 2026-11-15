@@ -1275,3 +1275,8 @@ interp_test!(optional_elem_contains);
 interp_test!(misc_scenarios_10);
 interp_test!(mem_places);
 error_test!(error_nested_optional_dict_get_default);
+
+error_test!(error_optional_into_plain_let);
+error_test!(error_optional_into_plain_return);
+error_test!(error_optional_into_plain_first);
+interp_test!(optional_builtin_stored);

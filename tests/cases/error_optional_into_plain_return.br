@@ -1,0 +1,6 @@
+# The same refusal for a `return` from a function declared to return a plain `int`.
+int position([int] xs, int x):
+    return xs.indexOf(x)
+
+def main():
+    print position([3, 1], 9)

@@ -1,0 +1,13 @@
+# `first()` of an array and `parseInt()` of a string are optionals too: a field's array and an
+# untyped binding are enough for the checker to know the receiver.
+struct Bag:
+    var mut [int] items = []
+
+    req int head():
+        let int h = items.first()
+        return h
+
+def main():
+    let text = "12"
+    let int n = text.parseInt()
+    print Bag().head() + n

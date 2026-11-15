@@ -1,0 +1,7 @@
+# `indexOf` returns an `int?` (`nil` when the item is absent). Stored in a plain `int`, `boring
+# run` let the `nil` through and `boring build` emitted an `Option<isize>` for an `isize`
+# (rustc E0308): the checker refuses it. `first`, `last`, `find` and `parseInt` are the same.
+def main():
+    let [int] a = [3, 1]
+    let int j = a.indexOf(9)
+    print j

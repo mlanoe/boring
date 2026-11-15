@@ -1,0 +1,1 @@
+`.indexOf()` returns an optional (`nil` when the item is absent), but its result is returned from a function declared to return `int`

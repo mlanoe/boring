@@ -5555,6 +5555,8 @@ On an array whose element type is itself optional (`[int?]`), `first()`, `last()
 | `sum()`, `min()`, `max()` | `any` | numeric elements |
 | `join(sep)` (also `joined`) | `string` | |
 
+The methods of this table that return `T?` (and `parseInt()` / `parseFloat*()` of a string) cannot be stored in, or returned as, a plain `T`: `let int j = a.indexOf(x)` and `int f(): return a.indexOf(x)` are checker errors (the `nil` of an absent item has nowhere to go; `boring build` would hand an `Option<isize>` to an `isize`). Declare `int?`, or unwrap first: `let int j = a.indexOf(x) else -1`, `if let j = a.indexOf(x):`. The receiver has to be known to be a built-in array or string (a literal, a typed or evident binding, a field of the struct): a user type's own `indexOf` is checked against its own declaration.
+
 `firstIndex()`/`nextIndex(i)`/`getAt(i)`/`removeAt(i)` are an **internal
 cursor-based protocol** backing generic `for`/index-based iteration across
 `[T]`/`{K=V}`/`{T}` uniformly (`i` is an opaque cursor value from
