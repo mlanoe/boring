@@ -11,6 +11,7 @@ use crate::transpiler::helpers::{
     camel_to_snake, desugared_labeled_array_shadow_fields, labeled_array_grid_dim_expr,
     shadow_grid_axes,
 };
+use crate::transpiler::gpu_common::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_host_rs(
@@ -217,11 +218,6 @@ fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String
         Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
         _ => false,
     }
-}
-
-fn is_gpu_array_param(ty: &Type) -> bool {
-    matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
-        if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
 }
 
 /// True for a bare `[float]`/`[float64]` array param -- this backend's own
@@ -4721,19 +4717,6 @@ pub(super) fn rust_type(ty: &Type) -> String {
     }
 }
 
-fn literal_array_uses_float16(expr: &Expr) -> bool {
-    fn is_half(expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Call(callee, args) if args.len() == 1 =>
-                matches!(&callee.kind, ExprKind::Var(name) if matches!(name.as_str(), "float16" | "f16")),
-            ExprKind::Cast(_, ty) => matches!(ty.without_mut(), Type::Float16)
-                || matches!(ty.without_mut(), Type::Named(name) if matches!(name.as_str(), "float16" | "f16")),
-            _ => false,
-        }
-    }
-    matches!(&expr.kind, ExprKind::Array(elements) if elements.iter().any(is_half))
-}
-
 fn elem_size_bytes(ty: &Type) -> usize {
     match ty {
         Type::Float16                                => 2,
@@ -4780,28 +4763,6 @@ fn emit_scalar_default(expr: &Expr) -> String {
             _ => "Default::default()".into(),
         },
         _ => "Default::default()".into(),
-    }
-}
-
-fn binop_rust(op: &BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",   BinOp::Sub => "-",  BinOp::Mul => "*",
-        BinOp::Div => "/",   BinOp::Rem => "%",
-        BinOp::Eq  => "==",  BinOp::NotEq => "!=",  BinOp::RefEq => "==",
-        BinOp::Lt  => "<",   BinOp::Gt => ">",
-        BinOp::LtEq => "<=", BinOp::GtEq => ">=",
-        BinOp::And => "&&",  BinOp::Or => "||",
-        BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "^",
-        BinOp::Shl => "<<",  BinOp::Shr => ">>",
-        _ => "/*op*/",
-    }
-}
-
-fn unaryop_rust(op: &UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg    => "-",
-        UnaryOp::Not    => "!",
-        UnaryOp::BitNot => "!",
     }
 }
 

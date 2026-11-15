@@ -13,6 +13,7 @@ use crate::transpiler::helpers::{
     labeled_array_at_index, labeled_array_dim_literal,
     first_loop_index,
 };
+use crate::transpiler::gpu_common::*;
 
 #[cfg(test)]
 pub(super) fn emit_device_msl(program: &Program) -> String {
@@ -2991,10 +2992,6 @@ impl DeviceEmitter {
     }
 }
 
-fn const_array_count(e: &Expr) -> Option<usize> {
-    match e.kind { ExprKind::Int(n) if n >= 0 => Some(n as usize), _ => None }
-}
-
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
@@ -3417,11 +3414,6 @@ fn tensor_scalar_fallback_is_emitted() {
     assert!(!source.contains("matmulTile("), "{source}");
 }
 
-fn is_gpu_warp_receiver(obj: &Expr) -> bool {
-    matches!(&obj.kind, ExprKind::Field(inner, name) if name == "warp"
-        && matches!(&inner.kind, ExprKind::Var(v) if v == "gpu"))
-}
-
 fn map_builtin_fn(name: &str) -> String {
     match name {
         "int"   => "(int64_t)".into(),
@@ -3499,58 +3491,6 @@ fn float_unary_method_msl(method: &str, obj: &str, args: &[String]) -> Option<St
 }
 
 // ── Auto-sync helpers ─────────────────────────────────────────────────────────
-
-/// Returns true if the body contains at least one explicit `sync` statement at any depth.
-fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| match s {
-        Stmt::Comment(c) if c == "sync" => true,
-        Stmt::While(w)   => body_has_explicit_sync(&w.body),
-        Stmt::For(f)     => body_has_explicit_sync(&f.body),
-        Stmt::If(i)      => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
-                         || i.else_body.as_ref().is_some_and(|b| body_has_explicit_sync(b)),
-        _ => false,
-    })
-}
-
-/// Returns true if the body references any field declared with `'sync`.
-fn body_accesses_sync_field(stmts: &[Stmt], fields: &[KernelFieldDecl]) -> bool {
-    let sync_names: Vec<&str> = fields.iter()
-        .filter(|f| matches!(f.qual, GpuQual::Actor))
-        .map(|f| f.name.as_str())
-        .collect();
-    if sync_names.is_empty() { return false; }
-    stmts_reference_any(stmts, &sync_names)
-}
-
-fn stmts_reference_any(stmts: &[Stmt], names: &[&str]) -> bool {
-    stmts.iter().any(|s| stmt_references_any(s, names))
-}
-
-fn stmt_references_any(stmt: &Stmt, names: &[&str]) -> bool {
-    match stmt {
-        Stmt::Expr(e) => expr_references_any(e, names),
-        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
-        Stmt::Let(s) => s.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
-        Stmt::While(w) => stmts_reference_any(&w.body, names),
-        Stmt::For(f)   => stmts_reference_any(&f.body, names),
-        Stmt::If(i)    => i.branches.iter().any(|(_, b)| stmts_reference_any(b, names))
-                       || i.else_body.as_ref().is_some_and(|b| stmts_reference_any(b, names)),
-        _ => false,
-    }
-}
-
-fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
-    match &expr.kind {
-        ExprKind::Var(n)           => names.contains(&n.as_str()),
-        ExprKind::Index(a, i)      => expr_references_any(a, names) || expr_references_any(i, names),
-        ExprKind::Field(e, _)      => expr_references_any(e, names),
-        ExprKind::BinOp(_, l, r)   => expr_references_any(l, names) || expr_references_any(r, names),
-        ExprKind::UnaryOp(_, e)    => expr_references_any(e, names),
-        ExprKind::Assign(l, r)     => expr_references_any(l, names) || expr_references_any(r, names),
-        ExprKind::Call(f, args)    => expr_references_any(f, names) || args.iter().any(|a| expr_references_any(&a.value, names)),
-        _ => false,
-    }
-}
 
 /// `__boring_metal_blocked_prefill_<format>()` statement synthesized by `tensor_host` for the
 /// formats the blocked SIMD-group prefill supports; returns the format name.

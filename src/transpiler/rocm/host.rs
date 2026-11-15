@@ -26,6 +26,7 @@ use crate::transpiler::helpers::{
     labeled_array_grid_dim_expr, desugared_labeled_array_shadow_fields,
     labeled_array_total_size_expr,
 };
+use crate::transpiler::gpu_common::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_host_rs(
@@ -881,22 +882,6 @@ struct HostEmitter {
     /// `try_emit_kernel_launch_call`) must use `.expect(...)` instead while
     /// this flag is set.
     in_render_loop: bool,
-}
-
-/// True when `ty` is one of boring's always-by-reference parameter kinds (see
-/// `HostEmitter::fn_ref_params`'s doc comment for the exact contract this
-/// mirrors).
-fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::HashSet<String>) -> bool {
-    match ty {
-        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) => true,
-        Type::Named(n) => struct_names.contains(n),
-        _ => false,
-    }
-}
-
-fn is_gpu_array_param(ty: &Type) -> bool {
-    matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
-        if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))
 }
 
 impl HostEmitter {
@@ -4276,20 +4261,6 @@ fn emit_scalar_default(expr: &Expr) -> String {
     }
 }
 
-/// Returns the size in bytes of a scalar element type for shared-memory calculations.
-fn literal_array_uses_float16(expr: &Expr) -> bool {
-    fn is_half(expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Call(callee, args) if args.len() == 1 =>
-                matches!(&callee.kind, ExprKind::Var(name) if matches!(name.as_str(), "float16" | "f16")),
-            ExprKind::Cast(_, ty) => matches!(ty.without_mut(), Type::Float16)
-                || matches!(ty.without_mut(), Type::Named(name) if matches!(name.as_str(), "float16" | "f16")),
-            _ => false,
-        }
-    }
-    matches!(&expr.kind, ExprKind::Array(elements) if elements.iter().any(is_half))
-}
-
 fn elem_size_bytes(ty: &Type) -> usize {
     match ty {
         Type::Float16                          => 2,
@@ -4321,27 +4292,5 @@ fn elem_size_bytes(ty: &Type) -> usize {
         Type::Qualified(inner, _)            => elem_size_bytes(inner),
         Type::Array(inner) | Type::ArrayN(inner, _) | Type::ArrayNExpr(inner, _) => elem_size_bytes(inner),
         _                                    => 8,
-    }
-}
-
-fn binop_rust(op: &BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",   BinOp::Sub => "-",  BinOp::Mul => "*",
-        BinOp::Div => "/",   BinOp::Rem => "%",
-        BinOp::Eq  => "==",  BinOp::NotEq => "!=",  BinOp::RefEq => "==",
-        BinOp::Lt  => "<",   BinOp::Gt => ">",
-        BinOp::LtEq => "<=", BinOp::GtEq => ">=",
-        BinOp::And => "&&",  BinOp::Or => "||",
-        BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "^",
-        BinOp::Shl => "<<",  BinOp::Shr => ">>",
-        _ => "/*op*/",
-    }
-}
-
-fn unaryop_rust(op: &UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg    => "-",
-        UnaryOp::Not    => "!",
-        UnaryOp::BitNot => "!",
     }
 }

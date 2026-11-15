@@ -19,6 +19,7 @@ use crate::transpiler::helpers::{
     labeled_array_at_index, labeled_array_dim_literal,
     first_loop_index,
 };
+use crate::transpiler::gpu_common::*;
 
 #[cfg(test)]
 pub(super) fn emit_device_hip(program: &Program) -> String {
@@ -772,10 +773,6 @@ impl DeviceEmitter {
     }
 }
 
-fn const_array_count(e: &Expr) -> Option<usize> {
-    match e.kind { ExprKind::Int(n) if n >= 0 => Some(n as usize), _ => None }
-}
-
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
 fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
@@ -808,39 +805,6 @@ fn field_params(fields: &[KernelFieldDecl]) -> Vec<String> {
                         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => None,
                         ty if ty.as_labeled_array().is_some() => None,
                         _ => Some(format!("{} {}", c_type(&f.ty), c_gpu_safe_ident(&f.name))),
-                    }
-                }
-                _ => None,
-            }
-        })
-    ).collect()
-}
-
-/// Argument names to pass at a call site for `field_params(fields)` — same filtering
-/// and ordering, but just the bare field names instead of full C parameter declarations.
-fn field_arg_names(fields: &[KernelFieldDecl]) -> Vec<String> {
-    fields.iter().filter_map(|f| {
-        match f.qual {
-            GpuQual::Actor | GpuQual::Local => None,
-            GpuQual::Unified | GpuQual::Global | GpuQual::ActorGlobal | GpuQual::ActorUnified | GpuQual::Surface => {
-                Some(c_gpu_safe_ident(&f.name))
-            }
-            GpuQual::Const => {
-                if matches!(f.ty, Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _)) || f.ty.as_labeled_array().is_some() {
-                    None  // __constant__ arrays accessed via file-scope global, not as args
-                } else {
-                    Some(c_gpu_safe_ident(&f.name))
-                }
-            }
-        }
-    }).chain(
-        fields.iter().filter_map(|f| {
-            match f.qual {
-                GpuQual::Local => {
-                    match &f.ty {
-                        Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) => None,
-                        ty if ty.as_labeled_array().is_some() => None,
-                        _ => Some(c_gpu_safe_ident(&f.name)),
                     }
                 }
                 _ => None,
@@ -919,54 +883,6 @@ fn elem_c_type(ty: &Type) -> String {
     }
 }
 
-fn binop_c(op: &BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",  BinOp::Sub => "-",  BinOp::Mul => "*",
-        BinOp::Div => "/",  BinOp::Rem => "%",
-        BinOp::Eq  => "==", BinOp::NotEq => "!=",
-        BinOp::Lt  => "<",  BinOp::Gt => ">",
-        BinOp::LtEq => "<=", BinOp::GtEq => ">=",
-        BinOp::And => "&&", BinOp::Or => "||",
-        BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "^",
-        BinOp::Shl => "<<", BinOp::Shr => ">>",
-        _ => "/*op*/",
-    }
-}
-
-fn unaryop_c(op: &UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg    => "-",
-        UnaryOp::Not    => "!",
-        UnaryOp::BitNot => "~",
-    }
-}
-
-fn map_gpu_field(obj: &str, field: &str) -> String {
-    match (obj, field) {
-        ("gpu", "thread")    => "threadIdx".into(),
-        ("gpu", "block")     => "blockIdx".into(),
-        ("gpu", "block_dim" | "blockDim") => "blockDim".into(),
-        ("gpu", "grid_dim" | "gridDim")  => "gridDim".into(),
-        ("threadIdx", "x")   => "threadIdx.x".into(),
-        ("threadIdx", "y")   => "threadIdx.y".into(),
-        ("threadIdx", "z")   => "threadIdx.z".into(),
-        ("blockIdx",  "x")   => "blockIdx.x".into(),
-        ("blockIdx",  "y")   => "blockIdx.y".into(),
-        ("blockIdx",  "z")   => "blockIdx.z".into(),
-        ("blockDim",  "x")   => "blockDim.x".into(),
-        ("blockDim",  "y")   => "blockDim.y".into(),
-        ("blockDim",  "z")   => "blockDim.z".into(),
-        ("gridDim",   "x")   => "gridDim.x".into(),
-        ("gridDim",   "y")   => "gridDim.y".into(),
-        ("gridDim",   "z")   => "gridDim.z".into(),
-        ("gpu", "warp")      => "__warp".into(),
-        ("__warp", "size")   => "warpSize".into(),
-        ("__warp", "lane")   =>
-            "((threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y) % warpSize)".into(),
-        _                    => format!("{}.{}", obj, field),
-    }
-}
-
 /// `.warp.sync()` / `.warp.shuffle_down/up/xor/shuffle(...)` — unlike
 /// the comment this replaces claimed, HIP does NOT mirror CUDA's `_sync`
 /// shuffle intrinsic names or their mask argument: confirmed against a real
@@ -1000,11 +916,6 @@ fn tensor_scalar_fallback_is_emitted() {
     assert!(source.contains("bp_tensor_sum += a["), "{source}");
     assert!(source.contains("c["), "{source}");
     assert!(!source.contains("matmulTile("), "{source}");
-}
-
-fn is_gpu_warp_receiver(obj: &Expr) -> bool {
-    matches!(&obj.kind, ExprKind::Field(inner, name) if name == "warp"
-        && matches!(&inner.kind, ExprKind::Var(v) if v == "gpu"))
 }
 
 fn map_builtin_fn(name: &str) -> String {
@@ -1056,56 +967,6 @@ fn map_builtin_fn(name: &str) -> String {
 }
 
 // ── Auto-sync helpers ─────────────────────────────────────────────────────────
-
-fn body_has_explicit_sync(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| match s {
-        Stmt::Comment(c) if c == "sync" => true,
-        Stmt::While(w)   => body_has_explicit_sync(&w.body),
-        Stmt::For(f)     => body_has_explicit_sync(&f.body),
-        Stmt::If(i)      => i.branches.iter().any(|(_, b)| body_has_explicit_sync(b))
-                         || i.else_body.as_ref().is_some_and(|b| body_has_explicit_sync(b)),
-        _ => false,
-    })
-}
-
-fn body_accesses_sync_field(stmts: &[Stmt], fields: &[KernelFieldDecl]) -> bool {
-    let sync_names: Vec<&str> = fields.iter()
-        .filter(|f| matches!(f.qual, GpuQual::Actor))
-        .map(|f| f.name.as_str())
-        .collect();
-    if sync_names.is_empty() { return false; }
-    stmts_reference_any(stmts, &sync_names)
-}
-
-fn stmts_reference_any(stmts: &[Stmt], names: &[&str]) -> bool {
-    stmts.iter().any(|s| stmt_references_any(s, names))
-}
-
-fn stmt_references_any(stmt: &Stmt, names: &[&str]) -> bool {
-    match stmt {
-        Stmt::Expr(e) => expr_references_any(e, names),
-        Stmt::Return(r) => r.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
-        Stmt::Let(s) => s.value.as_ref().is_some_and(|v| expr_references_any(v, names)),
-        Stmt::While(w) => stmts_reference_any(&w.body, names),
-        Stmt::For(f)   => stmts_reference_any(&f.body, names),
-        Stmt::If(i)    => i.branches.iter().any(|(_, b)| stmts_reference_any(b, names))
-                       || i.else_body.as_ref().is_some_and(|b| stmts_reference_any(b, names)),
-        _ => false,
-    }
-}
-
-fn expr_references_any(expr: &Expr, names: &[&str]) -> bool {
-    match &expr.kind {
-        ExprKind::Var(n)           => names.contains(&n.as_str()),
-        ExprKind::Index(a, i)      => expr_references_any(a, names) || expr_references_any(i, names),
-        ExprKind::Field(e, _)      => expr_references_any(e, names),
-        ExprKind::BinOp(_, l, r)   => expr_references_any(l, names) || expr_references_any(r, names),
-        ExprKind::UnaryOp(_, e)    => expr_references_any(e, names),
-        ExprKind::Assign(l, r)     => expr_references_any(l, names) || expr_references_any(r, names),
-        ExprKind::Call(f, args)    => expr_references_any(f, names) || args.iter().any(|a| expr_references_any(&a.value, names)),
-        _ => false,
-    }
-}
 
 // ── fixed-point (docs/fixed-point-types.md, GPU backends) ────────────────────
 impl DeviceEmitter {

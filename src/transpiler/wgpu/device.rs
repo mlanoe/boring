@@ -1245,7 +1245,11 @@ impl DeviceEmitter {
                             self.line(&format!("let {name}: vec2<u32> = vec2<u32>({pvar}.{name}_lo, {pvar}.{name}_hi);"));
                         }
                         _ => {
-                            if is_float16_type(&f.ty) {
+                            if is_bool_type(&f.ty) {
+                                // Stored as `u32` in the uniform block; unpacked as a native
+                                // WGSL `bool` so conditions / `and` / `not` type-check.
+                                self.line(&format!("let {name}: bool = ({pvar}.{name} != 0u);"));
+                            } else if is_float16_type(&f.ty) {
                                 self.line(&format!("let {name}: f16 = f16({pvar}.{name});"));
                             } else {
                                 self.line(&format!("let {name}: {} = {pvar}.{name};", wgsl_scalar(&f.ty)));
@@ -1472,7 +1476,7 @@ impl DeviceEmitter {
                     // Non-atomic `arr[idx].min/max/swap/cas(...)` needs two
                     // real WGSL statements (no statement-expression in WGSL)
                     // — see `try_emit_plain_index_method_stmt`'s own doc.
-                    let ty_suffix = s.ty.as_ref().map(|t| format!(": {}", wgsl_type(t))).unwrap_or_default();
+                    let ty_suffix = s.ty.as_ref().map(|t| format!(": {}", wgsl_local_type(t))).unwrap_or_default();
                     let name = wgsl_safe_ident(&s.name);
                     if self.try_emit_plain_index_method_stmt(Some((kw, &ty_suffix)), &name, val) {
                         return;
@@ -1482,7 +1486,7 @@ impl DeviceEmitter {
                         None => self.expr(val),
                     };
                     if let Some(ty) = &s.ty {
-                        self.line(&format!("{} {}: {} = {};", kw, name, wgsl_type(ty), rhs));
+                        self.line(&format!("{} {}: {} = {};", kw, name, wgsl_local_type(ty), rhs));
                     } else {
                         self.line(&format!("{} {} = {};", kw, name, rhs));
                     }
@@ -2430,10 +2434,27 @@ impl DeviceEmitter {
                 // Nest every branch (not just the first) so an elif chain lowers to
                 // `select(select(select(else, t2, c2), t1, c1), t0, c0)` instead of
                 // collapsing to just the first condition with the else value as fallback.
-                let mut acc = tail;
-                for (cond, then_body) in i.branches.iter().rev() {
+                let mut arms: Vec<(String, String)> = Vec::new();
+                for (cond, then_body) in i.branches.iter() {
                     let c = self.expr(cond);
                     let t = self.if_branch_value(then_body);
+                    arms.push((c, t));
+                }
+                let mut tail = tail;
+                // `select` needs both values to share one type. An int literal above
+                // `i32::MAX` is spelled `Nu` (a `u32`), so when sibling branches are plain
+                // `i32` literals, reinterpret it as `i32` (bit-preserving) instead of
+                // emitting a mixed `u32`/`i32` `select` the WGSL validator rejects.
+                let is_big = |v: &str| v.len() > 1 && v.ends_with('u') && v[..v.len() - 1].bytes().all(|b| b.is_ascii_digit());
+                let is_plain = |v: &str| v.trim_start_matches('-').bytes().all(|b| b.is_ascii_digit()) && !v.is_empty();
+                let all: Vec<&String> = arms.iter().map(|(_, t)| t).chain(std::iter::once(&tail)).collect();
+                if all.iter().any(|v| is_big(v)) && all.iter().any(|v| is_plain(v)) {
+                    let fix = |v: &mut String| if is_big(v) { *v = format!("bitcast<i32>({v})"); };
+                    for (_, t) in arms.iter_mut() { fix(t); }
+                    fix(&mut tail);
+                }
+                let mut acc = tail;
+                for (c, t) in arms.into_iter().rev() {
                     acc = format!("select({}, {}, {})", acc, t, c);
                 }
                 acc
@@ -2689,6 +2710,17 @@ pub(super) fn wgsl_buffer_type(f: &KernelFieldDecl) -> (&'static str, String) {
     };
     let ty = format!("array<{}>", elem);
     (access, ty)
+}
+
+fn is_bool_type(ty: &Type) -> bool {
+    matches!(ty, Type::Bool) || matches!(ty, Type::Named(n) if n == "bool")
+}
+
+/// WGSL type of a kernel-body *local* binding: `bool` stays a native WGSL `bool`
+/// (only buffer/uniform storage is `u32`), so the literal initialiser, assignments
+/// and `not`/`and`/`if` conditions all agree.
+fn wgsl_local_type(ty: &Type) -> String {
+    if is_bool_type(ty) { "bool".into() } else { wgsl_type(ty) }
 }
 
 /// WGSL scalar type for kernel use (i32, u32, f32, bool→u32).

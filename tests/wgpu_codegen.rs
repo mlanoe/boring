@@ -6013,3 +6013,60 @@ def main() throws:
         .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
     assert!(check.status.success(), "generated Rust must type-check:\n{}\n{rs}", String::from_utf8_lossy(&check.stderr));
 }
+
+/// A kernel-local `var bool` initialised with a literal, reassigned in a loop and
+/// tested with `not`/plain conditions must emit one consistent representation
+/// (previously `var already: u32 = false;`, rejected by the WGSL validator).
+#[test]
+fn kernel_local_bool_var_is_consistent() {
+    let (wgsl, _rs) = wgpu_codegen("local_bool_var", r#"
+kernel BoolLocal:
+    mut [int32]'unified out
+    let [int32]'unified src
+    let bool flag
+    init([int32]'unified o, [int32]'unified s, bool f):
+        out = o
+        src = s
+        flag = f
+    def ():
+        let t = .thread.x
+        if t < 4:
+            var bool seen = false
+            var int32 count = 0
+            for i in 0..<4:
+                if not seen:
+                    if src[i] > t:
+                        seen = true
+                        count += 1
+                if seen and flag:
+                    count += 10
+            out[t] = count
+
+def main() throws:
+    mut k = BoolLocal([0, 0, 0, 0], [0, 1, 2, 3], true)
+    kernel:
+        k(block = 4, grid = 1)
+    print k.out[0]
+"#);
+    assert!(!wgsl.contains(": u32 = false") && !wgsl.contains(": u32 = true"), "{wgsl}");
+    assert!(wgsl.contains("var seen: bool = false;"), "{wgsl}");
+    assert!(wgsl.contains("let flag: bool = (boollocal_params.flag != 0u);"), "{wgsl}");
+}
+
+/// An `if`/`elif` expression mixing int literals above and below `i32::MAX` must lower to
+/// a `select` whose values all share one type (the large literal is `u32`-spelled).
+#[test]
+fn if_expr_mixed_large_int_literals_share_one_type() {
+    let (wgsl, _rs) = wgpu_codegen("if_expr_large_literals", r#"
+kernel BigLit:
+    mut [int32]'unified out
+    init([int32]'unified o):
+        out = o
+    def ():
+        let t = .thread.x
+        let w = if t == 0: 1059919873 elif t == 1: 2795081089 else: 4057580981
+        out[t] = w
+"#);
+    assert!(wgsl.contains("bitcast<i32>(2795081089u)") && wgsl.contains("bitcast<i32>(4057580981u)"), "{wgsl}");
+    assert!(!wgsl.contains("select(bitcast<i32>(4057580981u), 2795081089u"), "{wgsl}");
+}
