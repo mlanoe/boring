@@ -3,9 +3,8 @@ def run_mem_borrow_builtins() throws:
     # Regression test for `boring.toml [external_fns]`'s built-in `KNOWN_EXTERNAL_FN_BORROWS`
     # table (src/transpiler/mod.rs) -- `std::mem::swap`/`replace`/`take` all take at least one
     # argument by `&mut`, which the transpiler's generic external-call fallback would otherwise
-    # emit by value (invalid Rust). Transpiler-only (no interpreter support for a raw `mem.*`
-    # call at all -- not added to tests/run.rs, same reason `pointee` isn't there), and
-    # deliberately `int`-only so it stays a self-contained, zero-Cargo-dependency case: a
+    # emit by value (invalid Rust). Runs under `boring run` too (the interpreter emulates
+    # `mem.*` on places), and is deliberately `int`-only so it stays a self-contained, zero-Cargo-dependency case: a
     # `string` argument would hit the separate "string literal as external call argument"
     # known gap documented in docs/book.md, which is not what this test is about.
     #

@@ -2248,7 +2248,7 @@ impl Transpiler {
     /// known to produce `Option<T>` (an if-expression with nil/some branches, a throws call,
     /// a function/method/field known to return Optional, etc.), in which case it's passed
     /// through unwrapped to avoid double-wrapping.
-    fn emit_let_value_optional(&self, inner: &Type, value: &Expr, is_option_cast: bool) -> String {
+    pub(crate) fn emit_let_value_optional(&self, inner: &Type, value: &Expr, is_option_cast: bool) -> String {
         // Bare `let T? x = arr.pop()`: pass `Vec::pop()`'s `Option<T>` straight through
         // raw — skip map_method's default `.unwrap_or_default()` and don't wrap it in
         // `Some(...)` below (it's already Option-shaped). Mirrors the identical check in
@@ -2876,6 +2876,17 @@ impl Transpiler {
                 if let ExprKind::Array(elems) = &value.kind {
                     let es: Vec<String> = elems.iter().map(|e| self.emit_let_value(Some(elem_ty), e)).collect();
                     return format!("vec![{}]", es.join(", "));
+                }
+            }
+        }
+        // `{T?}` set literal: same implicit `some` per element as `[T?]` above.
+        if let Some(Type::Set(elem_ty)) = declared_ty {
+            if matches!(elem_ty.without_mut(), Type::Optional(_)) {
+                if let ExprKind::Set(elems) = &value.kind {
+                    if !elems.is_empty() {
+                        let es: Vec<String> = elems.iter().map(|e| self.emit_let_value(Some(elem_ty), e)).collect();
+                        return format!("HashSet::from([{}])", es.join(", "));
+                    }
                 }
             }
         }

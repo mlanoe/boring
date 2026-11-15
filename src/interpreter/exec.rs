@@ -260,8 +260,13 @@ impl Interpreter {
                 // "set"/"put" are mutating on Dict/Set but NOT on user-defined structs
                 const MUTATING_COLL_ONLY: &[&str] = &["set", "put"];
                 if let ExprKind::MethodCall(obj_expr, method, args) = &e.kind {
-                    let might_mutate = MUTATING.contains(&method.as_str())
-                        || MUTATING_COLL_ONLY.contains(&method.as_str());
+                    // `mem.swap(a, b)` is the emulated `std::mem::swap`, not a receiver
+                    // named `mem` — leave it to `eval_expr`'s dedicated arm.
+                    let is_mem_module = matches!(&obj_expr.kind, ExprKind::Var(n) if n == "mem")
+                        && env.borrow().get("mem").is_none();
+                    let might_mutate = !is_mem_module
+                        && (MUTATING.contains(&method.as_str())
+                            || MUTATING_COLL_ONLY.contains(&method.as_str()));
                     if might_mutate {
                         // Fast path: `var_name.mutatingArrayMethod(args)` — this is the
                         // form loop bodies use (`samples.push(x)` as its own statement),

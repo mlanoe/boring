@@ -2600,6 +2600,22 @@ impl Transpiler {
         None
     }
 
+    /// `x` as an element of a collection whose element type is `T?` (`[int?]`, `{string?}`):
+    /// a non-nil value is wrapped in `Some(..)` like any store into a `T?` slot. `None` when the
+    /// receiver's element type is not optional (or `x` is the `nil` literal, emitted as is).
+    fn optional_elem_arg(&self, obj: &Expr, x: &Expr) -> Option<String> {
+        if matches!(x.kind, ExprKind::Nil) { return None; }
+        let ty = self.resolve_expr_type(obj)?;
+        let elem = match ty.without_mut() {
+            Type::Array(e) | Type::ArrayN(e, _) | Type::ArrayNExpr(e, _) | Type::Set(e) => e.without_mut().clone(),
+            _ => return None,
+        };
+        match elem {
+            Type::Optional(inner) => Some(self.emit_let_value_optional(&inner, x, false)),
+            _ => None,
+        }
+    }
+
     /// The element type of a receiver positively known to be an array.
     fn array_elem_type(&self, obj: &Expr) -> Option<Type> {
         match self.resolve_expr_type(obj)?.without_mut() {
@@ -3169,15 +3185,18 @@ impl Transpiler {
                 return Some(format!("{}.{}(&{})", obj_s, rust, other_s));
             }
             "add" | "insert" if !args.is_empty() => {
-                let val_s = self.emit_expr_owned(&args[0].value);
+                let val_s = self.optional_elem_arg(obj, &args[0].value)
+                    .unwrap_or_else(|| self.emit_expr_owned(&args[0].value));
                 return Some(format!("{}.insert({})", obj_s, val_s));
             }
             "remove" if !args.is_empty() => {
-                let val_s = self.emit_expr_owned(&args[0].value);
+                let val_s = self.optional_elem_arg(obj, &args[0].value)
+                    .unwrap_or_else(|| self.emit_expr_owned(&args[0].value));
                 return Some(format!("{}.remove(&{})", obj_s, val_s));
             }
             "contains" | "has" if !args.is_empty() => {
-                let val_s = self.emit_expr_owned(&args[0].value);
+                let val_s = self.optional_elem_arg(obj, &args[0].value)
+                    .unwrap_or_else(|| self.emit_expr_owned(&args[0].value));
                 return Some(format!("{}.contains(&{})", obj_s, val_s));
             }
             _ => {}
@@ -3450,7 +3469,8 @@ impl Transpiler {
                         obj_s, pred_s
                     ));
                 }
-                let val_s = self.emit_expr(&val_arg.value);
+                let val_s = self.optional_elem_arg(obj, &val_arg.value)
+                    .unwrap_or_else(|| self.emit_expr(&val_arg.value));
                 return Some(format!(
                     "{}.iter().position(|__x| __x == &({})).map(|i| i as isize)",
                     obj_s, val_s
@@ -5124,6 +5144,8 @@ impl Transpiler {
                 }),
             };
             args.iter().map(|a| match &a.value.kind {
+                _ if self.optional_elem_arg(obj, &a.value).is_some() =>
+                    format!("&{}", self.optional_elem_arg(obj, &a.value).unwrap()),
                 ExprKind::Str(_) if recv_is_string_array => format!("&{}", self.emit_expr_owned(&a.value)),
                 _ => format!("&{}", self.emit_expr(&a.value)),
             }).collect()

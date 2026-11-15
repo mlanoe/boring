@@ -1,0 +1,22 @@
+# `mem.swap`/`replace`/`take` act on places: fields, strings, arrays. (Indexed elements, `mem.swap(xs[0], xs[2])`, work only
+# under `boring run`: generated Rust leaves the array unchanged -- known transpiler gap.)
+struct Pair:
+    var int a = 1
+    var int b = 2
+
+def main() throws:
+    mut Pair p = Pair(1, 2)
+    mem.swap(p.a, p.b)
+    print "{p.a} {p.b}"
+
+    var int n = 7
+    let int old = mem.replace(p.a, n)
+    print "{old} {p.a}"
+
+    var string s = "hello"
+    let string t = mem.take(s)
+    print "[{s}] {t}"
+
+    var mut [int] ys = [4, 5]
+    let zs = mem.take(ys)
+    print "{ys.length} {zs.length} {zs[0]}"

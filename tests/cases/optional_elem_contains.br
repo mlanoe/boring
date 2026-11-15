@@ -1,0 +1,33 @@
+struct Bag:
+    var mut [int?] items = [1, nil]
+
+    req bool has(int x):
+        items.contains(x)
+
+    req bool hasLit():
+        items.contains(3)
+
+def main():
+    let [int?] xs = [1, nil, 3]
+    print xs.contains(nil)
+    print xs.contains(3)
+    print xs.contains(4)
+    let int n = 3
+    print xs.contains(n)
+    print xs.indexOf(3)
+    print xs.indexOf(nil)
+    let [string?] ss = ["a", nil]
+    print ss.contains("a")
+    print ss.contains("b")
+    print ss.contains(nil)
+    var mut {int?} st = {1, nil}
+    st.add(5)
+    print st.contains(5)
+    print st.contains(nil)
+    print st.contains(n)
+    st.remove(5)
+    print st.contains(5)
+    let b = Bag()
+    print b.has(1)
+    print b.has(2)
+    print b.hasLit()

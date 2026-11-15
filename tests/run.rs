@@ -1164,7 +1164,7 @@ interp_test!(interp_builtin_parity);
 // Interpreter/transpiler parity, second pass: every remaining `tests/cases` fixture with an
 // `.expected` file whose `boring run` output already matched it, but that only `tests/transpile.rs`
 // registered. What stays transpile-only calls into Rust the interpreter has no access to:
-// `misc_scenarios_10` (`mem.swap`/`replace`/`take`, i.e. `std::mem`) and the external-type
+// the external-type
 // projects (`ext_*`, `clear_color_construct`, `text_color_construct`: Bevy types).
 interp_test!(actor_collection_field_ops);
 interp_test!(actor_field_alias_assign);
@@ -1271,4 +1271,7 @@ error_test!(error_nested_optional_find_field);
 error_test!(error_nested_optional_pop);
 error_test!(error_nested_optional_dict_get);
 interp_test!(optional_array_discarded_pop);
+interp_test!(optional_elem_contains);
+interp_test!(misc_scenarios_10);
+interp_test!(mem_places);
 error_test!(error_nested_optional_dict_get_default);

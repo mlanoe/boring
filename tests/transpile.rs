@@ -1733,3 +1733,5 @@ transpile_test!(interp_builtin_parity);
 transpile_test!(interp_builtin_parity_2);
 transpile_test!(build_builtin_parity);
 transpile_test!(optional_array_discarded_pop);
+transpile_test!(optional_elem_contains);
+transpile_test!(mem_places);
