@@ -179,6 +179,10 @@ const CUDA: &str = r##"pub fn __boring_bench() -> Option<f64> {
         for _ in 0..reps {
             let mut launcher = stream.launch_builder(&func);
             launcher.arg(&x).arg(&mut y).arg(&a).arg(&count);
+            // SAFETY: the kernel is `bench_fma(const float*, float*, float, int)`, and the four args
+            // pushed above match it in order and type. `x` and `y` each hold `n` floats, the grid
+            // covers `n / 256 * 256 <= n` threads, and both buffers outlive the launch (the stream is
+            // synchronized before they drop).
             unsafe { launcher.launch(cfg).ok()?; }
         }
         stream.synchronize().ok()

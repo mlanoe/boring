@@ -278,6 +278,10 @@ pub fn transfers() -> (u64, u64) {
 /// used from whichever thread launches the kernel, one at a time behind the store's lock.
 pub struct AssertSend<T>(pub T);
 
+// SAFETY: `T` is only ever a backend's raw device handles (context, queue, pipelines). The GPU APIs
+// allow using them from any thread as long as the uses do not overlap, and the global store hands
+// them out one caller at a time behind its lock, so moving the wrapper across threads is sound.
+// Nothing stops a caller from wrapping a `!Send` type that does not meet this: keep it to handles.
 unsafe impl<T> Send for AssertSend<T> {}
 
 /// Register the ranked backends. `forced` is set when the user named the backends
