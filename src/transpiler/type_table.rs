@@ -446,7 +446,8 @@ fn bind_match(m: &MatchStmt, env: &mut Env, owner: Option<&str>, d: &Decls) {
     }
 }
 
-fn walk_body(scope: &str, owner: Option<&str>, params: &[Param], body: &[Stmt], d: &Decls, out: &mut HashMap<Key, Option<String>>, locals: &mut Locals, types: &mut LocalTypes, declared: &mut LocalTypes, scalar: &mut LocalTypes, std: &mut LocalTypes, inits: &mut LocalInits, binders: &mut Binders) {
+fn walk_body(scope: &str, owner: Option<&str>, params: &[Param], body: &[Stmt], d: &Decls, tables: &mut WalkTables) {
+    let WalkTables { out, locals, types, declared, scalar, std, inits, binders } = tables;
     use super::emit_methods::receiver_type_name;
     let mut env: Env = HashMap::new();
     // Locals declared with an enum type: the emitter does not answer its struct question for them (it does
@@ -782,29 +783,36 @@ fn walk_body(scope: &str, owner: Option<&str>, params: &[Param], body: &[Stmt], 
     Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut stmts);
 }
 
+/// What one walk over a program produces, one table per question the transpiler asks.
+#[derive(Default)]
+pub(crate) struct WalkTables {
+    /// Struct type of each position (`Key`), `None` where the walk claims it has none.
+    pub(crate) out: HashMap<Key, Option<String>>,
+    pub(crate) locals: Locals,
+    pub(crate) types: LocalTypes,
+    pub(crate) declared: LocalTypes,
+    pub(crate) scalar: LocalTypes,
+    pub(crate) std: LocalTypes,
+    pub(crate) inits: LocalInits,
+    pub(crate) binders: Binders,
+}
+
 /// The struct-name answers a standalone walk over `program` can give, keyed like the recorded ones.
 /// It makes a claim only when declarations say it: an annotated parameter or `let`, a constructor, a
 /// declared return type, `self`, a field of a resolved struct, an element of a typed collection.
-pub(crate) fn build_struct_names(program: &Program, imported: &[Item]) -> (HashMap<Key, Option<String>>, Locals, LocalTypes, LocalTypes, LocalTypes, LocalTypes, LocalInits, Binders) {
+pub(crate) fn build_struct_names(program: &Program, imported: &[Item]) -> WalkTables {
     let mut d = Decls { fields: HashMap::new(), types: Default::default(), methods: HashMap::new(), fns: HashMap::new(), variants: HashMap::new(), generics: Default::default(), traits: Default::default(), enums: Default::default(), enum_variants: HashMap::new() };
     seed_builtins(&mut d);
     collect_decls(imported, &mut d);
     // What the file itself declares comes last, so it wins over an import of the same name.
     collect_decls(&program.items, &mut d);
-    let mut out = HashMap::new();
-    let mut locals: Locals = HashMap::new();
-    let mut types: LocalTypes = HashMap::new();
-    let mut declared: LocalTypes = HashMap::new();
-    let mut scalar: LocalTypes = HashMap::new();
-    let mut std: LocalTypes = HashMap::new();
-    let mut inits: LocalInits = HashMap::new();
-    let mut binders: Binders = HashMap::new();
-    fn go(items: &[Item], d: &Decls, out: &mut HashMap<Key, Option<String>>, locals: &mut Locals, types: &mut LocalTypes, declared: &mut LocalTypes, scalar: &mut LocalTypes, std: &mut LocalTypes, inits: &mut LocalInits, binders: &mut Binders) {
+    let mut tables = WalkTables::default();
+    fn go(items: &[Item], d: &Decls, tables: &mut WalkTables) {
         for item in items {
             match item {
-                Item::Fn(f) if f.qualifier.is_none() => walk_body(&format!("::{}", f.name), None, &f.params, &f.body, d, out, locals, types, declared, scalar, std, inits, binders),
+                Item::Fn(f) if f.qualifier.is_none() => walk_body(&format!("::{}", f.name), None, &f.params, &f.body, d, tables),
                 Item::Struct(s) => {
-                    for m in &s.methods { walk_body(&format!("{}::{}", s.name, m.name), Some(&s.name), &m.params, &m.body, d, out, locals, types, declared, scalar, std, inits, binders) }
+                    for m in &s.methods { walk_body(&format!("{}::{}", s.name, m.name), Some(&s.name), &m.params, &m.body, d, tables) }
                     // Inits, setters and conversions are not emitted through `emit_fn`: their scope is the owner's.
                     let scope = format!("{}::", s.name);
                     for i in &s.inits {
@@ -812,31 +820,31 @@ pub(crate) fn build_struct_names(program: &Program, imported: &[Item]) -> (HashM
                             name: p.name.clone(), ty: p.ty.clone(), mutable: false, rebindable: false, var_mut: false,
                             owned: false, variadic: false, default: None, line: 0, col: 0,
                         }).collect();
-                        walk_body(&scope, Some(&s.name), &params, &i.body, d, out, locals, types, declared, scalar, std, inits, binders);
+                        walk_body(&scope, Some(&s.name), &params, &i.body, d, tables);
                     }
                     for st in &s.setters {
                         let p = Param { name: st.param_name.clone(), ty: Some(st.param_ty.clone()), mutable: false, rebindable: false, var_mut: false, owned: false, variadic: false, default: None, line: 0, col: 0 };
-                        walk_body(&scope, Some(&s.name), &[p], &st.body, d, out, locals, types, declared, scalar, std, inits, binders);
+                        walk_body(&scope, Some(&s.name), &[p], &st.body, d, tables);
                     }
-                    for c in &s.conversions { walk_body(&scope, Some(&s.name), &[], &c.body, d, out, locals, types, declared, scalar, std, inits, binders); }
+                    for c in &s.conversions { walk_body(&scope, Some(&s.name), &[], &c.body, d, tables); }
                 }
-                Item::Trait(t) => for m in &t.defaults { walk_body(&format!("::{}", m.name), Some(&t.name), &m.params, &m.body, d, out, locals, types, declared, scalar, std, inits, binders) },
-                Item::Enum(e) => for m in &e.methods { walk_body(&format!("{}::{}", e.name, m.name), Some(&e.name), &m.params, &m.body, d, out, locals, types, declared, scalar, std, inits, binders) },
-                Item::Ext(e) => for m in &e.methods { walk_body(&format!("{}::{}", e.type_name, m.name), Some(&e.type_name), &m.params, &m.body, d, out, locals, types, declared, scalar, std, inits, binders) },
-                Item::Mod(m) => go(&m.items, d, out, locals, types, declared, scalar, std, inits, binders),
+                Item::Trait(t) => for m in &t.defaults { walk_body(&format!("::{}", m.name), Some(&t.name), &m.params, &m.body, d, tables) },
+                Item::Enum(e) => for m in &e.methods { walk_body(&format!("{}::{}", e.name, m.name), Some(&e.name), &m.params, &m.body, d, tables) },
+                Item::Ext(e) => for m in &e.methods { walk_body(&format!("{}::{}", e.type_name, m.name), Some(&e.type_name), &m.params, &m.body, d, tables) },
+                Item::Mod(m) => go(&m.items, d, tables),
                 _ => {}
             }
         }
     }
-    go(&program.items, &d, &mut out, &mut locals, &mut types, &mut declared, &mut scalar, &mut std, &mut inits, &mut binders);
+    go(&program.items, &d, &mut tables);
     // The file's own statements are one body (scope ""), the top-level `let`s its locals.
     let top: Vec<Stmt> = program.items.iter().filter_map(|i| match i {
         Item::Stmt(s) => Some(s.clone()),
         Item::Let(l) => Some(Stmt::Let(l.clone())),
         _ => None,
     }).collect();
-    if !top.is_empty() { walk_body("", None, &[], &top, &d, &mut out, &mut locals, &mut types, &mut declared, &mut scalar, &mut std, &mut inits, &mut binders); }
-    (out, locals, types, declared, scalar, std, inits, binders)
+    if !top.is_empty() { walk_body("", None, &[], &top, &d, &mut tables); }
+    tables
 }
 
 /// How a standalone table compares with the recorded one.
@@ -1193,7 +1201,7 @@ impl super::Transpiler {
             // (`'new`, a qualifier group) is resolved by the decision.
             // What the decisions pass chose counts as a lock only for a value that has fields to route through one: an
             // inferred `'actor` on a scalar (what a `with` over a plain `var int` makes of it) is a no-op block, not a lock.
-            let scalar = |t: &Option<Type>| t.as_ref().is_some_and(|t| super::Transpiler::is_copy_type(&canon(&t.without_mut())));
+            let scalar = |t: &Option<Type>| t.as_ref().is_some_and(|t| super::Transpiler::is_copy_type(&canon(t.without_mut())));
             let decided_lock = |t: &Option<Type>| matches!(decided, Some(OwnerQual::Actor)) && !scalar(t);
             let by_name = match &declared { Some(OwnerQual::Union(_)) | None => decided_lock(&walked_ty.clone().flatten()), Some(q) => matches!(q, OwnerQual::Actor) };
             // By position: the latest binding event of the name that is in force where the emitter has reached (a `let`, an
@@ -1206,7 +1214,7 @@ impl super::Transpiler {
             });
             let walk = match (&by_pos, &events) {
                 (Some(b), _) if b.unlocked => false,
-                (Some(b), _) => match b.ty.as_ref().and_then(|t| outer(t)) {
+                (Some(b), _) => match b.ty.as_ref().and_then(outer) {
                     Some(OwnerQual::Union(_)) | None => decided_lock(&b.ty),
                     Some(q) => matches!(q, OwnerQual::Actor),
                 },

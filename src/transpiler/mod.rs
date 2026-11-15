@@ -3272,7 +3272,7 @@ impl Transpiler {
     fn emit_program_items(&mut self, program: &Program, emit_main: bool) {
         if matches!(self.type_table_mode, type_table::TypeTableMode::Record | type_table::TypeTableMode::Walk | type_table::TypeTableMode::Check) {
             let imported = crate::infer_return_types::collect_inference_imports(&program.items, &self.source_dir, &self.deps);
-            let (built, locals, local_types, declared_types, scalar_types, std_types, init_table, binder_table) = type_table::build_struct_names(program, &imported);
+            let type_table::WalkTables { out: built, locals, types: local_types, declared: declared_types, scalar: scalar_types, std: std_types, inits: init_table, binders: binder_table } = type_table::build_struct_names(program, &imported);
             if self.type_table_mode == type_table::TypeTableMode::Walk {
                 let top = std::rc::Rc::make_mut(&mut self.walk_top_types);
                 for ((scope, name), ty) in &declared_types {
