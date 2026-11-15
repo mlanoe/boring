@@ -1,0 +1,44 @@
+struct Holder:
+    [int] items
+
+    req string show():
+        let k = items.indexOf(9)
+        let f = items.first()
+        "{k} {f}"
+
+int half(int n) throws:
+    if n > 0:
+        return n / 2
+    throw "neg"
+
+def main():
+    let [int] a = [3, 1]
+    let k = a.indexOf(9)
+    let g = a.first()
+    print k
+    print "{k}"
+    print "{g} {k}"
+    let l = a.last()
+    let fd = a.find((x): x > 2)
+    let s = "hello"
+    let si = s.indexOf("ll")
+    let pi = "42".parseInt()
+    let pf = "2.5".parseFloat()
+    let bad = "zz".parseInt()
+    let {string=int} d = {"a" = 1}
+    let dg = d.get("a")
+    let dm = d.get("q")
+    let t = try? half(4)
+    let tn = try? half(0 - 1)
+    print "{l} {fd} {si} {pi} {pf} {bad} {dg} {dm} {t} {tn}"
+    var vk = a.indexOf(1)
+    print "{vk}"
+    mut mk = a.last()
+    print "{mk}"
+    for i in 0..<2:
+        let li = a.indexOf(i + 1)
+        print "loop {i} {li}"
+    let b = Holder(a)
+    print b.show()
+    let kd = a.indexOf(9)
+    print "{kd:?}"

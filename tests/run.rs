@@ -1280,3 +1280,4 @@ error_test!(error_optional_into_plain_let);
 error_test!(error_optional_into_plain_return);
 error_test!(error_optional_into_plain_first);
 interp_test!(optional_builtin_stored);
+interp_test!(optional_hole_untyped_let);

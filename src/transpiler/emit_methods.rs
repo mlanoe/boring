@@ -7159,7 +7159,12 @@ impl Transpiler {
         if cast_opt || self.cast_is_string_parse(e, expr_s) {
             return Some(format!("({}).as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", expr_s));
         }
-        let ty = self.resolve_expr_type(e)?;
+        let Some(ty) = self.resolve_expr_type(e) else {
+            // An untyped `let k = a.indexOf(9)` records no type, only `optional_vars`: the same
+            // predicate `print k` consults.
+            return matches!(&e.kind, ExprKind::Var(n) if self.optional_vars.contains(n.as_str()))
+                .then(|| format!("({}).as_ref().map_or_else(|| \"nil\".to_string(), |v| format!(\"{{}}\", v))", expr_s));
+        };
         let ty = ty.without_mut();
         let ty = match ty { Type::Qualified(inner, _) => inner.without_mut(), t => t };
         let Type::Optional(el) = ty else { return None };
