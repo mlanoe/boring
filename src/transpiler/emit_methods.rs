@@ -5143,11 +5143,14 @@ impl Transpiler {
                     matches!(cur, Type::Array(elem) if Self::is_string_type(elem))
                 }),
             };
-            args.iter().map(|a| match &a.value.kind {
-                _ if self.optional_elem_arg(obj, &a.value).is_some() =>
-                    format!("&{}", self.optional_elem_arg(obj, &a.value).unwrap()),
-                ExprKind::Str(_) if recv_is_string_array => format!("&{}", self.emit_expr_owned(&a.value)),
-                _ => format!("&{}", self.emit_expr(&a.value)),
+            args.iter().map(|a| {
+                if let Some(elem) = self.optional_elem_arg(obj, &a.value) {
+                    return format!("&{}", elem);
+                }
+                match &a.value.kind {
+                    ExprKind::Str(_) if recv_is_string_array => format!("&{}", self.emit_expr_owned(&a.value)),
+                    _ => format!("&{}", self.emit_expr(&a.value)),
+                }
             }).collect()
         } else if is_user_struct_receiver {
             // User-defined struct methods: coerce string literals to Arc<str> to match

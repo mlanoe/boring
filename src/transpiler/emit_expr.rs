@@ -5323,9 +5323,9 @@ impl Transpiler {
     pub(crate) fn emit_constructor(&self, name: &str, args: &[Arg]) -> String {
         let result = self.emit_constructor_inner(name, args);
         // Check if the current function returns T'owned/T'new in managed mode → wrap in managed actor.
-        if let Some(Type::Qualified(inner, q)) = &self.fn_return_ty {
+        if let Some(ret_ty @ Type::Qualified(inner, q)) = &self.fn_return_ty {
             if q.is_owned_or_new() && matches!(inner.as_ref(), Type::Named(n) if n == name) {
-                if self.is_managed_owned_user(self.fn_return_ty.as_ref().unwrap()) {
+                if self.is_managed_owned_user(ret_ty) {
                     return match self.config.threading {
                         crate::transpiler::ThreadingMode::Multi =>
                             format!("Arc::new(std::sync::Mutex::new({}))", result),
@@ -5737,14 +5737,13 @@ impl Transpiler {
                 .map(|a| self.emit_expr(&a.value))
                 .collect();
             let labeled_fields: Vec<String> = args.iter()
-                .filter(|a| a.label.is_some())
-                .map(|a| {
-                    let label = a.label.as_ref().unwrap();
+                .filter_map(|a| {
+                    let label = a.label.as_ref()?;
                     let field_ty = self.struct_fields.get(name)
                         .and_then(|fs| fs.iter().find(|(n, _)| n == label))
                         .map(|(_, ty)| ty);
                     let val = self.emit_struct_field_value(field_ty, &a.value);
-                    format!("{}: {}", escape_rust_keyword(label), val)
+                    Some(format!("{}: {}", escape_rust_keyword(label), val))
                 })
                 .collect();
             // Combine: explicit fields first, then spread bases.
