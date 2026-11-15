@@ -406,6 +406,8 @@ pub view EnvMissing:
 #             paint above earlier ones
 #   Fill      accepts the finite size its parent proposes on the chosen axes (no manufactured space, never
 #             clips a larger child) and aligns its child in the extra room
+#   Fraction  takes a share (0.0...1.0, clamped) of the finite size its parent proposes, per axis, and
+#             aligns its child inside (a Slider thumb at a fraction of the track: inside a `Layer`/`Fill`/`Frame`)
 #   Scroll    a finite viewport over content that chooses its full extent on the scrolling axis; the offset is
 #             mounted control state, clamped after layout
 #   Border    an inside stroke painted over its child
@@ -429,6 +431,16 @@ pub view Fill:
 # host applied, the viewport scrolls so the `ScrollAnchor` named `anchor` sits at its leading edge (as far as the content allows).
 # Bump `request` to scroll to the same anchor again. With `animated` the viewport glides there (ease-out, the host steps it each frame)
 # instead of jumping; user scrolling or a press stops the glide.
+# Fraction: on each axis whose `width`/`height` is set, the view is that share of the proposal (clamped to 0.0...1.0; the child is
+# proposed that size and aligned in it by `alignment`). An axis left nil, or one whose proposal is unspecified, takes the child's own
+# size. Meant inside a parent that proposes a definite size (`Layer`, `Fill`, `Frame`); as a stack child it is flexible like `Fill`.
+pub view Fraction:
+    float? width = nil
+    float? height = nil
+    Alignment alignment = .Middle
+    [View] children
+    body(): native
+
 pub view Scroll:
     ScrollAxis axis = .Vertical
     string anchor = ""
