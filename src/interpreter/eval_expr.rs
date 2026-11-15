@@ -746,7 +746,7 @@ impl Interpreter {
             ExprKind::Call(callee, _) => {
                 let ExprKind::Var(f) = &callee.kind else { return false };
                 match self.global.borrow().get(f.as_str()) {
-                    Some(Value::Fn { decl, .. }) => decl.return_ty.as_ref().is_some_and(|t| is_opt(t)),
+                    Some(Value::Fn { decl, .. }) => decl.return_ty.as_ref().is_some_and(is_opt),
                     _ => false,
                 }
             }
@@ -768,7 +768,7 @@ impl Interpreter {
                     if let Some(Value::Struct { decl, .. }) = global.get(&pty) {
                         return decl.methods.iter().find(|f| f.name == *m)
                             .and_then(|f| f.return_ty.as_ref())
-                            .is_some_and(|t| is_opt(t));
+                            .is_some_and(is_opt);
                     }
                     return false;
                 }

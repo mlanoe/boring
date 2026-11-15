@@ -4338,9 +4338,9 @@ impl Transpiler {
                     let is_gpu_target = self.is_gpu_target;
                     let mut has_qualifying_call = false;
                     let mut classify = |fn_name: &str, arg_idx: usize, label: Option<&str>| -> bool {
-                        let ok = if kernel_ctor_takes_gpu_array(kernel_decls, fn_name, arg_idx, label) {
-                            true
-                        } else if is_gpu_target && struct_ctor_takes_gpu_array(struct_fields, fn_name, arg_idx, label) {
+                        let ok = if kernel_ctor_takes_gpu_array(kernel_decls, fn_name, arg_idx, label)
+                            || (is_gpu_target && struct_ctor_takes_gpu_array(struct_fields, fn_name, arg_idx, label))
+                        {
                             true
                         } else if let Some(idx) = fn_param_index(&all_fns, fn_name, arg_idx, label) {
                             known.get(fn_name)
@@ -6940,7 +6940,7 @@ pub(crate) fn compute_gpu_borrow_params(
                 };
                 let treat_len = p.ty.as_ref().is_some_and(is_array_like_type);
                 let (any, only) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, treat_len);
-                if has_qualifying_call || !any || (any && only) {
+                if has_qualifying_call || !any || only {
                     takes_kernel_arg.get_mut(f.name.as_str()).unwrap()[i] = true;
                     changed = true;
                 }
