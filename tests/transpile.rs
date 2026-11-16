@@ -835,6 +835,9 @@ transpile_test!(narrowing_cast_if_let);
 // `TryFrom<Arc<str>>`/`Rc<str>` isn't implemented for `isize`) instead of the correct
 // string-parse codegen. See the file's own doc comment for the full writeup.
 transpile_test!(guard_let_cast_struct_field);
+// `'guard` / `'actor` (and `'task`) enum payloads bound in a pattern are lock locals.
+transpile_test!(guard_enum_payload_binding);
+transpile_test!(guard_task_enum_payload_binding);
 transpile_test!(misc_scenarios_11);
 // `try`/`try?` used to only be recognized as a prefix inside `parse_else_expr`,
 // one precedence level above where `guard let x = EXPR`/`if let x = EXPR`
