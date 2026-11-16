@@ -1279,6 +1279,7 @@ error_test!(error_nested_optional_dict_get_default);
 error_test!(error_optional_into_plain_let);
 error_test!(error_optional_into_plain_return);
 error_test!(error_optional_into_plain_first);
+error_test!(error_try_optional_not_throws);
 interp_test!(optional_builtin_stored);
 interp_test!(optional_hole_untyped_let);
 interp_test!(optional_reassign_untyped_var);

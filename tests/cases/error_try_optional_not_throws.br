@@ -1,0 +1,11 @@
+# `try? f(x)` on a function declared `int? f(int n)` (returns an optional, NOT throws)
+# is refused by the checker: `try?` converts a throwing call into an optional, but
+# `half()` already returns an optional.
+int? half(int n):
+    if n > 0:
+        return n / 2
+    nil
+
+def main():
+    let t = try? half(4)
+    print "{t}"

@@ -269,6 +269,14 @@ struct Checker {
     void_fns: std::collections::HashSet<String>,
     nonvoid_methods: std::collections::HashSet<(String, String)>,
     void_methods: std::collections::HashSet<(String, String)>,
+    /// Free function names declared `throws`.
+    fn_throws: std::collections::HashSet<String>,
+    /// Free function name -> declared optional return type (`T?`).
+    fn_returns_optional: HashMap<String, Type>,
+    /// (struct/ext name, method name) -> declared `throws`.
+    method_throws: std::collections::HashSet<(String, String)>,
+    /// (struct/ext name, method name) -> declared optional return type (`T?`).
+    method_returns_optional: HashMap<(String, String), Type>,
     /// Names last bound by a `let`/`var` to a `task` / `task(dur)` expression (a task handle).
     /// Name-based and unscoped (a rebinding to anything else clears it): only used for the
     /// `try h.wait else <value>` diagnostic, where a stale entry just means a missed warning.
@@ -398,6 +406,10 @@ impl Checker {
             void_fns: std::collections::HashSet::new(),
             nonvoid_methods: std::collections::HashSet::new(),
             void_methods: std::collections::HashSet::new(),
+            fn_throws: std::collections::HashSet::new(),
+            fn_returns_optional: HashMap::new(),
+            method_throws: std::collections::HashSet::new(),
+            method_returns_optional: HashMap::new(),
             task_handle_vars: std::collections::HashSet::new(),
             current_struct_fields: std::collections::HashSet::new(),
             in_qual_generic_decl: false,
@@ -760,6 +772,15 @@ impl Checker {
             // `ext T:` methods are overloads of `T`'s own methods.
             Item::Ext(e)    => {
                 for m in &e.methods {
+                    let key = (e.type_name.clone(), m.name.clone());
+                    if m.throws {
+                        self.method_throws.insert(key.clone());
+                    }
+                    if let Some(rt) = &m.return_ty {
+                        if matches!(Self::strip_qualifiers(rt.without_mut()), Type::Optional(_)) {
+                            self.method_returns_optional.insert(key.clone(), rt.clone());
+                        }
+                    }
                     self.struct_methods.entry((e.type_name.clone(), m.name.clone())).or_default().push(m.params.clone());
                 }
             }
@@ -797,6 +818,14 @@ impl Checker {
 
     fn collect_fn_signature(&mut self, f: &FnDecl) {
         if Self::returns_value(f) { self.nonvoid_fns.insert(f.name.clone()); } else { self.void_fns.insert(f.name.clone()); }
+        if f.throws {
+            self.fn_throws.insert(f.name.clone());
+        }
+        if let Some(rt) = &f.return_ty {
+            if matches!(Self::strip_qualifiers(rt.without_mut()), Type::Optional(_)) {
+                self.fn_returns_optional.insert(f.name.clone(), rt.clone());
+            }
+        }
         let var_flags: Vec<bool> = f.params.iter().map(|p| p.rebindable).collect();
         self.fn_var_params.insert(f.name.clone(), var_flags);
         self.fn_param_types.insert(f.name.clone(), f.params.iter().map(|p| p.ty.clone()).collect());
@@ -847,7 +876,15 @@ impl Checker {
         }
         for m in &s.methods {
             let key = (s.name.clone(), m.name.clone());
-            if Self::returns_value(m) { self.nonvoid_methods.insert(key); } else { self.void_methods.insert(key); }
+            if Self::returns_value(m) { self.nonvoid_methods.insert(key.clone()); } else { self.void_methods.insert(key.clone()); }
+            if m.throws {
+                self.method_throws.insert(key.clone());
+            }
+            if let Some(rt) = &m.return_ty {
+                if matches!(Self::strip_qualifiers(rt.without_mut()), Type::Optional(_)) {
+                    self.method_returns_optional.insert(key.clone(), rt.clone());
+                }
+            }
             self.method_mutating.insert((s.name.clone(), m.name.clone()), m.mutating);
             self.struct_methods.entry((s.name.clone(), m.name.clone())).or_default().push(m.params.clone());
         }
@@ -2224,6 +2261,96 @@ impl Checker {
         );
     }
 
+    /// `try? f(x)` or `try? recv.m(x)` where the callee returns an optional (`T?`) but is not
+    /// declared `throws`: `boring run` lets it through as a no-op, `boring build` emits `.ok()`
+    /// on `Option<T>` (rustc E0599). `try?` converts a throwing call into an optional, but the
+    /// callee already returns an optional.
+    fn check_try_optional_not_throws(&mut self, e: &Expr, line: usize, col: usize) {
+        if self.kernel_dispatch_only { return; }
+
+        // Built-in optional calls (indexOf, first, last, find, parseInt, parseFloat*)
+        if let Some(method) = self.optional_builtin_call(e) {
+            self.error(
+                format!(
+                    "`try?` on `.{method}()`: `.{method}()` returns an optional and is not declared `throws`; \
+                     `try?` converts a throwing call into an optional, not an optional into an optional; \
+                     fix: call `.{method}()` directly without `try?`"
+                ),
+                line, col,
+            );
+            return;
+        }
+
+        // Dict .get(k) / .get(k, default)
+        if let ExprKind::MethodCall(recv, method, args) = &e.kind {
+            if method == "get" && (args.len() == 1 || args.len() == 2) {
+                if let Some(ty) = self.declared_receiver_type(recv) {
+                    if matches!(Self::strip_qualifiers(ty.without_mut()), Type::Dict(..)) {
+                        self.error(
+                            "`try?` on `.get()`: `.get()` returns an optional and is not declared `throws`; \
+                             `try?` converts a throwing call into an optional, not an optional into an optional; \
+                             fix: call `.get()` directly without `try?`",
+                            line, col,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Free function call: f(...) or f<...>(...)
+        let callee_name = match &e.kind {
+            ExprKind::Call(callee, _) | ExprKind::GenericCall(callee, _, _) => match &callee.kind {
+                ExprKind::Var(name) => Some(name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(fn_name) = callee_name {
+            if self.lookup(fn_name).is_none() && !self.fn_throws.contains(fn_name) {
+                if let Some(ret_ty) = self.fn_returns_optional.get(fn_name) {
+                    let ty_desc = crate::desugar_array_block::describe_type(ret_ty);
+                    self.error(
+                        format!(
+                            "`try?` on `{fn_name}()`: `{fn_name}()` returns an optional (`{ty_desc}`) and is not declared `throws`; \
+                             `try?` converts a throwing call into an optional, not an optional into an optional; \
+                             fix: call `{fn_name}()` directly without `try?`"
+                        ),
+                        line, col,
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Method call: recv.m(...)
+        if let ExprKind::MethodCall(recv, method, _) = &e.kind {
+            let user_struct = match self.arg_class(recv) {
+                Some((ArgClass::User(s), _)) => Some(s),
+                _ => match &recv.kind {
+                    ExprKind::Var(v) if v == "self" => self.current_struct.clone(),
+                    _ => None,
+                },
+            };
+            if let Some(struct_name) = user_struct {
+                let key = (struct_name, method.clone());
+                if !self.method_throws.contains(&key) {
+                    if let Some(ret_ty) = self.method_returns_optional.get(&key) {
+                        let ty_desc = crate::desugar_array_block::describe_type(ret_ty);
+                        self.error(
+                            format!(
+                                "`try?` on `.{method}()`: `.{method}()` returns an optional (`{ty_desc}`) and is not declared `throws`; \
+                                 `try?` converts a throwing call into an optional, not an optional into an optional; \
+                                 fix: call `.{method}()` directly without `try?`"
+                            ),
+                            line, col,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn check_method_arg_types(&mut self, recv: &Expr, method: &str, args: &[Arg]) {
         if args.iter().any(|a| a.spread || a.default_rest) { return; }
         let Some((ArgClass::User(s), _)) = self.arg_class(recv) else { return };
@@ -3068,6 +3195,7 @@ impl Checker {
             ExprKind::Else(e, d)  => { self.check_expr(e); self.check_expr(d); }
             ExprKind::TryElse(e, d) => {
                 self.check_try_else_wait_default(e, d);
+                self.check_try_optional_not_throws(e, expr.line, expr.col);
                 self.check_expr(e);
                 self.check_expr(d);
             }

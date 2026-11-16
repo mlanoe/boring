@@ -1,0 +1,1 @@
+`try?` on `half()`: `half()` returns an optional (`int?`) and is not declared `throws`; `try?` converts a throwing call into an optional, not an optional into an optional; fix: call `half()` directly without `try?`
