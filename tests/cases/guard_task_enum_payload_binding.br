@@ -1,0 +1,37 @@
+# `'guard'task` / `'actor'task` values carried by an enum payload and bound in a match arm are
+# tokio lock locals: a method call on the binding locks it (`.read().await` / `.lock().await`),
+# and the enum must not derive PartialEq (tokio's locks have no impl).
+struct Cell:
+    var int value = 0
+
+    req int peek():
+        value
+
+enum GSlot:
+    Empty
+    Full(Cell'guard'task)
+
+enum ASlot:
+    Empty
+    Full(Cell'actor'task)
+
+task showG(GSlot s):
+    match s:
+        Empty: print "empty"
+        Full(c): print "guard full {c.peek()}"
+
+task showA(ASlot s):
+    match s:
+        Empty: print "empty"
+        Full(c): print "actor full {c.peek()}"
+
+task go():
+    let a = task showG(GSlot.Full(Cell(3)))
+    a.wait
+    let b = task showG(GSlot.Empty)
+    b.wait
+    let c = task showA(ASlot.Full(Cell(4)))
+    c.wait
+
+let t = task go()
+t.wait

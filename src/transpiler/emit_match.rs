@@ -1432,15 +1432,26 @@ impl Transpiler {
                 }
             }
         }
-        // `'guard` payloads (Arc<RwLock<T>>): same registration as `'actor` above, in the
-        // read-write lock set, so a method call on the binding locks it instead of being emitted
-        // on the Arc itself. (`'task` payloads are not covered: an enum carrying one does not
-        // compile, its derived `PartialEq` has no impl for tokio's lock.)
+        // `'guard` / `'guard'task` / `'actor'task` payloads: same registration as `'actor` above,
+        // in the matching lock set, so a method call on the binding locks it instead of being
+        // emitted on the Arc itself.
         let mut bound_guards: Vec<String> = Vec::new();
+        let mut bound_lock_tasks: Vec<(String, bool)> = Vec::new();
         for (name, ty) in &bound_types {
-            if matches!(ty.without_mut(), Type::Qualified(_, crate::ast::OwnerQual::Guard)) {
-                self.var_rwlock_types.insert(name.clone());
-                bound_guards.push(name.clone());
+            match ty.without_mut() {
+                Type::Qualified(_, crate::ast::OwnerQual::Guard) => {
+                    self.var_rwlock_types.insert(name.clone());
+                    bound_guards.push(name.clone());
+                }
+                Type::Qualified(_, crate::ast::OwnerQual::GuardTask) => {
+                    self.var_rwlock_task_types.insert(name.clone());
+                    bound_lock_tasks.push((name.clone(), true));
+                }
+                Type::Qualified(_, crate::ast::OwnerQual::ActorTask) => {
+                    self.var_mutex_task_types.insert(name.clone());
+                    bound_lock_tasks.push((name.clone(), false));
+                }
+                _ => {}
             }
         }
         // Collect boxed bindings — pattern vars bound from recursive (Box<T>) fields.
@@ -1593,6 +1604,10 @@ impl Transpiler {
         }
         for name in &bound_guards {
             self.var_rwlock_types.remove(name.as_str());
+        }
+        for (name, is_rw) in &bound_lock_tasks {
+            if *is_rw { self.var_rwlock_task_types.remove(name.as_str()); }
+            else { self.var_mutex_task_types.remove(name.as_str()); }
         }
         // Remove actor tracking added for this arm (scoped to the arm body).
         for name in &bound_actors {

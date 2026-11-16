@@ -2437,7 +2437,7 @@ impl Transpiler {
         // implement PartialEq when T does).
         let has_actor_field = !is_unit_enum && e.variants.iter().any(|v| {
             v.fields.iter().enumerate().any(|(fi, f)| match &f.ty {
-                Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Shared) => true,
+                Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Shared) => true,
                 Type::Qualified(_, q) if q.is_owned_or_new() => {
                     self.config.mode == crate::transpiler::TranspileMode::Managed
                         && !self.recursive_fields.contains(&format!("{}::{}::{}", e.name, v.name, fi))

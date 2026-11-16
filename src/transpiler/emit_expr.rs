@@ -4612,7 +4612,8 @@ impl Transpiler {
         let target_is_optional_field = target_is_external_optional_field
             || matches!(target_field_ty.as_ref().map(Type::without_mut), Some(Type::Optional(_)));
         let target_is_optional_var = matches!(&target.kind, ExprKind::Var(v)
-            if self.optional_vars.contains(v.as_str()));
+            if self.optional_vars.contains(v.as_str())
+                || self.local_type(v.as_str()).map(|t| matches!(t.without_mut(), Type::Optional(_))).unwrap_or(false));
         let rhs_s = if target_is_optional_var || target_is_optional_field {
             let rhs_already_opt = rhs_s.starts_with("Some(")
                 || rhs_s == "None"
@@ -4631,7 +4632,8 @@ impl Transpiler {
                 // declared return type is `T?` (any receiver shape) — e.g.
                 // `id = items[1].as_str()` where `as_str()` already returns `string?`.
                 // See docs/option-return-double-some-wrap-bug.md.
-                || self.expr_is_declared_optional(value);
+                || self.expr_is_declared_optional(value)
+                || (!is_bare_pop_call(value) && self.is_option_expr(value));
             // `Trait'shared?` field: alias an existing shared pointer rather than moving it out
             // of the local it came from, wrap a concrete implementor.
             let shared_trait_inner = match target_field_ty.as_ref().map(Type::without_mut) {

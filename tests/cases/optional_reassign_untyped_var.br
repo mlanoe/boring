@@ -1,0 +1,66 @@
+struct Holder:
+    [int] items
+    var int? stored
+
+    def update():
+        stored = items.indexOf(1)
+        var loc = items.first()
+        loc = items.indexOf(9)
+        print "{stored} {loc}"
+
+int half(int n) throws:
+    if n > 0:
+        return n / 2
+    throw "neg"
+
+def main():
+    let [int] a = [3, 1]
+    var vk = a.indexOf(1)
+    vk = a.indexOf(7)
+    print "{vk}"
+    var vl = a.first()
+    vl = a.last()
+    print "{vl}"
+    var vf = a.last()
+    vf = a.first()
+    print "{vf}"
+    var vfd = a.first()
+    vfd = a.find((x): x > 2)
+    print "{vfd}"
+    vfd = a.find((x): x > 10)
+    print "{vfd}"
+    let s = "hello"
+    var vsi = s.indexOf("ll")
+    vsi = s.indexOf("zz")
+    print "{vsi}"
+    var vpi = "42".parseInt()
+    vpi = "zz".parseInt()
+    print "{vpi}"
+    var vpf = "2.5".parseFloat()
+    vpf = "zz".parseFloat()
+    print "{vpf}"
+    let {string=int} d = {"a" = 1}
+    var vdg = d.get("a")
+    vdg = d.get("q")
+    print "{vdg}"
+    var vt = try? half(4)
+    vt = try? half(0 - 1)
+    print "{vt}"
+    var mut vmut = a.indexOf(1)
+    vmut = a.indexOf(7)
+    print "{vmut}"
+    var vloop = a.indexOf(1)
+    for i in 0..<2:
+        vloop = a.indexOf(i)
+        print "loop {i} {vloop}"
+    var vrn = a.first()
+    vrn = nil
+    print "{vrn}"
+    var vrp = a.first()
+    vrp = 42
+    print "{vrp}"
+    let int plain = 99
+    vrp = plain
+    print "{vrp}"
+    mut h = Holder(a, nil)
+    h.update()
