@@ -8,7 +8,7 @@ where it is tested:
 | Part | User documentation | Tests |
 |---|---|---|
 | Typed specialisation of untyped parameters (free functions, methods, `ext`, `mod`, across files) | book, "Advanced — Typed specialisation of untyped parameters"; CHANGELOG | `tests/cases/implicit_generics_specialise*.br`, `tests/specialize_cross_file.rs`, `tests/implicit_generics_errors.rs` |
-| `<T>` carries the qualifier of its argument (`<T'q>` removed) | book, "A type argument carries its qualifier" | `tests/cases/monomorphize_qualified_*.br` |
+| `<T>` carries the qualifier of its argument | book, "A type argument carries its qualifier" | `tests/cases/monomorphize_qualified_*.br` |
 | `.bri` files (`mono`, `full`, instances, origin comments) | book, "Advanced — Boring inferred files"; CHANGELOG | `tests/bri_oracle.rs` (report), `tests/bri_cli.rs` |
 | Typing walk / `TypeTable` (`BORING_TYPE_TABLE=replay\|walk\|check\|stats`), decisions pass | this file, sections 16 to 18 | `tests/type_table.rs` |
 
@@ -26,12 +26,10 @@ takes while emitting; no part of it is needed by the features above. Related: th
 - `.bri` files are complete: a full Boring printer, not only the touched declarations
   (open question 8), so a `.bri` is always a valid, whole file.
 - `mono` is built before `full` (phasing, step 6).
-- **`<T'q>` is removed entirely** (decided 2026-11-09; Boring is not 1.0 and only the sibling
-  projects of `perso/` use it). A plain `T` carries its own qualifier: `T = Counter'actor`
-  binds both, and a qualifier written on a slot (`T'owned a`, `a'owned`) is a constraint, not
-  a parameter. The linked-parameter sugar goes; what stays is the unlinked long form
-  `<T, 'q>` where a qualifier parameter is genuinely wanted (a slot can then write `T'q`).
-  Known loss to accept or fix: a field that follows a qualifier while another stays fixed
+- **A plain `T` carries its own qualifier** (decided 2026-11-09): `T = Counter'actor` binds both,
+  and a qualifier written on a slot (`T'owned a`, `a'owned`) is a constraint, not a parameter.
+  Where a qualifier parameter is genuinely wanted, the long form is `<T, 'q>` (a slot can then
+  write `T'q`). Known limit: a field that follows a qualifier while another stays fixed
   (`let T'q res` next to `let T'inline default`) is written with `<T, 'q>`, whose type
   argument is not inferred (only from an expected type naming every argument).
 - Qualifier parameters keep their tick syntax (`<'q>`, `elem'actor`, `<T, 'q>`). An uppercase
@@ -82,7 +80,7 @@ helpers, `--show-types` cannot show per-use instantiations, and an implicit fiel
 - Qualifier parameters (`struct Board<'elem>`) have no generic-Rust form: every use is
   specialised (`Board_actor`), type-position uses are rewritten by `substitute_type` in a
   thread-local mode.
-- `<T'q>` is implemented: a qualifier is inferred from the **written** qualifier of the
+- A qualifier parameter is inferred from the **written** qualifier of the
   arguments, an expected type, or an explicit argument; there is no inference by usage and
   no type-argument inference ("the type of an argument expression is not known at that
   stage").
@@ -143,9 +141,10 @@ constrains it:
 | `let T'actor a`     | accepted        | **error**       | accepted, resolved to `'actor` |
 
 The error is a Boring (transpilation) error naming the slot, the written qualifier and
-the argument's qualifier. This needs no `<T'q>` on the declaration: it is the same
-specialisation, with the qualifier as part of the instance key. `<T'q>` stays the way to
-*link* a field qualifier to a parameter explicitly when a declaration has several slots.
+the argument's qualifier. This needs no qualifier parameter on the declaration: it is the same
+specialisation, with the qualifier as part of the instance key. A qualifier parameter
+(`<T, 'q>`) stays the way to *link* a field qualifier to a parameter explicitly when a
+declaration has several slots.
 
 An unwritten qualifier is no evidence (existing rule): `let p = Point(1)` carries no
 qualifier to propagate.
@@ -190,7 +189,7 @@ read what the compiler decided and debug rustc errors against it.
   existing transpile cases this checks the pass with almost no new test code, and makes
   a faithful printer mandatory (an unfaithful one breaks the round-trip at once).
 - **Caveat on `full`: the round-trip is not guaranteed identical.** The book says an
-  *inferred* qualifier is not evidence for `<T'q>` (`let p = Point(1)` commits to
+  *inferred* qualifier is not evidence for a qualifier parameter (`let p = Point(1)` commits to
   nothing), while a *written* one is (`let Point'inline p = ...`). Reading a `full` file
   back turns inferred qualifiers into written evidence, so an instantiation that was
   free can become constrained or conflicting. A round-trip mismatch on `full` is
@@ -265,7 +264,7 @@ read what the compiler decided and debug rustc errors against it.
    exist. With specialisation the body is retyped, so `"{a}"` on an `'actor` value either
    works (auto lock) or is a clear error on the instance; generic-path bounds must not
    promise more than the lock handle can do.
-7. **Interaction with `<T'q>` defaults and `'new`** (candidate-set qualifier): is `'new`
+7. **Interaction with qualifier-parameter defaults and `'new`** (candidate-set qualifier): is `'new`
    resolved before or after instance keys are formed?
 8. **`.bri` printer scope** (3.6): **decided: a full Boring printer.** It must cover every
    construct the pass can produce, including sugar already desugared by earlier passes
@@ -384,7 +383,7 @@ Not yet decided from the spike: the specialisation currently lives in the parser
 in the transpiler's monomorphizer (open question 2 decided the monomorphizer as the engine;
 moving the pass there needs the typed call sites to survive until the transpiler).
 
-## 10. What replacing `<T'q>` by `<T>` needs (found 2026-11-09, before the removal)
+## 10. A qualified type argument on `<T>` (found 2026-11-09)
 
 `struct Entry<T>: var mut T value` already accepts a qualified argument at the Rust type level:
 `Entry<Counter'actor>(c)` and the bare `Entry(c)` (with `c` written `Counter'actor`) both emit
@@ -392,19 +391,13 @@ moving the pass there needs the typed call sites to survive until the transpiler
 `Arc<Mutex<Counter>>`): a generic body cannot take the lock. Same problem as `bump(a)`, same
 answer: the struct must be specialised with `T = Counter'actor`.
 
-Why it is not specialised today: the turbofish monomorphizer bails when a type argument does not
-mangle, and `mangle_type` (`src/transpiler/monomorphize.rs`) has no case for `Type::Qualified`,
-so `Entry<Counter'actor>` stays generic Rust. The qualifier-parameter machinery (`Board_actor`)
-is what `<T'q>` used to reach specialisation.
-
-So the removal of `<T'q>` is not a deletion, it is a migration of its capability onto `<T>`:
-1. `mangle_type` / instantiation accept a qualified type argument (`Entry_Counter_actor`), so the
-   explicit `Entry<Counter'actor>(...)` is specialised like any other concrete argument.
+What this needed:
+1. `mangle_type` / instantiation (`src/transpiler/monomorphize.rs`) accept a qualified type argument
+   (`Entry_Counter_actor`), so the explicit `Entry<Counter'actor>(...)` is specialised like any
+   other concrete argument.
 2. A bare construction or call (`Entry(c)`, `show(c)` with an explicit `<T>`) infers `T` from a
    variable whose type is written, the typed call-site mechanism of `specialize_untyped.rs`
    extended from free functions with untyped parameters to generic structs and generic functions.
-3. Then `<T'q>` (parser, `generic_args.rs`, `qual_infer.rs`, tests, book) is deleted, and
-   `tests/cases/qualified_generics.br` is rewritten on `<T>`.
 
 ## 11. The `.bri` as a real stage: informative, then transpilable, then a two-phase compiler
 

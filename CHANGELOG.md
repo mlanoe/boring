@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.14] — 2026-11-16 *(cargo test: 4920/4920 passing across 169 suites, 5 ignored · clippy: clean · self-hosted interpreter: moved to boring-self-interpreter, not run for this cut)*
+
+### Highlights
+
+- `boring check/build --emit-bri[=mono|full]` prints the program as "Boring inferred" source: types, specialised copies, qualifiers, shared traits, GPU residency.
+- `def bump(var mut a): a.inc()` now works: methods on untyped parameters are specialised per call from the argument's written type.
+- `def describe(Response r)` with a bare implicit-generic struct is generic over its fields; `<T>` carries its argument's qualifier.
+- `boring.ui` gains `Fraction`; `Button`/`Toggle`/`TextField` take `children` for custom control styles; `screen.requestRedrawAfter(ms)` / `wake()` for demand windows.
+- `boring run` catches up with `build`: `mem.swap/replace/take`, reflection `FieldValue`, `"{x:?}"` of optionals, many built-in calls.
+- Fixes: optional handling (`try?` on non-throwing calls, `indexOf`/`first`/`find`/dict `get` into plain types are checker errors; no double-wrapping on reassignment).
+- Fixes: managed-mode `'owned` args, repeated by-value use of generic call results, `mut` on generic scalar instances, wgpu `Screen` casts.
+- Internal: the typing walk (`TypeTable`) is now the default; the self-hosted interpreter moved to `boring-self-interpreter`.
+
 ### Changed
 
 - **The typing walk (`TypeTable`) is now the default source of struct types and qualifier decisions** in the transpiler (it was opt-in as `BORING_TYPE_TABLE=walk`). Where the walk claims a position or a local, the emitter reads it instead of its own per-local tables; where it does not, the emitter's tables still answer. Generated Rust is identical to `BORING_TYPE_TABLE=off` over `tests/cases` and `examples` (645 files; `generics` and `supertraits` vary between runs in both modes, hash-map order). `BORING_TYPE_TABLE=off` restores the old behaviour, for bisecting a difference. The emitter's reads of `var_types` by variable name now go through one accessor (`local_type`), and `BORING_TYPE_TABLE=check` compares them with the walk's declared types (no change of output); so do the reads of `var_scalar_types` (`local_scalar_type`) and `var_std_types` (`local_std_type`), and `var_init_exprs` (`local_init_expr`). In walk mode the walk answers the declared type of a top-level local the emitter does not track (written types only), 164 reads over `tests/cases`, and withholds an initialiser the emitter would take from another body (`var_init_exprs` was flat by name and never reset: 15 such reads over `tests/cases`, none changing the output). The last-use sites that decide move against clone at a by-value read are made by the decisions pass before emission (`last_use_table`, 8,408 function bodies over `tests/cases`, identical to what `emit_fn` computed), and in walk mode a by-value read moves its local only if the emitter and the decisions pass both say it is a plain owned value (they differ for a collection a `task:` captures, which the emitter does not hold behind a lock). The reads of `var_mutex_types` (every lock-or-not choice on an `'actor` local) go through `is_mutex_local`, compared with the decisions in `check` mode: 16,423 reads agree over `tests/cases`, none differs; the walk keeps a table of binding events by position (`let`, match-arm patterns, `with`) and the emitter tracks the position it has reached (`cur_pos`), which closed the `with` and match-arm classes; the walk also types `Enum::Variant` / `Enum<..>::Variant` patterns and a dict's `get`, which took the differences from 29 to 10. The decisions pass now also covers the file's own statements (the synthesized `main`), 1,317 decision reads agreeing with the emitter's own over `tests/cases`.
@@ -15,7 +28,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Removed
 
 - **The self-hosted interpreter (`boring/interpreter/`) moved to its own project, `boring-self-interpreter`.** The Boring-written interpreter, its three suites (`interpreter`, `interpreter_build`, `interpreter_functional`), `tools/interpreter_parity.py`, `bench_interpreters.sh` and `docs/interpreter-parity.md` no longer live here; the new project depends on this repository (the compiler binary and the `tests/cases` corpus) and nothing here depends on it. Fixtures used only by it stay in `tests/cases`.
-- **`<T'q>` (qualified generics) is gone: a plain `<T>` carries the qualifier of its argument.** `struct Entry<T'q>` tied a type and its qualifier into one parameter; it is now an error naming the replacements. `struct Entry<T>` takes `T = Counter'actor` as the qualified type itself and is specialised for it (`Entry_Counter_actor`, so `e.value.inc()` takes the lock); a bare `Entry(c)` or call infers `T` from a variable written with a qualifier; a qualifier written on a slot (`T'owned a`, `a'owned`) refuses another written qualifier. Where a field must follow a qualifier while another stays fixed, declare `<T, 'q>` (its type argument is not inferred). The same change makes a type argument that is a qualified type mangle (`Entry<Counter'actor>` was left as generic Rust) and rewrites annotation positions to the specialised name (`var mut Entry<int> e = Entry<int>(5)` failed in rustc with E0308 before). Book: "A type argument carries its qualifier". Tests: `tests/cases/monomorphize_qualified_arg.br`, `monomorphize_qualified_infer.br`.
 
 ### Fixed
 

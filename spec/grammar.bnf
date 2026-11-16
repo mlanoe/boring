@@ -224,8 +224,6 @@ qual_chain      ::= IDENT ("'" IDENT)*
 # Valid const types: int, uint, bool (primitives only; float is not valid in Rust const generics).
 const_param     ::= ("int" | "uint" | "bool") IDENT
 type_param      ::= IDENT ("as" (IDENT | "(" IDENT ("," IDENT)* ")"))?
-                  | IDENT "'" IDENT        # qualified generic `T'q`: declares type `T` and the qualifier parameter `q` tied to it
-                                           # (plain form only — no `as` bound, no default; docs/book.md "Qualified generics")
 
 # Generic ARGUMENTS at a use site (call, method turbofish, type position, `ext` header):
 # positional arguments first, then labelled ones in any order, trailing comma allowed.

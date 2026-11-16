@@ -4590,7 +4590,7 @@ e.value.inc()                                               # takes the lock
 
 - **Inference.** A bare construction or call infers `T` from a variable whose type is *written* with a qualifier (`let Counter'actor c`), and only then; any other call stays on the ordinary generic path.
 - **A qualifier written on a slot is a constraint.** `def show<T>(T'owned a)` and `def show(a'owned)` refuse an argument written with another qualifier, naming both.
-- **A field that follows a qualifier while another stays fixed** needs a qualifier parameter of its own: `struct Entry<T, 'q>` (`<T'q>` is not a form).
+- **A field that follows a qualifier while another stays fixed** needs a qualifier parameter of its own: `struct Entry<T, 'q>`.
 
 More in [Advanced — Qualifier parameters in depth](#advanced--qualifier-parameters-in-depth).
 
@@ -9542,7 +9542,6 @@ count<q'owned>(Board<elem'owned>())              # explicit
 - **Inference.** A bare construction or call of a generic struct or function infers `T` from a variable whose type is *written* with a qualifier (`let Counter'actor c`), and only then: any other call stays on the ordinary generic path (rustc infers it), and an argument whose qualifier is not written gives no evidence. Every type parameter must be determined this way, otherwise the call is left generic.
 - **A qualifier written on a slot is a constraint.** `def show<T>(T'owned a)` and, for an untyped parameter, `def show(a'owned)` refuse an argument written with another qualifier, naming both (``the parameter `a'owned` of `show` expects that qualifier, but this argument is written `'actor` ``). An argument whose qualifier is not written is not refused. The qualifier compared is the one written directly on the base type (`Counter'actor'weak` is `'actor`).
 - **One parameter, one qualifier.** Because `T` carries its qualifier, a slot `T'inline` next to a slot `T` cannot hold a `T` given as `Counter'actor`. A declaration that needs a field to follow a qualifier while another stays fixed declares the qualifier parameter separately: `struct Entry<T, 'q>` with `let T'q res` and `let T'inline fallback`, instantiated `Entry<T = Counter, q'actor>`. Its type argument is not inferred (see above): an expected type naming every argument resolves it.
-- **`<T'q>` is not a form.** The old sugar that tied a type and its qualifier into one parameter is an error naming the two forms to write: `<T>` (the qualifier travels with the type) or `<T, 'q>` (a qualifier parameter of its own).
 - **Specialisation** is per concrete type argument, qualifier included: `Entry_Counter_actor`, `Entry_Counter_owned`, like any generic instance. Under `boring run` qualifiers are ignored, so the same program runs unspecialised.
 - **Why not a hidden parameter.** An untyped field (`struct Response: payload`) stays a type parameter only, its qualifier following the inference for bare fields; it does not get an invisible qualifier parameter (see "Considered and not built" above: contagion, instance explosion). A qualifier travels with the type it was written on.
 
