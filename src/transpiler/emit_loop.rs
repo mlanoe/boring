@@ -618,7 +618,7 @@ impl Transpiler {
         // Acquire a read lock, iterate with `.iter().cloned()`.
         if let ExprKind::Var(guard_name) = &s.iterable.kind {
             let is_multi = matches!(self.config.threading, crate::transpiler::ThreadingMode::Multi);
-            if self.var_rwlock_types.contains(guard_name.as_str())
+            if self.is_rwlock_local(guard_name.as_str())
             {
                 let vars = if s.vars.is_empty() {
                     "_".into()

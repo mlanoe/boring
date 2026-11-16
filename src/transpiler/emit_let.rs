@@ -193,7 +193,7 @@ impl Transpiler {
         let known = match (guard, is_task) {
             (false, false) => self.is_mutex_local(v.as_str()),
             (false, true) => self.var_mutex_task_types.contains(v.as_str()),
-            (true, false) => self.var_rwlock_types.contains(v.as_str()),
+            (true, false) => self.is_rwlock_local(v.as_str()),
             (true, true) => self.var_rwlock_task_types.contains(v.as_str()),
         };
         known.then(|| format!("Arc::clone(&{})", escape_rust_keyword(v)))
@@ -1533,7 +1533,7 @@ impl Transpiler {
                     if self.rc_vars.contains(src.as_str()) {
                         self.rc_vars.insert(s.name.clone());
                     }
-                } else if self.var_rwlock_types.contains(src.as_str()) {
+                } else if self.is_rwlock_local(src.as_str()) {
                     self.var_rwlock_types.insert(s.name.clone());
                     self.arc_vars.insert(s.name.clone());
                     if self.rc_vars.contains(src.as_str()) {
@@ -2491,7 +2491,7 @@ impl Transpiler {
             let is_existing_rc = inner.starts_with("Rc::clone(") || inner.starts_with("Rc::new(")
                 || matches!(&value.kind, ExprKind::Var(v)
                     if self.is_mutex_local(v.as_str())
-                    || self.var_rwlock_types.contains(v.as_str())
+                    || self.is_rwlock_local(v.as_str())
                     || self.rc_vars.contains(v.as_str()))
                 || (matches!(&value.kind, ExprKind::Field(..))
                     && self.resolve_lock_field_ref(value).is_some_and(|r| r.rwlock == is_guard))
@@ -2500,7 +2500,7 @@ impl Transpiler {
                     if m == "clone" && args.is_empty()
                     && matches!(&obj.kind, ExprKind::Var(v)
                         if self.is_mutex_local(v.as_str())
-                        || self.var_rwlock_types.contains(v.as_str())
+                        || self.is_rwlock_local(v.as_str())
                         || self.rc_vars.contains(v.as_str())));
             return if is_existing_rc {
                 if inner.starts_with("Rc::") { inner }
@@ -2519,7 +2519,7 @@ impl Transpiler {
         // If the value is an existing Arc variable, clone it instead of moving.
         let is_existing_arc =
             (is_actor && matches!(&value.kind, ExprKind::Var(v) if self.is_mutex_local(v.as_str())))
-            || (is_guard && matches!(&value.kind, ExprKind::Var(v) if self.var_rwlock_types.contains(v.as_str())))
+            || (is_guard && matches!(&value.kind, ExprKind::Var(v) if self.is_rwlock_local(v.as_str())))
             || matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()))
             // MethodCall(obj, "clone", []) on a known arc_var — already Arc<Mutex<T>>
             || matches!(&value.kind, ExprKind::MethodCall(obj, m, args)
@@ -3125,9 +3125,9 @@ impl Transpiler {
             }
             Some(Type::Qualified(_, OwnerQual::Guard)) => {
                 if let ExprKind::Var(v) = &value.kind {
-                    let is_owned = self.var_rwlock_types.contains(v.as_str())
+                    let is_owned = self.is_rwlock_local(v.as_str())
                         && !self.fn_current_params.contains_key(v.as_str());
-                    let is_borrowed = self.var_rwlock_types.contains(v.as_str())
+                    let is_borrowed = self.is_rwlock_local(v.as_str())
                         && self.fn_current_params.contains_key(v.as_str())
                         || matches!(self.inferred_qualifiers.get(v.as_str()), Some(crate::ast::OwnerQual::Guard | crate::ast::OwnerQual::GuardTask));
                     if is_owned { format!("&{}", v) }

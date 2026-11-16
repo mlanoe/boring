@@ -2828,7 +2828,7 @@ impl Transpiler {
                     if (field == "value" || field == "wait")
                         && type_name != "self"
                         && !self.is_mutex_local(type_name.as_str())
-                        && !self.var_rwlock_types.contains(type_name.as_str())
+                        && !self.is_rwlock_local(type_name.as_str())
                         && self.task_vars.contains(type_name.as_str())
                     {
                         return self.emit_expr(expr);
@@ -2902,7 +2902,7 @@ impl Transpiler {
                 }
                 // RwLock var access (owned context): c.field → c.read().await.field (async) or c.read().unwrap().field (sync)
                 if let ExprKind::Var(v) = &obj.kind {
-                    if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+                    if self.is_rwlock_local(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                         let access = if self.var_rwlock_task_types.contains(v.as_str()) {
                             self.guard_task_read_access(v)
                         } else {
@@ -3414,7 +3414,7 @@ impl Transpiler {
     pub(crate) fn owner_var_denies_mut(&self, v: &str) -> bool {
         if v == "self" { return false; }
         if self.is_mutex_local(v) || self.var_mutex_task_types.contains(v)
-            || self.var_rwlock_types.contains(v) || self.var_rwlock_task_types.contains(v)
+            || self.is_rwlock_local(v) || self.var_rwlock_task_types.contains(v)
         {
             return false;
         }

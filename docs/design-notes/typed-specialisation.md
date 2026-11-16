@@ -1381,3 +1381,23 @@ for `is_mutex_local` in walk mode: it would give the emitter's answer on every r
 answer is a missing or an extra `.lock()` (a rustc error) for programs the corpus does not hold. The check is the gate: `check` over a
 suite is how a program with another shape would show up.
 
+### 20.13 `var_rwlock_types` behind an accessor, and a `'guard` payload the emitter does not lock (2026-11-13)
+
+The 29 reads of `var_rwlock_types` by name go through `is_rwlock_local`; the 11 writes and `var_mutex_task_types` /
+`var_rwlock_task_types` are untouched. It is the lock check of 20.8 to 20.12 with `'guard` as the qualifier: the comparison was
+factored into `check_lock(v, own, qualifier, prefix)`, used by `is_mutex_local` (`LOCK*`) and `is_rwlock_local` (`RWLOCK*`), the same
+decisions, the same by-position binding events, the same `with` region. `with` removes the name from the read-write set too.
+The stats line also says how many reads found the local *held* (the side of the check that is not vacuous: 627 mutex reads, 50
+rwlock reads over `tests/cases`).
+
+Over `tests/cases`: 12,205 rwlock reads agree, 0 differ; the mutex numbers do not move (16,423 / 0). Rust identical. The corpus holds
+few `'guard` locals (50 reads find one held, 11 files), so a program of the shapes that matter was written (a written local, a
+`with` read block and write block, a parameter, a top-level local, a pattern payload): all agree but the last.
+
+**The last is an emitter bug, found by the check.** A `'guard` carried by an enum payload and bound in a `match` arm
+(`Full(c)` of `Full(Cell'guard)`) is registered by the emitter as no lock: `c.peek()` is emitted on the `Arc<RwLock<Cell>>` itself, and
+the generated crate fails to build (`E0599: no method named peek found for struct Arc<RwLock<Cell>>`). The same pattern with
+`'actor` is registered (the payload of `V.Obj(Inner'actor)`, 20.10); the `'guard` case is not. `check` reports it as `RWLOCKEXTRA`
+(the walk sees the payload qualifier, the emitter holds nothing). It is a gap of the emitter, not of the walk, and is not fixed here.
+Test: `check_finds_no_rwlock_the_decisions_contradict_for_plain_guard_locals` (the clean shapes).
+

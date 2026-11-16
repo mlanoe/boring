@@ -133,7 +133,7 @@ impl Transpiler {
                     if self.is_mutex_local(n.as_str()) || self.var_mutex_task_types.contains(n.as_str()) {
                         return format!("*{}", self.mutex_var_read(n, n));
                     }
-                    if self.var_rwlock_types.contains(n.as_str()) || self.var_rwlock_task_types.contains(n.as_str()) {
+                    if self.is_rwlock_local(n.as_str()) || self.var_rwlock_task_types.contains(n.as_str()) {
                         let access = if self.var_rwlock_task_types.contains(n.as_str()) {
                             self.guard_task_read_access(n)
                         } else {
@@ -2973,7 +2973,7 @@ impl Transpiler {
                 return if mapped.contains(" as ") { format!("({})", result) } else { result };
             }
             // RwLock var access: w.field → w.read().unwrap().field (multi) or w.borrow().field (single)
-            if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+            if self.is_rwlock_local(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                 let access = if self.var_rwlock_task_types.contains(v.as_str()) {
                     self.guard_task_read_access(v)
                 } else {
@@ -3630,7 +3630,7 @@ impl Transpiler {
                     let guard = self.mutex_var_write(var_name, var_name);
                     return format!("{{ let __v = {}; let mut __g = {}; *__g = __v; }}", val_s, guard);
                 }
-                if self.var_rwlock_types.contains(var_name.as_str()) || self.var_rwlock_task_types.contains(var_name.as_str()) {
+                if self.is_rwlock_local(var_name.as_str()) || self.var_rwlock_task_types.contains(var_name.as_str()) {
                     let val_s = coerce_value(self.emit_expr_owned(value));
                     let guard = if self.var_rwlock_task_types.contains(var_name.as_str()) {
                         self.guard_task_write_guard(var_name)
@@ -3712,7 +3712,7 @@ impl Transpiler {
             if let ExprKind::Var(v) = &obj.kind {
                 let is_lock = self.is_mutex_local(v.as_str())
                     || self.var_mutex_task_types.contains(v.as_str())
-                    || self.var_rwlock_types.contains(v.as_str())
+                    || self.is_rwlock_local(v.as_str())
                     || self.var_rwlock_task_types.contains(v.as_str());
                 if is_lock && v != "self" {
                     let sn = self.resolve_receiver_type_name(v.as_str());
@@ -3774,7 +3774,7 @@ impl Transpiler {
         // RwLock field write: c.field = v
         if let ExprKind::Field(obj, field) = &target.kind {
             if let ExprKind::Var(v) = &obj.kind {
-                if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+                if self.is_rwlock_local(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                     // See the matching comment on the mutex branch above — same gap, same fix.
                     self.check_field_reassignable_via_var(obj, field);
                     // See note above: evaluate RHS before taking the write guard.
@@ -3868,7 +3868,7 @@ impl Transpiler {
                 let rhs_already_wrapped = matches!(&value.kind, ExprKind::Var(vn)
                     if self.is_mutex_local(vn.as_str())
                         || self.var_mutex_task_types.contains(vn.as_str())
-                        || self.var_rwlock_types.contains(vn.as_str())
+                        || self.is_rwlock_local(vn.as_str())
                         || self.var_rwlock_task_types.contains(vn.as_str())
                         || self.observed_locals.contains_key(vn.as_str()));
                 // RHS is itself an actor/guard/observed-qualified *field*
@@ -3954,7 +3954,7 @@ impl Transpiler {
                     && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
                     && !self.is_mutex_local(v.as_str())
                     && !self.var_mutex_task_types.contains(v.as_str())
-                    && !self.var_rwlock_types.contains(v.as_str())
+                    && !self.is_rwlock_local(v.as_str())
                     && !self.var_rwlock_task_types.contains(v.as_str())
                 {
                     let struct_name = self.param_direct_struct_name(v.as_str());
@@ -3972,7 +3972,7 @@ impl Transpiler {
                     && self.mut_checked_local_vars.contains(v.as_str())
                     && !self.is_mutex_local(v.as_str())
                     && !self.var_mutex_task_types.contains(v.as_str())
-                    && !self.var_rwlock_types.contains(v.as_str())
+                    && !self.is_rwlock_local(v.as_str())
                     && !self.var_rwlock_task_types.contains(v.as_str())
                 {
                     // Same diagnostic as above, for a plain local binding rather
@@ -5541,7 +5541,7 @@ impl Transpiler {
                         }
                     } else if self.struct_rwlock_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_rwlock_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            if self.is_rwlock_local(v.as_str()) || self.rc_vars.contains(v.as_str()))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);

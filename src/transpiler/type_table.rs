@@ -100,6 +100,12 @@ pub(crate) struct TypeTable {
     /// `var_mutex_types` reads (`is_mutex_local`): the emitter's answer equals / differs from the decisions'.
     pub lock_hits: usize,
     pub lock_conflicts: usize,
+    /// `var_rwlock_types` reads (`is_rwlock_local`).
+    pub rw_hits: usize,
+    pub rw_conflicts: usize,
+    /// Reads of either lock set that found the local held: the side of the check that is not vacuous.
+    pub lock_held: usize,
+    pub rw_held: usize,
     /// Walk mode: stale initialisers the walk withheld.
     pub init_dropped: usize,
     pub std_conflicts: usize,
@@ -1191,44 +1197,60 @@ impl super::Transpiler {
     /// not see; `LOCKEXTRA`: the walk says actor, the emitter does not hold one).
     pub(crate) fn is_mutex_local(&self, v: &str) -> bool {
         let own = self.var_mutex_types.contains(v);
-        if self.type_table_mode == TypeTableMode::Check {
-            let key = (self.type_scope.clone(), v.to_string());
-            let decided = self.decision_table.borrow().get(&key).cloned();
-            let outer = |t: &Type| -> Option<OwnerQual> { match t.without_mut() { Type::Qualified(_, q) => Some(q.clone()), _ => None } };
-            let walked_ty = self.built_local_types.borrow().get(&key).cloned();
-            let declared = walked_ty.clone().flatten().and_then(|t| outer(&t));
-            // A written qualifier wins over what the decisions pass chose for an unqualified local; a candidate set
-            // (`'new`, a qualifier group) is resolved by the decision.
-            // What the decisions pass chose counts as a lock only for a value that has fields to route through one: an
-            // inferred `'actor` on a scalar (what a `with` over a plain `var int` makes of it) is a no-op block, not a lock.
-            let scalar = |t: &Option<Type>| t.as_ref().is_some_and(|t| super::Transpiler::is_copy_type(&canon(t.without_mut())));
-            let decided_lock = |t: &Option<Type>| matches!(decided, Some(OwnerQual::Actor)) && !scalar(t);
-            let by_name = match &declared { Some(OwnerQual::Union(_)) | None => decided_lock(&walked_ty.clone().flatten()), Some(q) => matches!(q, OwnerQual::Actor) };
-            // By position: the latest binding event of the name that is in force where the emitter has reached (a `let`, an
-            // arm's pattern for the arm, a `with` for its body). Where the name has events and none is in force yet, it is
-            // not bound: a read before the binding (a pre-scan of the body) is not a lock.
-            let pos = self.cur_pos.get();
-            let events = self.built_binders.borrow().get(&key).cloned();
-            let by_pos = events.as_ref().and_then(|evs| {
-                evs.iter().filter(|b| b.pos <= pos && b.end.is_none_or(|e| pos <= e)).max_by_key(|b| b.pos).cloned()
-            });
-            let walk = match (&by_pos, &events) {
-                (Some(b), _) if b.unlocked => false,
-                (Some(b), _) => match b.ty.as_ref().and_then(outer) {
-                    Some(OwnerQual::Union(_)) | None => decided_lock(&b.ty),
-                    Some(q) => matches!(q, OwnerQual::Actor),
-                },
-                (None, Some(_)) => false,
-                (None, None) => by_name,
-            };
-            if walk == own { self.type_table.borrow_mut().lock_hits += 1; } else {
-                self.type_table.borrow_mut().lock_conflicts += 1;
-                let kind = if own { "LOCKMISSING" } else { "LOCKEXTRA" };
-                if std::env::var_os("BORING_TYPE_TABLE_BACKTRACE").is_some() { eprintln!("{kind} {v} {}", std::backtrace::Backtrace::force_capture()); }
-                self.log_check(format!("{kind} ({:?}, {:?}) decided {:?} declared {:?} walk type {:?} at {:?} binder {:?}", self.type_scope, v, decided, declared, walked_ty, pos, by_pos));
-            }
-        }
+        if self.type_table_mode == TypeTableMode::Check { self.check_lock(v, own, OwnerQual::Actor, "LOCK"); }
         own
+    }
+
+    /// Whether the local `v` is a `T'guard` held behind a read-write lock: what `var_rwlock_types` holds. Same check as
+    /// `is_mutex_local` with `'guard` as the qualifier (`RWLOCKMISSING` / `RWLOCKEXTRA`).
+    pub(crate) fn is_rwlock_local(&self, v: &str) -> bool {
+        let own = self.var_rwlock_types.contains(v);
+        if self.type_table_mode == TypeTableMode::Check { self.check_lock(v, own, OwnerQual::Guard, "RWLOCK"); }
+        own
+    }
+
+    /// The comparison behind `is_mutex_local` and `is_rwlock_local`: `qual` is the qualifier that makes a local this kind of
+    /// lock (`'actor`, `'guard`); `prefix` names the log lines and the counters.
+    fn check_lock(&self, v: &str, own: bool, qual: OwnerQual, prefix: &str) {
+        let key = (self.type_scope.clone(), v.to_string());
+        let decided = self.decision_table.borrow().get(&key).cloned();
+        let outer = |t: &Type| -> Option<OwnerQual> { match t.without_mut() { Type::Qualified(_, q) => Some(q.clone()), _ => None } };
+        let walked_ty = self.built_local_types.borrow().get(&key).cloned();
+        let declared = walked_ty.clone().flatten().and_then(|t| outer(&t));
+        // A written qualifier wins over what the decisions pass chose for an unqualified local; a candidate set
+        // (`'new`, a qualifier group) is resolved by the decision.
+        // What the decisions pass chose counts as a lock only for a value that has fields to route through one: an
+        // inferred qualifier on a scalar (what a `with` over a plain `var int` makes of it) is a no-op block, not a lock.
+        let scalar = |t: &Option<Type>| t.as_ref().is_some_and(|t| super::Transpiler::is_copy_type(&canon(t.without_mut())));
+        let decided_lock = |t: &Option<Type>| decided.as_ref() == Some(&qual) && !scalar(t);
+        let by_name = match &declared { Some(OwnerQual::Union(_)) | None => decided_lock(&walked_ty.clone().flatten()), Some(q) => *q == qual };
+        // By position: the latest binding event of the name that is in force where the emitter has reached (a `let`, an
+        // arm's pattern for the arm, a `with` for its body). Where the name has events and none is in force yet, it is
+        // not bound: a read before the binding (a pre-scan of the body) is not a lock.
+        let pos = self.cur_pos.get();
+        let events = self.built_binders.borrow().get(&key).cloned();
+        let by_pos = events.as_ref().and_then(|evs| {
+            evs.iter().filter(|b| b.pos <= pos && b.end.is_none_or(|e| pos <= e)).max_by_key(|b| b.pos).cloned()
+        });
+        let walk = match (&by_pos, &events) {
+            (Some(b), _) if b.unlocked => false,
+            (Some(b), _) => match b.ty.as_ref().and_then(outer) {
+                Some(OwnerQual::Union(_)) | None => decided_lock(&b.ty),
+                Some(q) => q == qual,
+            },
+            (None, Some(_)) => false,
+            (None, None) => by_name,
+        };
+        let rw = prefix == "RWLOCK";
+        let mut tt = self.type_table.borrow_mut();
+        if own { if rw { tt.rw_held += 1 } else { tt.lock_held += 1 } }
+        if walk == own { if rw { tt.rw_hits += 1 } else { tt.lock_hits += 1 } } else {
+            if rw { tt.rw_conflicts += 1 } else { tt.lock_conflicts += 1 }
+            drop(tt);
+            let kind = if own { format!("{prefix}MISSING") } else { format!("{prefix}EXTRA") };
+            if std::env::var_os("BORING_TYPE_TABLE_BACKTRACE").is_some() { eprintln!("{kind} {v} {}", std::backtrace::Backtrace::force_capture()); }
+            self.log_check(format!("{kind} ({:?}, {:?}) decided {:?} declared {:?} walk type {:?} at {:?} binder {:?}", self.type_scope, v, decided, declared, walked_ty, pos, by_pos));
+        }
     }
 
     /// Whether the emitter tracks a declared type for `v` (`var_types.contains_key`).

@@ -1813,7 +1813,7 @@ impl Transpiler {
         // req methods use .read(), def methods use .write().
         // 'guard → std::sync::RwLock (unwrap), 'guard'task → tokio::sync::RwLock (await in async ctx).
         if let ExprKind::Var(v) = &obj.kind {
-            if self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
+            if self.is_rwlock_local(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str()) {
                 let is_task = self.var_rwlock_task_types.contains(v.as_str());
                 let struct_name = self.resolve_receiver_type_name(v.as_str());
                 // Preserve the real method name for a known user struct/enum receiver —
@@ -1879,7 +1879,7 @@ impl Transpiler {
                 let outer_type: Option<String> = if v == "self" {
                     self.self_type.clone()
                 } else if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
-                    || self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
+                    || self.is_rwlock_local(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
                     || self.managed_mutex_vars.contains(v.as_str()) || self.managed_refcell_vars.contains(v.as_str())
                 {
                     None
@@ -4126,7 +4126,7 @@ impl Transpiler {
             ExprKind::Var(v) => self.inferred_qualifiers.get(v.as_str()).is_some_and(|q| !matches!(q, OwnerQual::Inline))
                 || self.local_type(v.as_str()).is_some_and(qualified_ty)
                 || self.arc_vars.contains(v.as_str()) || self.rc_vars.contains(v.as_str())
-                || self.is_mutex_local(v.as_str()) || self.var_rwlock_types.contains(v.as_str()),
+                || self.is_mutex_local(v.as_str()) || self.is_rwlock_local(v.as_str()),
             _ => self.resolve_expr_type(value).is_some_and(|t| qualified_ty(&t)),
         };
         if already {
@@ -4808,7 +4808,7 @@ impl Transpiler {
                 && (!self.fn_current_params_mut.contains(v.as_str()) || self.fn_current_params_rebind_only.contains(v.as_str()))
                 && !self.is_mutex_local(v.as_str())
                 && !self.var_mutex_task_types.contains(v.as_str())
-                && !self.var_rwlock_types.contains(v.as_str())
+                && !self.is_rwlock_local(v.as_str())
                 && !self.var_rwlock_task_types.contains(v.as_str())
             {
                 // Check if the param's type is a known user struct and the method is `def` (not `req`).
@@ -4838,7 +4838,7 @@ impl Transpiler {
                 && self.mut_checked_local_vars.contains(v.as_str())
                 && !self.is_mutex_local(v.as_str())
                 && !self.var_mutex_task_types.contains(v.as_str())
-                && !self.var_rwlock_types.contains(v.as_str())
+                && !self.is_rwlock_local(v.as_str())
                 && !self.var_rwlock_task_types.contains(v.as_str())
             {
                 // Same diagnostic as above, for a plain local binding rather than
@@ -5619,7 +5619,7 @@ impl Transpiler {
                 if self.var_mutex_task_types.contains(v.as_str()) { K::ActorTask }
                 else if self.is_mutex_local(v.as_str()) { K::Actor }
                 else if self.var_rwlock_task_types.contains(v.as_str()) { K::GuardTask }
-                else if self.var_rwlock_types.contains(v.as_str()) { K::Guard }
+                else if self.is_rwlock_local(v.as_str()) { K::Guard }
                 else {
                     match self.inferred_qualifiers.get(v.as_str()) {
                         Some(OwnerQual::ActorTask) => K::ActorTask,
@@ -6036,7 +6036,7 @@ impl Transpiler {
                         if self.is_mutex_local(vname.as_str()) {
                             _actor_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Actor);
                             Some(&_actor_placeholder)
-                        } else if self.var_rwlock_types.contains(vname.as_str()) {
+                        } else if self.is_rwlock_local(vname.as_str()) {
                             _guard_placeholder = Type::Qualified(Box::new(Type::Named(String::new())), OwnerQual::Guard);
                             Some(&_guard_placeholder)
                         } else if self.arc_vars.contains(vname.as_str()) {
@@ -7444,7 +7444,7 @@ impl Transpiler {
                 // A receiver that is itself a lock handle is not a plain struct place.
                 if let ExprKind::Var(v) = &inner.kind {
                     if self.is_mutex_local(v.as_str()) || self.var_mutex_task_types.contains(v.as_str())
-                        || self.var_rwlock_types.contains(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
+                        || self.is_rwlock_local(v.as_str()) || self.var_rwlock_task_types.contains(v.as_str())
                         || self.managed_mutex_vars.contains(v.as_str()) || self.managed_refcell_vars.contains(v.as_str())
                         || self.managed_param_shadows.contains_key(v.as_str())
                     {

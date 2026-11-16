@@ -50,7 +50,7 @@ fn stats_report_the_table_and_what_a_walk_of_its_own_gets() {
 fn check_finds_no_declared_type_the_walk_contradicts() {
     let log = std::env::temp_dir().join(format!("boring_type_table_check_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
-    for case in ["structs", "modules", "mut_scenarios_2", "trait_scenarios_3", "field_scenarios", "qualifier_infer", "monomorphize_struct", "free_fn_overloading", "method_overloading", "misc_scenarios_6"] {
+    for case in ["structs", "modules", "mut_scenarios_2", "trait_scenarios_3", "field_scenarios", "qualifier_infer", "monomorphize_struct", "free_fn_overloading", "method_overloading", "local_fn_overload_repeat", "external_non_clone_collection", "misc_scenarios_6"] {
         let o = Command::new(BIN)
             .args(["build", "--emit-rust", &format!("tests/cases/{case}.br")])
             .env("BORING_TYPE_TABLE", "check")
@@ -123,7 +123,7 @@ fn a_last_use_the_decisions_do_not_allow_to_move_is_cloned() {
 fn check_finds_no_lock_the_decisions_contradict_for_plain_actor_locals() {
     let log = std::env::temp_dir().join(format!("boring_type_table_lock_{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
-    for case in ["actor_slot_double_read", "view_scenarios_2", "actor_scenarios", "actor_collection_field_ops", "match_subject_reused_in_arm", "qualifier_gaps_enums", "auto_ref_infer", "qualifier_group_local_caller", "qualifier_defaults_chains", "qualifier_infer", "with_stmt"] {
+    for case in ["actor_slot_double_read", "view_scenarios_2", "actor_scenarios", "actor_collection_field_ops", "external_non_clone_collection", "match_subject_reused_in_arm", "qualifier_gaps_enums", "auto_ref_infer", "qualifier_group_local_caller", "qualifier_defaults_chains", "qualifier_infer", "with_stmt"] {
         let o = Command::new(BIN)
             .args(["build", "--emit-rust", &format!("tests/cases/{case}.br")])
             .env("BORING_TYPE_TABLE", "check")
@@ -183,4 +183,26 @@ fn the_lock_state_of_a_name_follows_its_binding_by_position() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!text.lines().any(|l| l.starts_with("LOCKMISSING") || l.starts_with("LOCKEXTRA")), "{text}");
     assert!(err.contains(" lock reads agree, 0 differ") && !err.contains(" 0 lock reads agree"), "{err}");
+}
+
+/// `is_rwlock_local` (the accessor of `var_rwlock_types`), same check as the mutex one with `'guard`: a written local, a
+/// parameter, a `with` (the name is the unlocked guard inside it, the lock again after), a top-level local. A `'guard` bound
+/// by a pattern (`Full(c)` of `Full(Cell'guard)`) is not here: the emitter does not track it as a read-write lock (the
+/// generated Rust does not compile, E0599), which `check` reports as `RWLOCKEXTRA` (design note 20.13).
+#[test]
+fn check_finds_no_rwlock_the_decisions_contradict_for_plain_guard_locals() {
+    let dir = std::env::temp_dir().join(format!("boring_type_table_rw_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("rw.br");
+    std::fs::write(&src, "struct Cell:\n    var int value = 0\n\n    req int peek():\n        value\n\n    def bump():\n        value += 1\n\ndef local_guard():\n    var mut Cell'guard b = Cell(1)\n    with b:\n        b.bump()\n    print \"{b.peek()}\"\n    with b:\n        print \"{b.peek()}\"\n    b.bump()\n    print \"{b.peek()}\"\n\ndef param_guard(Cell'guard g):\n    print \"{g.peek()}\"\n\nlocal_guard()\nvar mut Cell'guard top = Cell(9)\nwith top:\n    top.bump()\nprint \"{top.peek()}\"\nparam_guard(top)\n").unwrap();
+    let log = dir.join("check.log");
+    let o = Command::new(BIN).args(["build", "--emit-rust", src.to_str().unwrap()])
+        .env("BORING_TYPE_TABLE", "check").env("BORING_TYPE_TABLE_LOG", &log).env("BORING_TYPE_TABLE_STATS", "1")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR"))).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!text.lines().any(|l| l.starts_with("RWLOCKMISSING") || l.starts_with("RWLOCKEXTRA")), "{text}");
+    assert!(err.contains(" rwlock reads agree, 0 differ") && !err.contains("; 0 mutex and 0 rwlock reads"), "{err}");
 }

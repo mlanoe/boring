@@ -586,7 +586,7 @@ impl Transpiler {
 
             let is_mutex = self.is_mutex_local(name.as_str());
             let is_mutex_task = self.var_mutex_task_types.contains(name.as_str());
-            let is_rwlock = self.var_rwlock_types.contains(name.as_str());
+            let is_rwlock = self.is_rwlock_local(name.as_str());
             let is_rwlock_task = self.var_rwlock_task_types.contains(name.as_str());
             if !(is_mutex || is_mutex_task || is_rwlock || is_rwlock_task) {
                 continue;
