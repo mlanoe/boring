@@ -1614,12 +1614,23 @@ let _name = "ok"
 // generic "no method on type File" error.
 #[test]
 fn test_rust_file_open_metadata_len() {
+    // The thread name is `interpreter::tests::...`; `:` is an invalid filename
+    // character on Windows, so keep only alphanumerics.
+    let thread_name: String = std::thread::current()
+        .name()
+        .unwrap_or("test")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
     let path = std::env::temp_dir().join(format!(
         "boring-interpreter-file-metadata-{}-{}",
         std::process::id(),
-        std::thread::current().name().unwrap_or("test"),
+        thread_name,
     ));
     std::fs::write(&path, b"boring").expect("write fixture");
+    // Backslashes would be parsed as escapes inside the Boring string literal;
+    // Windows accepts forward slashes.
+    let path_lit = path.display().to_string().replace('\\', "/");
     let src = format!(
         r#"
 use std.fs.File
@@ -1633,7 +1644,7 @@ def uint64 fileLen(string path) throws:
 
 let _len = try? fileLen("{}")
 "#,
-        path.display()
+        path_lit
     );
     let (interp, res) = run(&src);
     let _ = std::fs::remove_file(&path);
