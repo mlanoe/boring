@@ -44,6 +44,35 @@ pub enum Item {
     Alias(AliasDecl),
     Kernel(KernelDecl),
     Stmt(Stmt),
+    Query(QueryDecl),
+}
+
+/// An ECS query system: `[@attr]* query [name]?(params) [where filter]?: body`
+#[derive(Debug, Clone)]
+pub struct QueryDecl {
+    pub name: Option<String>,
+    pub params: Vec<Param>,
+    pub where_clause: Option<QueryWhereClause>,
+    pub attrs: Vec<Attr>,
+    pub body: Vec<Stmt>,
+    pub is_req: bool,
+    /// When declared inside a component/struct, the enclosing type name (`self` accesses this component).
+    pub self_type: Option<String>,
+    pub line: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryWhereClause {
+    pub terms: Vec<QueryFilterTerm>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryFilterTerm {
+    With(String),
+    Without(String),
+    Changed(String),
+    Added(String),
 }
 
 /// `mod name:` — groups items into a named module for Rust transpilation.
@@ -178,11 +207,18 @@ pub struct StructDecl {
     /// Declared with `view` instead of `struct` (docs/design-notes/boring-ui-draft.md, §2).
     /// Its fields may carry a `ViewFieldKind`, and it may declare a `body()`.
     pub is_view: bool,
+    /// Declared with `data` instead of `struct` (pure value type, POD).
+    pub is_data: bool,
+    /// Declared with `component` instead of `struct` (ECS component).
+    pub is_component: bool,
+    /// Declared with `resource` instead of `struct` (ECS global resource).
+    pub is_resource: bool,
     pub is_native: bool, // body is `native` — implemented by the runtime
     pub protocols: Vec<String>,
     pub fields: Vec<FieldDecl>,
     pub inits: Vec<InitDecl>,
     pub methods: Vec<FnDecl>,
+    pub queries: Vec<QueryDecl>,
     pub conversions: Vec<AsDecl>,
     pub type_params: Vec<String>,
     pub where_clause: Vec<(String, String)>,
@@ -830,6 +866,8 @@ pub struct LetStmt {
     pub value: Option<Expr>,
     /// `true` for `lazy` bindings — deferred, write-once via `?=`.
     pub is_lazy: bool,
+    /// `true` when declared with `@resource` (ECS global resource).
+    pub is_resource: bool,
     pub line: usize,
     pub col: usize,
 }

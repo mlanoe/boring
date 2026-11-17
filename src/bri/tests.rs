@@ -112,7 +112,7 @@ fn unknown_constructs_are_errors_naming_them() {
     let ty = Type::Generic("Board".into(), vec![Type::QualArg(vec![OwnerQual::Actor])]);
     let let_stmt = LetStmt {
         binding: BindingKind::Let, is_pub: false, is_static: false, name: "b".into(), ty: Some(ty), var_mut: false,
-        value: None, is_lazy: false, line: 1, col: 0,
+        value: None, is_lazy: false, is_resource: false, line: 1, col: 0,
     };
     let err = print_program(&Program { items: vec![Item::Let(let_stmt)] }).unwrap_err();
     assert!(err.what.contains("qualifier argument of `Board`"), "{err}");

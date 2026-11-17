@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boring — Intégration ECS Native dans le Langage Boring</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; line-height: 1.7; color: #1a1a2e;
+  background: #f8f9fa;
+}
+.sidebar {
+  position: fixed; top: 0; left: 0; width: 270px; height: 100vh;
+  background: #1a1a2e; color: #c9d1d9; overflow-y: auto;
+  padding: 0 0 2rem 0; z-index: 100;
+}
+.sidebar-header {
+  background: #0f3460; padding: 1.2rem 1.5rem; margin-bottom: 0.5rem;
+}
+.sidebar-header h2 { font-size: 1rem; color: #e94560; font-weight: 700; letter-spacing: 0.03em; }
+.sidebar-header p  { font-size: 0.75rem; color: #8b949e; margin-top: 0.2rem; }
+.sidebar nav a {
+  display: block; padding: 0.3rem 1.5rem; color: #8b949e;
+  text-decoration: none; font-size: 0.875rem; transition: all 0.15s;
+}
+.sidebar nav a:hover { color: #e6edf3; background: rgba(255,255,255,0.05); }
+.sidebar nav a.h2 { font-weight: 600; color: #c9d1d9; margin-top: 0.4rem; }
+.sidebar nav a.h3 { padding-left: 2.5rem; font-size: 0.825rem; }
+.main { margin-left: 270px; padding: 3rem 4rem; max-width: 980px; }
+h1 { font-size: 2.2rem; font-weight: 800; color: #0f3460; margin: 2rem 0 1rem;
+     border-bottom: 3px solid #e94560; padding-bottom: 0.5rem; }
+h2 { font-size: 1.6rem; font-weight: 700; color: #16213e; margin: 2.5rem 0 1rem;
+     border-bottom: 1px solid #dee2e6; padding-bottom: 0.4rem; }
+h3 { font-size: 1.15rem; font-weight: 600; color: #0f3460; margin: 1.8rem 0 0.6rem; }
+h4 { font-size: 1rem;    font-weight: 600; color: #495057; margin: 1.2rem 0 0.4rem; }
+p  { margin-bottom: 1rem; }
+a  { color: #e94560; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #dee2e6; margin: 2rem 0; }
+strong { color: #16213e; }
+code {
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  font-size: 0.875em; background: #e8ecf0; color: #c7254e;
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.code-block { position: relative; margin: 1.2rem 0; }
+.code-block pre {
+  background: #1e2030; border-radius: 8px; padding: 1.2rem 1.5rem;
+  overflow-x: auto; line-height: 1.6;
+  border-left: 3px solid transparent;
+}
+.code-block[data-lang="boring"] pre {
+  background: #1e2030;
+  border-left: 3px solid #89b4fa;
+}
+.code-block[data-lang="rust"] pre {
+  background: #d4d8e0;
+  border-left: 3px solid #b7410e;
+}
+.code-block pre code {
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.875rem; background: none; color: #cdd6f4; padding: 0;
+  border-radius: 0;
+}
+.code-block[data-lang="rust"] pre code { color: #2d2d3a; }
+.lang-label {
+  position: absolute; top: 0; right: 0;
+  background: #313244; color: #7f849c; font-size: 0.7rem;
+  padding: 0.2rem 0.6rem; border-radius: 0 8px 0 6px;
+  font-family: "JetBrains Mono", monospace; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.code-block[data-lang="boring"] .lang-label { background: #1e3a5f; color: #89b4fa; }
+.code-block[data-lang="rust"]   .lang-label { background: #e8e0f0; color: #7c3aed; }
+/* Rust light-theme syntax overrides */
+.code-block[data-lang="rust"] .kw { color: #7c3aed; }
+.code-block[data-lang="rust"] .kt { color: #0e7490; }
+.code-block[data-lang="rust"] .fn { color: #1d4ed8; }
+.code-block[data-lang="rust"] .fm { color: #c2410c; }
+.code-block[data-lang="rust"] .s  { color: #16a34a; }
+.code-block[data-lang="rust"] .si { color: #92400e; }
+.code-block[data-lang="rust"] .nb { color: #c2410c; }
+.code-block[data-lang="rust"] .co { color: #9ca3af; }
+.code-block[data-lang="rust"] .at { color: #dc2626; }
+.code-block[data-lang="rust"] .lf { color: #9d174d; }
+/* Syntax colors (Catppuccin-inspired) */
+.kw { color: #cba6f7; font-weight: 600; }  /* keywords */
+.kt { color: #89dceb; }                     /* types */
+.fn { color: #89b4fa; }                     /* function names */
+.fm { color: #fab387; }                     /* macros */
+.s  { color: #a6e3a1; }                     /* strings */
+.si { color: #f9e2af; font-weight: 600; }   /* string interpolation */
+.nb { color: #fab387; }                     /* numbers */
+.co { color: #6c7086; font-style: italic; } /* comments */
+.at { color: #f38ba8; }                     /* attributes */
+.lf { color: #f2cdcd; }                     /* lifetime/qualifier */
+/* Tables */
+table { border-collapse: collapse; width: 100%; margin: 1.2rem 0; font-size: 0.9rem; }
+th { background: #0f3460; color: #fff; padding: 0.6rem 1rem; text-align: left; }
+td { padding: 0.5rem 1rem; border-bottom: 1px solid #dee2e6; }
+tr:nth-child(even) td { background: #f1f3f5; }
+tr:hover td { background: #e8f4fd; }
+/* Blockquote (preview banner) */
+blockquote {
+  background: #fff3cd; border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem; border-radius: 0 8px 8px 0;
+  margin: 1.5rem 0; color: #664d03; font-size: 0.95rem;
+}
+ul, ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+li { margin-bottom: 0.3rem; }
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h2>Boring Language</h2>
+    <p>Beta</p>
+  </div>
+  <nav id="toc"></nav>
+</aside>
+<main class="main" id="content">
+<h1 id="intégration-ecs-native-dans-le-langage-boring">Intégration ECS Native dans le Langage Boring</h1>
+<blockquote><strong>Statut</strong> : Implémenté et Validé   <strong>Auteur</strong> : Mickaël LANOË &amp; Assistant   <strong>Cible initiale (Phase 1)</strong> : Abaissement direct vers Bevy ECS en Rust  </blockquote>
+<hr>
+<h2 id="1-vision-et-objectifs">1. Vision et Objectifs</h2>
+<p>Boring dispose d&#x27;intégrations avec Bevy (<code>bevy-boring</code>, <code>breakout-boring</code>, <code>boring-bevylib</code>). L&#x27;intégration native fait de l&#x27;<strong>ECS un citoyen de première classe</strong> dans la syntaxe et la sémantique de Boring : 1. <strong>Élimination du bruit syntaxique</strong> : Pas de types génériques Bevy ni d&#x27;itérateurs manuels dans le code utilisateur. 2. <strong>Types de données pures (<code>data</code>)</strong> : Distinction claire entre objets généraux (<code>struct</code>) et données par valeur (<code>data</code>), interdisant formellement les pointeurs partagés (<code>&#x27;actor</code>, <code>&#x27;shared</code>) pour préserver la localité du cache et le parallélisme. 3. <strong>Composants (<code>@component data</code>)</strong> : Déclaration explicite et lisible des composants d&#x27;entités. 4. <strong>Ressources simples (<code>@resource</code>)</strong> : Variables globales sans bloc struct ni double nom, utilisables comme n&#x27;importe quelle variable (<code>score += 10</code>). 5. <strong>Queries universelles (Méthodes et Fonctions)</strong> :    <em> </em><em>Méthodes dans un composant</em><em> : <code>self</code> représente le composant principal à faire évoluer (<code>query movement(Velocity vel): self.x += ...</code>).    </em> <strong>Fonctions top-level</strong> : Pour les systèmes médiateurs opérant sur plusieurs composants distincts (<code>query check_collisions(Transform a, ...):</code>). 6. <strong>Contexte ambiant avec point (<code>.</code>)</strong> : Accès direct au temps (<code>.time.delta</code>), aux entrées (<code>.input</code>), à l&#x27;entité courante (<code>.entity</code>), et aux commandes (<code>.despawn()</code>, <code>.spawn(...)</code>).</p>
+<hr>
+<h2 id="2-déclaration-des-données--data-et-component">2. Déclaration des Données : <code>data</code> et <code>@component</code></h2>
+<h3 id="21-le-mot-clé-data-pure-value--pod">2.1 Le mot-clé <code>data</code> (Pure Value / POD)</h3>
+<p>Le mot-clé <code>data</code> définit un type de données pures par valeur : <em> </em><em>Membres autorisés</em><em> : Scalaires (<code>int</code>, <code>float</code>, <code>bool</code>), chaînes (<code>string</code>), vecteurs mathématiques (<code>Vec2</code>, <code>Vec3</code>, <code>Transform</code>), enums Boring, tableaux (<code>[int]</code>, <code>[float, 3]</code>), optionnels (<code>Target?</code>), et autres types <code>data</code>. </em> <strong>Membres interdits</strong> : Qualificateurs de pointeurs partagés (<code>&#x27;actor</code>, <code>&#x27;shared</code>, verrous internes, références locales). Le compilateur garantit ainsi statiquement que tout <code>data</code> est strictement <code>Send + Sync + &#x27;static</code> et optimal pour le cache CPU.</p>
+<h3 id="22-composants-dentités-component-data">2.2 Composants d&#x27;entités (<code>@component data</code>)</h3>
+<p>Pour marquer un <code>data</code> comme composant pouvant être attaché à une entité ECS :</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@component</span>
+<span class="kw">data</span> Position:
+    <span class="kt">float</span> x = <span class="nb">0.0</span>
+    <span class="kt">float</span> y = <span class="nb">0.0</span>
+
+<span class="at">@component</span>
+<span class="kw">data</span> Velocity:
+    <span class="kt">float</span> dx = <span class="nb">0.0</span>
+    <span class="kt">float</span> dy = <span class="nb">0.0</span>
+
+<span class="co"># Tag component / Unit component (0 octet, utilisé comme filtre d&#x27;archétype)</span>
+<span class="at">@component</span>
+<span class="kw">data</span> Frozen: <span class="kw">pass</span></code></pre></div>
+<p><strong>Transpilation Rust / Bevy :</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(bevy::prelude::Component, Debug, Clone, PartialEq)]</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">Position</span> {
+    <span class="kw">pub</span> x: f64,
+    <span class="kw">pub</span> y: f64,
+}
+
+<span class="at">#[derive(bevy::prelude::Component, Debug, Clone, PartialEq)]</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">Velocity</span> {
+    <span class="kw">pub</span> dx: f64,
+    <span class="kw">pub</span> dy: f64,
+}
+
+<span class="at">#[derive(bevy::prelude::Component, Debug, Clone, Copy, Default, PartialEq, Eq)]</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">Frozen</span>;</code></pre></div>
+<hr>
+<h2 id="3-ressources-globales--resource">3. Ressources Globales : <code>@resource</code></h2>
+<p>Les états globaux (score du jeu, configuration, réglages) sont déclarés avec <code>@resource</code> sans forcer de bloc struct inutile :</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@resource</span>
+<span class="kw">var</span> <span class="kt">int</span> score = <span class="nb">0</span>
+
+<span class="at">@resource</span>
+<span class="kt">float</span> gravity = <span class="nb">-9.81</span>
+
+<span class="at">@resource</span>
+<span class="kw">data</span> GameConfig:
+    <span class="kw">var</span> <span class="kt">int</span> max_players = <span class="nb">4</span></code></pre></div>
+<h3 id="usage-dans-les-queries">Usage dans les Queries</h3>
+<p>Dans n&#x27;importe quelle query, la ressource est lue ou modifiée comme une variable ordinaire :</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">query</span> <span class="fn">kill_enemy</span>(Enemy e) <span class="kw">where</span> e.is_dead:
+    score += <span class="nb">10</span>
+    .<span class="fn">despawn</span>()</code></pre></div>
+<p><strong>Transpilation Rust / Bevy :</strong> Le compilateur génère le wrapper <code>#[derive(Resource)] pub struct Res_score(pub isize);</code>, injecte <code>mut res_score: ResMut&lt;Res_score&gt;</code> dans la fonction système générée, et applique <code>res_score.0 = ...</code>.</p>
+<hr>
+<h2 id="4-systèmes-et-queries--query">4. Systèmes et Queries : <code>query</code></h2>
+<p>Une <code>query</code> définit un système itérant sur toutes les entités satisfaisant une signature de composants et une condition de filtrage <code>where</code>.</p>
+<h3 id="41-queries-sous-forme-de-méthode-de-composant">4.1 Queries sous forme de méthode de composant</h3>
+<p>Lorsqu&#x27;un système fait évoluer un composant particulier, il est déclaré directement dans le <code>data</code> de ce composant :</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@component</span>
+<span class="kw">data</span> Position:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+
+    <span class="at">@schedule</span>(Update)
+    <span class="kw">query</span> <span class="fn">movement</span>(Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
+        <span class="kw">self</span>.x += vel.dx * .time.delta
+        <span class="kw">self</span>.y += vel.dy * .time.delta</code></pre></div>
+<ul><li><code>self</code> est automatiquement lié au composant de l&#x27;entité courante en accès mutable (<code>&amp;mut Position</code>).</li><li><code>(Velocity vel)</code> ne liste que les composants secondaires requis pour le calcul.</li><li>Si le système ne fait que de la lecture seule sur <code>self</code>, on utilise <code>req query</code> (<code>&amp;Position</code>).</li></ul>
+<p><strong>Transpilation Rust / Bevy :</strong></p>
+<div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">position_movement</span>(
+    <span class="kw">mut</span> query: <span class="kt">Query</span>&lt;(&amp;<span class="kw">mut</span> <span class="kt">Position</span>, &amp;<span class="kt">Velocity</span>), <span class="kt">Without</span>&lt;<span class="kt">Frozen</span>&gt;&gt;,
+    time: <span class="kt">Res</span>&lt;<span class="kt">Time</span>&gt;,
+) {
+    <span class="kw">for</span> (<span class="kw">mut</span> self_, vel) <span class="kw">in</span> &amp;<span class="kw">mut</span> query {
+        self_.x += (vel.dx * (time.<span class="fn">delta_secs</span>() <span class="kw">as</span> f64));
+        self_.y += (vel.dy * (time.<span class="fn">delta_secs</span>() <span class="kw">as</span> f64));
+    }
+}</code></pre></div>
+<h3 id="42-queries-au-niveau-global-top-level">4.2 Queries au niveau global (Top-level)</h3>
+<p>Pour les systèmes médiateurs opérant entre plusieurs entités ou sans composant propriétaire :</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Système de physique générale</span>
+<span class="kw">query</span> <span class="fn">apply_velocity</span>(<span class="kw">mut</span> Position pos, Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
+    pos.x += vel.dx * .time.delta
+    pos.y += vel.dy * .time.delta
+
+<span class="co"># Système de cycle de vie (exécuté 1 fois au lancement, sans composant)</span>
+<span class="at">@schedule</span>(Startup)
+<span class="kw">query</span> <span class="fn">setup_world</span>():
+    .<span class="fn">spawn</span>(<span class="fn">Position</span>(x = <span class="nb">0.0</span>, y = <span class="nb">0.0</span>), <span class="fn">Velocity</span>(dx = <span class="nb">10.0</span>, dy = <span class="nb">5.0</span>))
+
+<span class="co"># Système de destruction</span>
+<span class="kw">query</span> <span class="fn">death_check</span>(Health h) <span class="kw">where</span> h.current &lt;= <span class="nb">0</span>:
+    .<span class="fn">despawn</span>()</code></pre></div>
+<hr>
+<h2 id="5-ordonnancement-et-cycle-de-vie--schedule-et-state">5. Ordonnancement et Cycle de Vie : <code>@schedule</code> et <code>@state</code></h2>
+<ol><li><strong><code>@schedule(...)</code></strong> : Règle la phase d&#x27;exécution par frame.</li></ol>
+<p>   <em> Valeurs standard : <code>Startup</code>, <code>FixedUpdate</code>, <code>Update</code> (défaut si omis), <code>PostUpdate</code>, <code>Render</code>.    </em> Exemple : <code>@schedule(FixedUpdate)</code> pour une physique à pas constant (50/60 Hz). 2. <strong><code>@state(...)</code> (ou <code>@inState(...)</code>)</strong> : Conditionne l&#x27;exécution selon l&#x27;état applicatif.    * Exemple : <code>@state(GameState.Playing)</code> (transpilé en <code>.run_if(in_state(GameState::Playing))</code>).</p>
+<hr>
+<h2 id="6-la-clause-de-filtrage-where">6. La Clause de Filtrage <code>where</code></h2>
+<p>La clause <code>where</code> permet d&#x27;exprimer les contraintes fines sur les archétypes et les valeurs : <em> </em><em>Présence de tag</em><em> : <code>where Player</code> $\rightarrow$ <code>With&lt;Player&gt;</code> </em> <strong>Exclusion de tag</strong> : <code>where not Frozen</code> $\rightarrow$ <code>Without&lt;Frozen&gt;</code> <em> </em><em>Combinaisons booléennes</em><em> : <code>where Player and not (Frozen or Stunned)</code> </em> <strong>Détection de changement</strong> : <code>where changed Transform</code> $\rightarrow$ <code>Changed&lt;Transform&gt;</code> <em> </em><em>Détection d&#x27;ajout</em><em> : <code>where added Enemy</code> $\rightarrow$ <code>Added&lt;Enemy&gt;</code> </em> <strong>Filtre de valeur</strong> : <code>where h.current &lt;= 0</code> $\rightarrow$ condition évaluée au début de chaque itération.</p>
+<hr>
+<h2 id="7-contexte-ambiant">7. Contexte Ambiant (<code>.</code>)</h2>
+<p>À l&#x27;intérieur du corps d&#x27;une <code>query</code>, l&#x27;opérateur point (<code>.</code>) donne accès au contexte sans polluer la liste des paramètres :</p>
+<table><thead><tr><th>Expression Boring</th><th>Signification ECS</th><th>Équivalent Rust / Bevy généré</th></tr></thead><tbody><tr><td><code>.time.delta</code></td><td>Temps écoulé depuis la dernière frame (secondes)</td><td><code>(time.delta_secs() as f64)</code> (via <code>Res&lt;Time&gt;</code>)</td></tr><tr><td><code>.time.elapsed</code></td><td>Temps total écoulé de la simulation</td><td><code>time.elapsed_secs_f64()</code></td></tr><tr><td><code>.input.is_key_pressed(...)</code></td><td>Touche pressée</td><td><code>input.pressed(...)</code> (via <code>Res&lt;ButtonInput&lt;KeyCode&gt;&gt;</code>)</td></tr><tr><td><code>.entity</code></td><td>ID de l&#x27;entité courante</td><td>Tuple avec <code>Entity</code></td></tr><tr><td><code>.despawn()</code></td><td>Détruit l&#x27;entité courante</td><td><code>commands.entity(__entity).despawn()</code></td></tr><tr><td><code>.spawn(c1, c2, ...)</code></td><td>Crée une nouvelle entité avec ses composants</td><td><code>commands.spawn((c1, c2, ...))</code></td></tr><tr><td><code>score += 10</code></td><td>Modifie une ressource globale <code>@resource</code></td><td><code>res_score.0 += 10</code> (via <code>ResMut&lt;Res_score&gt;</code>)</td></tr></tbody></table>
+<p>Le compilateur analyse statiquement le corps de la query pour détecter ces occurrences et génère automatiquement les paramètres Bevy requis (<code>time: Res&lt;Time&gt;</code>, <code>mut commands: Commands</code>, etc.).</p>
+</main>
+<script>
+// Build TOC from headings
+const toc = document.getElementById('toc');
+document.querySelectorAll('h2,h3').forEach(h => {
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName.toLowerCase();
+  toc.appendChild(a);
+});
+// Highlight active section on scroll
+const headings = [...document.querySelectorAll('h2,h3')];
+const links = [...toc.querySelectorAll('a')];
+window.addEventListener('scroll', () => {
+  let current = headings[0];
+  headings.forEach(h => { if (window.scrollY >= h.offsetTop - 80) current = h; });
+  links.forEach(a => a.style.color = a.getAttribute('href') === '#' + current?.id ? '#e94560' : '');
+});
+</script>
+</body>
+</html>

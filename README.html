@@ -166,14 +166,14 @@ li { margin-bottom: 0.3rem; }
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">kernel</span> Scale:
     <span class="kw">mut</span> [<span class="kt">float</span>]<span class="lf">&#x27;unified</span> buf
 
-    <span class="kw">init</span>([<span class="kt">float</span>]<span class="lf">&#x27;unified</span> data):
-        buf = data
+    <span class="kw">init</span>([<span class="kt">float</span>]<span class="lf">&#x27;unified</span> <span class="kw">data</span>):
+        buf = <span class="kw">data</span>
 
     <span class="kw">def</span> ():
         <span class="kw">let</span> i = .thread.x + .block.x * .block_dim.x
         buf[i] *= <span class="nb">2.0</span>
 
-<span class="kw">mut</span> k = <span class="fn">Scale</span>(data)
+<span class="kw">mut</span> k = <span class="fn">Scale</span>(<span class="kw">data</span>)
 <span class="kw">kernel</span>:
     <span class="fn">k</span>(block = <span class="nb">256</span>)
 

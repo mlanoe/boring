@@ -356,13 +356,29 @@ impl Transpiler {
                 derive_names.push(name.clone());
             }
         }
+        if s.is_component {
+            if !derive_names.iter().any(|d| d == "Component") {
+                derive_names.push("Component".to_string());
+            }
+            if s.fields.is_empty() {
+                if !derive_names.iter().any(|d| d == "Copy") {
+                    derive_names.push("Copy".to_string());
+                }
+                if !derive_names.iter().any(|d| d == "Default") {
+                    derive_names.push("Default".to_string());
+                }
+            }
+        }
+        if s.is_resource && !derive_names.iter().any(|d| d == "Resource") {
+            derive_names.push("Resource".to_string());
+        }
         if !derive_names.is_empty() {
             self.line(&format!("#[derive({})]", derive_names.join(", ")));
         }
         // Any other explicit attrs (not `derive`, already folded into `derive_names` above)
         // still emit verbatim, unchanged.
         for attr in &s.attrs {
-            if attr.name == "derive" || attr.name == "api" { continue; }
+            if attr.name == "derive" || attr.name == "api" || attr.name == "component" || attr.name == "resource" { continue; }
             let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
             self.line(&format!("#[{}{}]", attr.name, args_s));
         }
@@ -645,6 +661,11 @@ impl Transpiler {
 
         self.indent -= 1;
         self.line("}");
+
+        // Queries declared inside the component/struct: emit as Bevy systems.
+        for q in &s.queries {
+            self.emit_query(q);
+        }
 
         // Protocol conformances declared in header: `struct X as Trait1, Trait2:`.
         // Emit `impl Trait for X { methods... }` so all trait methods are fulfilled.

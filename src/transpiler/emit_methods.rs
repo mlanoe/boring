@@ -4294,6 +4294,27 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        if self.in_ecs_query {
+            if let ExprKind::DotIdent(d) = &obj.kind {
+                if d == "input" {
+                    let key = if let Some(arg) = args.first() {
+                        match &arg.value.kind {
+                            ExprKind::Str(s) => format!("KeyCode::{}", s),
+                            ExprKind::DotIdent(s) => format!("KeyCode::{}", s),
+                            _ => self.emit_expr(&arg.value),
+                        }
+                    } else {
+                        "KeyCode::Space".to_string()
+                    };
+                    match method {
+                        "is_key_pressed" | "pressed" => return format!("input.pressed({})", key),
+                        "is_key_just_pressed" | "just_pressed" => return format!("input.just_pressed({})", key),
+                        "is_key_just_released" | "just_released" => return format!("input.just_released({})", key),
+                        _ => {}
+                    }
+                }
+            }
+        }
         if let Some(code) = self.try_emit_fixed_method(obj, method, args) {
             return code;
         }
@@ -7784,6 +7805,8 @@ impl Transpiler {
             in_async: self.in_async,
             in_iter_stream: self.in_iter_stream,
             in_try_stream: self.in_try_stream,
+            in_ecs_query: self.in_ecs_query,
+            ecs_resource_vars: self.ecs_resource_vars.clone(),
             self_type: self.self_type.clone(),
             collection_vars: self.collection_vars.clone(),
             vec_vars: self.vec_vars.clone(),

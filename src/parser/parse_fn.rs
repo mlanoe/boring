@@ -448,7 +448,7 @@ impl Parser {
                 // Variadic marker sits between type and name: `int... args`
                 variadic = self.eat(&TokenKind::DotDotDot);
 
-                if matches!(self.peek(), TokenKind::Ident(_)) {
+                if matches!(self.peek(), TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set) {
                     let name = self.expect_ident()?;
                     // Also accept `Type name...` (marker after name)
                     if !variadic { variadic = self.eat(&TokenKind::DotDotDot); }
@@ -1007,7 +1007,7 @@ impl Parser {
             let line = self.line();
             let col = self.col();
             self.advance(); // consume @
-            let name = match self.expect_ident() {
+            let name = match self.expect_ident_or_keyword() {
                 Ok(n) => n,
                 Err(_) => break,
             };
@@ -1049,6 +1049,7 @@ impl Parser {
                 TokenKind::Int(n) => { parts.push(n.to_string()); self.advance(); }
                 // Preserve `::` path separators (e.g. `thiserror::Error`, `std::fmt::Display`)
                 TokenKind::Colon => { parts.push(":".to_string()); self.advance(); }
+                TokenKind::Dot => { parts.push(".".to_string()); self.advance(); }
                 // Reconstruct interpolated strings verbatim so that `@error("not found: {0}")`
                 // passes `"not found: {0}"` to Rust rather than losing the `{0}` hole.
                 TokenKind::StringInterp(segs) => {

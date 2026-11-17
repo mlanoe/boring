@@ -578,6 +578,7 @@ fn substitute_types_in_item(item: &mut Item, subst: &HashMap<String, Type>) {
         }
         Item::Alias(a) => { a.ty = substitute_type(&a.ty, subst); }
         Item::Stmt(s) => substitute_types_in_stmt(s, subst),
+        Item::Query(q) => substitute_types_in_stmts(&mut q.body, subst),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) => {}
     }
 }
@@ -1035,6 +1036,7 @@ fn collect_in_item(item: &Item, enclosing: &[String], ctx: &mut CollectCtx) {
         Item::Mod(m) => { for it in &m.items { collect_in_item(it, enclosing, ctx); } }
         Item::Let(l) => { if let Some(v) = &l.value { collect_in_expr(v, enclosing, ctx); } }
         Item::Stmt(s) => collect_in_stmt(s, enclosing, ctx),
+        Item::Query(q) => collect_in_stmts(&q.body, enclosing, ctx),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) | Item::Alias(_) => {}
     }
 }
@@ -1540,6 +1542,7 @@ fn rewrite_in_item(item: &mut Item, instantiations: &InstantiationMap, method_in
         Item::Mod(m) => { for it in &mut m.items { rewrite_in_item(it, instantiations, method_instantiations); } }
         Item::Let(l) => { if let Some(v) = &mut l.value { rewrite_in_expr(v, instantiations, method_instantiations); } }
         Item::Stmt(s) => rewrite_in_stmt(s, instantiations, method_instantiations),
+        Item::Query(q) => rewrite_in_stmts(&mut q.body, instantiations, method_instantiations),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) | Item::Alias(_) => {}
     }
 }

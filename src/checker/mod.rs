@@ -1362,7 +1362,7 @@ impl Checker {
             Item::Stmt(s)   => self.check_stmt(s),
             Item::Kernel(k) => self.check_kernel_decl(k),
             Item::Trait(t)  => self.check_trait(t),
-            Item::Use(_) | Item::Alias(_) => {}
+            Item::Use(_) | Item::Alias(_) | Item::Query(_) => {}
         }
     }
 
@@ -1579,6 +1579,17 @@ impl Checker {
     fn check_struct(&mut self, s: &StructDecl) {
         if s.is_view {
             self.check_view_decl(s);
+        }
+        if s.is_data {
+            for f in &s.fields {
+                if matches!(f.ty.without_mut(), Type::Qualified(_, OwnerQual::Actor | OwnerQual::ActorTask | OwnerQual::Guard | OwnerQual::GuardTask | OwnerQual::Shared)) {
+                    self.errors.push(CheckError::at(
+                        format!("field '{}' of data '{}' cannot carry shared pointer qualifier (data types must be pure value types)", f.name, s.name),
+                        f.line,
+                        f.col,
+                    ));
+                }
+            }
         }
         for f in &s.fields {
             self.check_scalar_mut_in_type(&f.ty, "field", f.line, f.col);

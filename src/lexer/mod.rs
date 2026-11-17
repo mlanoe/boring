@@ -793,6 +793,11 @@ pub enum TokenKind {
     Mod,
     Kernel,
     Sync,
+    Data,
+    Component,
+    Resource,
+    Query,
+    Where,
 
     // Operators
     Plus, Minus, Star, Slash, Percent,
@@ -1666,6 +1671,11 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "mod"      => TokenKind::Mod,
         "kernel"   => TokenKind::Kernel,
         "sync"     => TokenKind::Sync,
+        "data"     => TokenKind::Data,
+        "component" => TokenKind::Component,
+        "resource" => TokenKind::Resource,
+        "query"    => TokenKind::Query,
+        "where"    => TokenKind::Where,
         "true"     => TokenKind::Bool(true),
         "false"    => TokenKind::Bool(false),
         "nil"      => TokenKind::Nil,

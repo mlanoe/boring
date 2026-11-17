@@ -29,6 +29,7 @@ mod fixed_emit;
 mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
+mod emit_query;
 pub(crate) mod unified;
 mod infer_qualifiers;
 mod infer_field_cross_file;
@@ -739,6 +740,10 @@ struct Transpiler {
     pub(crate) in_iter_stream: bool,
     /// True while emitting the body of a `throws` stream (`try_stream!`).
     pub(crate) in_try_stream: bool,
+    /// True while emitting an ECS query body (`query (mut Pos p): ...`).
+    pub(crate) in_ecs_query: bool,
+    /// Variables declared with `@resource` or resource types.
+    pub(crate) ecs_resource_vars: std::collections::HashSet<String>,
     /// Name of the type currently being impl'd (for self-aware emit).
     pub(crate) self_type: Option<String>,
     /// Variables known to hold a collection (Vec/HashMap/HashSet) — use {:?} when formatting.
@@ -1881,6 +1886,8 @@ impl Transpiler {
             in_async: false,
             in_iter_stream: false,
             in_try_stream: false,
+            in_ecs_query: false,
+            ecs_resource_vars: std::collections::HashSet::new(),
             self_type: None,
             collection_vars: std::collections::HashSet::new(),
             vec_vars: std::collections::HashSet::new(),
@@ -2843,6 +2850,9 @@ impl Transpiler {
             self.line(&format!("use std::f64::consts::{{{}}};", f64_consts.join(", ")));
         }
         self.line("use std::time::Duration;");
+        if program_uses_ecs(program) {
+            self.line("use bevy::prelude::*;");
+        }
         if matches!(self.config.threading, ThreadingMode::Single) && self.uses_local_channel.get() {
             self.line("use local_channel;");
         }
@@ -3324,6 +3334,10 @@ impl Transpiler {
                 Item::Stmt(_) if screen_setup => setup_items.push(item),
                 Item::Stmt(_) if host_owns_top_level => {}
                 Item::Stmt(_) => stmts.push(item),
+                Item::Let(s) if s.is_resource => {
+                    self.emit_item(item);
+                    self.blank();
+                }
                 // A mutable top-level binding referenced by a function was already
                 // emitted above as a `LazyLock<Mutex<T>>`.  This must precede the
                 // explicit-static arm: `static var` is both mutable and `is_static`,
@@ -5218,8 +5232,17 @@ impl Transpiler {
         // `let` appearing above its own type's declaration.
         for item in &program.items {
             match item {
-                Item::Struct(s) => { self.user_types.insert(s.name.clone()); }
+                Item::Struct(s) => {
+                    self.user_types.insert(s.name.clone());
+                    if s.is_resource {
+                        self.ecs_resource_vars.insert(s.name.clone());
+                        self.ecs_resource_vars.insert(s.name.to_lowercase());
+                    }
+                }
                 Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
+                Item::Let(l) if l.is_resource => {
+                    self.ecs_resource_vars.insert(l.name.clone());
+                }
                 _ => {}
             }
         }
@@ -5962,6 +5985,20 @@ fn program_uses_introspect(program: &Program) -> bool {
         items.iter().any(|item| match item {
             Item::Struct(s) => s.protocols.iter().any(|p| p == "Introspect"),
             Item::Enum(e)   => e.protocols.iter().any(|p| p == "Introspect"),
+            Item::Mod(m)    => items_use(&m.items),
+            _ => false,
+        })
+    }
+    items_use(&program.items)
+}
+
+fn program_uses_ecs(program: &Program) -> bool {
+    use crate::ast::Item;
+    fn items_use(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Struct(s) => s.is_component || s.is_resource || !s.queries.is_empty(),
+            Item::Let(l) => l.is_resource,
+            Item::Query(_) => true,
             Item::Mod(m)    => items_use(&m.items),
             _ => false,
         })

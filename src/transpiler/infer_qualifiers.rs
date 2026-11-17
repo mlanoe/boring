@@ -1479,6 +1479,9 @@ impl Transpiler {
 
     /// Fields of `s` that qualifier inference considers: struct-typed, no written qualifier.
     pub(super) fn field_inference_targets(s: &crate::ast::StructDecl) -> std::collections::HashMap<String, String> {
+        if s.is_data {
+            return std::collections::HashMap::new();
+        }
         s.fields.iter()
             .filter(|f| !matches!(f.ty.without_mut(), Type::Qualified(..)))
             .filter_map(|f| match f.ty.without_mut() {

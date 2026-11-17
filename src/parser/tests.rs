@@ -799,4 +799,29 @@ mod dispatch_tests {
         let body = main_body("def main():\n    let dispatch = 3\n    print dispatch\n");
         assert!(matches!(body[0], Stmt::Let(_)));
     }
+
+    #[test]
+    fn component_and_resource_declarations_parse_into_struct_decl() {
+        let src = "component Position:\n    float x\n    float y\n\ncomponent Frozen: pass\n\nresource Score:\n    var int points = 0\n";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        assert_eq!(program.items.len(), 3);
+
+        let crate::ast::Item::Struct(pos) = &program.items[0] else { panic!("expected struct") };
+        assert_eq!(pos.name, "Position");
+        assert!(pos.is_component);
+        assert!(!pos.is_resource);
+        assert_eq!(pos.fields.len(), 2);
+
+        let crate::ast::Item::Struct(frozen) = &program.items[1] else { panic!("expected struct") };
+        assert_eq!(frozen.name, "Frozen");
+        assert!(frozen.is_component);
+        assert!(!frozen.is_resource);
+        assert_eq!(frozen.fields.len(), 0);
+
+        let crate::ast::Item::Struct(score) = &program.items[2] else { panic!("expected struct") };
+        assert_eq!(score.name, "Score");
+        assert!(!score.is_component);
+        assert!(score.is_resource);
+        assert_eq!(score.fields.len(), 1);
+    }
 }

@@ -1742,6 +1742,26 @@ impl Parser {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Var("self".to_string()), line, col, len: self.span_len(line, col)})
             }
+            TokenKind::Data => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("data".to_string()), line, col, len: self.span_len(line, col)})
+            }
+            TokenKind::Component => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("component".to_string()), line, col, len: self.span_len(line, col)})
+            }
+            TokenKind::Resource => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("resource".to_string()), line, col, len: self.span_len(line, col)})
+            }
+            TokenKind::Query => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("query".to_string()), line, col, len: self.span_len(line, col)})
+            }
+            TokenKind::Where => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Var("where".to_string()), line, col, len: self.span_len(line, col)})
+            }
             TokenKind::Ident(s) => {
                 let name = s.clone();
                 // Macro call: `name!(...)`, `name![...]`, `name!{...}`

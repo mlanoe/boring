@@ -4078,6 +4078,7 @@ impl Interpreter {
             Item::Kernel(decl) => {
                 self.exec_kernel_decl(decl, env)
             }
+            Item::Query(_) => Ok(()),
         }
     }
 

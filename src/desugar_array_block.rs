@@ -1011,6 +1011,7 @@ fn desugar_trailing_array_block(
                 var_mut: false,
                 value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
                 is_lazy: false,
+                is_resource: false,
                 line, col,
             }));
             // With `boring.ui`'s `Sited` in scope, a `[View]` block with control flow tags every
@@ -1150,6 +1151,7 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, elem_ty: &T
                 var_mut: false,
                 value: Some(Expr { kind: ExprKind::Array(vec![]), line, col, len: 0 }),
                 is_lazy: false,
+                is_resource: false,
                 line, col,
             })];
             // Inside the group the iteration's own items get a fresh numbering.

@@ -389,6 +389,9 @@ impl Parser {
                 is_pub,
                 vec![],
                 true,
+                false,
+                false,
+                false,
             )?));
         }
         match self.peek().clone() {
@@ -430,6 +433,25 @@ impl Parser {
                     TokenKind::Struct => Ok(Item::Struct(
                         self.parse_struct_decl_with_attrs(is_pub, attrs)?,
                     )),
+                    TokenKind::Data => Ok(Item::Struct(
+                        self.parse_struct_or_view(is_pub, attrs, false, true, false, false)?,
+                    )),
+                    TokenKind::Component => Ok(Item::Struct(
+                        self.parse_struct_or_view(is_pub, attrs, false, false, true, false)?,
+                    )),
+                    TokenKind::Resource => Ok(Item::Struct(
+                        self.parse_struct_or_view(is_pub, attrs, false, false, false, true)?,
+                    )),
+                    TokenKind::Static | TokenKind::Let | TokenKind::Mut | TokenKind::Var => {
+                        let mut let_stmt = self.parse_let_stmt_pub(is_pub)?;
+                        if attrs.iter().any(|a| a.name == "resource" || a.name == "Resource") {
+                            let_stmt.is_resource = true;
+                        }
+                        Ok(Item::Let(let_stmt))
+                    }
+                    TokenKind::Query => Ok(Item::Query(
+                        self.parse_query_decl(attrs)?,
+                    )),
                     TokenKind::Enum => {
                         Ok(Item::Enum(self.parse_enum_decl_with_attrs(is_pub, attrs)?))
                     }
@@ -439,7 +461,7 @@ impl Parser {
                     }
                     // `@derive(..)` etc. on a `view` carry over to its lowered struct.
                     _ if self.is_view_decl_start() => Ok(Item::Struct(
-                        self.parse_struct_or_view(is_pub, attrs, true)?,
+                        self.parse_struct_or_view(is_pub, attrs, true, false, false, false)?,
                     )),
                     // Return-type-first function shorthand with no explicit `def`/`req`
                     // (`NetworkClient'shared networkClient(): ...`) — previously fell through
@@ -555,6 +577,10 @@ impl Parser {
                 }
             }
             TokenKind::Struct => Ok(Item::Struct(self.parse_struct_decl(is_pub)?)),
+            TokenKind::Data => Ok(Item::Struct(self.parse_data_decl(is_pub)?)),
+            TokenKind::Component => Ok(Item::Struct(self.parse_component_decl(is_pub)?)),
+            TokenKind::Resource => Ok(Item::Struct(self.parse_resource_decl(is_pub)?)),
+            TokenKind::Query => Ok(Item::Query(self.parse_query_decl(vec![])?)),
             TokenKind::Enum => Ok(Item::Enum(self.parse_enum_decl(is_pub)?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_decl()?)),
             TokenKind::Ext => Ok(Item::Ext(self.parse_ext_decl()?)),
@@ -1721,7 +1747,7 @@ impl Parser {
                     i += 2;
                 }
                 i = self.skip_type_suffix_qualifiers(i);
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_))
+                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
             }
             // Array type `[...]` or Set/Dict type `{...}` before a param name
             TokenKind::LBracket | TokenKind::LBrace => {
@@ -1743,7 +1769,7 @@ impl Parser {
                     i += 1;
                 }
                 i = self.skip_type_suffix_qualifiers(i);
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_))
+                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
             }
             // Tuple type `(T1, T2, ...)` before a param/variable name.
             TokenKind::LParen => {
@@ -1766,7 +1792,7 @@ impl Parser {
                 }
                 matches!(
                     self.tokens.get(i).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_))
+                    Some(TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
                 )
             }
             // `<Trait>` impl-shorthand: `< Ident >` where Ident is a PascalCase type name.
@@ -1780,7 +1806,7 @@ impl Parser {
                     Some(TokenKind::Gt)
                 ) && matches!(
                     self.tokens.get(self.pos + 3).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_))
+                    Some(TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
                 )
             }
             _ => false,
@@ -2206,7 +2232,78 @@ impl Parser {
         is_pub: bool,
         attrs: Vec<Attr>,
     ) -> Result<StructDecl, ParseError> {
-        self.parse_struct_or_view(is_pub, attrs, false)
+        self.parse_struct_or_view(is_pub, attrs, false, false, false, false)
+    }
+
+    fn parse_data_decl(&mut self, is_pub: bool) -> Result<StructDecl, ParseError> {
+        self.parse_struct_or_view(is_pub, vec![], false, true, false, false)
+    }
+
+    fn parse_component_decl(&mut self, is_pub: bool) -> Result<StructDecl, ParseError> {
+        self.parse_struct_or_view(is_pub, vec![], false, false, true, false)
+    }
+
+    fn parse_resource_decl(&mut self, is_pub: bool) -> Result<StructDecl, ParseError> {
+        self.parse_struct_or_view(is_pub, vec![], false, false, false, true)
+    }
+
+    fn parse_query_decl(&mut self, attrs: Vec<Attr>) -> Result<crate::ast::QueryDecl, ParseError> {
+        let line = self.line();
+        let col = self.col();
+        self.expect(&TokenKind::Query)?;
+        let is_req = self.eat(&TokenKind::Req);
+        let name = if matches!(self.peek(), TokenKind::Ident(_)) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        let params = self.parse_params()?;
+        let where_clause = if self.eat(&TokenKind::Where) {
+            Some(self.parse_query_where_clause()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_block()?;
+        Ok(crate::ast::QueryDecl {
+            name,
+            params,
+            where_clause,
+            attrs,
+            body,
+            is_req,
+            self_type: None,
+            line,
+            col,
+        })
+    }
+
+    fn parse_query_where_clause(&mut self) -> Result<crate::ast::QueryWhereClause, ParseError> {
+        let mut terms = Vec::new();
+        loop {
+            if self.eat(&TokenKind::Not) {
+                let name = self.expect_ident()?;
+                terms.push(crate::ast::QueryFilterTerm::Without(name));
+            } else if matches!(self.peek(), TokenKind::Ident(s) if s == "changed") {
+                self.advance();
+                let name = self.expect_ident()?;
+                terms.push(crate::ast::QueryFilterTerm::Changed(name));
+            } else if matches!(self.peek(), TokenKind::Ident(s) if s == "added") {
+                self.advance();
+                let name = self.expect_ident()?;
+                terms.push(crate::ast::QueryFilterTerm::Added(name));
+            } else {
+                let name = self.expect_ident()?;
+                terms.push(crate::ast::QueryFilterTerm::With(name));
+            }
+
+            if self.eat(&TokenKind::And) || self.eat(&TokenKind::Comma) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        Ok(crate::ast::QueryWhereClause { terms })
     }
 
     /// `view Name:` — a contextual keyword (`view` stays an ordinary identifier everywhere else),
@@ -2242,10 +2339,23 @@ impl Parser {
         is_pub: bool,
         attrs: Vec<Attr>,
         is_view: bool,
+        is_data: bool,
+        is_component: bool,
+        is_resource: bool,
     ) -> Result<StructDecl, ParseError> {
         let line = self.line();
         let col = self.col();
+        let has_comp_attr = attrs.iter().any(|a| a.name == "component" || a.name == "Component");
+        let is_component = is_component || has_comp_attr;
+        let has_res_attr = attrs.iter().any(|a| a.name == "resource" || a.name == "Resource");
+        let is_resource = is_resource || has_res_attr;
         if is_view {
+            self.advance();
+        } else if self.check(&TokenKind::Data) {
+            self.advance();
+        } else if self.check(&TokenKind::Component) {
+            self.advance();
+        } else if self.check(&TokenKind::Resource) {
             self.advance();
         } else {
             self.expect(&TokenKind::Struct)?;
@@ -2269,11 +2379,15 @@ impl Parser {
                 name,
                 is_pub,
                 is_view,
+                is_data,
+                is_component,
+                is_resource,
                 is_native: false,
                 protocols,
                 fields: vec![],
                 inits: vec![],
                 methods: vec![],
+                queries: vec![],
                 conversions: vec![],
                 type_params,
                 where_clause,
@@ -2293,11 +2407,15 @@ impl Parser {
                 name,
                 is_pub,
                 is_view,
+                is_data,
+                is_component,
+                is_resource,
                 is_native: true,
                 protocols,
                 fields: vec![],
                 inits: vec![],
                 methods: vec![],
+                queries: vec![],
                 conversions: vec![],
                 type_params,
                 where_clause,
@@ -2316,6 +2434,9 @@ impl Parser {
             name,
             is_pub,
             is_view,
+            is_data,
+            is_component,
+            is_resource,
             protocols,
             type_params,
             where_clause,
@@ -2331,6 +2452,9 @@ impl Parser {
         name: String,
         is_pub: bool,
         is_view: bool,
+        is_data: bool,
+        is_component: bool,
+        is_resource: bool,
         protocols: Vec<String>,
         type_params: Vec<String>,
         where_clause: Vec<(String, String)>,
@@ -2341,6 +2465,7 @@ impl Parser {
         let mut fields = Vec::new();
         let mut inits = Vec::new();
         let mut methods = Vec::new();
+        let mut queries = Vec::new();
         let mut conversions = Vec::new();
         let mut setters = Vec::new();
         let mut type_methods = Vec::new();
@@ -2353,6 +2478,46 @@ impl Parser {
                 break;
             }
             match self.peek().clone() {
+                TokenKind::At => {
+                    let attrs = self.parse_attrs();
+                    if self.check(&TokenKind::Query) {
+                        let mut q = self.parse_query_decl(attrs)?;
+                        q.self_type = Some(name.clone());
+                        queries.push(q);
+                    } else if self.check(&TokenKind::Def) {
+                        let mut m = self.parse_fn_decl(false, true)?;
+                        m.attrs = attrs;
+                        methods.push(m);
+                    } else if self.check(&TokenKind::Req) {
+                        if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Query)) {
+                            self.advance();
+                            let mut q = self.parse_query_decl(attrs)?;
+                            q.is_req = true;
+                            q.self_type = Some(name.clone());
+                            queries.push(q);
+                        } else {
+                            let mut m = self.parse_fn_decl(false, false)?;
+                            m.attrs = attrs;
+                            methods.push(m);
+                        }
+                    } else {
+                        let mut f = self.parse_field_decl()?;
+                        f.attrs.extend(attrs);
+                        fields.push(f);
+                    }
+                }
+                TokenKind::Query => {
+                    let mut q = self.parse_query_decl(vec![])?;
+                    q.self_type = Some(name.clone());
+                    queries.push(q);
+                }
+                TokenKind::Req if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Query)) => {
+                    self.advance();
+                    let mut q = self.parse_query_decl(vec![])?;
+                    q.is_req = true;
+                    q.self_type = Some(name.clone());
+                    queries.push(q);
+                }
                 // `view` bodies: contextual `state`/`bind`/`env` fields and the implicit `body()`.
                 TokenKind::Ident(ref s)
                     if is_view && matches!(s.as_str(), "state" | "bind" | "env") =>
@@ -2540,11 +2705,15 @@ impl Parser {
             name,
             is_pub,
             is_view,
+            is_data,
+            is_component,
+            is_resource,
             is_native: false,
             protocols,
             fields,
             inits,
             methods,
+            queries,
             conversions,
             type_params,
             where_clause,
@@ -3160,6 +3329,26 @@ impl Parser {
                 self.advance();
                 Ok(s)
             }
+            TokenKind::Data => {
+                self.advance();
+                Ok("data".to_string())
+            }
+            TokenKind::Component => {
+                self.advance();
+                Ok("component".to_string())
+            }
+            TokenKind::Resource => {
+                self.advance();
+                Ok("resource".to_string())
+            }
+            TokenKind::Query => {
+                self.advance();
+                Ok("query".to_string())
+            }
+            TokenKind::Where => {
+                self.advance();
+                Ok("where".to_string())
+            }
             TokenKind::Get => {
                 self.advance();
                 Ok("get".to_string())
@@ -3253,6 +3442,11 @@ impl Parser {
             TokenKind::Init => Some("init".into()),
             TokenKind::Pass => Some("pass".into()),
             TokenKind::Native => Some("native".into()),
+            TokenKind::Data => Some("data".into()),
+            TokenKind::Component => Some("component".into()),
+            TokenKind::Resource => Some("resource".into()),
+            TokenKind::Query => Some("query".into()),
+            TokenKind::Where => Some("where".into()),
             TokenKind::Mod => Some("mod".into()),
             TokenKind::New => Some("new".into()),
             TokenKind::Sync => Some("sync".into()),

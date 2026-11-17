@@ -139,7 +139,7 @@ li { margin-bottom: 0.3rem; }
 <h3 id="reference-and-advanced-topics">Reference and advanced topics</h3>
 <ol><li><a href="#24-attributes">Attributes</a></li><li><a href="#25-format-specifiers">Format Specifiers</a></li><li><a href="#26-built-in-functions">Built-in Functions</a></li><li><a href="#27-appendix-boring--rust-mapping">Appendix: Boring → Rust Mapping</a></li><li><a href="#28-diagnostics">Diagnostics</a></li><li><a href="#29-advanced">Advanced</a></li><li><a href="#30-qualifier-inference">Qualifier Inference</a></li><li><a href="#31-debugging--profiling">Debugging &amp; Profiling</a></li></ol>
 <h3 id="specialized-systems">Specialized systems</h3>
-<ol><li><a href="#32-gpu-computing">GPU Computing</a></li><li><a href="#33-dependency-injection">Dependency Injection</a></li></ol>
+<ol><li><a href="#32-gpu-computing">GPU Computing</a></li><li><a href="#33-dependency-injection">Dependency Injection</a></li><li><a href="#34-entity-component-system-ecs">Entity Component System (ECS)</a></li></ol>
 <hr>
 <h2 id="1-getting-started">1. Getting Started</h2>
 <h3 id="creating-a-project">Creating a project</h3>
@@ -407,7 +407,7 @@ print <span class="s">"Next year: <span class="si">{age + 1}</span>"</span></cod
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> table  = <span class="s">"orders"</span>
 <span class="kw">let</span> limit  = <span class="nb">100</span>
 
-<span class="kw">let</span> query = <span class="s">""</span><span class="s">"
+<span class="kw">let</span> <span class="kw">query</span> = <span class="s">""</span><span class="s">"
     SELECT *
     FROM <span class="si">{table}</span>
     LIMIT <span class="si">{limit}</span>
@@ -426,9 +426,9 @@ print <span class="s">"Next year: <span class="si">{age + 1}</span>"</span></cod
 <p><code>&#x27;&#x27;&#x27;...&#x27;&#x27;&#x27;</code> is a <strong>raw</strong> string: nothing inside is interpreted. No <code>{expr}</code> interpolation, no <code>{{</code>/<code>}}</code> doubling, no <code>\n</code>/<code>\t</code> escapes — every character up to the next <code>&#x27;&#x27;&#x27;</code> is literal, including <code>&quot;</code>, <code>{</code>, <code>}</code> and <code>\</code>. It exists for text that is full of those characters (JSON, SQL, regexes, Windows paths):</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> body = <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;{<span class="s">"name"</span>: <span class="s">"Alice"</span>, <span class="s">"tags"</span>: [<span class="s">"a"</span>, <span class="s">"b"</span>]}<span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
 
-<span class="kw">let</span> query = <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
+<span class="kw">let</span> <span class="kw">query</span> = <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
     SELECT * FROM t
-    WHERE data-&gt;&gt;<span class="lf">&#x27;k</span>&#x27; = <span class="s">"<span class="si">{not_a_hole}</span>"</span>
+    WHERE <span class="kw">data</span>-&gt;&gt;<span class="lf">&#x27;k</span>&#x27; = <span class="s">"<span class="si">{not_a_hole}</span>"</span>
     <span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;
 
 <span class="kw">let</span> path = <span class="lf">&#x27;</span><span class="lf">&#x27;</span><span class="lf">&#x27;C</span>:\temp\<span class="kw">new</span><span class="lf">&#x27;</span><span class="lf">&#x27;</span>&#x27;     <span class="co"># backslashes stay backslashes</span></code></pre></div>
@@ -623,10 +623,10 @@ a[<span class="nb">0</span>].<span class="fn">move_to</span>(<span class="nb">1<
 <span class="kw">let</span> [<span class="kt">int</span>, <span class="nb">3</span>]   z = [<span class="nb">0</span> <span class="kw">for</span> ..&lt;<span class="nb">3</span>]
 
 <span class="kw">struct</span> Mat2:
-    [<span class="kt">float</span>, <span class="nb">4</span>] data                   <span class="co"># inline in a struct field</span>
+    [<span class="kt">float</span>, <span class="nb">4</span>] <span class="kw">data</span>                   <span class="co"># inline in a struct field</span>
 
-<span class="kw">let</span> m = <span class="fn">Mat2</span>(data= [<span class="nb">0.0</span>, <span class="nb">1.0</span>, <span class="nb">0.0</span>, <span class="nb">1.0</span>])
-print m.data[<span class="nb">0</span>]                       <span class="co"># 0</span></code></pre></div>
+<span class="kw">let</span> m = <span class="fn">Mat2</span>(<span class="kw">data</span>= [<span class="nb">0.0</span>, <span class="nb">1.0</span>, <span class="nb">0.0</span>, <span class="nb">1.0</span>])
+print m.<span class="kw">data</span>[<span class="nb">0</span>]                       <span class="co"># 0</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">let</span> v: [f64; <span class="nb">4</span>] = [<span class="nb">1.0</span>, <span class="nb">2.0</span>, <span class="nb">3.0</span>, <span class="nb">4.0</span>];
 <span class="kw">let</span> z: [isize; <span class="nb">3</span>] = [<span class="nb">0i</span>size; <span class="nb">3</span>];</code></pre></div>
@@ -1612,6 +1612,21 @@ print c.value            <span class="co"># 3</span></code></pre></div>
     <span class="kw">fn</span> <span class="fn">__call__</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>) { <span class="kw">self</span>.value += <span class="nb">1</span>; }
 }</code></pre></div>
 <p><code>obj()</code> at a call site dispatches to <code>__call__</code> when <code>obj</code> is a known struct instance. Calling a struct that has no <code>def ()</code>/<code>req ()</code> defined is a runtime error.</p>
+<h3 id="pure-value-types--data">Pure Value Types — <code>data</code></h3>
+<p>In addition to general-purpose <code>struct</code>, Boring provides the <code>data</code> keyword for declaring pure value types (Plain Old Data / POD):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">pub</span> <span class="kw">data</span> Point:
+    <span class="kt">float</span> x = <span class="nb">0.0</span>
+    <span class="kt">float</span> y = <span class="nb">0.0</span>
+
+<span class="kw">pub</span> <span class="kw">data</span> Velocity:
+    <span class="kt">float</span> dx
+    <span class="kt">float</span> dy
+
+<span class="co"># Zero-sized unit tag</span>
+<span class="kw">pub</span> <span class="kw">data</span> Marker: <span class="kw">pass</span></code></pre></div>
+<h4 id="differences-between-struct-and-data">Differences between <code>struct</code> and <code>data</code></h4>
+<ul><li><strong>Pure Value Semantics</strong>: A <code>data</code> type represents pure, identity-less data intended to be stored linearly in cache-friendly arrays or tables.</li><li><strong>Allowed Field Types</strong>: Scalaires (<code>int</code>, <code>float</code>, <code>bool</code>), strings (<code>string</code>), math vectors (<code>Vec2</code>, <code>Vec3</code>, <code>Transform</code>), enums, arrays (<code>[int]</code>, <code>[float, 3]</code>), dictionaries, optional values (<code>Point?</code>), and other <code>data</code> types.</li><li><strong>Forbidden Field Types</strong>: Pointer and concurrency qualifiers (<code>&#x27;actor</code>, <code>&#x27;shared</code>, lock handles, references). A <code>data</code> type cannot hold references to external managed actors or mutexes.</li><li><strong>Guarantees</strong>: The compiler statically ensures that every <code>data</code> is <code>Send + Sync + &#x27;static</code>, copyable or clonable without side-effects, and optimal for CPU cache locality and parallel processing.</li><li><strong>ECS Integration</strong>: All components in Boring&#x27;s native ECS (Chapter 34) must be declared with <code>data</code> via <code>@component data</code>.</li></ul>
+<p>Automatic trait derives for <code>data</code> include <code>Debug</code>, <code>Clone</code>, <code>PartialEq</code>, and where all fields support it, <code>Eq</code> and <code>Hash</code>. Unit data types (<code>pass</code> with no fields) additionally derive <code>Copy</code> and <code>Default</code>.</p>
 <hr>
 <h2 id="9-enums-and-pattern-matching">9. Enums and Pattern Matching</h2>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">enum</span> Expr:
@@ -2427,7 +2442,7 @@ shapes: <span class="kw">Vec</span>&lt;<span class="kw">Box</span>&lt;<span clas
 <p>Both styles below are equivalent — choose whichever you prefer:</p>
 <p><strong>Style 1 — <code>catch</code> per variant (concise):</strong></p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
-    <span class="kw">let</span> data = <span class="fn">timeout</span>(.<span class="fn">fromSecs</span>(<span class="nb">5</span>), <span class="fn">fetch</span>())
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">timeout</span>(.<span class="fn">fromSecs</span>(<span class="nb">5</span>), <span class="fn">fetch</span>())
 <span class="kw">catch</span> Error.Expired:
     print <span class="s">"timed out"</span>
 <span class="kw">catch</span> Error.Cancelled:
@@ -2435,7 +2450,7 @@ shapes: <span class="kw">Vec</span>&lt;<span class="kw">Box</span>&lt;<span clas
 <p>Each <code>catch Error.Variant:</code> clause handles exactly one variant. Unlisted variants are <strong>re-thrown</strong> automatically to the caller.</p>
 <p><strong>Style 2 — global <code>catch</code> + <code>match error:</code> (flexible):</strong></p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">try</span>:
-    <span class="kw">let</span> data = <span class="fn">timeout</span>(.<span class="fn">fromSecs</span>(<span class="nb">5</span>), <span class="fn">fetch</span>())
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">timeout</span>(.<span class="fn">fromSecs</span>(<span class="nb">5</span>), <span class="fn">fetch</span>())
 <span class="kw">catch</span> Error:
     <span class="kw">match</span> error:
         Error.Expired:    print <span class="s">"timed out"</span>
@@ -2538,7 +2553,7 @@ print r4   <span class="co"># not found</span></code></pre></div>
     <span class="kw">return</span> <span class="s">"ok"</span>
 
 <span class="kw">try</span>:
-    <span class="kw">let</span> data = <span class="fn">fetch</span>(url)
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">fetch</span>(url)
     print <span class="s">"got: <span class="si">{data}</span>"</span>
 <span class="kw">catch</span> Error.InvalidInput:
     print <span class="s">"invalid URL"</span>
@@ -2835,7 +2850,7 @@ e.value.<span class="fn">inc</span>()                                           
 <h3 id="const-generics--uint-n">Const generics — <code>&lt;uint N&gt;</code></h3>
 <p>A <strong>const generic</strong> is a compile-time integer or bool value that is part of a type&#x27;s signature. Write it as <code>&lt;uint N&gt;</code> (or <code>&lt;int N&gt;</code>, <code>&lt;bool N&gt;</code>) inside the generic parameter list — the type comes first, then the name, just like a regular variable declaration.</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">struct</span> Stack&lt;T, <span class="kt">uint</span> N&gt;:
-    [T]  data          <span class="co"># runtime storage</span>
+    [T]  <span class="kw">data</span>          <span class="co"># runtime storage</span>
     <span class="kt">int</span>  len
 
     <span class="kw">req</span> <span class="kt">uint</span> <span class="fn">capacity</span>():
@@ -2856,7 +2871,7 @@ e.value.<span class="fn">inc</span>()                                           
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># N is inferred from the param type `Stack&lt;T, uint N&gt;` — no explicit &lt;T, uint N&gt; needed</span>
 T <span class="fn">get</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s, <span class="kt">int</span> i):
     <span class="kw">guard</span> i &lt; N <span class="kw">as</span> <span class="kt">int</span> <span class="kw">else</span> <span class="kw">throw</span> Error.OutOfBounds
-    s.data[i]
+    s.<span class="kw">data</span>[i]
 
 <span class="kt">uint</span> <span class="fn">capacity_of</span>(Stack&lt;T, <span class="kt">uint</span> N&gt; s):
     N</code></pre></div>
@@ -2999,8 +3014,8 @@ numbers.<span class="fn">iter</span>().<span class="fn">filter</span>(|n| n % <s
 <ul><li><code>():</code> inside parens — always unambiguous, works anywhere</li><li><code>f(args): body</code> — clean for single-expression bodies</li><li><code>f(args) body</code> — closest to <code>task(dur) expr</code> style; same-line only</li></ul>
 <p>Multi-line zero-arg body uses the colon form:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">timeout</span>(.<span class="fn">fromSecs</span>(<span class="nb">10</span>)):
-    <span class="kw">let</span> data = <span class="fn">download</span>(url)
-    <span class="fn">parse</span>(data)</code></pre></div>
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">download</span>(url)
+    <span class="fn">parse</span>(<span class="kw">data</span>)</code></pre></div>
 <p><strong>Limitation — single-identifier argument ambiguity</strong></p>
 <p>When the content between <code>()</code> consists <strong>only of bare identifiers</strong>, the parser cannot tell whether they are call arguments or closure parameters, and resolves them as <strong>closure parameters</strong>:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="fn">timeout</span>(deadline): <span class="fn">fetch</span>(url)    <span class="co"># (deadline): is a 1-param closure, NOT a call arg</span>
@@ -3025,8 +3040,8 @@ nums.<span class="fn">reduce</span>(<span class="nb">0</span>) <span class="kw">
 
 <span class="co"># Multiline</span>
 <span class="fn">timeout</span>(deadline) <span class="kw">do</span>:
-    <span class="kw">let</span> data = <span class="fn">download</span>(url)
-    <span class="fn">parse</span>(data)</code></pre></div>
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">download</span>(url)
+    <span class="fn">parse</span>(<span class="kw">data</span>)</code></pre></div>
 <p>All existing trailing closure forms remain valid and are preferred when unambiguous. <code>do</code> is a deliberate escape hatch for the identifier-only argument case.</p>
 <h3 id="closures-in-collections">Closures in collections</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> pipeline = [double, add_one, double]
@@ -3776,8 +3791,8 @@ wait Duration.<span class="fn">fromSecs</span>(<span class="nb">5</span>)
 
 <span class="co"># Labeled — same thing, more explicit</span>
 <span class="kw">let</span> f = <span class="kw">task</span>(timeout = Duration.<span class="fn">fromMillis</span>(<span class="nb">500</span>)):
-    <span class="kw">let</span> data = <span class="fn">download</span>(url)
-    <span class="fn">parse</span>(data)</code></pre></div>
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">download</span>(url)
+    <span class="fn">parse</span>(<span class="kw">data</span>)</code></pre></div>
 <p>When the deadline elapses before the body completes, awaiting the handle throws <code>Error.Expired</code>. Handle it with <code>try … else</code> or <code>catch</code>:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Inline else — concise fallback</span>
 <span class="kw">let</span> result = <span class="kw">try</span> f.value <span class="kw">else</span> <span class="s">"timed out"</span>
@@ -3816,8 +3831,8 @@ wait Duration.<span class="fn">fromSecs</span>(<span class="nb">5</span>)
 
 <span class="co"># ④ Multi-line</span>
 <span class="fn">timeout</span>(Duration.<span class="fn">fromSecs</span>(<span class="nb">10</span>)):
-    <span class="kw">let</span> data = <span class="fn">download</span>(url)
-    <span class="fn">parse</span>(data)</code></pre></div>
+    <span class="kw">let</span> <span class="kw">data</span> = <span class="fn">download</span>(url)
+    <span class="fn">parse</span>(<span class="kw">data</span>)</code></pre></div>
 <p>Forms ②③④ are syntactic sugar for form ①. They are interchangeable.</p>
 <h3 id="automatic-duration--instant-dispatch">Automatic Duration / Instant dispatch</h3>
 <p>The same <code>timeout</code> name works with a <code>Duration</code> (relative delay) <strong>or</strong> an <code>Instant</code> (absolute deadline). The transpiler automatically picks <code>timeout</code> or <code>timeout_at</code> based on the type of the first argument:</p>
@@ -3833,8 +3848,8 @@ wait Duration.<span class="fn">fromSecs</span>(<span class="nb">5</span>)
 <p>The main use of absolute deadlines is to <strong>share a time limit</strong> across multiple operations:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> deadline = Instant.<span class="fn">now</span>() + Duration.<span class="fn">fromSecs</span>(<span class="nb">10</span>)
 
-<span class="kw">let</span> data   = <span class="fn">timeout</span>(deadline, (): <span class="fn">fetchData</span>(url))
-<span class="kw">let</span> parsed = <span class="fn">timeout</span>(deadline, (): <span class="fn">parse</span>(data))
+<span class="kw">let</span> <span class="kw">data</span>   = <span class="fn">timeout</span>(deadline, (): <span class="fn">fetchData</span>(url))
+<span class="kw">let</span> parsed = <span class="fn">timeout</span>(deadline, (): <span class="fn">parse</span>(<span class="kw">data</span>))
 <span class="kw">let</span> saved  = <span class="fn">timeout</span>(deadline, (): <span class="fn">save</span>(parsed))</code></pre></div>
 <h3 id="error-handling">Error handling</h3>
 <p><code>timeout</code> throws <code>Error.Expired</code> if the deadline is exceeded. Use <code>try … else</code> or <code>catch</code>:</p>
@@ -4230,7 +4245,7 @@ Data <span class="fn">compress</span>(Data d):
     <span class="kw">let</span> f1 = <span class="kw">task</span> <span class="fn">fetch</span>(url)
 
     <span class="co"># def fn → tokio::task::spawn_blocking (blocking thread pool)</span>
-    <span class="kw">let</span> f2 = <span class="kw">task</span> <span class="fn">compress</span>(data)
+    <span class="kw">let</span> f2 = <span class="kw">task</span> <span class="fn">compress</span>(<span class="kw">data</span>)
 
     print f1.value   <span class="co"># awaits the async task</span>
     print f2.value   <span class="co"># awaits the blocking task</span></code></pre></div>
@@ -5770,7 +5785,7 @@ AuditLogger<span class="lf">&#x27;shared</span> <span class="fn">auditLogger</sp
     AuditLogger<span class="lf">&#x27;shared</span> audit     <span class="co"># unambiguous — resolves against AuditLogger&#x27;s own provider</span></code></pre></div>
 <p>When the bindings are the same concept, just multiple instances or configurations of it (three database shards, one client per environment), <code>@inject</code>/<code>@provide</code> also take an <code>id</code> argument:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">trait</span> Database:
-    <span class="kw">req</span> [Row] <span class="fn">query</span>(<span class="kt">string</span> sql) <span class="kw">throws</span>
+    <span class="kw">req</span> [Row] <span class="kw">query</span>(<span class="kt">string</span> sql) <span class="kw">throws</span>
 
 <span class="at">@provide</span>(id = <span class="s">"primary"</span>)
 <span class="at">@singleton</span>
@@ -5829,6 +5844,79 @@ NetworkClient<span class="lf">&#x27;shared</span> <span class="fn">networkClient
     <span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">new_with</span>(client: <span class="kw">Arc</span>&lt;<span class="kw">dyn</span> <span class="kt">NetworkClient</span>&gt;) -&gt; <span class="kw">Self</span> { <span class="kt">UserRepository</span> { client } }
 }</code></pre></div>
 <p>Two constructors fall out exactly the way an ordinary defaulted parameter already generates one call-site path for &quot;omitted&quot; and one for &quot;supplied&quot; — <code>@inject</code> is the same mechanism with a synthesized default, not a special case of the codegen. A plain <code>NetworkClient client</code> field with <strong>no</strong> <code>@inject</code> above it never becomes DI-resolved just because a matching <code>@provide</code> function happens to exist somewhere in the program — the attribute must always be written for resolution to happen at all.</p>
+<hr>
+<h2 id="34-entity-component-system-ecs">34. Entity Component System (ECS)</h2>
+<p>Boring treats ECS (Entity Component System) as a first-class language citizen, lowering directly to high-performance archetype ECS architectures such as Bevy ECS.</p>
+<h3 id="core-principles">Core Principles</h3>
+<ol><li><strong>Zero Boilerplate</strong>: No manual generic wrappers (<code>Query&lt;(&amp;Transform, &amp;Velocity)&gt;</code>, <code>Res&lt;Time&gt;</code>, <code>ResMut&lt;Score&gt;</code>), manual iterators, or system parameter wiring.</li><li><strong>Pure Value Types (<code>data</code>)</strong>: Pure data structures without pointer or reference overhead (<code>&#x27;actor</code>, <code>&#x27;shared</code>), maximizing CPU cache locality and enabling safe parallel execution.</li><li><strong>Explicit Components (<code>@component data</code>)</strong>: Components are declared with <code>@component data</code>, ensuring cache-optimal storage.</li><li><strong>Global Resources (<code>@resource</code>)</strong>: Global state is declared simply with <code>@resource</code>, accessible and mutable like standard variables (<code>score += 10</code>).</li><li><strong>Universal Queries (<code>query</code>)</strong>: Systems operate across matching entities via <code>query</code>:</li></ol>
+<p>   - <strong>Component Method Queries</strong>: Declare behavior directly on the primary component using <code>self</code>.    - <strong>Top-Level Queries</strong>: Declare mediator systems across multiple components or lifecycle hooks. 6. <strong>Ambient Context (<code>.</code>)</strong>: Access system context directly via the leading dot syntax (<code>.time.delta</code>, <code>.input</code>, <code>.entity</code>, <code>.despawn()</code>, <code>.spawn(...)</code>).</p>
+<h3 id="1-components-component-data">1. Components: <code>@component data</code></h3>
+<p>Components represent data attached to entities:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@component</span>
+<span class="kw">pub</span> <span class="kw">data</span> Position:
+    <span class="kt">float</span> x = <span class="nb">0.0</span>
+    <span class="kt">float</span> y = <span class="nb">0.0</span>
+
+<span class="at">@component</span>
+<span class="kw">pub</span> <span class="kw">data</span> Velocity:
+    <span class="kt">float</span> dx = <span class="nb">0.0</span>
+    <span class="kt">float</span> dy = <span class="nb">0.0</span>
+
+<span class="co"># Zero-sized unit tag component (0 bytes, used for archetype filtering)</span>
+<span class="at">@component</span>
+<span class="kw">pub</span> <span class="kw">data</span> Frozen: <span class="kw">pass</span></code></pre></div>
+<h3 id="2-global-resources-resource">2. Global Resources: <code>@resource</code></h3>
+<p>Global state is declared using <code>@resource</code> on variables or data types:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@resource</span>
+<span class="kw">var</span> <span class="kt">int</span> score = <span class="nb">0</span>
+
+<span class="at">@resource</span>
+<span class="kt">float</span> gravity = <span class="nb">-9.81</span>
+
+<span class="at">@resource</span>
+<span class="kw">data</span> GameConfig:
+    <span class="kw">var</span> <span class="kt">int</span> max_players = <span class="nb">4</span></code></pre></div>
+<p>In any system or query, global resources can be read and mutated directly:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">query</span> <span class="fn">kill_enemy</span>(Enemy e) <span class="kw">where</span> e.is_dead:
+    score += <span class="nb">10</span>
+    .<span class="fn">despawn</span>()</code></pre></div>
+<h3 id="3-systems-query">3. Systems: <code>query</code></h3>
+<p>A <code>query</code> defines a system that automatically iterates over all entities matching the specified components and <code>where</code> constraints.</p>
+<h4 id="method-queries-on-components">Method Queries on Components</h4>
+<p>When a system primarily modifies or queries a single component, define it directly inside the <code>data</code> declaration. <code>self</code> automatically binds to the current entity&#x27;s component:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@component</span>
+<span class="kw">pub</span> <span class="kw">data</span> Position:
+    <span class="kt">float</span> x
+    <span class="kt">float</span> y
+
+    <span class="at">@schedule</span>(Update)
+    <span class="kw">query</span> <span class="fn">movement</span>(Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
+        <span class="kw">self</span>.x += vel.dx * .time.delta
+        <span class="kw">self</span>.y += vel.dy * .time.delta</code></pre></div>
+<ul><li><code>self</code> is available as a mutable reference (<code>&amp;mut Position</code>).</li><li>Secondary required components are listed in the parameter list (<code>(Velocity vel)</code>).</li><li>Read-only queries on <code>self</code> can use <code>req query</code>.</li></ul>
+<h4 id="top-level-queries">Top-Level Queries</h4>
+<p>For mediator systems operating across multiple distinct components or system lifecycle events:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Physics mediator system</span>
+<span class="kw">query</span> <span class="fn">apply_velocity</span>(<span class="kw">mut</span> Position pos, Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
+    pos.x += vel.dx * .time.delta
+    pos.y += vel.dy * .time.delta
+
+<span class="co"># Startup system (runs once when the world initializes)</span>
+<span class="at">@schedule</span>(Startup)
+<span class="kw">query</span> <span class="fn">setup_world</span>():
+    .<span class="fn">spawn</span>(<span class="fn">Position</span>(x = <span class="nb">0.0</span>, y = <span class="nb">0.0</span>), <span class="fn">Velocity</span>(dx = <span class="nb">10.0</span>, dy = <span class="nb">5.0</span>))
+
+<span class="co"># Entity lifecycle system</span>
+<span class="kw">query</span> <span class="fn">death_check</span>(Health h) <span class="kw">where</span> h.current &lt;= <span class="nb">0</span>:
+    .<span class="fn">despawn</span>()</code></pre></div>
+<h3 id="4-scheduling--state-schedule-and-state">4. Scheduling &amp; State: <code>@schedule</code> and <code>@state</code></h3>
+<ul><li><code>@schedule(...)</code>: Determines the execution phase. Supported schedules include <code>Startup</code>, <code>FixedUpdate</code>, <code>Update</code> (default), <code>PostUpdate</code>, and <code>Render</code>.</li><li><code>@state(...)</code>: Restricts system execution to a specific application or game state (e.g. <code>@state(GameState.Playing)</code>).</li></ul>
+<h3 id="5-filtering-with-where">5. Filtering with <code>where</code></h3>
+<p>The <code>where</code> clause specifies archetype constraints and runtime value filters:</p>
+<ul><li><strong>Component presence</strong>: <code>where Player</code> $\rightarrow$ <code>With&lt;Player&gt;</code></li><li><strong>Component absence</strong>: <code>where not Frozen</code> $\rightarrow$ <code>Without&lt;Frozen&gt;</code></li><li><strong>Boolean combinations</strong>: <code>where Player and not (Frozen or Stunned)</code></li><li><strong>Change detection</strong>: <code>where changed Transform</code> $\rightarrow$ <code>Changed&lt;Transform&gt;</code></li><li><strong>Addition detection</strong>: <code>where added Enemy</code> $\rightarrow$ <code>Added&lt;Enemy&gt;</code></li><li><strong>Value expressions</strong>: <code>where health.current &lt;= 0</code> evaluates at the start of each entity step.</li></ul>
+<h3 id="6-ambient-context">6. Ambient Context (<code>.</code>)</h3>
+<p>Inside queries, the leading dot (<code>.</code>) provides direct access to environmental context:</p>
+<table><thead><tr><th>Expression</th><th>Meaning</th><th>Rust/Bevy Target</th></tr></thead><tbody><tr><td><code>.time.delta</code></td><td>Frame delta time in seconds</td><td><code>(time.delta_secs() as f64)</code></td></tr><tr><td><code>.time.elapsed</code></td><td>Total elapsed simulation time</td><td><code>time.elapsed_secs_f64()</code></td></tr><tr><td><code>.input.is_key_pressed(...)</code></td><td>Key press state</td><td><code>input.pressed(...)</code></td></tr><tr><td><code>.entity</code></td><td>ID of the current entity</td><td><code>Entity</code></td></tr><tr><td><code>.despawn()</code></td><td>Despawns the current entity</td><td><code>commands.entity(__entity).despawn()</code></td></tr><tr><td><code>.spawn(c1, c2, ...)</code></td><td>Spawns a new entity with components</td><td><code>commands.spawn((c1, c2, ...))</code></td></tr><tr><td><code>score += 10</code></td><td>Modifies an <code>@resource</code> variable</td><td><code>res_score.0 += 10</code> via <code>ResMut</code></td></tr></tbody></table>
 <hr>
 <h2 id="further-reading-1">Further Reading</h2>
 <p>The following documents cover topics in greater depth or address areas still under active design.</p>

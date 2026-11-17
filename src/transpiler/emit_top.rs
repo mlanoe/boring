@@ -57,6 +57,41 @@ impl Transpiler {
             Item::Mod(m)    => self.emit_mod(m),
             Item::Alias(a)  => self.emit_alias(a),
             Item::Let(s)    => {
+                if s.is_resource {
+                    let vis = if s.is_pub { "pub " } else { "pub " };
+                    let ty_s = match &s.ty {
+                        Some(t) => self.emit_type(t),
+                        None => match &s.value {
+                            Some(v) => match &v.kind {
+                                ExprKind::Int(_) => "i64".to_string(),
+                                ExprKind::UInt64(_) => "u64".to_string(),
+                                ExprKind::Float(_) => "f64".to_string(),
+                                ExprKind::Bool(_) => "bool".to_string(),
+                                ExprKind::Str(_) => "String".to_string(),
+                                _ => "()".to_string(),
+                            },
+                            None => "()".to_string(),
+                        },
+                    };
+                    let struct_name = format!("Res_{}", s.name);
+                    self.line("#[derive(bevy::prelude::Resource, Debug, Clone, PartialEq)]");
+                    self.line(&format!("{}struct {}(pub {});", vis, struct_name, ty_s));
+                    if let Some(val) = &s.value {
+                        let val_s = self.emit_expr(val);
+                        self.line(&format!("impl Default for {} {{", struct_name));
+                        self.indent += 1;
+                        self.line(&format!("fn default() -> Self {{ {}({}) }}", struct_name, val_s));
+                        self.indent -= 1;
+                        self.line("}");
+                    } else {
+                        self.line(&format!("impl Default for {} {{", struct_name));
+                        self.indent += 1;
+                        self.line(&format!("fn default() -> Self {{ {}(Default::default()) }}", struct_name));
+                        self.indent -= 1;
+                        self.line("}");
+                    }
+                    return;
+                }
                 // Top-level `static let` → emit as `const` at module scope. GPU targets
                 // treat every top-level `let` this way too -- see `emit_program_items`'s
                 // classification of `Item::Let` (gated on `is_gpu_target`, not on
@@ -230,6 +265,7 @@ impl Transpiler {
                     ));
                 }
             }
+            Item::Query(q) => self.emit_query(q),
         }
     }
 

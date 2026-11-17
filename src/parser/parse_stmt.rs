@@ -537,7 +537,7 @@ impl Parser {
                             }
                         };
                         let ty = if wrap_mut { ty.map(Self::wrap_type_mut) } else { ty };
-                        return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col });
+                        return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, is_resource: false, line, col });
                     }
                     _ => {}
                 }
@@ -547,17 +547,17 @@ impl Parser {
         // `lazy T name` — deferred write-once binding, no initializer allowed.
         if matches!(binding, BindingKind::Lazy) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: None, is_lazy: true, line, col });
+            return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: None, is_lazy: true, is_resource: false, line, col });
         }
         // `let v` / `var v` — deferred initialisation (no `= expr`).
         if !self.check(&TokenKind::Eq) {
             self.expect_newline_soft();
-            return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: None, is_lazy: false, line, col });
+            return Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: None, is_lazy: false, is_resource: false, line, col });
         }
         self.expect(&TokenKind::Eq)?;
         let value = self.parse_expr()?;
         self.expect_newline_soft();
-        Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, line, col })
+        Ok(LetStmt { binding, var_mut, is_pub, is_static, name, ty, value: Some(value), is_lazy: false, is_resource: false, line, col })
     }
 
     /// Parse the binding list of a destructuring `let`.

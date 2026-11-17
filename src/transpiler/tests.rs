@@ -373,6 +373,127 @@ def sys(Query<(mut A&, mut B&)> query):\n    for a, b in query:\n        a.x = a
     }
 
     #[test]
+    fn test_component_and_resource_auto_derive() {
+        let src = "component Position:\n    pub float x\n    pub float y\n\ncomponent Frozen: pass\n\nresource Score:\n    pub var int points = 0\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("Component"), "expected Component derive on Position, got:\n{}", code);
+        assert!(code.contains("struct Position"), "expected struct Position, got:\n{}", code);
+        assert!(code.contains("struct Frozen"), "expected struct Frozen, got:\n{}", code);
+        assert!(code.contains("Resource"), "expected Resource derive on Score, got:\n{}", code);
+        assert!(code.contains("struct Score"), "expected struct Score, got:\n{}", code);
+        assert!(code.contains("use bevy::prelude::*;"), "expected bevy prelude import, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_transpile_movement() {
+        let src = "\
+component Position:
+    pub float x
+    pub float y
+
+component Velocity:
+    pub float dx
+    pub float dy
+
+component Frozen: pass
+
+query movement(mut Position pos, Velocity vel) where not Frozen:
+    pos.x += vel.dx * .time.delta
+    pos.y += vel.dy * .time.delta
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn movement("), "expected pub fn movement, got:\n{}", code);
+        assert!(code.contains("Query<(&mut Position, &Velocity), Without<Frozen>>"), "expected Query type, got:\n{}", code);
+        assert!(code.contains("time: Res<Time>"), "expected time: Res<Time>, got:\n{}", code);
+        assert!(code.contains("for (mut pos, vel) in &mut query"), "expected for loop, got:\n{}", code);
+        assert!(code.contains("pos.x += (vel.dx * (time.delta_secs() as f64))"), "expected pos.x update, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_transpile_startup_spawn() {
+        let src = "\
+component Position:
+    pub float x
+    pub float y
+
+@schedule(Startup)
+query setup_world():
+    .spawn(Position(x = 1.0, y = 2.0))
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("// @schedule(Startup)"), "expected @schedule(Startup) comment, got:\n{}", code);
+        assert!(code.contains("pub fn setup_world(mut commands: Commands)"), "expected pub fn setup_world with commands, got:\n{}", code);
+        assert!(code.contains("commands.spawn("), "expected commands.spawn, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_transpile_despawn() {
+        let src = "\
+component Health:
+    pub int current
+
+query death_check(Health h):
+    .despawn()
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn death_check("), "expected pub fn death_check, got:\n{}", code);
+        assert!(code.contains("Query<(Entity, &Health)>"), "expected Query with Entity, got:\n{}", code);
+        assert!(code.contains("mut commands: Commands"), "expected mut commands: Commands, got:\n{}", code);
+        assert!(code.contains("for (__entity, h) in &mut query"), "expected for loop with __entity, got:\n{}", code);
+        assert!(code.contains("commands.entity(__entity).despawn()"), "expected despawn call, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_data_component_method_query() {
+        let src = "\
+@component
+data Position:
+    float x
+    float y
+
+    @schedule(Update)
+    query movement(Velocity vel) where not Frozen:
+        self.x += vel.dx * .time.delta
+        self.y += vel.dy * .time.delta
+
+@component
+data Velocity:
+    float dx
+    float dy
+
+@component
+data Frozen: pass
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn position_movement("), "expected position_movement fn, got:\n{}", code);
+        assert!(code.contains("Query<(&mut Position, &Velocity), Without<Frozen>>"), "expected Query type, got:\n{}", code);
+        assert!(code.contains("time: Res<Time>"), "expected time: Res<Time>, got:\n{}", code);
+        assert!(code.contains("for (mut self_, vel) in &mut query"), "expected for loop, got:\n{}", code);
+        assert!(code.contains("self_.x += (vel.dx * (time.delta_secs() as f64));"), "expected self_.x update, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_resource_and_query_mutation() {
+        let src = "\
+@resource
+var int score = 0
+
+@component
+data Position:
+    float x
+    float y
+
+query add_score(Position pos):
+    score += 10
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("#[derive(bevy::prelude::Resource, Debug, Clone, PartialEq)]"), "expected derive Resource, got:\n{}", code);
+        assert!(code.contains("pub struct Res_score(pub isize);"), "expected Res_score struct, got:\n{}", code);
+        assert!(code.contains("mut res_score: ResMut<Res_score>"), "expected ResMut<Res_score>, got:\n{}", code);
+        assert!(code.contains("res_score.0 = res_score.0.wrapping_add((10 as isize));"), "expected res_score update, got:\n{}", code);
+    }
+
+    #[test]
     fn test_for_loop_over_unannotated_enum_array_preserves_camel_case_method() {
         // Regression: a `for` loop's single iteration variable over an *unannotated*
         // `let arr = [EnumType.Variant(...), ...]` array literal never got its element
@@ -2333,4 +2454,24 @@ def Shape make():\n    Shape()\n\n";
         // `inc`'s parameter is a plain int: nothing to lend, so no diagnostic however unknown the receiver.
         let (_, errs) = lent_case("    let g = (x): x.inc(1)\n");
         assert_eq!(errs, "");
+    }
+
+    #[test]
+    fn test_data_field_never_infers_lock_qualifier() {
+        let src = r#"
+data Inner:
+    int count = 0
+    def inc():
+        count += 1
+
+data Outer:
+    Inner inner
+
+    def bump():
+        inner.inc()
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        // inner field must stay pure value (pub inner: Inner), never Arc<Mutex<Inner>> or RefCell
+        assert!(code.contains("pub inner: Inner"), "got:\n{}", code);
+        assert!(!code.contains("Mutex<Inner>"), "got:\n{}", code);
     }

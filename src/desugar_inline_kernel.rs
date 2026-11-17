@@ -240,7 +240,7 @@ fn lower_expr(
     let instance = LetStmt {
         binding: BindingKind::Mut, is_pub: false, is_static: false,
         name: instance_name.clone(), ty: None, var_mut: false, value: Some(ctor),
-        is_lazy: false, line: expr.line, col: expr.col,
+        is_lazy: false, is_resource: false, line: expr.line, col: expr.col,
     };
     let mut launch_args = Vec::new();
     if let Some(value) = &config.block { launch_args.push(labeled_arg("block", value.clone())); }

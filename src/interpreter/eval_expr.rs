@@ -3859,7 +3859,7 @@ impl Interpreter {
             Item::Let(d)    => Some((&d.name, d.is_pub)),
             Item::Mod(d)    => Some((&d.name, false)),
             Item::Kernel(d) => Some((&d.name, d.is_pub)),
-            Item::Use(_) | Item::Alias(_) | Item::Trait(_) | Item::Ext(_) | Item::Stmt(_) => None,
+            Item::Use(_) | Item::Alias(_) | Item::Trait(_) | Item::Ext(_) | Item::Stmt(_) | Item::Query(_) => None,
         }
     }
 

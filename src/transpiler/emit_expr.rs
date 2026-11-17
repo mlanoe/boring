@@ -70,6 +70,13 @@ impl Transpiler {
             ExprKind::Nil      => "None".into(),
             ExprKind::Void     => "()".into(),
             ExprKind::Var(n)   => {
+                if self.in_ecs_query && self.ecs_resource_vars.contains(n) {
+                    return if self.struct_fields.contains_key(n) {
+                        format!("res_{}", n.to_lowercase())
+                    } else {
+                        format!("res_{}.0", n.to_lowercase())
+                    };
+                }
                 // In init body, `self` is the local `__self` variable.
                 if self.in_init_body && n == "self" {
                     return "__self".to_string();
@@ -632,6 +639,18 @@ impl Transpiler {
             }
 
             ExprKind::DotIdent(name) => {
+                if self.in_ecs_query {
+                    if name == "entity" {
+                        return "__entity".to_string();
+                    }
+                    if self.ecs_resource_vars.contains(name) {
+                        return if self.struct_fields.contains_key(name) {
+                            format!("res_{}", name.to_lowercase())
+                        } else {
+                            format!("res_{}.0", name.to_lowercase())
+                        };
+                    }
+                }
                 // Enum variant shorthand: `.North` → `Direction::North`
                 if let Some(enum_name) = self.enum_variants.get(name) {
                     format!("{}::{}", enum_name, name)
@@ -2651,6 +2670,17 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        if self.in_ecs_query {
+            if let ExprKind::DotIdent(d) = &obj.kind {
+                if d == "time" {
+                    if field == "delta" {
+                        return "(time.delta_secs() as f64)".to_string();
+                    } else if field == "elapsed" {
+                        return "(time.elapsed_secs_f64())".to_string();
+                    }
+                }
+            }
+        }
         if let Some(code) = self.try_emit_fixed_field(obj, field) {
             return code;
         }
@@ -3308,6 +3338,7 @@ impl Transpiler {
                 && !self.fn_current_params.contains_key(n.as_str())
                 && !self.user_top_level_names.contains(n.as_str())
                 && !is_implicit_self_field
+                && !(self.in_ecs_query && self.ecs_resource_vars.contains(n.as_str()))
             {
                 self.push_error(target.line, target.col, format!(
                     "cannot assign to undeclared variable `{}`; fix: declare it with `var {} = ...`", n, n));
@@ -4696,6 +4727,36 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_call(&self, callee: &Expr, args: &[Arg]) -> String {
+        if self.in_ecs_query {
+            if let ExprKind::DotIdent(d) = &callee.kind {
+                match d.as_str() {
+                    "despawn" => {
+                        return "commands.entity(__entity).despawn()".to_string();
+                    }
+                    "spawn" => {
+                        let args_s = args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ");
+                        return if args.len() == 1 {
+                            format!("commands.spawn(({},))", args_s)
+                        } else {
+                            format!("commands.spawn(({}))", args_s)
+                        };
+                    }
+                    "resource" => {
+                        if let Some(arg) = args.first() {
+                            let name = self.emit_expr(&arg.value);
+                            return format!("res_{}.clone()", name.to_lowercase());
+                        }
+                    }
+                    "mut_resource" => {
+                        if let Some(arg) = args.first() {
+                            let name = self.emit_expr(&arg.value);
+                            return format!("res_{}", name.to_lowercase());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         // `t.many[i](x)` on a `[Seed]` field: lock/borrow the element handle, then call.
         if let ExprKind::Index(coll, _) = &callee.kind {
             if let Some((_, req)) = self.fn_coll_expr(coll) {

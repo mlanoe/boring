@@ -178,6 +178,7 @@ fn stmt_let(name: &str, ty: Option<Type>, value: Expr, line: usize, col: usize) 
         var_mut: false,
         value: Some(value),
         is_lazy: false,
+        is_resource: false,
         line,
         col,
     })

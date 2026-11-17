@@ -56,6 +56,7 @@ This file is the reader-facing language reference. Read chapters 1–15 in order
 
 32. [GPU Computing](#32-gpu-computing)
 33. [Dependency Injection](#33-dependency-injection)
+34. [Entity Component System (ECS)](#34-entity-component-system-ecs)
 
 ---
 
@@ -2711,6 +2712,32 @@ impl Counter {
 ```
 
 `obj()` at a call site dispatches to `__call__` when `obj` is a known struct instance. Calling a struct that has no `def ()`/`req ()` defined is a runtime error.
+
+### Pure Value Types — `data`
+
+In addition to general-purpose `struct`, Boring provides the `data` keyword for declaring pure value types (Plain Old Data / POD):
+
+```boring
+pub data Point:
+    float x = 0.0
+    float y = 0.0
+
+pub data Velocity:
+    float dx
+    float dy
+
+# Zero-sized unit tag
+pub data Marker: pass
+```
+
+#### Differences between `struct` and `data`
+* **Pure Value Semantics**: A `data` type represents pure, identity-less data intended to be stored linearly in cache-friendly arrays or tables.
+* **Allowed Field Types**: Scalaires (`int`, `float`, `bool`), strings (`string`), math vectors (`Vec2`, `Vec3`, `Transform`), enums, arrays (`[int]`, `[float, 3]`), dictionaries, optional values (`Point?`), and other `data` types.
+* **Forbidden Field Types**: Pointer and concurrency qualifiers (`'actor`, `'shared`, lock handles, references). A `data` type cannot hold references to external managed actors or mutexes.
+* **Guarantees**: The compiler statically ensures that every `data` is `Send + Sync + 'static`, copyable or clonable without side-effects, and optimal for CPU cache locality and parallel processing.
+* **ECS Integration**: All components in Boring's native ECS (Chapter 34) must be declared with `data` via `@component data`.
+
+Automatic trait derives for `data` include `Debug`, `Clone`, `PartialEq`, and where all fields support it, `Eq` and `Hash`. Unit data types (`pass` with no fields) additionally derive `Copy` and `Default`.
 
 ---
 
@@ -10710,6 +10737,137 @@ impl UserRepository {
 ```
 
 Two constructors fall out exactly the way an ordinary defaulted parameter already generates one call-site path for "omitted" and one for "supplied" — `@inject` is the same mechanism with a synthesized default, not a special case of the codegen. A plain `NetworkClient client` field with **no** `@inject` above it never becomes DI-resolved just because a matching `@provide` function happens to exist somewhere in the program — the attribute must always be written for resolution to happen at all.
+
+---
+
+## 34. Entity Component System (ECS)
+
+Boring treats ECS (Entity Component System) as a first-class language citizen, lowering directly to high-performance archetype ECS architectures such as Bevy ECS.
+
+### Core Principles
+1. **Zero Boilerplate**: No manual generic wrappers (`Query<(&Transform, &Velocity)>`, `Res<Time>`, `ResMut<Score>`), manual iterators, or system parameter wiring.
+2. **Pure Value Types (`data`)**: Pure data structures without pointer or reference overhead (`'actor`, `'shared`), maximizing CPU cache locality and enabling safe parallel execution.
+3. **Explicit Components (`@component data`)**: Components are declared with `@component data`, ensuring cache-optimal storage.
+4. **Global Resources (`@resource`)**: Global state is declared simply with `@resource`, accessible and mutable like standard variables (`score += 10`).
+5. **Universal Queries (`query`)**: Systems operate across matching entities via `query`:
+   - **Component Method Queries**: Declare behavior directly on the primary component using `self`.
+   - **Top-Level Queries**: Declare mediator systems across multiple components or lifecycle hooks.
+6. **Ambient Context (`.`)**: Access system context directly via the leading dot syntax (`.time.delta`, `.input`, `.entity`, `.despawn()`, `.spawn(...)`).
+
+### 1. Components: `@component data`
+
+Components represent data attached to entities:
+
+```boring
+@component
+pub data Position:
+    float x = 0.0
+    float y = 0.0
+
+@component
+pub data Velocity:
+    float dx = 0.0
+    float dy = 0.0
+
+# Zero-sized unit tag component (0 bytes, used for archetype filtering)
+@component
+pub data Frozen: pass
+```
+
+### 2. Global Resources: `@resource`
+
+Global state is declared using `@resource` on variables or data types:
+
+```boring
+@resource
+var int score = 0
+
+@resource
+float gravity = -9.81
+
+@resource
+data GameConfig:
+    var int max_players = 4
+```
+
+In any system or query, global resources can be read and mutated directly:
+
+```boring
+query kill_enemy(Enemy e) where e.is_dead:
+    score += 10
+    .despawn()
+```
+
+### 3. Systems: `query`
+
+A `query` defines a system that automatically iterates over all entities matching the specified components and `where` constraints.
+
+#### Method Queries on Components
+When a system primarily modifies or queries a single component, define it directly inside the `data` declaration. `self` automatically binds to the current entity's component:
+
+```boring
+@component
+pub data Position:
+    float x
+    float y
+
+    @schedule(Update)
+    query movement(Velocity vel) where not Frozen:
+        self.x += vel.dx * .time.delta
+        self.y += vel.dy * .time.delta
+```
+
+- `self` is available as a mutable reference (`&mut Position`).
+- Secondary required components are listed in the parameter list (`(Velocity vel)`).
+- Read-only queries on `self` can use `req query`.
+
+#### Top-Level Queries
+For mediator systems operating across multiple distinct components or system lifecycle events:
+
+```boring
+# Physics mediator system
+query apply_velocity(mut Position pos, Velocity vel) where not Frozen:
+    pos.x += vel.dx * .time.delta
+    pos.y += vel.dy * .time.delta
+
+# Startup system (runs once when the world initializes)
+@schedule(Startup)
+query setup_world():
+    .spawn(Position(x = 0.0, y = 0.0), Velocity(dx = 10.0, dy = 5.0))
+
+# Entity lifecycle system
+query death_check(Health h) where h.current <= 0:
+    .despawn()
+```
+
+### 4. Scheduling & State: `@schedule` and `@state`
+
+- `@schedule(...)`: Determines the execution phase. Supported schedules include `Startup`, `FixedUpdate`, `Update` (default), `PostUpdate`, and `Render`.
+- `@state(...)`: Restricts system execution to a specific application or game state (e.g. `@state(GameState.Playing)`).
+
+### 5. Filtering with `where`
+
+The `where` clause specifies archetype constraints and runtime value filters:
+- **Component presence**: `where Player` $\rightarrow$ `With<Player>`
+- **Component absence**: `where not Frozen` $\rightarrow$ `Without<Frozen>`
+- **Boolean combinations**: `where Player and not (Frozen or Stunned)`
+- **Change detection**: `where changed Transform` $\rightarrow$ `Changed<Transform>`
+- **Addition detection**: `where added Enemy` $\rightarrow$ `Added<Enemy>`
+- **Value expressions**: `where health.current <= 0` evaluates at the start of each entity step.
+
+### 6. Ambient Context (`.`)
+
+Inside queries, the leading dot (`.`) provides direct access to environmental context:
+
+| Expression | Meaning | Rust/Bevy Target |
+|---|---|---|
+| `.time.delta` | Frame delta time in seconds | `(time.delta_secs() as f64)` |
+| `.time.elapsed` | Total elapsed simulation time | `time.elapsed_secs_f64()` |
+| `.input.is_key_pressed(...)` | Key press state | `input.pressed(...)` |
+| `.entity` | ID of the current entity | `Entity` |
+| `.despawn()` | Despawns the current entity | `commands.entity(__entity).despawn()` |
+| `.spawn(c1, c2, ...)` | Spawns a new entity with components | `commands.spawn((c1, c2, ...))` |
+| `score += 10` | Modifies an `@resource` variable | `res_score.0 += 10` via `ResMut` |
 
 ---
 

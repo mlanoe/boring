@@ -333,6 +333,7 @@ fn rw_items(items: &mut [Item], t: &HashSet<String>, b: B) {
             }
             Item::Alias(a) => rw_type(&mut a.ty, t),
             Item::Stmt(s) => rw_stmts(std::slice::from_mut(s), t),
+            Item::Query(q) => rw_stmts(&mut q.body, t),
             Item::Use(_) | Item::Kernel(_) => {}
         }
     }
