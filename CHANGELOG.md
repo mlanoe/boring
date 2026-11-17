@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **A call missing a required argument is now a checker error**, not a warning: `boring run` and `boring build` reject it up front instead of running anyway / emitting Rust that rustc rejects with E0061. A `T?` parameter without a default is still required (no implicit `nil`). The other call-arity diagnostics (too many positional arguments, unknown label, argument bound twice) stay warnings.
+- **`boring check` now runs the semantic checker** (same front end and diagnostics as `run`/`build`); it used to only lex and parse, and exited 0 on any checker error.
+
 ## [0.9.14] — 2026-11-16 *(cargo test: 4920/4920 passing across 169 suites, 5 ignored · clippy: clean · self-hosted interpreter: moved to boring-self-interpreter, not run for this cut)*
 
 ### Highlights

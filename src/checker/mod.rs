@@ -1936,9 +1936,10 @@ impl Checker {
     // error). This check surfaces the four unambiguous, purely structural
     // cases — unknown label, an argument bound twice, too many positional
     // arguments, a missing required argument — at the real call site, before
-    // either backend sees it. A non-fatal warning for now, same as
-    // `check_missing_return`: shipped conservatively pending more real-world
-    // exposure before ever being considered for promotion to a hard error.
+    // either backend sees it. The missing-required-argument case is a hard
+    // error (see its branch below); the other three remain non-fatal
+    // warnings for now, same as `check_missing_return`, pending more
+    // real-world exposure before being considered for promotion.
     //
     // Scoped to plain function calls only (`ExprKind::Call(Var(name), _)`) —
     // method calls need the receiver's static type to resolve overloads, which
@@ -2491,7 +2492,15 @@ impl Checker {
 
         for (i, pname) in arity.param_names.iter().enumerate() {
             if !bound[i] && !arity.has_default[i] {
-                self.warning(
+                // A hard error, unlike the three cases above: a missing
+                // required argument never yields a working program on any
+                // path (`boring build` emits Rust that rustc rejects with
+                // E0061, `boring run` binds the slot to an undeclared `nil`),
+                // and as a warning it once let a dropped argument reach CI
+                // in boring-self-interpreter unnoticed. A `T?` parameter
+                // without `= nil` is still required — Boring has no implicit
+                // `nil` default (docs/book.md "Default parameters").
+                self.error(
                     format!("missing required argument '{}' in call to '{}'", pname, name),
                     line, col,
                 );
@@ -4435,6 +4444,12 @@ mod call_arity_tests {
         super::check(&program).warnings.into_iter().map(|w| w.message).collect()
     }
 
+    fn errors_for(src: &str) -> Vec<String> {
+        let tokens = lex(src).expect("lex error");
+        let program = parse(tokens).expect("parse error");
+        super::check(&program).errors.into_iter().map(|e| e.message).collect()
+    }
+
     #[test]
     fn missing_required_argument_is_flagged() {
         // The real-world regression this check closes — see
@@ -4442,8 +4457,23 @@ mod call_arity_tests {
         // tests/variadic_arity_no_panic.rs's own header comment: this exact
         // call shape used to reach the transpiler unvalidated and panic it.
         let src = "def void greet(string name, string tags...):\n    print name\ngreet()\n";
-        let warns = warnings_for(src);
-        assert!(warns.iter().any(|w| w.contains("missing required argument") && w.contains("name")), "expected a missing-argument warning, got {warns:?}");
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|w| w.contains("missing required argument") && w.contains("name")), "expected a missing-argument error, got {errs:?}");
+    }
+
+    #[test]
+    fn missing_optional_typed_argument_without_default_is_an_error() {
+        // `int? c` with no `= nil` is still required: no implicit nil default.
+        let src = "def int f(int a, int b, int? c):\n    return a + b\n\nprint(f(1, 2))\n";
+        let errs = errors_for(src);
+        assert!(errs.iter().any(|w| w.contains("missing required argument 'c' in call to 'f'")), "expected a missing-argument error, got {errs:?}");
+    }
+
+    #[test]
+    fn omitted_defaulted_argument_is_not_an_error() {
+        let src = "def int f(int a, int? c = nil):\n    return a\n\nprint(f(1))\n";
+        let errs = errors_for(src);
+        assert!(errs.is_empty(), "expected no errors, got {errs:?}");
     }
 
     #[test]

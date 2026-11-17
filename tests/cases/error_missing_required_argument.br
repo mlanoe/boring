@@ -1,0 +1,7 @@
+# A call missing a required argument must be rejected by `boring check`,
+# `boring run` and `boring build` alike (tests/missing_required_argument.rs).
+# `int? c` has no default, so it is required: Boring has no implicit `nil`.
+def int f(int a, int b, int? c):
+    return a + b
+
+print(f(1, 2))

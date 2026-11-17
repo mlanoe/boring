@@ -2594,6 +2594,29 @@ fn check_file(path: &str, show_types: bool) {
             println!("{out}");
         }
     }
+    // The same semantic checker `boring run`/`boring build` run before doing anything else
+    // (same front-end desugarings, same `[deps]`), so `check` rejects exactly what they reject
+    // — before, it only lexed and parsed, and exited 0 on e.g. a missing required argument.
+    let deps = match find_project_root(&path) {
+        Some(root) => match std::fs::read_to_string(root.join("boring.toml")) {
+            Ok(toml_src) => match BoringToml::parse(&toml_src).resolve_deps(&root) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    process::exit(1);
+                }
+            },
+            Err(_) => Default::default(),
+        },
+        None => Default::default(),
+    };
+    let program = desugar_inline_kernel::desugar_inline_kernels(program);
+    let program = desugar_labeled_array::desugar_labeled_array(program);
+    let program = desugar_array_block_or_exit(&path, &source, program);
+    let program = desugar_inject_or_exit(&path, &source, program, &deps);
+    if report_check_result(&path, &source, check_with_imports(&path, &program, &deps)) {
+        process::exit(1);
+    }
 }
 
 /// `--emit-bri` / `--emit-bri=mono` / `--emit-bri=full` among `args`: the requested `.bri` level.
