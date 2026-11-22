@@ -83,6 +83,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 32;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
+    tensor_config.portable_tiled_dynamic_float_linear = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     // Type-generic structs / helper functions used in device code become concrete copies first.
     let (device_generic, device_generic_errors) = crate::transpiler::device_generic::monomorphise_device_generics(&tensor_host.program);
@@ -153,6 +154,30 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
     // identical derivation -- see `crate::transpiler::detect_boring_main`.
     let uses_unicode = general_out.uses_unicode;
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
+    // `needs_async_runtime` (see `TranspileOutput`'s doc): some host-side function --
+    // `boring_main` itself, or one of its callees -- uses `task:`/a channel. Unlike
+    // cuda/rocm/metal (plain blocking FFI kernel dispatch, so wrapping their own real
+    // `fn main()` in a tokio runtime is safe -- see `rocm::host`'s `needs_async_runtime`
+    // handling), this backend's entry point (`host::emit_host_rs`'s `async_main`, driven
+    // by `pollster::block_on`, see this module's doc comment) has no tokio executor
+    // running at all. Silently generating `async fn`/`.await` here would compile but
+    // panic the first time it actually ran ("no reactor running") -- exactly the failure
+    // mode `emit_gpu_boring_main` (mod.rs) already refuses at compile time for bare
+    // top-level `task:`/channel usage; this is the same restriction extended to a NAMED
+    // function (`boring_main` or one it calls transitively), which that existing check
+    // can't see since it only looks at top-level statements.
+    let mut async_runtime_errors: Vec<crate::transpiler::TranspileError> = Vec::new();
+    if general_out.needs_async_runtime {
+        async_runtime_errors.push(crate::transpiler::TranspileError::at(
+            "`task`/stream/channel usage isn't supported for the wgpu target yet -- its \
+             generated entry point runs under a minimal `pollster` executor, not a tokio \
+             runtime, so `tokio::spawn`/tokio channels/timers would panic at runtime (\"no \
+             reactor running\") even though this compiles. Move this into a synchronous \
+             function instead, or avoid task/stream/channel usage for now (cuda/rocm/metal/ \
+             simd do support it).".to_string(),
+            0, 0,
+        ));
+    }
 
     let requires_f16 = device_wgsl.contains("enable f16;");
     let (host_rs, host_errors) = host::emit_host_rs(program, &kernel_names, &effective_kernels, &general_out.code, has_boring_main, boring_main_throws, device_wgsl_emulated.is_some(), requires_f16, &general_out.screen_setup_fields);
@@ -179,6 +204,7 @@ fn transpile_wgpu_impl(program: &Program, stem: &str, version: &str, tensor_conf
 
     let warnings = general_out.warnings;
     let mut errors = general_out.errors;
+    errors.extend(async_runtime_errors);
     errors.extend(fixed_errors.into_iter().map(|m| crate::transpiler::TranspileError::at(m, 0, 0)));
     errors.extend(device_errors);
     errors.extend(device_generic_errors);

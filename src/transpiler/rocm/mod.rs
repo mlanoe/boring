@@ -117,6 +117,7 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let mut tensor_config = tensor_config.clone();
     tensor_config.target_warp_width = 64;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
+    tensor_config.portable_tiled_dynamic_float_linear = true;
     // Opt-in only (`[tensor.matmul] algorithm = "rocblas"`): rocBLAS needs a Tensile
     // library for the GPU architecture and aborts the process when it is missing
     // (e.g. gfx1032 without HSA_OVERRIDE_GFX_VERSION), which cannot be caught.
@@ -230,6 +231,7 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
         screen_setup: if setup_names.is_empty() { None } else { Some(setup_names.clone()) },
         ..crate::transpiler::kernel_target_base_config()
     };
+    let threading = general_config.threading;
     let general_out = crate::transpiler::transpile_with_config(&general_program, general_config);
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
@@ -247,9 +249,10 @@ fn transpile_rocm_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
         has_boring_main, boring_main_throws, top_level_kernel_touching, rocblas, &general_out.screen_setup_fields,
+        general_out.needs_async_runtime, threading,
     );
     let build_rs = emit_build_rs(rocblas);
-    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen, general_out.needs_async_runtime);
     let mut host_rs = host_rs;
     let mut routes = Vec::new();
     if unified {
@@ -472,13 +475,19 @@ pub(crate) const BORING_HIP_ATTR_SHARED_MEM_PER_BLOCK: i32 = {shared_mem};\n\
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
 
-fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
+fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool, needs_async_runtime: bool) -> String {
     // `winit`/`softbuffer` are only needed for a `Screen` (display) program --
     // see `host::emit_screen_setup`'s doc comment for why this specific pair
     // (winit 0.28's `run_return` API + the matching raw-window-handle 0.5
     // softbuffer release) was chosen. A compute-only program stays free of
     // any graphics-crate dependency, same as today.
     let extra_deps = if has_screen { "winit = \"0.28\"\nsoftbuffer = \"0.3\"\n" } else { "" };
+    // `needs_async_runtime` (see `TranspileOutput`'s doc) -- a host-side function uses
+    // `task:`/a channel (the general pass already emitted it `async fn` and the real `fn
+    // main()` above now `.await`s it), so this generated crate needs the same `tokio`
+    // dependency the `std` target's own Cargo.toml template (`main.rs`) always adds --
+    // mirrored here since every GPU backend generates its own separate manifest.
+    let tokio_dep = if needs_async_runtime { "tokio = { version = \"1\", features = [\"full\"] }\n" } else { "" };
     format!(
         r#"[package]
 name = "{stem}"
@@ -496,9 +505,10 @@ path = "src/main.rs"
 # present layer, not a GPU compute crate.
 [dependencies]
 half = {{ version = "2", features = ["bytemuck", "serde"] }}
-{extra_deps}"#,
+{tokio_dep}{extra_deps}"#,
         stem = stem,
         version = version,
+        tokio_dep = tokio_dep,
         extra_deps = extra_deps,
     )
 }

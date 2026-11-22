@@ -86,6 +86,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
     // Formats without a native Metal kernel (Q5_0, Q4_0, IQ4_NL, Q3_K, Q2_K) get the shared-memory
     // tiled prefill instead of the per-element scalar loop (60-90x slower on an M-series GPU).
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
+    tensor_config.portable_tiled_dynamic_float_linear = true;
     tensor_config.metal_blocked_prefill = true;
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &tensor_config);
     // Type-generic structs / helper functions used in device code become concrete copies first.
@@ -185,6 +186,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
         screen_setup: if setup_names.is_empty() { None } else { Some(setup_names.clone()) },
         ..crate::transpiler::kernel_target_base_config()
     };
+    let threading = general_config.threading;
     let general_out = crate::transpiler::transpile_with_config(&general_program, general_config);
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
@@ -201,8 +203,9 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
         has_boring_main, boring_main_throws, top_level_kernel_touching, &general_out.screen_setup_fields,
+        general_out.needs_async_runtime, threading,
     );
-    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen, general_out.needs_async_runtime);
     let mut host_rs = host_rs;
     let mut routes = Vec::new();
     if unified {
@@ -237,7 +240,7 @@ fn transpile_metal_impl(program: &Program, stem: &str, version: &str, tensor_con
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
 
-fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
+fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool, needs_async_runtime: bool) -> String {
     // No build.rs needed: MSL is compiled at runtime via newLibraryWithSource.
     // The Metal compiler is built into macOS — no external toolchain required.
     // `objc` is unconditional (not just when `Screen` is present): every
@@ -249,6 +252,8 @@ fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
     } else {
         "objc = \"0.2\"\n"
     };
+    // See `rocm::mod`'s identical `tokio_dep` for why.
+    let tokio_dep = if needs_async_runtime { "tokio = { version = \"1\", features = [\"full\"] }\n" } else { "" };
     format!(
         r#"[package]
 name = "{stem}"
@@ -262,9 +267,10 @@ path = "src/main.rs"
 [dependencies]
 metal = "0.29"
 half = {{ version = "2", features = ["bytemuck", "serde"] }}
-{extra_deps}"#,
+{tokio_dep}{extra_deps}"#,
         stem = stem,
         version = version,
+        tokio_dep = tokio_dep,
         extra_deps = extra_deps,
     )
 }

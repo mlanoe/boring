@@ -40,6 +40,7 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
     // every GPU backend's own identical call (`rocm`/`cuda`/`wgpu`/`metal`::mod.rs).
     let portable_tensor_config = crate::transpiler::tensor_host::TensorLinearConfig {
         portable_tiled_dynamic_quantized_linear: true,
+        portable_tiled_dynamic_float_linear: true,
         ..Default::default()
     };
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &portable_tensor_config);
@@ -115,6 +116,7 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
         unified_routing: unified,
         ..crate::transpiler::kernel_target_base_config()
     };
+    let threading = config.threading;
     SIMD_HOST_TYPES.with(|flag| flag.set(true));
     let general = crate::transpiler::transpile_with_config(&renamed, config);
     SIMD_HOST_TYPES.with(|flag| flag.set(false));
@@ -243,16 +245,31 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
         e.raw(super::screen_input::CLIPBOARD_RUNTIME);
         e.raw(super::screen_input::SIMD_CLIPBOARD_SCREEN);
     }
+    // `general.needs_async_runtime` (see `TranspileOutput`'s doc) -- a host-side function
+    // (possibly `boring_main` itself) uses `task:`/a channel, so this backend's own real
+    // `fn main()` must become `#[tokio::main] async fn main()` and `.await` the call into
+    // `boring_main()`, exactly like the `std` target's own `fn main()` and the other GPU
+    // backends (see `rocm::host`'s identical `needs_async_runtime` doc comment).
+    let needs_async_runtime = general.needs_async_runtime;
     if has_main {
+        let await_suffix = if needs_async_runtime { ".await" } else { "" };
         let call = if main_throws {
-            "if let Err(e) = boring_main() { eprintln!(\"error: {}\", e); std::process::exit(1); }"
+            format!("if let Err(e) = boring_main(){await_suffix} {{ eprintln!(\"error: {{}}\", e); std::process::exit(1); }}")
         } else {
-            "boring_main();"
+            format!("boring_main(){await_suffix};")
+        };
+        let main_sig = if needs_async_runtime {
+            match threading {
+                crate::transpiler::ThreadingMode::Single => "#[tokio::main(flavor = \"current_thread\")]\nasync fn main()",
+                crate::transpiler::ThreadingMode::Multi => "#[tokio::main]\nasync fn main()",
+            }
+        } else {
+            "fn main()"
         };
         if uses_screen {
-            e.raw(&format!("\nfn main() {{ __boring_display_run(|| {{ {call} }}); }}\n"));
+            e.raw(&format!("\n{main_sig} {{ __boring_display_run(|| {{ {call} }}); }}\n"));
         } else {
-            e.raw(&format!("\nfn main() {{ {call} }}\n"));
+            e.raw(&format!("\n{main_sig} {{ {call} }}\n"));
         }
     } else {
         e.raw("\nfn main() {}\n");
@@ -262,8 +279,12 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
     } else {
         ""
     };
+    // See `rocm::mod`'s identical `tokio_dep` for why.
+    let tokio_dep = if needs_async_runtime { "tokio = { version = \"1\", features = [\"full\"] }\n" } else { "" };
     let display_deps = if uses_screen {
-        format!("[dependencies]\nwinit = \"0.28\"\nsoftbuffer = \"0.3\"\n{clipboard_dep}")
+        format!("[dependencies]\nwinit = \"0.28\"\nsoftbuffer = \"0.3\"\n{clipboard_dep}{tokio_dep}")
+    } else if needs_async_runtime {
+        format!("[dependencies]\n{tokio_dep}")
     } else {
         String::new()
     };

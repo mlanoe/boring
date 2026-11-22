@@ -709,10 +709,34 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [float32]'kernel
     y
 "#);
     assert!(msl.contains("kernel BoringTensorDynamicFloatNative0"), "{msl}");
-    assert!(msl.contains("if ((m % 8) == 0 && (n % 8) == 0 && (k % 8) == 0)"), "{msl}");
+    assert!(msl.contains("if (m == 1)"), "{msl}");
+    assert!(msl.contains("else if ((k % 8) == 0)"), "{msl}");
     assert!(msl.contains("simdgroup_multiply_accumulate"), "{msl}");
+    assert!(msl.contains("simd_sum"), "{msl}");
     assert!(host.contains("__boring_launch((32 as u32, 1, 1)"), "{host}");
     assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
+}
+
+#[test]
+fn dynamic_float_linear_metal_warp_decode_and_unaligned_tiling() {
+    let (msl, host) = metal_codegen("metal_unaligned_float_linear", r#"
+req [float32]'kernel'unified compute([float32]'kernel'global a, [float32]'kernel'global weights, int m, int n, int k) throws:
+    mut [float32]'kernel'unified y = [0.0 as float32 for ..<m * n]
+    kernel.tensors.linear(a, weights, y, m = m, n = n, k = k)
+    y
+"#);
+    // m == 1 uses SIMD-group rows decode with float4 loads and simd_sum
+    assert!(msl.contains("if (m == 1)"), "{msl}");
+    assert!(msl.contains("constexpr uint bp_rows = 4;"), "{msl}");
+    assert!(msl.contains("simd_sum("), "{msl}");
+    // k % 8 == 0 enables simdgroup_float8x8 even when n % 8 != 0 (e.g. Whisper n = 51865)
+    assert!(msl.contains("else if ((k % 8) == 0)"), "{msl}");
+    assert!(msl.contains("simdgroup_float8x8 bp_result"), "{msl}");
+    assert!(host.contains("__boring_launch((256 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("__boring_launch((32 as u32, 1, 1)"), "{host}");
+    assert!(host.contains("(n + 31) / 32"), "{host}");
+    assert!(host.contains("(n + 7) / 8"), "{host}");
+    assert!(host.contains("(m + 7) / 8"), "{host}");
 }
 
 #[test]

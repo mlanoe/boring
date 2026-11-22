@@ -4631,7 +4631,8 @@ impl Transpiler {
         // is itself a tracked resident local being reassigned (rare, but a
         // real "opt-in stays resident" case: don't force-materialize into it).
         let target_is_resident = matches!(&target.kind, ExprKind::Var(name)
-            if self.resident_call_vars.contains_key(name.as_str()));
+            if self.resident_call_vars.contains_key(name.as_str()))
+            || self.expr_is_gpu_resident_field(target);
         // A bare resident local on the RHS (`z = y`) is itself a `BoringKernelArg<T>`:
         // alias it (cheap `Arc::clone`) into a resident target, materialize it by
         // reference into any other target.
@@ -4658,11 +4659,19 @@ impl Transpiler {
         let rhs_s = if target_is_resident {
             let target_ty = match &target.kind {
                 ExprKind::Var(name) => self.resident_call_vars.get(name.as_str()),
+                ExprKind::Field(..) => self.struct_field_type_from_expr(target),
                 _ => None,
             };
             self.try_emit_gpu_resident_return(value)
                 .or_else(|| rhs_resident_var.as_ref().map(|(v, _)| format!("{v}.clone()")))
                 .or_else(|| self.try_emit_resident_call_as_kernel_arg(value, target_ty))
+                .or_else(|| {
+                    if let ExprKind::If(if_stmt) = &value.kind {
+                        self.try_emit_gpu_resident_if_expr(if_stmt, target_ty).map(|(code, _)| code)
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| self.expr_is_gpu_resident_field(value).then(|| self.emit_expr_owned(value)))
                 .or_else(|| match &value.kind {
                     ExprKind::Var(v) if self.gpu_resident_vars.contains_key(v.as_str())

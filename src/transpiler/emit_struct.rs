@@ -961,7 +961,18 @@ impl Transpiler {
         if init.body.is_empty() {
             // Auto-field init: fn new(x: T, y: T) -> Self { Self { x, y } }
             let params_s: Vec<String> = init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"));
+                let p_ty = p.ty.as_ref().or_else(|| fields.iter().find(|f| f.name == p.name).map(|f| &f.ty));
+                let ty = if self.config.is_gpu_target && p_ty.is_some_and(|t| t.gpu_resident_qual().is_some()) {
+                    let unqualified = match p_ty.unwrap().without_mut() {
+                        Type::Qualified(inner, _) => inner.as_ref(),
+                        other => other,
+                    };
+                    let inner_ty = super::emit_kernel::array_inner_type(unqualified);
+                    let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                    format!("BoringKernelArg<{}>", host_ty)
+                } else {
+                    p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"))
+                };
                 let mut_kw = if p.mutable { "mut " } else { "" };
                 format!("{}{}:{}", mut_kw, p.name, ty)
             }).collect();
@@ -1023,13 +1034,33 @@ impl Transpiler {
         } else {
             // Body init: fn new(params) -> Self { body }
             let params_s: Vec<String> = init.params.iter().map(|p| {
-                let ty = p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"));
+                let p_ty = p.ty.as_ref().or_else(|| fields.iter().find(|f| f.name == p.name).map(|f| &f.ty));
+                let ty = if self.config.is_gpu_target && p_ty.is_some_and(|t| t.gpu_resident_qual().is_some()) {
+                    let unqualified = match p_ty.unwrap().without_mut() {
+                        Type::Qualified(inner, _) => inner.as_ref(),
+                        other => other,
+                    };
+                    let inner_ty = super::emit_kernel::array_inner_type(unqualified);
+                    let host_ty = super::emit_kernel::kernel_host_element_type(&inner_ty);
+                    format!("BoringKernelArg<{}>", host_ty)
+                } else {
+                    p.ty.as_ref().map(|t| self.emit_type(&Self::resolve_bare_observed(t))).unwrap_or_else(|| self.missing_type_error(&p.name, p.line, p.col, "parameter"))
+                };
                 format!("{}: {}", p.name, ty)
             }).collect();
             self.line(&format!("pub fn new({}) -> Self {{", params_s.join(", ")));
             self.indent += 1;
             // Add init params to known_local_vars so bare param names don't resolve to self.field.
             for p in &init.params { self.known_local_vars.insert(p.name.clone()); }
+            let mut resident_init_params: Vec<String> = Vec::new();
+            for p in &init.params {
+                let p_ty = p.ty.as_ref().or_else(|| fields.iter().find(|f| f.name == p.name).map(|f| &f.ty));
+                if self.config.is_gpu_target && p_ty.is_some_and(|t| t.gpu_resident_qual().is_some()) {
+                    self.current_fn_gpu_arg_param_names.insert(p.name.clone());
+                    self.resident_call_vars.insert(p.name.clone(), p_ty.unwrap().without_mut().clone());
+                    resident_init_params.push(p.name.clone());
+                }
+            }
             // `'observed`-typed init params (the `@ObservedObject`-shaped case,
             // docs/design-notes/boring-ui-draft.md — a constructor receiving an
             // already-observed value from outside rather than only ever constructing
@@ -1096,7 +1127,9 @@ impl Transpiler {
                     };
                     if let ExprKind::Assign(target, value) = &e.kind {
                         if let Some(field) = field_assign_name(target) {
-                            let val_s = self.emit_expr(value);
+                            let field_decl = fields.iter().find(|f| f.name == field);
+                            let field_ty = field_decl.map(|f| &f.ty);
+                            let val_s = self.emit_struct_field_value(field_ty, value);
                             field_vals.push((field.clone(), val_s));
                         }
                     }
@@ -1120,6 +1153,8 @@ impl Transpiler {
                             extras.push(format!("{}: {}", escape_rust_keyword(&f.name), val));
                         } else if matches!(f.ty, Type::Optional(_)) {
                             extras.push(format!("{}: None", escape_rust_keyword(&f.name)));
+                        } else if self.config.is_gpu_target && f.ty.gpu_resident_qual().is_some() {
+                            extras.push(format!("{}: BoringKernelArg::Host(Vec::new())", escape_rust_keyword(&f.name)));
                         } else {
                             // Zero-initialize numeric/bool fields
                             let zero = match &f.ty {
@@ -1141,6 +1176,9 @@ impl Transpiler {
                 // General case: emit body as-is (may use self).
                 // Wrap in a local `let mut __self = ...` pattern.
                 let zero_fields: Vec<String> = fields.iter().map(|f| {
+                    if self.config.is_gpu_target && f.ty.gpu_resident_qual().is_some() {
+                        return format!("{}: BoringKernelArg::Host(Vec::new())", escape_rust_keyword(&f.name));
+                    }
                     let zero = match &f.ty {
                         Type::Float16 => "half::f16::ZERO".to_string(),
                         Type::Float32 | Type::Float64 => "0.0".to_string(),
@@ -1169,6 +1207,10 @@ impl Transpiler {
             self.line("}");
             // Clean up init param names from known_local_vars.
             for p in &init.params { self.known_local_vars.remove(p.name.as_str()); }
+            for name in &resident_init_params {
+                self.current_fn_gpu_arg_param_names.remove(name);
+                self.resident_call_vars.remove(name);
+            }
         }
         self.blank();
     }

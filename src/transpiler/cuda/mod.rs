@@ -126,6 +126,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
     tensor_config.native_dynamic_float_linear = tensor_config.native_fixed_matrices;
     tensor_config.single_launch_float_linear = true;
     tensor_config.portable_tiled_dynamic_quantized_linear = true;
+    tensor_config.portable_tiled_dynamic_float_linear = true;
     // Opt-in only: half rounds activations and dequantized weights.
     tensor_config.cuda_half_wmma_prefill = tensor_config.prefill_precision.as_deref() == Some("half")
         && !matches!(tensor_config.prefill_algorithm.as_deref(), Some("scalar"));
@@ -229,6 +230,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
         gpu_top_level_handled_by_host: top_level_kernel_touching,
         ..crate::transpiler::kernel_target_base_config()
     };
+    let threading = general_config.threading;
     let general_out = crate::transpiler::transpile_with_config(&renamed_program, general_config);
     let (has_boring_main, boring_main_throws) = crate::transpiler::detect_boring_main(&renamed_program, &general_out);
 
@@ -253,6 +255,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
     let host_rs = host::emit_host_rs(
         program, &kernel_names, &kernel_touching, &general_code,
         has_boring_main, boring_main_throws, top_level_kernel_touching, min_arch,
+        general_out.needs_async_runtime, threading,
     );
     let host_rs = if tf32 {
         host_rs.replace("CUBLAS_PEDANTIC_MATH", "CUBLAS_TF32_TENSOR_OP_MATH")
@@ -260,7 +263,7 @@ fn transpile_cuda_impl(program: &Program, stem: &str, version: &str, tensor_conf
         host_rs
     };
     let build_rs = emit_build_rs(tf32, half_wmma);
-    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen);
+    let mut cargo_toml = emit_cargo_toml(stem, version, has_screen, general_out.needs_async_runtime);
     let mut host_rs = host_rs;
     let mut routes = Vec::new();
     if unified {
@@ -345,13 +348,17 @@ fn main() {
 
 // ─── Cargo.toml generation ────────────────────────────────────────────────────
 
-fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool) -> String {
+fn emit_cargo_toml(stem: &str, version: &str, has_screen: bool, needs_async_runtime: bool) -> String {
     // `winit`/`softbuffer` are only needed for a `Screen` (display) program --
     // see `host::emit_screen_setup`'s doc comment for why this specific pair
     // (winit 0.28's `run_return` API + the matching raw-window-handle 0.5
     // softbuffer release) was chosen. A compute-only program stays free of
     // any graphics-crate dependency, same as today.
     let extra_deps = if has_screen { "winit = \"0.28\"\nsoftbuffer = \"0.3\"\n" } else { "" };
+    // See `rocm::mod`'s identical `tokio_dep` for why: `needs_async_runtime` (set by the
+    // general pass, see `TranspileOutput`'s doc) means a host-side function uses
+    // `task:`/a channel, so this generated crate needs `tokio` too.
+    let tokio_dep = if needs_async_runtime { "tokio = { version = \"1\", features = [\"full\"] }\n" } else { "" };
     format!(
         r#"[package]
 name = "{stem}"
@@ -365,9 +372,10 @@ path = "src/main.rs"
 [dependencies]
 cudarc = {{ version = "0.19", features = ["driver", "nvrtc", "cublas", "f16", "cuda-version-from-build-system"] }}
 half = {{ version = "2", features = ["bytemuck", "serde"] }}
-{extra_deps}"#,
+{tokio_dep}{extra_deps}"#,
         stem = stem,
         version = version,
+        tokio_dep = tokio_dep,
         extra_deps = extra_deps,
     )
 }

@@ -2075,3 +2075,56 @@ fn generic_kernel_emits_one_specialisation_per_argument_list() {
     assert!(!hip.contains("FMT") && !rs.contains("FMT"), "const parameter must be substituted:\n{hip}");
     assert!(!hip.contains("Unused") && !rs.contains("Unused"), "an uninstantiated generic emits nothing");
 }
+
+// ─── host-side `task:` concurrency combined with GPU kernels ─────────────────
+//
+// Regression coverage for a real boring-llm repro: a program mixing GPU kernel
+// dispatch with server-style `task:` concurrency (continuous-batching request
+// scheduling) transpiled cleanly for `--target rocm` but failed `cargo check`
+// on the generated Rust with three independent bugs, none of them specific to
+// ROCm -- a gap in the SHARED transpiler pipeline that happened to be exercised
+// here first: (1) a plain function calling an already-`task:`-async function
+// never itself became `async fn`, so its caller's `?`/`.await` handling was
+// wrong; (2) `std.net.TcpListener`/`TcpStream`/... (dual sync/async stdlib
+// types) always resolved to the sync `std::net::` form even inside an async
+// function, so the `.await` a known-async static method (`bind`) got anyway
+// didn't type-check against it; (3) every GPU backend's own hand-rolled
+// `fn main()`/Cargo.toml (unlike the `std` target's) never knew to become
+// `#[tokio::main] async fn main()`/depend on `tokio` at all.
+#[test]
+fn task_concurrency_combined_with_kernel_dispatch_gets_a_tokio_entry_point() {
+    let (_, rs, _, toml) = run_rocm("task_plus_kernel", r#"
+kernel Noop:
+    mut [float32]'unified out
+    init(int n):
+        out = [0.0 as float32 for ..<n]
+    def ():
+        out[.thread.x] = 1.0
+
+use std.net.TcpListener
+
+def accept_once() throws:
+    let listener = try? TcpListener.bind("127.0.0.1:0")
+    guard let listener else throw "bind failed"
+    task: print "spawned"
+
+def run_wrapper() throws:
+    accept_once()
+
+def main() throws:
+    mut k = Noop(4)
+    kernel:
+        k(block = 4, grid = 1)
+    run_wrapper()
+"#);
+    assert!(rs.contains("async fn accept_once("), "accept_once() itself spawns a task, got:\n{rs}");
+    assert!(rs.contains("async fn run_wrapper("),
+        "run_wrapper() calls the now-async accept_once() and must become async too, got:\n{rs}");
+    assert!(rs.contains("tokio::net::TcpListener::bind") && rs.contains("tokio::net::TcpListener::bind(\"127.0.0.1:0\").await"),
+        "TcpListener.bind(..) inside an async fn must resolve to tokio's async form and be awaited, got:\n{rs}");
+    assert!(rs.contains("#[tokio::main]") && rs.contains("async fn main("),
+        "this backend's own real fn main() must become the tokio entry point when boring_main needs it, got:\n{rs}");
+    assert!(rs.contains("boring_main().await?"),
+        "the real fn main() must await boring_main() once it's async, got:\n{rs}");
+    assert!(toml.contains("tokio ="), "Cargo.toml must depend on tokio, got:\n{toml}");
+}

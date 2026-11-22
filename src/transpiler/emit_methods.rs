@@ -1423,6 +1423,21 @@ impl Transpiler {
         // Known async static methods need .await (+ ? in throws context) in async context
         const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
         if self.in_async && TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method) {
+            // `type_name` may be a dual sync/async stdlib type (`std.net.TcpListener`,
+            // `std.fs.File`, ... — see `EXTERNAL_NON_CLONE_TYPES`): the `use` import this
+            // file emitted (`emit_use`) always brings in the plain `std::` path, since it
+            // can't know at that point whether THIS particular call happens inside an
+            // async function — the same imported name can also be called from a sync
+            // function elsewhere in the same file. Fully-qualify with tokio's async module
+            // here instead of relying on that unqualified `std::`-resolved name, so the
+            // `.await` below actually awaits a real `Future` rather than being applied to
+            // std's already-resolved `Result` (confirmed via the real-world repro: ROCm
+            // target, `std.net.TcpListener.bind(..)` called from a `task:`-using `async
+            // fn` — see `tests.rs`'s `tcp_listener_bind_awaits_tokio_form_in_async_fn`).
+            let call = match Self::tokio_async_module_for(type_name.as_str()) {
+                Some(module) => format!("{module}::{type_name}::{rust_method}({})", vals.join(", ")),
+                None => call,
+            };
             let awaited = format!("{}.await", call);
             // In throws/try context, propagate the Result error with `?`
             return Some(if self.in_throws || self.in_try_body {
@@ -3911,6 +3926,20 @@ impl Transpiler {
         "Child", "ChildStdin", "ChildStdout", "ChildStderr", "Command",
         "JoinHandle", "Receiver", "Mutex", "RwLock",
     ];
+
+    /// The `tokio` module a dual sync/async stdlib type's async form lives in, for the
+    /// handful of `EXTERNAL_NON_CLONE_TYPES` that have one (`std::net::TcpListener` /
+    /// `tokio::net::TcpListener`, etc.). `None` for every other external type, including
+    /// ones from `EXTERNAL_NON_CLONE_TYPES` with no real tokio counterpart (`Stdin`,
+    /// `Command`, ...) — callers keep the plain `std::`-resolved call for those.
+    pub(crate) fn tokio_async_module_for(type_name: &str) -> Option<&'static str> {
+        match type_name {
+            "TcpListener" | "TcpStream" | "UdpSocket"
+            | "UnixListener" | "UnixStream" | "UnixDatagram" => Some("tokio::net"),
+            "File" => Some("tokio::fs"),
+            _ => None,
+        }
+    }
 
     /// Whether the dict expression `obj` has a declared value type from `EXTERNAL_NON_CLONE_TYPES`.
     pub(crate) fn dict_value_is_external_non_clone(&self, obj: &Expr) -> bool {

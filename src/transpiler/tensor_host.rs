@@ -42,6 +42,7 @@ pub(crate) struct TensorLinearConfig {
     pub metal_blocked_prefill: bool,
     pub native_dynamic_q8_linear: bool,
     pub portable_tiled_dynamic_quantized_linear: bool,
+    pub portable_tiled_dynamic_float_linear: bool,
 }
 
 impl Default for TensorLinearConfig {
@@ -61,6 +62,7 @@ impl Default for TensorLinearConfig {
             metal_blocked_prefill: false,
             native_dynamic_q8_linear: false,
             portable_tiled_dynamic_quantized_linear: false,
+            portable_tiled_dynamic_float_linear: false,
         }
     }
 }
@@ -1027,13 +1029,21 @@ fn parse_dynamic_linear_kernel_ext(
         && matches!(tensor_config.algorithm(quantized_format, false), "auto" | "native")
         && !(quantized_format == Some("q8_0") && decode_algorithm == "scalar")
         && !(quantized_format == Some("q5_k") && decode_algorithm == "scalar");
-    let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
-        && quantized_format.is_some()
+    let portable_tiled_enabled = if quantized_format.is_some() {
+        tensor_config.portable_tiled_dynamic_quantized_linear
+    } else {
+        tensor_config.portable_tiled_dynamic_float_linear || tensor_config.portable_tiled_dynamic_quantized_linear
+    };
+    let portable_tiled = portable_tiled_enabled
         && !native_packed_kernel
         && matches!(tensor_config.algorithm(quantized_format, false), "auto" | "native")
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
-    let warp_decode = matches!(quantized_format, Some("q8_0" | "q6_k" | "q5_k" | "q4_k" | "q3_k" | "q2_k" | "q5_1" | "q4_1" | "f16" | "bf16"))
-        && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
+    let warp_decode = match quantized_format {
+        Some("q8_0" | "q6_k" | "q5_k" | "q4_k" | "q3_k" | "q2_k" | "q5_1" | "q4_1" | "f16" | "bf16") | None => {
+            matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast")
+        }
+        _ => false,
+    };
     let q8_scale_lane = if tensor_config.target_warp_width == 32 {
         "0"
     } else {
@@ -1211,7 +1221,7 @@ fn parse_dynamic_linear_kernel_ext(
             product = product,
         )
     };
-    if portable_tiled_quantized {
+    if portable_tiled {
         let scalar_prefill = format!(
             "        else:\n            let blockIndex = .block.x + .block.y * .gridDim.x\n            let cell = .thread.x + blockIndex * .blockDim.x\n            if cell < m * n:\n                let row = cell / n\n                let col = cell % n\n                var float32 sum = {initial}\n                for inner in 0..<k:\n{product}                c[row * n + col] = sum\n",
             initial = initial,
@@ -1268,11 +1278,11 @@ fn parse_dynamic_linear_kernel_ext(
             body = format!("        if m == 1:\n            __boring_metal_rows_decode_{format}()\n        else:\n            __boring_metal_blocked_prefill_{format}()\n");
         }
     }
-    let tile_fields = if portable_tiled_quantized && metal_blocked_format(tensor_config, quantized_format) {
+    let tile_fields = if portable_tiled && metal_blocked_format(tensor_config, quantized_format) {
         "" // the blocked kernel declares its own threadgroup scratch
-    } else if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
+    } else if portable_tiled && tensor_config.cuda_half_wmma_prefill {
         "    mut [float32, width = 16, height = 64]'actor aTile\n    mut [float32, width = 64, height = 16]'actor bTile\n"
-    } else if portable_tiled_quantized {
+    } else if portable_tiled {
         "    mut [float32, width = 16, height = 16]'actor aTile\n    mut [float32, width = 16, height = 16]'actor bTile\n"
     } else { "" };
     if element == TensorElement::Float16 {
@@ -1487,7 +1497,7 @@ fn parse_dynamic_replacement_stmts(
     );
     let decode_algorithm = tensor_config.algorithm(call.format, true);
     let warp_decode = match call.format {
-        Some("q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k" | "q5_k" | "q5_1" | "q4_1" | "f16" | "bf16") => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
+        Some("q8_0" | "q5_0" | "q4_0" | "iq4_nl" | "q6_k" | "q4_k" | "q3_k" | "q2_k" | "q5_k" | "q5_1" | "q4_1" | "f16" | "bf16") | None => matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast"),
         _ => false,
     };
     let warps_per_block = 256 / tensor_config.target_warp_width.max(1);
@@ -1513,15 +1523,19 @@ fn parse_dynamic_replacement_stmts(
     let native_scalar_decode = native_packed && decode_algorithm == "scalar";
     let native_prefill_rows = if matches!(tensor_config.prefill_precision.as_deref(), Some("half" | "mixed")) { 128 } else { 64 };
     let native_prefill_columns = 64;
-    let portable_tiled_quantized = tensor_config.portable_tiled_dynamic_quantized_linear
-        && call.format.is_some()
+    let portable_tiled_enabled = if call.format.is_some() {
+        tensor_config.portable_tiled_dynamic_quantized_linear
+    } else {
+        tensor_config.portable_tiled_dynamic_float_linear || tensor_config.portable_tiled_dynamic_quantized_linear
+    };
+    let portable_tiled = portable_tiled_enabled
         && !native_packed
         && matches!(tensor_config.algorithm(call.format, false), "auto" | "native")
         && matches!(decode_algorithm, "auto" | "warp" | "warp-broadcast");
     let launch = if native_float && tensor_config.single_launch_float_linear {
         format!("    kernel:\n        {instance}(block = 256, grid = {grid})\n")
     } else if native_float {
-        format!("    if {m} % 8 == 0 and {n} % 8 == 0 and {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = ({n} / 8, {m} / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
+        format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 31) / 32)\n    elif {k} % 8 == 0:\n        kernel:\n            {instance}(block = 32, grid = (({n} + 7) / 8, ({m} + 7) / 8))\n    else:\n        kernel:\n            {instance}(block = 256, grid = {grid})\n", m = call.m, n = call.n, k = call.k)
     } else if native_scalar_decode {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + 255) / 256)\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
     } else if native_packed && matches!(call.format, Some("q4_k" | "q5_k")) {
@@ -1537,16 +1551,16 @@ fn parse_dynamic_replacement_stmts(
         } else {
             format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {rows_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + {col_tail}) / {native_prefill_columns}, ({m} + {row_tail}) / {native_prefill_rows}))\n", m = call.m, n = call.n, tail = rows_per_block - 1, col_tail = native_prefill_columns - 1, row_tail = native_prefill_rows - 1)
         }
-    } else if portable_tiled_quantized && metal_blocked_format(tensor_config, call.format) {
+    } else if portable_tiled && metal_blocked_format(tensor_config, call.format) {
         let decode_grid = if metal_rows_decode_format(tensor_config, call.format) {
             format!("({} + 31) / 32", call.n)
         } else {
             format!("({} + {}) / {warps_per_block}", call.n, warps_per_block - 1)
         };
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = {decode_grid})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n)
-    } else if portable_tiled_quantized && tensor_config.cuda_half_wmma_prefill {
+    } else if portable_tiled && tensor_config.cuda_half_wmma_prefill {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 63) / 64, ({m} + 63) / 64))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
-    } else if portable_tiled_quantized {
+    } else if portable_tiled {
         format!("    if {m} == 1:\n        kernel:\n            {instance}(block = 256, grid = ({n} + {tail}) / {warps_per_block})\n    else:\n        kernel:\n            {instance}(block = 256, grid = (({n} + 15) / 16, ({m} + 15) / 16))\n", m = call.m, n = call.n, tail = warps_per_block - 1)
     } else {
         format!("    kernel:\n        {instance}(block = 256, grid = {grid})\n")
@@ -1822,6 +1836,31 @@ run()
             "ScalarQ8", quals, true, Some("q8_0"), TensorElement::Float32, &scalar_config,
         ).unwrap();
         assert!(!scalar.fields.iter().any(|field| field.name == "aTile" || field.name == "bTile"));
+    }
+
+    #[test]
+    fn portable_float_linear_adds_shared_tiles_for_prefill_and_warp_decode_for_m1() {
+        let quals = [GpuQual::Global, GpuQual::Global, GpuQual::Unified];
+        let tiled_config = TensorLinearConfig { portable_tiled_dynamic_float_linear: true, ..Default::default() };
+        let tiled = parse_dynamic_linear_kernel(
+            "TiledFloat32", quals.clone(), true, None, TensorElement::Float32, &tiled_config,
+        ).unwrap();
+        assert!(tiled.fields.iter().any(|field| field.name == "aTile"));
+        assert!(tiled.fields.iter().any(|field| field.name == "bTile"));
+        let body = format!("{:?}", tiled.methods);
+        assert!(body.contains("aTile") && body.contains("bTile"));
+        assert!(body.contains("shuffleXor"));
+
+        // Scalar fallback when requested
+        let mut scalar_config = tiled_config;
+        scalar_config.decode_algorithm = Some("scalar".into());
+        scalar_config.prefill_algorithm = Some("scalar".into());
+        let scalar = parse_dynamic_linear_kernel(
+            "ScalarFloat32", quals, true, None, TensorElement::Float32, &scalar_config,
+        ).unwrap();
+        assert!(!scalar.fields.iter().any(|field| field.name == "aTile" || field.name == "bTile"));
+        let scalar_body = format!("{:?}", scalar.methods);
+        assert!(!scalar_body.contains("shuffleXor"));
     }
 
     #[test]

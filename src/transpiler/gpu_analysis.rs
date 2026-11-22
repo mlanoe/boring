@@ -136,11 +136,37 @@ pub(super) fn fn_param_index(all_fns: &[&FnDecl], fn_name: &str, arg_idx: usize,
     }
 }
 
+fn expr_evaluates_to_var(expr: &Expr, name: &str) -> bool {
+    match &expr.kind {
+        ExprKind::Var(v) => v == name,
+        ExprKind::If(if_stmt) => {
+            let in_branches = if_stmt.branches.iter().any(|(_, b)| {
+                b.last().is_some_and(|st| match st {
+                    Stmt::Expr(e) => expr_evaluates_to_var(e, name),
+                    _ => false,
+                })
+            });
+            let in_else = if_stmt.else_body.as_ref().is_some_and(|b| {
+                b.last().is_some_and(|st| match st {
+                    Stmt::Expr(e) => expr_evaluates_to_var(e, name),
+                    _ => false,
+                })
+            });
+            in_branches || in_else
+        }
+        _ => false,
+    }
+}
+
 /// True when `body` uses `name` in a way that expects or preserves `BoringKernelArg<T>`
 /// beyond call-argument positions handled by `classify`: a `with <name>:` block, a
-/// `'kernel'global`/`'kernel'unified` local initialized/assigned from `<name>`, or a
-/// `kernel.tensors.*` readable operand.
-pub(super) fn body_has_resident_use_of(body: &[Stmt], name: &str) -> bool {
+/// `'kernel'global`/`'kernel'unified` local initialized/assigned from `<name>`,
+/// an assignment into a GPU-resident struct field, or a `kernel.tensors.*` readable operand.
+pub(super) fn body_has_resident_use_of(
+    body: &[Stmt],
+    name: &str,
+    struct_fields: &std::collections::HashMap<String, Vec<(String, bool)>>,
+) -> bool {
     let mut resident_locals: std::collections::HashSet<String> = std::collections::HashSet::new();
     crate::ast::walk_stmts(body, &mut |node| {
         if let crate::ast::WalkNode::Stmt(Stmt::Let(l)) = node {
@@ -158,15 +184,20 @@ pub(super) fn body_has_resident_use_of(body: &[Stmt], name: &str) -> bool {
             }
             crate::ast::WalkNode::Stmt(Stmt::Let(l))
                 if l.ty.as_ref().is_some_and(|t| t.without_mut().gpu_resident_qual().is_some())
-                    && l.value.as_ref().is_some_and(|v| matches!(&v.kind, ExprKind::Var(vname) if vname == name)) =>
+                    && l.value.as_ref().is_some_and(|v| expr_evaluates_to_var(v, name)) =>
             {
                 found = true;
             }
             crate::ast::WalkNode::Expr(Expr { kind: ExprKind::Assign(lhs, rhs), .. })
-                if matches!(&lhs.kind, ExprKind::Var(ln) if resident_locals.contains(ln))
-                    && matches!(&rhs.kind, ExprKind::Var(rn) if rn == name) =>
+                if expr_evaluates_to_var(rhs, name) =>
             {
-                found = true;
+                if matches!(&lhs.kind, ExprKind::Var(ln) if resident_locals.contains(ln)) {
+                    found = true;
+                } else if let ExprKind::Field(_, field_name) = &lhs.kind {
+                    if struct_fields.values().any(|fields| fields.iter().any(|(n, is_gpu)| n == field_name && *is_gpu)) {
+                        found = true;
+                    }
+                }
             }
             crate::ast::WalkNode::Expr(Expr { kind: ExprKind::MethodCall(recv, method, args), .. })
                 if matches!(method.as_str(), "matmul" | "mma" | "linear" | "moe_linear")
@@ -222,7 +253,7 @@ pub(crate) fn compute_gpu_borrow_params(
         .map(|f| {
             let ret_res = fn_returns_resident(f);
             let row = f.params.iter().map(|p| {
-                is_gpu_array_param(p) && (ret_res || body_has_resident_use_of(&f.body, &p.name))
+                is_gpu_array_param(p) && (ret_res || body_has_resident_use_of(&f.body, &p.name, &struct_fields))
             }).collect();
             (f.name.as_str(), row)
         })

@@ -603,10 +603,16 @@ impl DeviceEmitter {
     }
 
     fn emit_dynamic_float_linear_body(&mut self, has_bias: bool) {
-        self.line("if ((m % 8) == 0 && (n % 8) == 0 && (k % 8) == 0) {");
+        self.line("if (m == 1) {");
+        self.indent += 1;
+        self.emit_unquantized_rows_decode(has_bias, "f32");
+        self.indent -= 1;
+        self.line("} else if ((k % 8) == 0) {");
         self.indent += 1;
         self.line("const uint bp_row = __block_pos.y * 8;");
         self.line("const uint bp_col = __block_pos.x * 8;");
+        self.line("if (bp_row + 8 <= (uint)m && bp_col + 8 <= (uint)n) {");
+        self.indent += 1;
         self.line("simdgroup_float8x8 bp_result = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);");
         self.line("simdgroup_float8x8 bp_a;");
         self.line("simdgroup_float8x8 bp_b;");
@@ -628,6 +634,34 @@ impl DeviceEmitter {
             self.indent -= 1;
             self.line("}");
         }
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("for (uint bp_cell = __simd_lane_id; bp_cell < 64; bp_cell += __simd_size) {");
+        self.indent += 1;
+        self.line("const uint bp_dr = bp_cell / 8;");
+        self.line("const uint bp_dc = bp_cell % 8;");
+        self.line("const uint bp_r = bp_row + bp_dr;");
+        self.line("const uint bp_c = bp_col + bp_dc;");
+        self.line("if (bp_r < (uint)m && bp_c < (uint)n) {");
+        self.indent += 1;
+        if has_bias {
+            self.line("float bp_sum = bias[bp_c];");
+        } else {
+            self.line("float bp_sum = 0.0f;");
+        }
+        self.line("for (uint bp_k = 0; bp_k < (uint)k; ++bp_k) {");
+        self.indent += 1;
+        self.line("bp_sum += a[bp_r * (uint)k + bp_k] * b[bp_c * (uint)k + bp_k];");
+        self.indent -= 1;
+        self.line("}");
+        self.line("c[bp_r * (uint)n + bp_c] = bp_sum;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;

@@ -6070,3 +6070,42 @@ kernel BigLit:
     assert!(wgsl.contains("bitcast<i32>(2795081089u)") && wgsl.contains("bitcast<i32>(4057580981u)"), "{wgsl}");
     assert!(!wgsl.contains("select(bitcast<i32>(4057580981u), 2795081089u"), "{wgsl}");
 }
+
+#[test]
+fn prop_04_resident_struct_fields_assignment_and_if_else() {
+    let (_wgsl, rs) = wgpu_codegen("prop_04_resident_struct_fields", r#"
+struct DecoderBlockState:
+    var mut [float32]'kernel'unified cache_k
+    var mut [float32]'kernel'unified cache_v
+
+req [float32]'kernel'unified kv_append_gpu([float32]'kernel'unified cache, [float32]'kernel'unified new_k) throws:
+    cache
+
+req update_state(mut DecoderBlockState s, [float32]'kernel'unified new_data) throws:
+    s.cache_k = new_data
+
+req update_append(mut DecoderBlockState s, [float32]'kernel'unified new_k) throws:
+    s.cache_k = kv_append_gpu(s.cache_k, new_k)
+
+req update_if_let(mut DecoderBlockState s, [float32]'kernel'unified new_k, bool cond) throws:
+    let [float32]'kernel'unified chosen = if cond:
+        kv_append_gpu(s.cache_k, new_k)
+    else:
+        s.cache_k
+    s.cache_k = chosen
+
+req update_direct_if(mut DecoderBlockState s, [float32]'kernel'unified new_k, bool cond) throws:
+    s.cache_k = if cond:
+        kv_append_gpu(s.cache_k, new_k)
+    else:
+        s.cache_k
+"#);
+    assert!(rs.contains("fn update_state(mut s: &mut DecoderBlockState, new_data: BoringKernelArg<f32>)"), "{rs}");
+    assert!(rs.contains("s.cache_k = new_data.clone();"), "{rs}");
+    assert!(rs.contains("s.cache_k = kv_append_gpu((s.cache_k).clone(), new_k.clone())?;"), "{rs}");
+    assert!(rs.contains("let chosen = {"), "{rs}");
+    assert!(!rs.contains("BoringKernelArg::Host({"), "{rs}");
+    assert!(!rs.contains("__boring_gpu_copy_d2h::<f32>"), "should not perform D2H readback:\n{rs}");
+    assert!(rs.contains("s.cache_k = {"), "{rs}");
+}
+

@@ -1842,23 +1842,8 @@ impl Transpiler {
         // `Vec<T>` made every later `v = <resident call>` a blocking device-to-host readback
         // (a Metal batch flush). A host-typed non-literal initialiser (`mut [T]'kernel'unified v = cache.hk`) starts the slot in
         // the Host variant too. A non-empty literal stays a plain host array.
-        let resident_init = s.value.as_ref().filter(|value_expr| {
-            let value_is_already_resident = self.expr_is_gpu_resident_field(value_expr)
-                || matches!(&value_expr.kind, ExprKind::Var(v)
-                    if !self.with_open_names.contains(v.as_str())
-                        && (self.resident_call_vars.contains_key(v.as_str())
-                            || self.current_fn_gpu_arg_param_names.contains(v.as_str())
-                            || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
-                || matches!(&value_expr.kind, ExprKind::Call(callee, _)
-                    if matches!(&callee.kind, ExprKind::Var(name)
-                        if self.fn_returns_resident.contains_key(name.as_str())));
+        let resident_init = s.value.as_ref().filter(|_value_expr| {
             self.is_gpu_target
-                && !self.config.is_simd_target
-                && (self.current_fn_returns_resident.is_some()
-                    || value_is_already_resident
-                    || (s.binding.is_mutable()
-                        && !self.fn_returns_resident.is_empty()
-                        && !matches!(&value_expr.kind, ExprKind::Array(e) if !e.is_empty())))
                 && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
         });
         if let Some(value_expr) = resident_init {
@@ -2849,6 +2834,30 @@ impl Transpiler {
         // correct `Box<Counter>`. A plain `let Counter'owned c = ...` (no `Type::Mut` wrapper)
         // was never affected — only `mut`/`var mut` bindings were.
         let declared_ty = declared_ty.map(Type::without_mut);
+        if self.config.is_gpu_target
+            && declared_ty.is_some_and(|t| t.gpu_resident_qual().is_some())
+        {
+            if matches!(&value.kind, ExprKind::Call(callee, _)
+                if matches!(&callee.kind, ExprKind::Var(name)
+                    if self.fn_returns_resident.contains_key(name.as_str())))
+            {
+                return self.emit_expr(value);
+            }
+            if self.expr_is_gpu_resident_field(value)
+                || matches!(&value.kind, ExprKind::Var(v)
+                    if !self.with_open_names.contains(v.as_str())
+                        && (self.resident_call_vars.contains_key(v.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(v.as_str())
+                            || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
+            {
+                return format!("({}).clone()", self.emit_expr(value));
+            }
+            let inner = match declared_ty.unwrap() {
+                Type::Qualified(inner, _) => inner.as_ref(),
+                other => other,
+            };
+            return format!("BoringKernelArg::Host({})", self.emit_let_value(Some(inner), value));
+        }
         // `let fixed16_16 x = 1.5` / `= 3`: an untyped literal takes the declared format.
         if let Some(fmt) = declared_ty.and_then(Self::fixed_fmt_of_type) {
             if let Some(lit) = self.emit_fixed_literal(value, &fmt) {

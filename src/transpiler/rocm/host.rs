@@ -39,11 +39,13 @@ pub(super) fn emit_host_rs(
     top_level_kernel_touching: bool,
     rocblas: bool,
     setup_fields: &[(String, String)],
+    needs_async_runtime: bool,
+    threading: crate::transpiler::ThreadingMode,
 ) -> String {
     let mut e = HostEmitter::new(kernel_names);
     e.setup_fields = setup_fields.to_vec();
     e.rocblas = rocblas;
-    e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching);
+    e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching, needs_async_runtime, threading);
     e.out
 }
 
@@ -1865,6 +1867,8 @@ impl HostEmitter {
         has_boring_main: bool,
         boring_main_throws: bool,
         top_level_kernel_touching: bool,
+        needs_async_runtime: bool,
+        threading: crate::transpiler::ThreadingMode,
     ) {
         // Detected before any `emit_fn` call below (`general_code` is only spliced
         // into `self.out` later, well after kernel-touching functions are emitted —
@@ -2011,7 +2015,20 @@ impl HostEmitter {
         self.out.push_str(general_code);
         self.blank();
 
-        self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        // `boring_main`/one of its callees uses `task:`/a channel (see
+        // `TranspileOutput::needs_async_runtime`'s doc) -- this backend's host-side kernel
+        // dispatch is plain blocking FFI (no `pollster`/async device setup to conflict with,
+        // unlike wgpu), so wrapping the whole entry point in a tokio runtime is safe, exactly
+        // like the `std` target's own `fn main()` (see `emit_top.rs`'s `emit_fn`).
+        if needs_async_runtime {
+            match threading {
+                crate::transpiler::ThreadingMode::Single => self.line("#[tokio::main(flavor = \"current_thread\")]"),
+                crate::transpiler::ThreadingMode::Multi => self.line("#[tokio::main]"),
+            }
+            self.line("async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        } else {
+            self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+        }
         self.fn_locals.clear();
         self.indent += 1;
         if !kernel_names.is_empty() {
@@ -2096,10 +2113,11 @@ impl HostEmitter {
                 }
             }
         } else if has_boring_main {
+            let await_suffix = if needs_async_runtime { ".await" } else { "" };
             if boring_main_throws {
-                self.line("boring_main()?;");
+                self.line(&format!("boring_main(){}?;", await_suffix));
             } else {
-                self.line("boring_main();");
+                self.line(&format!("boring_main(){};", await_suffix));
             }
         }
         self.line("Ok(())");

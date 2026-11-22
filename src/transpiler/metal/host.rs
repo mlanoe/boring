@@ -23,10 +23,12 @@ pub(super) fn emit_host_rs(
     boring_main_throws: bool,
     top_level_kernel_touching: bool,
     setup_fields: &[(String, String)],
+    needs_async_runtime: bool,
+    threading: crate::transpiler::ThreadingMode,
 ) -> String {
     let mut e = HostEmitter::new(kernel_names);
     e.setup_fields = setup_fields.to_vec();
-    e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching);
+    e.emit_program(program, kernel_names, kernel_touching, general_code, has_boring_main, boring_main_throws, top_level_kernel_touching, needs_async_runtime, threading);
     e.out
 }
 
@@ -490,6 +492,8 @@ impl HostEmitter {
         has_boring_main: bool,
         boring_main_throws: bool,
         top_level_kernel_touching: bool,
+        needs_async_runtime: bool,
+        threading: crate::transpiler::ThreadingMode,
     ) {
         self.string_rust_type = if general_code.contains("Rc<str>") {
             "std::rc::Rc<str>".into()
@@ -674,7 +678,16 @@ impl HostEmitter {
         self.blank();
 
         if self.screen_var.is_some() || top_level_kernel_touching || !kernel_names.is_empty() || has_boring_main || program.items.iter().any(|i| matches!(i, Item::Stmt(_) | Item::Let(_))) {
-            self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+            // See `rocm::host`'s identical `needs_async_runtime` doc comment for why.
+            if needs_async_runtime {
+                match threading {
+                    crate::transpiler::ThreadingMode::Single => self.line("#[tokio::main(flavor = \"current_thread\")]"),
+                    crate::transpiler::ThreadingMode::Multi => self.line("#[tokio::main]"),
+                }
+                self.line("async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+            } else {
+                self.line("fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
+            }
             self.fn_locals.clear();
             self.indent += 1;
             if self.screen_var.is_some() || top_level_kernel_touching {
@@ -740,10 +753,11 @@ impl HostEmitter {
                     }
                 }
             } else if has_boring_main {
+                let await_suffix = if needs_async_runtime { ".await" } else { "" };
                 if boring_main_throws {
-                    self.line("boring_main()?;");
+                    self.line(&format!("boring_main(){}?;", await_suffix));
                 } else {
-                    self.line("boring_main();");
+                    self.line(&format!("boring_main(){};", await_suffix));
                 }
             }
             self.line("Ok(())");

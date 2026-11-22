@@ -178,44 +178,63 @@ impl Transpiler {
     /// resident-returning function (or a resident local) keeps `y` a `BoringKernelArg<T>`.
     /// Typed as an ordinary value the if-expression materialised each branch into a host
     /// `Vec<T>` (a blocking device-to-host readback, then a re-upload when `y` is passed on).
-    /// Needs an `else`, and the tails must agree on the host element type; otherwise `false`
+    /// Needs an `else`, and the tails must agree on the host element type; otherwise `None`
     /// and the ordinary path (with its readback) applies.
-    pub(crate) fn try_emit_gpu_resident_if_let(&mut self, s: &LetStmt) -> bool {
-        if !self.is_gpu_target || self.config.is_simd_target || self.fn_returns_resident.is_empty() {
-            return false;
+    pub(crate) fn try_emit_gpu_resident_if_expr(
+        &self,
+        if_stmt: &IfStmt,
+        expected_ty: Option<&Type>,
+    ) -> Option<(String, Type)> {
+        if !self.is_gpu_target {
+            return None;
         }
-        let Some(val) = &s.value else { return false };
-        let ExprKind::If(if_stmt) = &val.kind else { return false };
-        let Some(else_body) = &if_stmt.else_body else { return false };
-        if s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_none()) {
-            return false;
-        }
+        let else_body = if_stmt.else_body.as_ref()?;
         let mut bodies: Vec<&Vec<Stmt>> = if_stmt.branches.iter().map(|(_, b)| b).collect();
         bodies.push(else_body);
         let mut elem_ty: Option<Type> = None;
+        let elem_of = |ty: &Type| -> &'static str {
+            let unq = match ty.without_mut() {
+                Type::Qualified(inner, _) => inner.without_mut(),
+                other => other,
+            };
+            kernel_host_element_type(&array_inner_type(unq))
+        };
         for body in &bodies {
-            let Some(Stmt::Expr(tail)) = body.last() else { return false };
+            let Some(Stmt::Expr(tail)) = body.last() else { return None };
             let ty = match &tail.kind {
                 ExprKind::Call(callee, _) => match &callee.kind {
                     ExprKind::Var(f) => self.fn_returns_resident.get(f.as_str()).cloned(),
                     _ => None,
                 },
-                ExprKind::Var(v) => self.resident_call_vars.get(v.as_str()).cloned(),
+                ExprKind::Var(v) => self.resident_call_vars.get(v.as_str()).cloned()
+                    .or_else(|| {
+                        if self.gpu_resident_vars.contains_key(v.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(v.as_str())
+                        {
+                            self.var_types.get(v.as_str()).cloned()
+                        } else {
+                            None
+                        }
+                    }),
+                ExprKind::Field(..) if self.expr_is_gpu_resident_field(tail) => self.struct_field_type_from_expr(tail).cloned(),
                 _ => None,
             };
-            let Some(ty) = ty else { return false };
-            let host = kernel_host_element_type(&array_inner_type(match &ty { Type::Qualified(i, _) => i, o => o }));
+            let Some(ty) = ty else { return None };
+            let host = elem_of(&ty);
             match &elem_ty {
                 None => elem_ty = Some(ty),
                 Some(first) => {
-                    let first_host = kernel_host_element_type(&array_inner_type(match first { Type::Qualified(i, _) => i, o => o }));
-                    if first_host != host { return false; }
+                    let first_host = elem_of(first);
+                    if first_host != host { return None; }
                 }
             }
         }
-        let elem_ty = elem_ty.expect("at least the else body");
-        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
-        let name = escape_rust_keyword(&s.name);
+        let elem_ty = elem_ty?;
+        if let Some(target_ty) = expected_ty {
+            if elem_of(target_ty) != elem_of(&elem_ty) {
+                return None;
+            }
+        }
         let mut sub = self.make_sub();
         sub.fn_returns_void = false;
         sub.suppress_ok_wrap = true;
@@ -228,6 +247,9 @@ impl Transpiler {
             let Stmt::Expr(tail) = tail else { unreachable!() };
             let tail_s = match &tail.kind {
                 ExprKind::Var(v) => format!("{}.clone()", escape_rust_keyword(v)),
+                ExprKind::Field(..) if sub.expr_is_gpu_resident_field(tail) => {
+                    format!("({}).clone()", sub.emit_expr(tail))
+                }
                 _ => sub.emit_expr_owned(tail),
             };
             sub.line(&tail_s);
@@ -245,7 +267,21 @@ impl Transpiler {
         emit_branch(&mut sub, else_body);
         sub.indent -= 1;
         sub.line("}");
-        self.line(&format!("{kw} {name} = {{\n{}}};", sub.out));
+        Some((format!("{{\n{}}}", sub.out), elem_ty))
+    }
+
+    pub(crate) fn try_emit_gpu_resident_if_let(&mut self, s: &LetStmt) -> bool {
+        let Some(val) = &s.value else { return false };
+        let ExprKind::If(if_stmt) = &val.kind else { return false };
+        if s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_none()) {
+            return false;
+        }
+        let Some((code, elem_ty)) = self.try_emit_gpu_resident_if_expr(if_stmt, s.ty.as_ref()) else {
+            return false;
+        };
+        let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
+        let name = escape_rust_keyword(&s.name);
+        self.line(&format!("{kw} {name} = {code};"));
         self.resident_call_vars.insert(s.name.clone(), elem_ty);
         self.known_local_vars.insert(s.name.clone());
         true
@@ -1483,6 +1519,9 @@ impl Transpiler {
                 return Some(format!("{name}.clone()"));
             }
         }
+        if self.expr_is_gpu_resident_field(expr) {
+            return Some(format!("({}).clone()", self.emit_expr(expr)));
+        }
         let ExprKind::Field(obj, field) = &expr.kind else { return None };
         let ExprKind::Var(var_name) = &obj.kind else { return None };
         let kname = self.kernel_vars.get(var_name.as_str())?;
@@ -1558,6 +1597,9 @@ impl Transpiler {
             {
                 return Some(format!("{name}.clone()"));
             }
+        }
+        if self.expr_is_gpu_resident_field(expr) {
+            return Some(format!("({}).clone()", self.emit_expr(expr)));
         }
         None
     }

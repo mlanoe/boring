@@ -285,6 +285,17 @@ pub struct TranspileOutput {
     /// `(name, rust type)` of every value `__boring_screen_setup` returns, in order (empty unless
     /// `TranspileConfig::screen_setup` was set).
     pub screen_setup_fields: Vec<(String, String)>,
+    /// True when any emitted function (including a renamed `boring_main`) ended up `async fn`
+    /// -- i.e. the generated code needs a tokio runtime and the `tokio` Cargo dependency. GPU
+    /// targets (cuda/metal/rocm) synthesize their own, separate `fn main()` that calls
+    /// `boring_main()` (see `detect_boring_main`) rather than reusing the general pass's own
+    /// `main`-handling code path, so they can't discover this from `has_explicit_main`/
+    /// `is_async` the way the `std` target's own `fn main()` emission does -- they need it
+    /// surfaced here instead, to decide whether their own entry point must also become
+    /// `#[tokio::main] async fn main()` and `.await` the `boring_main()` call, and whether
+    /// their own `emit_cargo_toml` needs the `tokio` dependency (the general pass's own
+    /// Cargo.toml template in `main.rs` already adds it unconditionally).
+    pub needs_async_runtime: bool,
 }
 
 /// True when `code` contains a `Box<dyn` that isn't path-qualified (`std::boxed::Box<dyn`) —
@@ -682,7 +693,8 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
             f.extend(set.iter().cloned());
         }
     });
-    TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get(), screen_setup_fields: t.screen_setup_fields.into_inner() }
+    let needs_async_runtime = !t.task_fns.is_empty() || !t.stream_fns.is_empty();
+    TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get(), screen_setup_fields: t.screen_setup_fields.into_inner(), needs_async_runtime }
 }
 
 #[derive(Debug, Clone)]
@@ -4597,7 +4609,7 @@ impl Transpiler {
                     let (any_use, only_qualifying) = crate::ast::scan_var_call_arg_uses(&f.body, &p.name, &mut classify, is_array_like_param);
                     let keep_resident = (returns_resident && explicitly_resident)
                         || (is_gpu_target && explicitly_resident
-                            && (has_qualifying_call || body_has_resident_use_of(&f.body, &p.name) || !any_use));
+                            && (has_qualifying_call || body_has_resident_use_of(&f.body, &p.name, struct_fields) || !any_use));
                     new_flags[i] = keep_resident || only_qualifying;
                 }
                 if flags_by_fn.get(f.name.as_str()) != Some(&new_flags) {

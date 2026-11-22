@@ -264,6 +264,35 @@ def int fetch(int n):\n    n * 10\n\ndef run() throws:\n    (task(Duration.from_
     }
 
     #[test]
+    fn test_async_propagates_transitively_through_plain_callers() {
+        // Regression test: `implicit_async` in emit_top.rs used to only check
+        // "does THIS function's own body call an already-async function" for
+        // `def main():` (the `main_needs_async` special case) — a plain function
+        // calling another plain function that is itself implicitly async (because
+        // ITS body spawns a `task:`) stayed a plain `fn`, so the `.await` the
+        // call site needed (gated on `self.in_async`) was never emitted, and a
+        // `throws` call got a bare `?` applied directly to a `Future` instead
+        // (E0277 "the `?` operator can only be applied to values that implement
+        // `Try`"). Found via a real boring-llm server combining `task:`-based
+        // connection handling with a plain `run_serve` wrapper calling `serve`,
+        // called in turn from `main` — three hops, none of them `main` itself at
+        // the innermost two. Fixed by checking `body_calls_task_fn` against the
+        // accumulating `task_fns` set for every free function, not just `main`.
+        let src = "\
+def helper() throws:\n    task: print \"hi\"\n\ndef wrapper() throws:\n    helper()\n    print \"wrapper done\"\n\ndef main() throws:\n    wrapper()\n";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("async fn helper("), "helper() itself spawns a task, got:\n{}", code);
+        assert!(code.contains("async fn wrapper("),
+            "wrapper() calls the now-async helper() and must become async too, got:\n{}", code);
+        assert!(code.contains("helper().await?"),
+            "wrapper()'s call to helper() must be awaited (and `?`-propagated, since helper() throws), got:\n{}", code);
+        assert!(code.contains("#[tokio::main]") && code.contains("async fn main("),
+            "main() transitively calls a task-spawning function (through wrapper()) and must get the tokio entry point, got:\n{}", code);
+        assert!(code.contains("wrapper().await?"),
+            "main()'s call to wrapper() must be awaited too, got:\n{}", code);
+    }
+
+    #[test]
     fn test_plain_inline_task_value_and_wait_ignore_throws_context() {
         // emit_plain_task_await path (inline `(task: expr).value`/`.wait`, whose
         // `is_future` heuristic matches `ExprKind::Task(_)` directly): always

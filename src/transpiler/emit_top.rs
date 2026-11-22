@@ -2024,16 +2024,17 @@ impl Transpiler {
         let implicit_async = !f.task && self_ty.is_none()
             && (body_has_stream_for(&f.body, &self.stream_fns, &self.stream_async_method_names)
                 || body_has_channel_or_task(&f.body)
-                || has_task_fn_param);
-        // For `main` specifically: also promote to async when the body calls any
-        // task function (wait, timeout, user-defined task fns, etc.).
-        // This lets `def main():` work without the `task` qualifier — the compiler
-        // infers async automatically, so there is no caller that needs to know.
-        let main_needs_async = !f.task
-            && f.name == "main"
-            && self_ty.is_none()
-            && body_calls_task_fn(&f.body, &self.task_fns);
-        let is_async = f.task || implicit_async || main_needs_async;
+                || has_task_fn_param
+                // Also implicit async when the body calls another function already known to
+                // be async (wait, timeout, a user-defined `task` fn, or a plain function
+                // promoted to async by this very check on an earlier call, since functions
+                // are processed in source/use order and `task_fns` accumulates as we go).
+                // This used to be checked only for `f.name == "main"` (`def main():` working
+                // without the `task` qualifier), but any free function calling an
+                // already-async function needs exactly the same promotion to be able to
+                // `.await` that call — not just the program's entry point.
+                || body_calls_task_fn(&f.body, &self.task_fns));
+        let is_async = f.task || implicit_async;
         // A method is never implicitly async (its callers would need `.await` too, which is
         // resolved from the declaration alone), so a `for` over an async stream inside a
         // non-`task` method would emit `.await` in a plain `fn` — rustc E0728, invisible from
@@ -2046,7 +2047,7 @@ impl Transpiler {
                  write `task def {}(...)` (or `task req`)", f.name, f.name));
         }
         // Register implicitly-async functions in task_fns so callers can add .await.
-        if (implicit_async || main_needs_async) && self_ty.is_none() {
+        if implicit_async && self_ty.is_none() {
             self.task_fns.insert(f.name.clone());
         }
 
@@ -3679,6 +3680,14 @@ impl Transpiler {
         self.struct_fields.get(struct_name.as_str())
             .and_then(|fields| fields.iter().find(|(name, _)| name == field))
             .is_some_and(|(_, ty)| ty.without_mut().gpu_resident_qual().is_some())
+    }
+
+    pub(crate) fn struct_field_type_from_expr(&self, e: &Expr) -> Option<&Type> {
+        let ExprKind::Field(base, field) = &e.kind else { return None };
+        let struct_name = self.resolve_struct_name(base)?;
+        self.struct_fields.get(struct_name.as_str())
+            .and_then(|fields| fields.iter().find(|(name, _)| name == field))
+            .map(|(_, ty)| ty)
     }
 
     pub(crate) fn is_atomic_binding(ty: &Type) -> bool {

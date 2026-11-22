@@ -206,3 +206,57 @@ fn implicit_generic_struct_in_a_kernel_is_rejected_on_every_target() {
         assert!(stderr.contains("struct `Wrap` has untyped fields"), "{target}: {stderr}");
     }
 }
+
+#[test]
+fn resident_struct_fields_build_on_simd_and_wgpu() {
+    let fixture_code = r#"
+struct DecoderKV:
+    var [float32]'kernel'unified cache_k
+    var [float32]'kernel'unified cache_v
+
+req [float32]'kernel'unified make_buf(int size) throws:
+    let [float32]'kernel'unified buf = [0.0 as float32 for ..<size]
+    buf
+
+struct Cache:
+    [float32]'kernel'unified data
+
+    init([float32]'kernel'unified data):
+        self.data = data
+
+req Cache make_cache(int size) throws:
+    let [float32]'kernel'unified buf = [0.0 as float32 for ..<size]
+    Cache(buf)
+
+req [float32]'kernel'unified get_cache_k(DecoderKV kv) throws:
+    kv.cache_k
+
+req main() throws:
+    let [float32]'kernel'unified res = make_buf(10)
+    mut DecoderKV b = DecoderKV(res, res)
+    b.cache_k = res
+    mut Cache c = make_cache(10)
+    let [float32]'kernel'unified k = get_cache_k(b)
+    print "ok"
+"#;
+    for target in ["simd", "wgpu"] {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("resident_struct_fields_{target}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.br"), fixture_code).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_boring"))
+            .args(["build", "--target", target, "main.br"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{target} build failed: {}", String::from_utf8_lossy(&out.stderr));
+        let crate_dir = if target == "simd" { "main_simd" } else { "main_wgpu" };
+        let mut cmd = Command::new("cargo");
+        cmd.args(["check", "--offline"])
+            .current_dir(dir.join(crate_dir));
+        let check_out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&check_out.stderr).into_owned();
+        assert!(check_out.status.success(), "{target} cargo check failed: {stderr}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
