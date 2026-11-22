@@ -3143,3 +3143,29 @@ let a_found = query any? x in [10, 20, 30] where x > 15
         let mut interp_err2 = crate::interpreter::Interpreter::new();
         assert!(interp_err2.exec_program(&p_err2).is_err());
     }
+
+    #[test]
+    fn test_unannotated_mut_from_fn_call_captured_in_closure() {
+        let src = r#"
+struct State:
+    int count = 0
+    def inc():
+        count += 1
+
+def State makeState():
+    State(count = 0)
+
+def mutate(mut State s):
+    s.inc()
+
+def run():
+    mut st = makeState()
+    mutate(st)
+    let f = ():
+        mutate(st)
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("Arc<std::sync::Mutex<State>>"), "expected Arc<Mutex<State>>, got:\n{}", code);
+        assert!(code.contains("Arc::new(std::sync::Mutex::new(makeState()))"), "expected Arc::new(Mutex::new(makeState())), got:\n{}", code);
+        assert!(code.contains("mutate(&mut *st.lock().unwrap())"), "expected mutate(&mut *st.lock().unwrap()), got:\n{}", code);
+    }

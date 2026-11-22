@@ -234,6 +234,7 @@ impl Transpiler {
                 } else {
                     self.var_mutex_types.insert(s.name.clone());
                 }
+                self.var_types.entry(s.name.clone()).or_insert_with(|| ty.clone());
                 // Scalar `T'actor` (no fields to route a mutation through — see
                 // `var_lock_scalar`'s doc comment): mark it so bare reads/writes of
                 // the binding itself go through the lock.
@@ -303,6 +304,7 @@ impl Transpiler {
                 } else {
                     self.var_rwlock_types.insert(s.name.clone());
                 }
+                self.var_types.entry(s.name.clone()).or_insert_with(|| ty.clone());
                 // Scalar `T'guard` — see `var_lock_scalar`'s doc comment.
                 if Self::is_copy_type(inner) {
                     self.var_lock_scalar.insert(s.name.clone());
@@ -510,30 +512,107 @@ impl Transpiler {
                     if matches!(&callee.kind, ExprKind::Var(n) if n.as_str() == "some") =>
                 {
                     if let Some(arg) = args.first() {
-                        if let ExprKind::Call(inner, _) = &arg.value.kind {
+                        let ctor_name = if let ExprKind::Call(inner, _) = &arg.value.kind {
                             if let ExprKind::Var(n) = &inner.kind {
                                 if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                                     && self.struct_fields.contains_key(n.as_str())
                                     && !self.generic_struct_names.contains(n.as_str())
                                 {
-                                    Some((n.clone(), true))
+                                    Some(n.clone())
                                 } else { None }
                             } else { None }
-                        } else { None }
+                        } else { None };
+
+                        let name = ctor_name.or_else(|| {
+                            let is_task = matches!(inferred_qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
+                            let is_guard = matches!(inferred_qual, OwnerQual::Guard | OwnerQual::GuardTask);
+                            if self.lock_handle_place(&arg.value, is_task, is_guard).is_some() {
+                                return None;
+                            }
+                            let ty = self.resolve_expr_type(&arg.value).or_else(|| {
+                                if let ExprKind::Call(c, _) = &arg.value.kind {
+                                    if let ExprKind::Var(fname) = &c.kind {
+                                        return self.fn_return_types.get(fname.as_str()).cloned();
+                                    }
+                                }
+                                None
+                            })?;
+                            let mut cur = ty.without_mut();
+                            while let Type::Qualified(inner, _) = cur {
+                                cur = inner.without_mut();
+                            }
+                            if let Type::Named(n) = cur {
+                                if self.struct_fields.contains_key(n.as_str())
+                                    && !self.generic_struct_names.contains(n.as_str())
+                                {
+                                    return Some(n.clone());
+                                }
+                            }
+                            None
+                        });
+                        name.map(|n| (n, true))
                     } else { None }
                 }
-                // Counter(0)
+                // Counter(0) or function call returning struct
                 ExprKind::Call(callee, _) => {
-                    if let ExprKind::Var(n) = &callee.kind {
+                    let ctor_name = if let ExprKind::Var(n) = &callee.kind {
                         if n.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                             && self.struct_fields.contains_key(n.as_str())
                             && !self.generic_struct_names.contains(n.as_str())
                         {
-                            Some((n.clone(), false))
+                            Some(n.clone())
                         } else { None }
-                    } else { None }
+                    } else { None };
+
+                    let name = ctor_name.or_else(|| {
+                        let is_task = matches!(inferred_qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
+                        let is_guard = matches!(inferred_qual, OwnerQual::Guard | OwnerQual::GuardTask);
+                        if self.lock_handle_place(s_value, is_task, is_guard).is_some() {
+                            return None;
+                        }
+                        let ty = self.resolve_expr_type(s_value).or_else(|| {
+                            if let ExprKind::Var(fname) = &callee.kind {
+                                self.fn_return_types.get(fname.as_str()).cloned()
+                            } else { None }
+                        })?;
+                        let mut cur = ty.without_mut();
+                        while let Type::Qualified(inner, _) = cur {
+                            cur = inner.without_mut();
+                        }
+                        if let Type::Named(n) = cur {
+                            if self.struct_fields.contains_key(n.as_str())
+                                && !self.generic_struct_names.contains(n.as_str())
+                            {
+                                return Some(n.clone());
+                            }
+                        }
+                        None
+                    });
+                    name.map(|n| (n, false))
                 }
-                _ => None,
+                _ => {
+                    let is_task = matches!(inferred_qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
+                    let is_guard = matches!(inferred_qual, OwnerQual::Guard | OwnerQual::GuardTask);
+                    if self.lock_handle_place(s_value, is_task, is_guard).is_none() {
+                        let ty = self.resolve_expr_type(s_value);
+                        ty.and_then(|t| {
+                            let mut cur = t.without_mut().clone();
+                            while let Type::Qualified(inner, _) = cur {
+                                cur = inner.without_mut().clone();
+                            }
+                            if let Type::Named(n) = cur {
+                                if self.struct_fields.contains_key(n.as_str())
+                                    && !self.generic_struct_names.contains(n.as_str())
+                                {
+                                    return Some((n, false));
+                                }
+                            }
+                            None
+                        })
+                    } else {
+                        None
+                    }
+                }
             };
             if let Some((type_name, is_optional)) = type_name_opt {
                 let base_ty = crate::ast::Type::Named(type_name);
@@ -2014,20 +2093,58 @@ impl Transpiler {
         }
         // A bare local whose use sites inferred `'actor`/`'guard` (passed to a callee that
         // demands it, captured by a closure, ...) and whose initializer is a plain
-        // struct-constructor call: emit it exactly as if it were declared `T'actor x = T(..)`
-        // — wrapped value, registered lock handle (reads/method calls lock, call sites pass
-        // `&x` instead of moving it).
+        // struct-constructor call or a function call returning a struct: emit it exactly
+        // as if it were declared `T'actor x = ...` — wrapped value, registered lock handle
+        // (reads/method calls lock, call sites pass `&x` instead of moving it).
         if s.ty.is_none() && !self.rc_identity_vars.contains(&s.name) {
-            if let (Some(qual @ (OwnerQual::Actor | OwnerQual::Guard | OwnerQual::ActorTask | OwnerQual::GuardTask)), ExprKind::Call(callee, _)) =
-                (self.decided_qual(&s.name), &s_value.kind)
+            if let Some(qual @ (OwnerQual::Actor | OwnerQual::Guard | OwnerQual::ActorTask | OwnerQual::GuardTask)) =
+                self.decided_qual(&s.name)
             {
-                if let ExprKind::Var(n) = &callee.kind {
-                    if n.chars().next().is_some_and(|c| c.is_uppercase())
-                        && self.struct_fields.contains_key(n.as_str())
-                        && !self.generic_struct_names.contains(n.as_str())
-                    {
+                let is_task = matches!(qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
+                let is_guard = matches!(qual, OwnerQual::Guard | OwnerQual::GuardTask);
+                if self.lock_handle_place(s_value, is_task, is_guard).is_none() {
+                    let struct_name = match &s_value.kind {
+                        ExprKind::Call(callee, _) => {
+                            if let ExprKind::Var(n) = &callee.kind {
+                                if n.chars().next().is_some_and(|c| c.is_uppercase())
+                                    && self.struct_fields.contains_key(n.as_str())
+                                    && !self.generic_struct_names.contains(n.as_str())
+                                {
+                                    Some(n.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }.or_else(|| {
+                        let ty = self.resolve_expr_type(s_value).or_else(|| {
+                            if let ExprKind::Call(callee, _) = &s_value.kind {
+                                if let ExprKind::Var(fname) = &callee.kind {
+                                    return self.fn_return_types.get(fname.as_str()).cloned();
+                                }
+                            }
+                            None
+                        })?;
+                        let mut cur = ty.without_mut();
+                        while let Type::Qualified(inner, _) = cur {
+                            cur = inner.without_mut();
+                        }
+                        if let Type::Named(n) = cur {
+                            if self.struct_fields.contains_key(n.as_str())
+                                && !self.generic_struct_names.contains(n.as_str())
+                            {
+                                return Some(n.clone());
+                            }
+                        }
+                        None
+                    });
+
+                    if let Some(n) = struct_name {
                         let qualified_ty = crate::transpiler::infer_qualifiers::apply_inferred_qual(
-                            &Type::Named(n.clone()), qual,
+                            &Type::Named(n), qual,
                         );
                         if self.try_emit_qualified_let(s, &qualified_ty, s_value) {
                             return;
