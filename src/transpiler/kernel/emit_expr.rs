@@ -547,6 +547,12 @@ impl KernelTranspiler {
             ExprKind::TrailingArrayBlock { .. } => {
                 panic!("trailing array-block sugar reached kernel codegen without being desugared first")
             }
+            ExprKind::EcsFetch(_) => {
+                panic!("ECS fetch expressions are not supported in kernel modules")
+            }
+            ExprKind::Query(_) => {
+                panic!("query expressions are not supported in kernel modules")
+            }
         }
     }
 

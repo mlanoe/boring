@@ -163,7 +163,7 @@
     },
 
     "type-definition": {
-      "match": "\\b(struct|enum|trait)\\s+([A-Z][A-Za-z0-9_]*)\\b",
+      "match": "\\b(struct|data|enum|trait)\\s+([A-Z][A-Za-z0-9_]*)\\b",
       "captures": {
         "1": { "name": "keyword.other.declaration.boring" },
         "2": { "name": "entity.name.type.boring" }
@@ -187,7 +187,7 @@
 
     "declaration-keywords": {
       "name": "keyword.other.declaration.boring",
-      "match": "\\b(let|mut|var|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|any|select|join|channel)\\b"
+      "match": "\\b(let|mut|var|def|req|struct|data|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|any|select|join|channel|query|where|single|first|all)\\b"
     },
 
     "operator-keywords": {

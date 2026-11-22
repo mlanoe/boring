@@ -2740,3 +2740,131 @@ let _result = _r_nan
     assert_eq!(get_var(&interp, "_r_not_nan"), Value::Bool(false));
     assert_eq!(get_var(&interp, "_r_not_inf"), Value::Bool(false));
 }
+
+// ─── Conventional subscript overloading via get / set ───────────────────────
+
+#[test]
+fn test_conventional_subscript_1d() {
+    let src = r#"
+struct CustomList:
+    var [int] items
+
+    req int get(int idx):
+        return self.items[idx]
+
+    def set(int idx, int val):
+        self.items[idx] = val
+
+mut cl = CustomList([10, 20, 30])
+let v0 = cl[1]
+cl[1] = 99
+let v1 = cl[1]
+cl[1] += 1
+let v2 = cl[1]
+let _result = v0 + v1 + v2
+"#;
+    assert_eq!(run_src(src), Value::Int(219));
+}
+
+#[test]
+fn test_conventional_subscript_multid_labeled() {
+    let src = r#"
+struct Grid:
+    var [int] data
+
+    req int get(int x, int y):
+        return self.data[y * 10 + x]
+
+    def set(int x, int y, int val):
+        self.data[y * 10 + x] = val
+
+mut g = Grid([0 for 100])
+g[x = 2, y = 3] = 42
+let v0 = g[y = 3, x = 2]
+g[x = 2, y = 3] += 8
+let v1 = g[x = 2, y = 3]
+let _result = v0 + v1
+"#;
+    assert_eq!(run_src(src), Value::Int(92));
+}
+
+#[test]
+fn test_conventional_subscript_readonly() {
+    let src = r#"
+struct ReadOnlyStore:
+    [int] items
+
+    req int get(int idx):
+        return self.items[idx]
+
+let store = ReadOnlyStore([100, 200])
+let _result = store[0] + store[1]
+"#;
+    assert_eq!(run_src(src), Value::Int(300));
+
+    // And test that assignment fails when `set` is not defined
+    let invalid_src = r#"
+struct ReadOnlyStore:
+    [int] items
+
+    req int get(int idx):
+        return self.items[idx]
+
+mut store = ReadOnlyStore([100, 200])
+store[0] = 42
+"#;
+    let tokens = lex(invalid_src).expect("lex error");
+    let program = parse(tokens).expect("parse error");
+    let mut interp = Interpreter::new();
+    let res = interp.exec_program(&program);
+    let err = res.expect_err("assignment on read-only subscript must fail");
+    assert!(err.message.contains("method 'set' is not defined"), "unexpected error message: {}", err.message);
+}
+
+#[test]
+fn test_conventional_subscript_overload() {
+    let src = r#"
+struct MultiVars:
+    var [int] globals
+    var {string = int} locals
+
+    req int get(int slot):
+        return self.globals[slot]
+
+    req int get(int slot, string sprite):
+        let key = sprite + "_" + slot.toString()
+        return self.locals[key] else 0
+
+    def set(int slot, int val):
+        self.globals[slot] = val
+
+    def set(int slot, string sprite, int val):
+        let key = sprite + "_" + slot.toString()
+        self.locals[key] = val
+
+mut vars = MultiVars([1, 2, 3], {=})
+vars[0] = 10
+vars[slot = 0, sprite = "player"] = 42
+let g0 = vars[0]
+let l0 = vars[sprite = "player", slot = 0]
+let _result = g0 + l0
+"#;
+    assert_eq!(run_src(src), Value::Int(52));
+}
+
+#[test]
+fn test_conventional_subscript_optional_else() {
+    let src = r#"
+struct SparseArray:
+    {string = int} map
+
+    req int? get(string key):
+        return self.map[key]
+
+let s = SparseArray({"a" = 10})
+let v1 = s["a"] else 0
+let v2 = s["b"] else 42
+let _result = v1 + v2
+"#;
+    assert_eq!(run_src(src), Value::Int(52));
+}

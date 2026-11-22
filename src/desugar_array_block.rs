@@ -1125,10 +1125,14 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, elem_ty: &T
             Stmt::If(IfStmt { branches, else_body, line, col })
         }
         ArrayBlockElem::For { vars, iterable, key: None, body } => {
+            let var_types = vec![None; vars.len()];
             Stmt::For(ForStmt {
                 vars: vars.clone(),
+                var_types,
                 iterable: iterable.clone(),
                 key: None,
+                where_clause: None,
+                where_expr: None,
                 // An unkeyed loop keeps positional (index) identity for its items.
                 body: elems_to_push_stmts(body, children_var, elem_ty, line, col, None),
                 line, col,
@@ -1179,7 +1183,7 @@ fn elems_to_push_stmts(elems: &[ArrayBlockElem], children_var: &str, elem_ty: &T
                     }]),
                 line, col, len: 0,
             }));
-            Stmt::For(ForStmt { vars: vars.clone(), iterable: iterable.clone(), key: None, body: inner, line, col })
+            Stmt::For(ForStmt { vars: vars.clone(), var_types: vec![None; vars.len()], iterable: iterable.clone(), key: None, where_clause: None, where_expr: None, body: inner, line, col })
         }
     }).collect()
 }

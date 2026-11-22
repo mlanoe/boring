@@ -1754,16 +1754,288 @@ impl Parser {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Var("resource".to_string()), line, col, len: self.span_len(line, col)})
             }
-            TokenKind::Query => {
-                self.advance();
-                Ok(Expr { kind: ExprKind::Var("query".to_string()), line, col, len: self.span_len(line, col)})
-            }
             TokenKind::Where => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::Var("where".to_string()), line, col, len: self.span_len(line, col)})
             }
             TokenKind::Ident(s) => {
                 let name = s.clone();
+                // ECS query fetch expression:
+                //   `query [all | single[?] | first[?] | any[?]] [(] [mut] Comp, ... [)] [where <clause>]`
+                if s == "query" {
+                    // Check if this is a collection query:
+                    // `query [all | single[?] | first[?] | any[?]] vars in collection [where cond] [|> proj]`
+                    let is_collection_query = {
+                        let mut i = self.pos + 1;
+                        if let Some(TokenKind::Ident(sub)) = self.tokens.get(i).map(|t| &t.kind) {
+                            if matches!(sub.as_str(), "all" | "single" | "first" | "any") {
+                                i += 1;
+                                if let Some(TokenKind::Question) = self.tokens.get(i).map(|t| &t.kind) {
+                                    i += 1;
+                                }
+                            }
+                        }
+                        let mut found_in = false;
+                        while i < self.tokens.len() {
+                            match &self.tokens[i].kind {
+                                TokenKind::In => { found_in = true; break; }
+                                TokenKind::Colon | TokenKind::Newline | TokenKind::Eof | TokenKind::Semicolon | TokenKind::Where => break,
+                                _ => i += 1,
+                            }
+                        }
+                        found_in
+                    };
+                    if is_collection_query {
+                        self.advance(); // consume "query"
+                        let (kind, is_optional) = match self.tokens.get(self.pos).map(|t| &t.kind) {
+                            Some(TokenKind::Ident(sub)) if sub == "all" => {
+                                self.advance();
+                                (EcsFetchKind::All, false)
+                            }
+                            Some(TokenKind::Ident(sub)) if sub == "single" => {
+                                self.advance();
+                                let opt = self.eat(&TokenKind::Question);
+                                (EcsFetchKind::Single, opt)
+                            }
+                            Some(TokenKind::Ident(sub)) if sub == "first" => {
+                                self.advance();
+                                let opt = self.eat(&TokenKind::Question);
+                                (EcsFetchKind::First, opt)
+                            }
+                            Some(TokenKind::Ident(sub)) if sub == "any" => {
+                                self.advance();
+                                let opt = self.eat(&TokenKind::Question);
+                                (EcsFetchKind::Any, opt)
+                            }
+                            _ => (EcsFetchKind::All, false),
+                        };
+                        // Parse vars: `x` or `(a, b)` or `a, b`
+                        let mut vars = Vec::new();
+                        if self.eat(&TokenKind::LParen) {
+                            while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                                vars.push(self.expect_ident()?);
+                                if !self.eat(&TokenKind::Comma) { break; }
+                            }
+                            self.expect(&TokenKind::RParen)?;
+                        } else {
+                            vars.push(self.expect_ident()?);
+                            while self.eat(&TokenKind::Comma) {
+                                vars.push(self.expect_ident()?);
+                            }
+                        }
+                        self.expect(&TokenKind::In)?;
+                        let iterable = self.parse_or()?;
+                        let where_clause = if self.eat(&TokenKind::Where) {
+                            Some(Box::new(self.parse_or()?))
+                        } else {
+                            None
+                        };
+                        // Projection via `|>` if followed by projection expression:
+                        // Note: if next is `|> collect()` or `|> .collect()`, it's an outer pipe on the iterator, not a projection!
+                        let projection = if self.check(&TokenKind::PipeArrow) {
+                            let next_is_collect = match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                                Some(TokenKind::Ident(id)) if id == "collect" => true,
+                                Some(TokenKind::Dot) => matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Ident(id)) if id == "collect"),
+                                _ => false,
+                            };
+                            if !next_is_collect {
+                                self.advance(); // consume `|>`
+                                Some(Box::new(self.parse_or()?))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        return Ok(Expr {
+                            kind: ExprKind::Query(Box::new(QueryExpr {
+                                kind,
+                                is_optional,
+                                vars,
+                                iterable: Box::new(iterable),
+                                where_clause,
+                                projection,
+                            })),
+                            line, col, len: self.span_len(line, col),
+                        });
+                    }
+
+                    let next1 = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                    let is_query_fetch = match next1 {
+                        Some(TokenKind::Ident(sub)) if matches!(sub.as_str(), "all" | "single" | "first" | "any") => {
+                            let next2 = self.tokens.get(self.pos + 2).map(|t| &t.kind);
+                            let comp_pos = if matches!(next2, Some(TokenKind::Question)) { self.pos + 3 } else { self.pos + 2 };
+                            match self.tokens.get(comp_pos).map(|t| &t.kind) {
+                                Some(TokenKind::Where | TokenKind::Mut) => true,
+                                Some(TokenKind::LParen) => match self.tokens.get(comp_pos + 1).map(|t| &t.kind) {
+                                    Some(TokenKind::Mut) => true,
+                                    Some(TokenKind::Ident(t)) => Self::is_type_name(t) || t == "entity",
+                                    _ => false,
+                                },
+                                Some(TokenKind::Ident(t)) => Self::is_type_name(t) || t == "entity",
+                                _ => sub == "any" || sub == "all",
+                            }
+                        }
+                        Some(TokenKind::Where | TokenKind::Mut) => true,
+                        Some(TokenKind::LParen) => match self.tokens.get(self.pos + 2).map(|t| &t.kind) {
+                            Some(TokenKind::Mut) => true,
+                            Some(TokenKind::Ident(t)) => Self::is_type_name(t) || t == "entity",
+                            _ => false,
+                        },
+                        Some(TokenKind::Ident(t)) => Self::is_type_name(t) || t == "entity",
+                        _ => false,
+                    };
+                    if is_query_fetch {
+                        self.advance(); // consume "query"
+                        let (kind, is_optional) = match self.tokens.get(self.pos).map(|t| &t.kind) {
+                            Some(TokenKind::Ident(sub)) if sub == "all" => {
+                                self.advance();
+                                (EcsFetchKind::All, false)
+                            }
+                            Some(TokenKind::Ident(sub)) if sub == "single" => {
+                                self.advance();
+                                let opt = self.eat(&TokenKind::Question);
+                                (EcsFetchKind::Single, opt)
+                            }
+                            Some(TokenKind::Ident(sub)) if sub == "first" => {
+                                self.advance();
+                                let opt = self.eat(&TokenKind::Question);
+                                (EcsFetchKind::First, opt)
+                            }
+                            Some(TokenKind::Ident(sub)) if sub == "any" => {
+                                self.advance();
+                                let opt = self.eat(&TokenKind::Question);
+                                (EcsFetchKind::Any, opt)
+                            }
+                            _ => (EcsFetchKind::All, false),
+                        };
+                        let mut components = Vec::new();
+                        if self.check(&TokenKind::Where) {
+                            // no components
+                        } else if self.eat(&TokenKind::LParen) {
+                            while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                                let is_mut = self.eat(&TokenKind::Mut);
+                                let mut ty = if matches!(self.peek(), TokenKind::Ident(s) if s == "entity") {
+                                    self.advance();
+                                    Type::Named("Entity".to_string())
+                                } else {
+                                    self.parse_type()?
+                                };
+                                let is_option = self.eat(&TokenKind::Question);
+                                if is_option {
+                                    ty = Type::Optional(Box::new(ty));
+                                }
+                                components.push(EcsFetchComponent { is_mut, is_option, ty });
+                                if !self.eat(&TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                            self.expect(&TokenKind::RParen)?;
+                        } else if matches!(self.peek(), TokenKind::Mut) || matches!(self.peek(), TokenKind::Ident(t) if Self::is_type_name(t) || t == "entity") {
+                            let is_mut = self.eat(&TokenKind::Mut);
+                            let mut ty = if matches!(self.peek(), TokenKind::Ident(s) if s == "entity") {
+                                self.advance();
+                                Type::Named("Entity".to_string())
+                            } else {
+                                self.parse_type()?
+                            };
+                            let is_option = self.eat(&TokenKind::Question);
+                            if is_option {
+                                ty = Type::Optional(Box::new(ty));
+                            }
+                            components.push(EcsFetchComponent { is_mut, is_option, ty });
+                        }
+                        let where_clause = if self.eat(&TokenKind::Where) {
+                            Some(self.parse_query_where_clause()?)
+                        } else {
+                            None
+                        };
+                        return Ok(Expr {
+                            kind: ExprKind::EcsFetch(Box::new(EcsFetchExpr {
+                                kind,
+                                is_optional,
+                                components,
+                                where_clause,
+                            })),
+                            line, col,
+                            len: self.span_len(line, col),
+                        });
+                    }
+                }
+                // Legacy ECS fetch expression: `single`, `single?`, `first`, `first?`, `any`, `any?`
+                if matches!(s.as_str(), "single" | "first" | "any") {
+                    let next = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                    let is_question = matches!(next, Some(TokenKind::Question));
+                    let comp_token_pos = if is_question { self.pos + 2 } else { self.pos + 1 };
+                    let is_fetch = match self.tokens.get(comp_token_pos).map(|t| &t.kind) {
+                        Some(TokenKind::LParen) => match self.tokens.get(comp_token_pos + 1).map(|t| &t.kind) {
+                            Some(TokenKind::Mut) => true,
+                            Some(TokenKind::Ident(t)) => Self::is_type_name(t) || t == "entity",
+                            _ => false,
+                        },
+                        Some(TokenKind::Ident(t)) if Self::is_type_name(t) || t == "entity" => true,
+                        Some(TokenKind::Mut) => true,
+                        _ => false,
+                    };
+                    if is_fetch {
+                        self.advance(); // consume "single" / "first" / "any"
+                        let is_optional = if is_question { self.advance(); true } else { false };
+                        let kind = match s.as_str() {
+                            "single" => EcsFetchKind::Single,
+                            "first" => EcsFetchKind::First,
+                            _ => EcsFetchKind::Any,
+                        };
+                        let mut components = Vec::new();
+                        if self.eat(&TokenKind::LParen) {
+                            while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                                let is_mut = self.eat(&TokenKind::Mut);
+                                let mut ty = if matches!(self.peek(), TokenKind::Ident(s) if s == "entity") {
+                                    self.advance();
+                                    Type::Named("Entity".to_string())
+                                } else {
+                                    self.parse_type()?
+                                };
+                                let is_option = self.eat(&TokenKind::Question);
+                                if is_option {
+                                    ty = Type::Optional(Box::new(ty));
+                                }
+                                components.push(EcsFetchComponent { is_mut, is_option, ty });
+                                if !self.eat(&TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                            self.expect(&TokenKind::RParen)?;
+                        } else {
+                            let is_mut = self.eat(&TokenKind::Mut);
+                            let mut ty = if matches!(self.peek(), TokenKind::Ident(s) if s == "entity") {
+                                self.advance();
+                                Type::Named("Entity".to_string())
+                            } else {
+                                self.parse_type()?
+                            };
+                            let is_option = self.eat(&TokenKind::Question);
+                            if is_option {
+                                ty = Type::Optional(Box::new(ty));
+                            }
+                            components.push(EcsFetchComponent { is_mut, is_option, ty });
+                        }
+                        let where_clause = if self.eat(&TokenKind::Where) {
+                            Some(self.parse_query_where_clause()?)
+                        } else {
+                            None
+                        };
+                        return Ok(Expr {
+                            kind: ExprKind::EcsFetch(Box::new(EcsFetchExpr {
+                                kind,
+                                is_optional,
+                                components,
+                                where_clause,
+                            })),
+                            line, col,
+                            len: self.span_len(line, col),
+                        });
+                    }
+                }
                 // Macro call: `name!(...)`, `name![...]`, `name!{...}`
                 // Lookahead: tokens[pos+1] == Bang AND tokens[pos+2] is a delimiter.
                 {

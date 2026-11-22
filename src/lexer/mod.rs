@@ -796,7 +796,6 @@ pub enum TokenKind {
     Data,
     Component,
     Resource,
-    Query,
     Where,
 
     // Operators
@@ -1674,7 +1673,6 @@ fn keyword_or_ident(s: String) -> TokenKind {
         "data"     => TokenKind::Data,
         "component" => TokenKind::Component,
         "resource" => TokenKind::Resource,
-        "query"    => TokenKind::Query,
         "where"    => TokenKind::Where,
         "true"     => TokenKind::Bool(true),
         "false"    => TokenKind::Bool(false),

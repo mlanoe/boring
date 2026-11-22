@@ -1096,6 +1096,9 @@ let f = a[1..=3].to_vec();
 | `arr.join(sep)`             | `arr.join(sep)`                   |
 | `arr.flat()`                | `arr.concat()`                    |
 | `arr.isEmpty()`             | `arr.is_empty()`                  |
+| `iter.collect()`            | `.collect::<Vec<_>>()` — materializes an iterator or collection query into an array |
+
+> See also [Collection queries](#collection-queries-query-kind--in-collection-where-cond--projection) for declarative SQL/LINQ-style querying (`query x in numbers where x % 2 == 0 |> x * 2`).
 
 ```boring
 let doubled  = numbers.map((n): n * 2)
@@ -2094,6 +2097,63 @@ for _ in 1..=5:
 for _ in 1isize..=5 { println!("tick"); }
 ```
 
+### `for ... where` filter guard
+
+A `where` guard can be added directly to any `for` loop to filter elements before entering the loop body:
+
+```boring
+let numbers = [1, 2, 3, 4, 5, 6]
+
+for n in numbers where n % 2 == 0:
+    print "{n}"    # 2, 4, 6
+
+for k, v in {"a" = 10, "b" = 3, "c" = 20} where v > 5:
+    print "{k}: {v}"
+```
+
+**Rust equivalent**
+```rust
+for n in numbers.iter().cloned() {
+    if !(n % 2 == 0) { continue; }
+    println!("{}", n);
+}
+```
+
+### Collection queries: `query [kind] ... in collection [where cond] [|> projection]`
+
+Beyond Bevy ECS entity queries, Boring supports expressive queries on collections, ranges, and iterators:
+
+```boring
+let nums = [1, 2, 3, 4, 5]
+
+# Filtering with `where`:
+let evens = query x in nums where x % 2 == 0
+
+# Filtering and projecting with `|>`:
+let doubled_evens = query x in nums where x % 2 == 0 |> x * 10
+
+# Collecting into a vector/array:
+let arr = (query x in nums where x > 2 |> x * 2).collect()
+# Or via pipeline syntax:
+let arr2 = query x in nums where x > 2 |> x * 2 |> collect()
+```
+
+#### Quantifiers (`all`, `first`, `any`, `single`)
+
+- `all` (default when omitted): returns an iterator of all matching elements.
+- `first` / `first?`: returns the first matching element (`T` or `T?` with `?`).
+- `any` / `any?`: returns any matching element without enforcing traversal order (`T` or `T?` with `?`).
+- `single` / `single?`: asserts exactly one matching element (`T` or `T?` with `?`); panics / throws if more than one match exists.
+
+```boring
+let first_match = query first? x in nums where x > 3        # Some(4)
+let single_item = query single? x in nums where x == 5       # Some(5)
+let any_match   = query any? x in nums where x % 2 != 0      # Some(1)
+```
+
+**Rust equivalent**
+Transpiles directly to zero-cost idiomatic Rust iterator chains (`.into_iter().filter(...).map(...)`, `.next()`, `.collect::<Vec<_>>()`).
+
 ### `loop` with `break` and `continue`
 
 ```boring
@@ -2713,6 +2773,120 @@ impl Counter {
 
 `obj()` at a call site dispatches to `__call__` when `obj` is a known struct instance. Calling a struct that has no `def ()`/`req ()` defined is a runtime error.
 
+### Subscript operator — conventional `get` / `set` indexing
+
+Any `struct` or `data` type can support the bracket indexing syntax `[]` (both 1D and multi-dimensional) by defining conventional `get` and `set` methods.
+
+Rather than introducing dedicated operator keywords or traits, Boring desugars subscript access into method calls:
+
+* **Read `obj[...]`** — desugars to `obj.get(...)`
+* **Write `obj[...] = val`** — desugars to `obj.set(..., val)`
+* **Compound modify `obj[...] += val`** — desugars to `obj.set(..., obj.get(...) + val)`
+
+#### 1D Subscript Access
+
+For structures wrapping an indexed collection, slot table, or key-value lookup:
+
+```boring
+struct SlotBuffer:
+    var [int] items
+
+    # Read: req get
+    req int get(int slot):
+        return self.items[slot]
+
+    # Write: def set
+    def set(int slot, int value):
+        self.items[slot] = value
+
+mut buf = SlotBuffer([10, 20, 30])
+
+# Read
+let score = buf[1]         # 20 (calls buf.get(1))
+
+# Write
+buf[1] = 99                # calls buf.set(1, 99)
+
+# Compound assignment
+buf[1] += 1                # calls buf.set(1, buf.get(1) + 1)
+print buf[1]               # 100
+```
+
+#### Multi-Dimensional Indexing with Labels
+
+For structures requiring multiple coordinates or keys (e.g. grids, ECS variable tables), methods define multiple parameters. At the call site, multi-dimensional indexing uses **mandatory labels in free order**:
+
+```boring
+struct Grid:
+    var [int] cells # 10x10 row-major
+
+    req int get(int x, int y):
+        return self.cells[y * 10 + x]
+
+    def set(int x, int y, int value):
+        self.cells[y * 10 + x] = value
+
+mut g = Grid([0 for 100])
+
+# Write using labels
+g[x = 2, y = 3] = 42
+
+# Read: order-free at the use site
+let v0 = g[y = 3, x = 2]   # 42 (calls g.get(x = 2, y = 3))
+
+# Compound assignment
+g[x = 2, y = 3] += 8       # 50
+```
+
+#### Method Overloading
+
+A struct can define multiple `get` and `set` overloads (e.g., supporting both 1D and labeled multi-D access on the same instance):
+
+```boring
+struct VariableTable:
+    var [int] globals
+    var {string = int} locals
+
+    req int get(int slot):
+        return self.globals[slot]
+
+    req int get(int slot, string sprite):
+        return self.locals[sprite + "_" + slot.toString()] else 0
+
+    def set(int slot, int value):
+        self.globals[slot] = value
+
+    def set(int slot, string sprite, int value):
+        self.locals[sprite + "_" + slot.toString()] = value
+
+mut vars = VariableTable([0, 0], {=})
+vars[0] = 10
+vars[slot = 0, sprite = "hero"] = 42
+
+print vars[0]                              # 10
+print vars[sprite = "hero", slot = 0]      # 42
+```
+
+#### Read-Only Subscripts
+
+A struct that declares `req get(...)` without a corresponding `def set(...)` is read-only. Attempting to assign to `obj[...]` produces a compile-time error:
+```boring
+struct Lookup:
+    {string = int} table
+    req int? get(string key): return self.table[key]
+
+let l = Lookup({"score" = 100})
+let s = l["score"] else 0     # OK: 100
+# l["score"] = 200            # ERROR: method 'set' is not defined
+```
+
+#### Optionals and `else`
+
+When `get` returns an optional type `T?`, the standard `else` fallback works naturally:
+```boring
+let val = table[key] else defaultValue
+```
+
 ### Pure Value Types — `data`
 
 In addition to general-purpose `struct`, Boring provides the `data` keyword for declaring pure value types (Plain Old Data / POD):
@@ -2732,7 +2906,7 @@ pub data Marker: pass
 
 #### Differences between `struct` and `data`
 * **Pure Value Semantics**: A `data` type represents pure, identity-less data intended to be stored linearly in cache-friendly arrays or tables.
-* **Allowed Field Types**: Scalaires (`int`, `float`, `bool`), strings (`string`), math vectors (`Vec2`, `Vec3`, `Transform`), enums, arrays (`[int]`, `[float, 3]`), dictionaries, optional values (`Point?`), and other `data` types.
+* **Allowed Field Types**: Scalars (`int`, `float`, `bool`), strings (`string`), fixed-size arrays (`[float, 2]`, `[float, 3]`, `[int]`), spatial types (`Transform`), enums, optional values (`Point?`), and other `data` types.
 * **Forbidden Field Types**: Pointer and concurrency qualifiers (`'actor`, `'shared`, lock handles, references). A `data` type cannot hold references to external managed actors or mutexes.
 * **Guarantees**: The compiler statically ensures that every `data` is `Send + Sync + 'static`, copyable or clonable without side-effects, and optimal for CPU cache locality and parallel processing.
 * **ECS Integration**: All components in Boring's native ECS (Chapter 34) must be declared with `data` via `@component data`.
@@ -8494,6 +8668,10 @@ unreachable("variant {v} should have been handled above")
 | `let x = …` (name already in scope)   | `let x = …` — Rust shadowing; type may change freely |
 | `1..=5`                     | `1isize..=5`                                |
 | `1..<5`                   | `1isize..5`                                 |
+| `obj[i]` (struct with `get`) | `obj.get(i)` — conventional subscript getter |
+| `obj[i] = v` (struct with `set`) | `obj.set(i, v)` — conventional subscript setter |
+| `obj[x = a, y = b]` (struct) | `obj.get(x = a, y = b)` — multi-D labeled subscript getter |
+| `obj[x = a, y = b] = v` (struct) | `obj.set(x = a, y = b, v)` — multi-D labeled subscript setter |
 | `x?.field`                 | `x.map(\|v\| v.field)`                      |
 | `f?(args)`                | `if f.is_some() { Some((f.as_ref().unwrap().lock().unwrap())(args)) } else { None }` |
 | `task fn(args)`            | `tokio::spawn(async move { fn(args).await })`  |
@@ -10748,11 +10926,11 @@ Boring treats ECS (Entity Component System) as a first-class language citizen, l
 1. **Zero Boilerplate**: No manual generic wrappers (`Query<(&Transform, &Velocity)>`, `Res<Time>`, `ResMut<Score>`), manual iterators, or system parameter wiring.
 2. **Pure Value Types (`data`)**: Pure data structures without pointer or reference overhead (`'actor`, `'shared`), maximizing CPU cache locality and enabling safe parallel execution.
 3. **Explicit Components (`@component data`)**: Components are declared with `@component data`, ensuring cache-optimal storage.
-4. **Global Resources (`@resource`)**: Global state is declared simply with `@resource`, accessible and mutable like standard variables (`score += 10`).
-5. **Universal Queries (`query`)**: Systems operate across matching entities via `query`:
-   - **Component Method Queries**: Declare behavior directly on the primary component using `self`.
-   - **Top-Level Queries**: Declare mediator systems across multiple components or lifecycle hooks.
-6. **Ambient Context (`.`)**: Access system context directly via the leading dot syntax (`.time.delta`, `.input`, `.entity`, `.despawn()`, `.spawn(...)`).
+4. **Global Resources (`@resource`) & Direct Signatures**: Global state is declared simply with `@resource`, accessible and mutable like standard variables (`score += 10`) and passed cleanly into signatures (`Score score`, `mut Score score`).
+5. **Universal Systems (`def` / `req` with `where`)**: Systems operate across matching entities and components using standard function syntax.
+6. **Inline Queries (`query`)**: Zero-allocation query views (`query (Entity, Transform) where Brick`) and entity fetchers (`query single`, `query first`, `query any`).
+7. **Ambient Context & Infrastructure**: Access system services (`time.delta`, `input.pressed`, `commands.spawn`, resources) directly, with qualified fallbacks (`ecs.time`, `ecs.input`, `resource.<name>`) when shadowed by local variables.
+8. **Unified ECS Modules (`use ecs.<module>`)**: Clean modular imports for specialized subsystems (`use ecs.asset...`, `use ecs.input...`).
 
 ### 1. Components: `@component data`
 
@@ -10790,20 +10968,24 @@ data GameConfig:
     var int max_players = 4
 ```
 
-In any system or query, global resources can be read and mutated directly:
+In any system, global resources can be read and mutated directly, or passed cleanly in system signatures:
 
 ```boring
-query kill_enemy(Enemy e) where e.is_dead:
+def kill_enemy(Enemy e) where e.is_dead:
     score += 10
-    .despawn()
+    despawn()
+
+def update_scoreboard(Score score, mut TextUiWriter writer):
+    let score_root = query single entity where (ScoreboardUi, Text)
+    writer.text(score_root, 1).pointee = "{score.count}".to_string()
 ```
 
-### 3. Systems: `query`
+### 3. Systems: `def` and `req` with `where`
 
-A `query` defines a system that automatically iterates over all entities matching the specified components and `where` constraints.
+Systems are declared with standard function keywords `def` (mutating systems) or `req` (read-only systems), along with optional `where` filter clauses.
 
-#### Method Queries on Components
-When a system primarily modifies or queries a single component, define it directly inside the `data` declaration. `self` automatically binds to the current entity's component:
+#### Method Systems on Components
+When a system primarily modifies or queries a single component, define it directly inside the `data` declaration:
 
 ```boring
 @component
@@ -10812,40 +10994,62 @@ pub data Position:
     float y
 
     @schedule(Update)
-    query movement(Velocity vel) where not Frozen:
-        self.x += vel.dx * .time.delta
-        self.y += vel.dy * .time.delta
+    def movement(Velocity vel) where not Frozen:
+        self.x += vel.dx * time.delta
+        self.y += vel.dy * time.delta
 ```
 
-- `self` is available as a mutable reference (`&mut Position`).
+- In Boring, the keyword defines the receiver's mutability: `def` automatically provides a mutable `self` (`&mut Position`), while `req` provides a read-only `self` (`&Position`). Explicit `mut self` is neither needed nor valid syntax.
 - Secondary required components are listed in the parameter list (`(Velocity vel)`).
-- Read-only queries on `self` can use `req query`.
+- The `self` parameter can be omitted from the signature or written as `self`.
+- Read-only systems on the component receiver use `req movement(Velocity vel): ...`.
 
-#### Top-Level Queries
+#### Top-Level Systems
 For mediator systems operating across multiple distinct components or system lifecycle events:
 
 ```boring
 # Physics mediator system
-query apply_velocity(mut Position pos, Velocity vel) where not Frozen:
-    pos.x += vel.dx * .time.delta
-    pos.y += vel.dy * .time.delta
+def apply_velocity(mut Position pos, Velocity vel) where not Frozen:
+    pos.x += vel.dx * time.delta
+    pos.y += vel.dy * time.delta
 
-# Startup system (runs once when the world initializes)
+# Startup system (runs once when the world initializes, commands is ambient)
 @schedule(Startup)
-query setup_world():
-    .spawn(Position(x = 0.0, y = 0.0), Velocity(dx = 10.0, dy = 5.0))
+def setup_world():
+    commands.spawn((Position(x = 0.0, y = 0.0), Velocity(dx = 10.0, dy = 5.0)))
 
 # Entity lifecycle system
-query death_check(Health h) where h.current <= 0:
-    .despawn()
+def death_check(Health h) where h.current <= 0:
+    despawn()
 ```
 
-### 4. Scheduling & State: `@schedule` and `@state`
+### 4. Inline Query Expressions: `query`
+
+Inside systems, the `query` keyword performs entity fetches and produces zero-allocation iterable views:
+
+```boring
+# Iterable view over all matching entities (O(1) .isEmpty(), for loop):
+let bricks = query (Entity, Transform) where Brick
+let all_bricks = query all (Entity, Transform) where Brick
+
+# Single matching entity (strict or optional):
+mut ball = query single (mut Velocity, Transform) where Ball
+let maybe_bonus = query single? (Transform) where Bonus
+
+# First matching entity:
+let leader = query first (Entity, Transform) where Player
+
+# Boolean existence check:
+if query any where Ball:
+    print("Ball is active")
+```
+
+### 5. Scheduling & State: `@schedule` and `@state`
 
 - `@schedule(...)`: Determines the execution phase. Supported schedules include `Startup`, `FixedUpdate`, `Update` (default), `PostUpdate`, and `Render`.
 - `@state(...)`: Restricts system execution to a specific application or game state (e.g. `@state(GameState.Playing)`).
 
-### 5. Filtering with `where`
+### 6. Filtering with `where`
 
 The `where` clause specifies archetype constraints and runtime value filters:
 - **Component presence**: `where Player` $\rightarrow$ `With<Player>`
@@ -10855,19 +11059,53 @@ The `where` clause specifies archetype constraints and runtime value filters:
 - **Addition detection**: `where added Enemy` $\rightarrow$ `Added<Enemy>`
 - **Value expressions**: `where health.current <= 0` evaluates at the start of each entity step.
 
-### 6. Ambient Context (`.`)
+### 7. Ambient Context & Conflict Disambiguation
 
-Inside queries, the leading dot (`.`) provides direct access to environmental context:
+Inside systems, Boring automatically detects and injects infrastructure services (`time`, `input`, `commands`, and `@resource` variables) directly by name without forcing extra signature parameters:
 
 | Expression | Meaning | Rust/Bevy Target |
 |---|---|---|
-| `.time.delta` | Frame delta time in seconds | `(time.delta_secs() as f64)` |
-| `.time.elapsed` | Total elapsed simulation time | `time.elapsed_secs_f64()` |
-| `.input.is_key_pressed(...)` | Key press state | `input.pressed(...)` |
-| `.entity` | ID of the current entity | `Entity` |
-| `.despawn()` | Despawns the current entity | `commands.entity(__entity).despawn()` |
-| `.spawn(c1, c2, ...)` | Spawns a new entity with components | `commands.spawn((c1, c2, ...))` |
-| `score += 10` | Modifies an `@resource` variable | `res_score.0 += 10` via `ResMut` |
+| `time.delta` / `time.deltaSecs()` | Frame delta time in seconds | `(time.delta_secs() as f64)` |
+| `time.elapsed` / `time.elapsedSecs()` | Total elapsed simulation time | `time.elapsed_secs_f64()` |
+| `input.pressed(...)` | Key / button held state | `input.pressed(...)` |
+| `input.justPressed(...)` | Key pressed this frame | `input.just_pressed(...)` |
+| `input.justReleased(...)` | Key released this frame | `input.just_released(...)` |
+| `commands.spawn(...)` | Spawns a new entity with components | `commands.spawn(...)` |
+| `commands.entity(e).despawn()` | Despawns a specific entity | `commands.entity(e).despawn()` |
+| `<resource_name>` (e.g. `score += 10`) | Direct access to an `@resource` variable | `res_score.0 += 10` via `ResMut` |
+| `entity` | ID of the current entity in query loop | `Entity` |
+| `despawn()` | Despawns the current entity in query loop | `commands.entity(__entity).despawn()` |
+
+Boring methods and fields use `camelCase` by convention (`justPressed(...)`, `deltaSecs()`, `elapsedSecs()`). The Boring transpiler automatically maps `camelCase` to Rust's `snake_case` (`just_pressed(...)`, `delta_secs()`). Both casings are accepted.
+
+If a local variable shadows an ambient service (such as a local variable named `time`, `input`, or `score`), the local variable takes precedence. You can qualify the ambient access using:
+- Current Entity: `ecs.entity`
+- Current Entity Despawn: `ecs.despawn()`
+- Resources: `resource.<name>` or `ecs.resource.<name>`
+- Time: `ecs.time.delta`
+- Input: `ecs.input.pressed(...)`
+- Commands: `ecs.commands.spawn(...)`
+
+Legacy leading-dot syntax (`.entity`, `.despawn()`, `.time`, `.input`, `.commands`, `.resource.<name>`) remains supported for backward compatibility.
+
+### 7. Game Framework: `@game`
+
+To write 100% native Boring games without any Bevy boilerplate (`App.new()`, `use bevy`, plugins, manual main loop), Boring provides the `@game` decorator on a `data` or `struct`:
+
+```boring
+@game
+pub data Breakout:
+    string title = "Breakout!"
+    int width = 800
+    int height = 600
+    Color clear_color = Color.srgb(0.9, 0.9, 0.9)
+```
+
+- **Automatic Application Bootstrap**: Synthesizes `pub fn build_app() -> App` and `fn main() { build_app().run(); }`.
+- **Default 2D Camera**: Automatically spawns a default 2D camera (`Camera2D`) if no camera is spawned in startup systems.
+- **Automatic System & Resource Scheduling**: Queries and systems with `@schedule(Startup)`, `@schedule(Update)` (or defaulting to Update), and `@schedule(FixedUpdate)` are automatically wired into their corresponding schedules.
+- **Standard Components & Ergonomics**: Built-in `Transform` offers direct coordinate access (`transform.x`, `transform.y`, `transform.z` mapped to `.translation.x/y/z` as `f32`), alongside `Sprite` and `Camera2D` aliases.
+
 
 ---
 

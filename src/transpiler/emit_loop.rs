@@ -327,6 +327,14 @@ impl Transpiler {
         self.line("}");
     }
 
+    fn emit_for_body(&mut self, s: &ForStmt) {
+        if let Some(guard) = &s.where_expr {
+            let cond = self.emit_expr(guard);
+            self.line(&format!("if !({}) {{ continue; }}", cond));
+        }
+        self.emit_loop_body(&s.body);
+    }
+
     pub(crate) fn emit_for(&mut self, s: &ForStmt) {
         // String-ness of loop vars is scoped to the loop: a loop var registered as a string
         // (`for i, v in fruits`) must not leak to a later `for k, v in scores` where `v` is an
@@ -359,6 +367,36 @@ impl Transpiler {
         // Loop variables are scoped to the for body: save outer set first so
         // that after the loop the loop vars are not visible to subsequent code.
         let saved_locals = self.known_local_vars.clone();
+
+        if self.in_ecs_query && (s.where_clause.is_some() || s.var_types.iter().any(|t| t.is_some())) {
+            let query_name = self.ecs_for_query_params.borrow().get(&(s.line, s.col)).cloned().unwrap_or_else(|| "query".to_string());
+            let any_mut = s.var_types.iter().any(|t| matches!(t, Some(Type::Mut(_))));
+            let ref_str = if any_mut { "&mut " } else { "&" };
+            for (v, ty) in s.vars.iter().zip(s.var_types.iter()) {
+                self.known_local_vars.insert(v.clone());
+                if let Some(t) = ty {
+                    if let Some(name) = t.name() {
+                        self.var_struct_types.insert(v.clone(), name.to_string());
+                        self.var_struct_type.insert(v.clone(), name.to_string());
+                    }
+                }
+            }
+            let pat = if s.vars.len() == 1 {
+                s.vars[0].clone()
+            } else {
+                format!("({})", s.vars.join(", "))
+            };
+            self.line(&format!("for {} in {}{} {{", pat, ref_str, query_name));
+            self.indent += 1;
+            for stmt in &s.body {
+                self.emit_stmt(stmt, false);
+            }
+            self.indent -= 1;
+            self.line("}");
+            self.known_local_vars = saved_locals;
+            return;
+        }
+
         // Track loop variables as known locals so field accesses inside the
         // loop body use `.` not `::`.
         for v in &s.vars {
@@ -607,7 +645,7 @@ impl Transpiler {
                     self.line(&format!("for {} in {} {{", vars, guard));
                 }
                 self.indent += 1;
-                self.emit_loop_body(&s.body);
+                self.emit_for_body(s);
                 self.indent -= 1;
                 self.line("}");
                 self.known_local_vars = saved_locals;
@@ -639,7 +677,7 @@ impl Transpiler {
                     self.line(&format!("for {} in {} {{", vars, rguard));
                 }
                 self.indent += 1;
-                self.emit_loop_body(&s.body);
+                self.emit_for_body(s);
                 self.indent -= 1;
                 self.line("}");
                 self.known_local_vars = saved_locals;
@@ -671,7 +709,7 @@ impl Transpiler {
                 self.line(&format!("let mut __iter = {};", iter_s));
                 self.line(&format!("while let Some({}) = __iter.next() {{", pat));
                 self.indent += 1;
-                self.emit_loop_body(&s.body);
+                self.emit_for_body(s);
                 self.indent -= 1;
                 self.line("}");
                 self.known_local_vars = saved_locals;
@@ -702,7 +740,7 @@ impl Transpiler {
                     let pat = if s.vars.len() > 1 { format!("({})", vars) } else { vars };
                     self.line(&format!("for {} in {}.into_iter() {{", pat, tmp));
                     self.indent += 1;
-                    self.emit_loop_body(&s.body);
+                    self.emit_for_body(s);
                     self.indent -= 1;
                     self.line("}");
                     self.known_local_vars = saved_locals;
@@ -902,7 +940,7 @@ impl Transpiler {
         };
         self.line(&format!("for {} in {} {{", pat, iter_expr));
         self.indent += 1;
-        self.emit_loop_body(&s.body);
+        self.emit_for_body(s);
         self.indent -= 1;
         self.line("}");
         // Restore: loop vars and any let-bindings inside the body are not
@@ -972,7 +1010,7 @@ impl Transpiler {
         };
         self.line(&format!("for {} in {} {{", vars, iter_expr));
         self.indent += 1;
-        self.emit_loop_body(&s.body);
+        self.emit_for_body(s);
         self.indent -= 1;
         self.line("}");
     }
@@ -1011,7 +1049,7 @@ impl Transpiler {
             self.line(&format!("while let Some({}) = {}.next().await {{", vars, stream_var));
             self.indent += 1;
         }
-        self.emit_loop_body(&s.body);
+        self.emit_for_body(s);
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -1027,7 +1065,7 @@ impl Transpiler {
         };
         self.line(&format!("while let Some({}) = {}.recv().await {{", vars, rx_name));
         self.indent += 1;
-        self.emit_loop_body(&s.body);
+        self.emit_for_body(s);
         self.indent -= 1;
         self.line("}");
     }
@@ -1043,13 +1081,13 @@ impl Transpiler {
             self.line("loop {");
             self.indent += 1;
             self.line(&format!("let {} = {}.recv().await;", vars, rx_name));
-            self.emit_loop_body(&s.body);
+            self.emit_for_body(s);
             self.indent -= 1;
             self.line("}");
         } else {
             self.line(&format!("while let Ok({}) = {}.recv().await {{", vars, rx_name));
             self.indent += 1;
-            self.emit_loop_body(&s.body);
+            self.emit_for_body(s);
             self.indent -= 1;
             self.line("}");
         }
@@ -1064,7 +1102,7 @@ impl Transpiler {
         self.line(&format!("while {}.changed().await.is_ok() {{", rx_name));
         self.indent += 1;
         self.line(&format!("let {} = {}.borrow().clone();", vars, rx_name));
-        self.emit_loop_body(&s.body);
+        self.emit_for_body(s);
         self.indent -= 1;
         self.line("}");
     }

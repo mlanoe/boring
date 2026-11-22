@@ -64,6 +64,7 @@ impl Walker<'_> {
             Stmt::For(f) => {
                 self.expr(&mut f.iterable);
                 if let Some(k) = &mut f.key { self.expr(k); }
+                if let Some(w) = &mut f.where_expr { self.expr(w); }
                 self.stmts(&mut f.body);
             }
             Stmt::Guard(g) => {
@@ -169,6 +170,12 @@ impl Walker<'_> {
             ExprKind::Match(m) => self.match_stmt(m),
             ExprKind::Block(b) | ExprKind::Do(b) => self.stmts(b),
             ExprKind::Loop(l) => self.stmts(&mut l.body),
+            ExprKind::EcsFetch(_) => {}
+            ExprKind::Query(q) => {
+                self.expr(&mut q.iterable);
+                if let Some(w) = &mut q.where_clause { self.expr(w); }
+                if let Some(p) = &mut q.projection { self.expr(p); }
+            }
         }
     }
 }

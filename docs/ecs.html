@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Boring — Intégration ECS Native dans le Langage Boring</title>
+<title>Boring — Native ECS Integration in Boring</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -125,17 +125,18 @@ li { margin-bottom: 0.3rem; }
   <nav id="toc"></nav>
 </aside>
 <main class="main" id="content">
-<h1 id="intégration-ecs-native-dans-le-langage-boring">Intégration ECS Native dans le Langage Boring</h1>
-<blockquote><strong>Statut</strong> : Implémenté et Validé   <strong>Auteur</strong> : Mickaël LANOË &amp; Assistant   <strong>Cible initiale (Phase 1)</strong> : Abaissement direct vers Bevy ECS en Rust  </blockquote>
+<h1 id="native-ecs-integration-in-boring">Native ECS Integration in Boring</h1>
 <hr>
-<h2 id="1-vision-et-objectifs">1. Vision et Objectifs</h2>
-<p>Boring dispose d&#x27;intégrations avec Bevy (<code>bevy-boring</code>, <code>breakout-boring</code>, <code>boring-bevylib</code>). L&#x27;intégration native fait de l&#x27;<strong>ECS un citoyen de première classe</strong> dans la syntaxe et la sémantique de Boring : 1. <strong>Élimination du bruit syntaxique</strong> : Pas de types génériques Bevy ni d&#x27;itérateurs manuels dans le code utilisateur. 2. <strong>Types de données pures (<code>data</code>)</strong> : Distinction claire entre objets généraux (<code>struct</code>) et données par valeur (<code>data</code>), interdisant formellement les pointeurs partagés (<code>&#x27;actor</code>, <code>&#x27;shared</code>) pour préserver la localité du cache et le parallélisme. 3. <strong>Composants (<code>@component data</code>)</strong> : Déclaration explicite et lisible des composants d&#x27;entités. 4. <strong>Ressources simples (<code>@resource</code>)</strong> : Variables globales sans bloc struct ni double nom, utilisables comme n&#x27;importe quelle variable (<code>score += 10</code>). 5. <strong>Queries universelles (Méthodes et Fonctions)</strong> :    <em> </em><em>Méthodes dans un composant</em><em> : <code>self</code> représente le composant principal à faire évoluer (<code>query movement(Velocity vel): self.x += ...</code>).    </em> <strong>Fonctions top-level</strong> : Pour les systèmes médiateurs opérant sur plusieurs composants distincts (<code>query check_collisions(Transform a, ...):</code>). 6. <strong>Contexte ambiant avec point (<code>.</code>)</strong> : Accès direct au temps (<code>.time.delta</code>), aux entrées (<code>.input</code>), à l&#x27;entité courante (<code>.entity</code>), et aux commandes (<code>.despawn()</code>, <code>.spawn(...)</code>).</p>
+<h2 id="1-vision-and-goals">1. Vision and Goals</h2>
+<p>Boring integrates natively with Bevy (<code>breakout-boring</code>, <code>boring-bevylib</code>). This native integration turns <strong>ECS into a first-class language citizen</strong> across Boring&#x27;s syntax and semantics:</p>
+<ol><li><strong>Zero Syntactic Noise</strong>: No manual Bevy generic wrappers (<code>Query</code>, <code>Res</code>, <code>ResMut</code>, <code>Single</code>), system parameter wiring, or manual query iterators in user code.</li><li><strong>Pure Value Types (<code>data</code>)</strong>: A clear distinction between general objects (<code>struct</code>) and pure value data (<code>data</code>), strictly forbidding shared pointer qualifiers (<code>&#x27;actor</code>, <code>&#x27;shared</code>) to guarantee CPU cache locality, zero pointer indirection, and thread safety.</li><li><strong>Entity Components (<code>@component data</code>)</strong>: Clean, explicit component declarations.</li><li><strong>Simple Resources (<code>@resource</code>) &amp; Direct Signatures</strong>: Global resources accessed and mutated naturally (<code>score += 10</code>) and passed cleanly into system signatures (<code>Score score</code> or <code>mut Score score</code>).</li><li><strong>Universal Systems (<code>def</code> / <code>req</code> with <code>where</code>)</strong>:</li></ol>
+<p>   <em> </em><em>Component Method Systems</em><em>: <code>self</code> represents the primary component being evolved (<code>def movement(Velocity vel) where not Frozen:</code>). Receiver mutability follows directly from <code>def</code> (mutable) or <code>req</code> (read-only) without any <code>mut self</code> syntax.    </em> <strong>Top-Level Systems</strong>: Mediator systems operating across distinct components (<code>def check_collisions(Score score):</code>). 6. <strong>Inline Query Expressions (<code>query</code>)</strong>:    <em> <code>query (Entity, Transform) where Brick</code> (or <code>query all ...</code>) for zero-allocation iterable views.    </em> <code>query single (mut Transform) where Paddle</code> for a single required entity.    <em> <code>query single? (Transform) where Bonus</code> for an optional single entity.    </em> <code>query first / first?</code> for the first matching entity.    <em> <code>query any where Ball</code> for an immediate boolean existence test. 7. </em><em>Ambient Context &amp; Infrastructure</em><em>: Direct natural access to frame timing (<code>time.delta</code>), inputs (<code>input.pressed(...)</code>), commands (<code>commands.spawn(...)</code>), current entity ID (<code>entity</code>), and current entity destruction (<code>despawn()</code>), with qualified fallbacks (<code>ecs.entity</code>, <code>ecs.despawn()</code>, <code>ecs.time</code>, <code>ecs.input</code>, <code>resource.&lt;name&gt;</code>) when shadowed by local variables. 8. </em><em>Unified Modular Imports (<code>use ecs.&lt;module&gt;</code>)</em>*: Framework-agnostic import syntax (<code>use ecs.asset.RenderAssetUsages</code>, <code>use ecs.input.keyboard.KeyboardInput</code>, etc.).</p>
 <hr>
-<h2 id="2-déclaration-des-données--data-et-component">2. Déclaration des Données : <code>data</code> et <code>@component</code></h2>
-<h3 id="21-le-mot-clé-data-pure-value--pod">2.1 Le mot-clé <code>data</code> (Pure Value / POD)</h3>
-<p>Le mot-clé <code>data</code> définit un type de données pures par valeur : <em> </em><em>Membres autorisés</em><em> : Scalaires (<code>int</code>, <code>float</code>, <code>bool</code>), chaînes (<code>string</code>), vecteurs mathématiques (<code>Vec2</code>, <code>Vec3</code>, <code>Transform</code>), enums Boring, tableaux (<code>[int]</code>, <code>[float, 3]</code>), optionnels (<code>Target?</code>), et autres types <code>data</code>. </em> <strong>Membres interdits</strong> : Qualificateurs de pointeurs partagés (<code>&#x27;actor</code>, <code>&#x27;shared</code>, verrous internes, références locales). Le compilateur garantit ainsi statiquement que tout <code>data</code> est strictement <code>Send + Sync + &#x27;static</code> et optimal pour le cache CPU.</p>
-<h3 id="22-composants-dentités-component-data">2.2 Composants d&#x27;entités (<code>@component data</code>)</h3>
-<p>Pour marquer un <code>data</code> comme composant pouvant être attaché à une entité ECS :</p>
+<h2 id="2-declaring-data-data-and-component">2. Declaring Data: <code>data</code> and <code>@component</code></h2>
+<h3 id="21-the-data-keyword-pure-value--pod">2.1 The <code>data</code> Keyword (Pure Value / POD)</h3>
+<p>The <code>data</code> keyword defines a pure value data type: <em> </em><em>Allowed members</em><em>: Scalars (<code>int</code>, <code>float</code>, <code>bool</code>), strings (<code>string</code>), fixed-size arrays/vectors (<code>[float, 2]</code>, <code>[float, 3]</code>, <code>[int]</code>), spatial types (<code>Transform</code>), Boring enums, optionals (<code>Target?</code>), and nested <code>data</code> types. </em> <strong>Forbidden members</strong>: Shared pointer qualifiers (<code>&#x27;actor</code>, <code>&#x27;shared</code>, internal locks, local references). The compiler statically guarantees that every <code>data</code> type is strictly <code>Send + Sync + &#x27;static</code> and contiguous in memory.</p>
+<h3 id="22-entity-components-component-data">2.2 Entity Components (<code>@component data</code>)</h3>
+<p>Decorating a <code>data</code> declaration with <code>@component</code> marks it as a component that can be attached to ECS entities:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@component</span>
 <span class="kw">data</span> Position:
     <span class="kt">float</span> x = <span class="nb">0.0</span>
@@ -146,10 +147,10 @@ li { margin-bottom: 0.3rem; }
     <span class="kt">float</span> dx = <span class="nb">0.0</span>
     <span class="kt">float</span> dy = <span class="nb">0.0</span>
 
-<span class="co"># Tag component / Unit component (0 octet, utilisé comme filtre d&#x27;archétype)</span>
+<span class="co"># Zero-sized unit tag component (0 bytes, used for archetype filtering)</span>
 <span class="at">@component</span>
 <span class="kw">data</span> Frozen: <span class="kw">pass</span></code></pre></div>
-<p><strong>Transpilation Rust / Bevy :</strong></p>
+<p><strong>Rust / Bevy Lowering:</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="at">#[derive(bevy::prelude::Component, Debug, Clone, PartialEq)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">Position</span> {
     <span class="kw">pub</span> x: f64,
@@ -165,8 +166,8 @@ li { margin-bottom: 0.3rem; }
 <span class="at">#[derive(bevy::prelude::Component, Debug, Clone, Copy, Default, PartialEq, Eq)]</span>
 <span class="kw">pub</span> <span class="kw">struct</span> <span class="kt">Frozen</span>;</code></pre></div>
 <hr>
-<h2 id="3-ressources-globales--resource">3. Ressources Globales : <code>@resource</code></h2>
-<p>Les états globaux (score du jeu, configuration, réglages) sont déclarés avec <code>@resource</code> sans forcer de bloc struct inutile :</p>
+<h2 id="3-global-resources-resource">3. Global Resources: <code>@resource</code></h2>
+<p>Global application state (game score, configuration, persistent state) is declared using <code>@resource</code> on global variables or <code>data</code> types:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@resource</span>
 <span class="kw">var</span> <span class="kt">int</span> score = <span class="nb">0</span>
 
@@ -176,28 +177,36 @@ li { margin-bottom: 0.3rem; }
 <span class="at">@resource</span>
 <span class="kw">data</span> GameConfig:
     <span class="kw">var</span> <span class="kt">int</span> max_players = <span class="nb">4</span></code></pre></div>
-<h3 id="usage-dans-les-queries">Usage dans les Queries</h3>
-<p>Dans n&#x27;importe quelle query, la ressource est lue ou modifiée comme une variable ordinaire :</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">query</span> <span class="fn">kill_enemy</span>(Enemy e) <span class="kw">where</span> e.is_dead:
+<h3 id="usage-in-systems">Usage in Systems</h3>
+<p>In any system, a resource can be read or mutated directly by name (e.g. <code>score += 10</code>), qualified via <code>resource.&lt;name&gt;</code> or <code>ecs.resource.&lt;name&gt;</code> when shadowed by a local variable, or passed explicitly as a system parameter (<code>Score score</code> or <code>mut Score score</code>):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">def</span> <span class="fn">kill_enemy</span>(Enemy e) <span class="kw">where</span> e.is_dead:
     score += <span class="nb">10</span>
-    .<span class="fn">despawn</span>()</code></pre></div>
-<p><strong>Transpilation Rust / Bevy :</strong> Le compilateur génère le wrapper <code>#[derive(Resource)] pub struct Res_score(pub isize);</code>, injecte <code>mut res_score: ResMut&lt;Res_score&gt;</code> dans la fonction système générée, et applique <code>res_score.0 = ...</code>.</p>
+    <span class="fn">despawn</span>()
+
+<span class="kw">def</span> <span class="fn">sync_layers</span>(<span class="kw">mut</span> Transform transform, ScratchSprite tag):
+    <span class="kw">let</span> order = layerOrders.<span class="fn">get</span>(tag.target_id)
+    transform.translation.z = order <span class="kw">as</span> float32
+
+<span class="kw">def</span> <span class="fn">update_scoreboard</span>(Score score, <span class="kw">mut</span> TextUiWriter writer):
+    <span class="kw">let</span> score_root = <span class="kw">query</span> <span class="kw">single</span> entity <span class="kw">where</span> (ScoreboardUi, Text)
+    writer.<span class="fn">text</span>(score_root, <span class="nb">1</span>).pointee = <span class="s">"<span class="si">{score.count}</span>"</span>.<span class="fn">to_string</span>()</code></pre></div>
+<p><strong>Rust / Bevy Lowering:</strong> The compiler statically checks usage (read vs. mutation): <em> For <code>@resource var int score = 0</code>, it emits <code>#[derive(Resource)] pub struct Res_score(pub isize);</code>. </em> Read-only usage injects <code>score: Res&lt;Score&gt;</code> or <code>res_layer_orders: Res&lt;LayerOrders&gt;</code>. <em> Reassignment or mutation injects <code>mut score: ResMut&lt;Score&gt;</code>. </em> Infrastructure types (<code>Commands</code>, <code>TextUiWriter</code>, etc.) are injected directly without redundant generic wrappers.</p>
 <hr>
-<h2 id="4-systèmes-et-queries--query">4. Systèmes et Queries : <code>query</code></h2>
-<p>Une <code>query</code> définit un système itérant sur toutes les entités satisfaisant une signature de composants et une condition de filtrage <code>where</code>.</p>
-<h3 id="41-queries-sous-forme-de-méthode-de-composant">4.1 Queries sous forme de méthode de composant</h3>
-<p>Lorsqu&#x27;un système fait évoluer un composant particulier, il est déclaré directement dans le <code>data</code> de ce composant :</p>
+<h2 id="4-declaring-systems-def-and-req-with-where">4. Declaring Systems: <code>def</code> and <code>req</code> with <code>where</code></h2>
+<p>Systems are declared with standard function keywords: <code>def</code> (mutating systems) or <code>req</code> (read-only systems), along with an optional <code>where</code> filter clause.</p>
+<h3 id="41-component-method-systems">4.1 Component Method Systems</h3>
+<p>When a system primarily modifies or queries a single component, declare it directly inside that component&#x27;s <code>data</code> block:</p>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@component</span>
 <span class="kw">data</span> Position:
     <span class="kt">float</span> x
     <span class="kt">float</span> y
 
     <span class="at">@schedule</span>(Update)
-    <span class="kw">query</span> <span class="fn">movement</span>(Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
-        <span class="kw">self</span>.x += vel.dx * .time.delta
-        <span class="kw">self</span>.y += vel.dy * .time.delta</code></pre></div>
-<ul><li><code>self</code> est automatiquement lié au composant de l&#x27;entité courante en accès mutable (<code>&amp;mut Position</code>).</li><li><code>(Velocity vel)</code> ne liste que les composants secondaires requis pour le calcul.</li><li>Si le système ne fait que de la lecture seule sur <code>self</code>, on utilise <code>req query</code> (<code>&amp;Position</code>).</li></ul>
-<p><strong>Transpilation Rust / Bevy :</strong></p>
+    <span class="kw">def</span> <span class="fn">movement</span>(Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
+        <span class="kw">self</span>.x += vel.dx * time.delta
+        <span class="kw">self</span>.y += vel.dy * time.delta</code></pre></div>
+<ul><li>As with any Boring method, receiver mutability is dictated by the keyword: <code>def</code> automatically grants mutable access (<code>&amp;mut Position</code> in Bevy), while <code>req</code> grants read-only access (<code>&amp;Position</code>). Explicit <code>mut self</code> is neither needed nor valid syntax.</li><li><code>(Velocity vel)</code> lists secondary components required for the calculation.</li><li><code>self</code> can be omitted from the parameter list or written simply as <code>self</code>.</li><li>For read-only systems on the component, use <code>req movement(Velocity vel): ...</code>.</li></ul>
+<p><strong>Rust / Bevy Lowering:</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">position_movement</span>(
     <span class="kw">mut</span> query: <span class="kt">Query</span>&lt;(&amp;<span class="kw">mut</span> <span class="kt">Position</span>, &amp;<span class="kt">Velocity</span>), <span class="kt">Without</span>&lt;<span class="kt">Frozen</span>&gt;&gt;,
     time: <span class="kt">Res</span>&lt;<span class="kt">Time</span>&gt;,
@@ -207,33 +216,96 @@ li { margin-bottom: 0.3rem; }
         self_.y += (vel.dy * (time.<span class="fn">delta_secs</span>() <span class="kw">as</span> f64));
     }
 }</code></pre></div>
-<h3 id="42-queries-au-niveau-global-top-level">4.2 Queries au niveau global (Top-level)</h3>
-<p>Pour les systèmes médiateurs opérant entre plusieurs entités ou sans composant propriétaire :</p>
-<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Système de physique générale</span>
-<span class="kw">query</span> <span class="fn">apply_velocity</span>(<span class="kw">mut</span> Position pos, Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
-    pos.x += vel.dx * .time.delta
-    pos.y += vel.dy * .time.delta
+<h3 id="42-top-level-systems">4.2 Top-Level Systems</h3>
+<p>For mediator systems operating across multiple entity types or handling system lifecycle events:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Physics mediator system</span>
+<span class="kw">def</span> <span class="fn">apply_velocity</span>(<span class="kw">mut</span> Position pos, Velocity vel) <span class="kw">where</span> <span class="kw">not</span> Frozen:
+    pos.x += vel.dx * time.delta
+    pos.y += vel.dy * time.delta
 
-<span class="co"># Système de cycle de vie (exécuté 1 fois au lancement, sans composant)</span>
+<span class="co"># Startup system (runs once on launch, commands is injected automatically)</span>
 <span class="at">@schedule</span>(Startup)
-<span class="kw">query</span> <span class="fn">setup_world</span>():
-    .<span class="fn">spawn</span>(<span class="fn">Position</span>(x = <span class="nb">0.0</span>, y = <span class="nb">0.0</span>), <span class="fn">Velocity</span>(dx = <span class="nb">10.0</span>, dy = <span class="nb">5.0</span>))
+<span class="kw">def</span> <span class="fn">setup_world</span>():
+    commands.<span class="fn">spawn</span>((<span class="fn">Position</span>(x = <span class="nb">0.0</span>, y = <span class="nb">0.0</span>), <span class="fn">Velocity</span>(dx = <span class="nb">10.0</span>, dy = <span class="nb">5.0</span>)))
 
-<span class="co"># Système de destruction</span>
-<span class="kw">query</span> <span class="fn">death_check</span>(Health h) <span class="kw">where</span> h.current &lt;= <span class="nb">0</span>:
-    .<span class="fn">despawn</span>()</code></pre></div>
+<span class="co"># Entity lifecycle system</span>
+<span class="kw">def</span> <span class="fn">death_check</span>(Health h) <span class="kw">where</span> h.current &lt;= <span class="nb">0</span>:
+    <span class="fn">despawn</span>()</code></pre></div>
 <hr>
-<h2 id="5-ordonnancement-et-cycle-de-vie--schedule-et-state">5. Ordonnancement et Cycle de Vie : <code>@schedule</code> et <code>@state</code></h2>
-<ol><li><strong><code>@schedule(...)</code></strong> : Règle la phase d&#x27;exécution par frame.</li></ol>
-<p>   <em> Valeurs standard : <code>Startup</code>, <code>FixedUpdate</code>, <code>Update</code> (défaut si omis), <code>PostUpdate</code>, <code>Render</code>.    </em> Exemple : <code>@schedule(FixedUpdate)</code> pour une physique à pas constant (50/60 Hz). 2. <strong><code>@state(...)</code> (ou <code>@inState(...)</code>)</strong> : Conditionne l&#x27;exécution selon l&#x27;état applicatif.    * Exemple : <code>@state(GameState.Playing)</code> (transpilé en <code>.run_if(in_state(GameState::Playing))</code>).</p>
+<h2 id="5-inline-query-expressions-query">5. Inline Query Expressions: <code>query</code></h2>
+<p>Inside systems, the <code>query</code> keyword performs entity lookups and provides zero-allocation iterable views:</p>
+<h3 id="51-entity-sets-query--query-all">5.1 Entity Sets (<code>query</code> / <code>query all</code>)</h3>
+<p>Returns an iterable Bevy query view without temporary heap allocations (<code>Vec</code>):</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="co"># Concise syntax (equivalent to &#x27;query all&#x27;):</span>
+<span class="kw">let</span> bricks = <span class="kw">query</span> (Entity, Transform) <span class="kw">where</span> Brick
+
+<span class="co"># Explicit syntax:</span>
+<span class="kw">let</span> all_bricks = <span class="kw">query</span> <span class="kw">all</span> (Entity, Transform) <span class="kw">where</span> Brick
+
+<span class="co"># O(1) empty check:</span>
+<span class="kw">if</span> bricks.<span class="fn">isEmpty</span>():
+    <span class="kw">return</span>
+
+<span class="co"># Iteration:</span>
+<span class="kw">for</span> b <span class="kw">in</span> bricks:
+    ...</code></pre></div>
+<h3 id="52-single-entity-query-single-and-query-single">5.2 Single Entity (<code>query single</code> and <code>query single?</code>)</h3>
+<p>Requires exactly one matching entity (panics or errors if 0 or &gt;1), or returns <code>None</code> with <code>?</code>:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">mut</span> ball = <span class="kw">query</span> <span class="kw">single</span> (<span class="kw">mut</span> Velocity, Transform) <span class="kw">where</span> Ball
+<span class="kw">let</span> maybe_bonus = <span class="kw">query</span> <span class="kw">single?</span> (Transform) <span class="kw">where</span> Bonus</code></pre></div>
+<h3 id="53-first-matching-entity-query-first-and-query-first">5.3 First Matching Entity (<code>query first</code> and <code>query first?</code>)</h3>
+<p>Retrieves the first matching entity found:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">let</span> leader = <span class="kw">query</span> <span class="kw">first</span> (Entity, Transform) <span class="kw">where</span> Player</code></pre></div>
+<h3 id="54-existence-check-query-any">5.4 Existence Check (<code>query any</code>)</h3>
+<p>Evaluates directly to a boolean indicating whether at least one matching entity exists:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">if</span> <span class="kw">query</span> <span class="kw">any</span> <span class="kw">where</span> Ball:
+    <span class="fn">print</span>(<span class="s">"Ball is in play"</span>)</code></pre></div>
 <hr>
-<h2 id="6-la-clause-de-filtrage-where">6. La Clause de Filtrage <code>where</code></h2>
-<p>La clause <code>where</code> permet d&#x27;exprimer les contraintes fines sur les archétypes et les valeurs : <em> </em><em>Présence de tag</em><em> : <code>where Player</code> $\rightarrow$ <code>With&lt;Player&gt;</code> </em> <strong>Exclusion de tag</strong> : <code>where not Frozen</code> $\rightarrow$ <code>Without&lt;Frozen&gt;</code> <em> </em><em>Combinaisons booléennes</em><em> : <code>where Player and not (Frozen or Stunned)</code> </em> <strong>Détection de changement</strong> : <code>where changed Transform</code> $\rightarrow$ <code>Changed&lt;Transform&gt;</code> <em> </em><em>Détection d&#x27;ajout</em><em> : <code>where added Enemy</code> $\rightarrow$ <code>Added&lt;Enemy&gt;</code> </em> <strong>Filtre de valeur</strong> : <code>where h.current &lt;= 0</code> $\rightarrow$ condition évaluée au début de chaque itération.</p>
+<h2 id="6-for--where-loops">6. <code>for ... where</code> Loops</h2>
+<p>Boring allows iterating directly over a set of components with filtering without intermediate variable declarations:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">for</span> entity, Transform collider_trans, Brick? maybe_brick <span class="kw">where</span> Collider:
+    <span class="kw">if</span> maybe_brick != <span class="kw">nil</span>:
+        commands.<span class="fn">entity</span>(entity).<span class="fn">despawn</span>()</code></pre></div>
 <hr>
-<h2 id="7-contexte-ambiant">7. Contexte Ambiant (<code>.</code>)</h2>
-<p>À l&#x27;intérieur du corps d&#x27;une <code>query</code>, l&#x27;opérateur point (<code>.</code>) donne accès au contexte sans polluer la liste des paramètres :</p>
-<table><thead><tr><th>Expression Boring</th><th>Signification ECS</th><th>Équivalent Rust / Bevy généré</th></tr></thead><tbody><tr><td><code>.time.delta</code></td><td>Temps écoulé depuis la dernière frame (secondes)</td><td><code>(time.delta_secs() as f64)</code> (via <code>Res&lt;Time&gt;</code>)</td></tr><tr><td><code>.time.elapsed</code></td><td>Temps total écoulé de la simulation</td><td><code>time.elapsed_secs_f64()</code></td></tr><tr><td><code>.input.is_key_pressed(...)</code></td><td>Touche pressée</td><td><code>input.pressed(...)</code> (via <code>Res&lt;ButtonInput&lt;KeyCode&gt;&gt;</code>)</td></tr><tr><td><code>.entity</code></td><td>ID de l&#x27;entité courante</td><td>Tuple avec <code>Entity</code></td></tr><tr><td><code>.despawn()</code></td><td>Détruit l&#x27;entité courante</td><td><code>commands.entity(__entity).despawn()</code></td></tr><tr><td><code>.spawn(c1, c2, ...)</code></td><td>Crée une nouvelle entité avec ses composants</td><td><code>commands.spawn((c1, c2, ...))</code></td></tr><tr><td><code>score += 10</code></td><td>Modifie une ressource globale <code>@resource</code></td><td><code>res_score.0 += 10</code> (via <code>ResMut&lt;Res_score&gt;</code>)</td></tr></tbody></table>
-<p>Le compilateur analyse statiquement le corps de la query pour détecter ces occurrences et génère automatiquement les paramètres Bevy requis (<code>time: Res&lt;Time&gt;</code>, <code>mut commands: Commands</code>, etc.).</p>
+<h2 id="7-scheduling-and-lifecycle-schedule-and-state">7. Scheduling and Lifecycle: <code>@schedule</code> and <code>@state</code></h2>
+<ol><li><strong><code>@schedule(...)</code></strong>: Configures the execution stage per frame.</li></ol>
+<p>   <em> Standard schedules: <code>Startup</code>, <code>FixedUpdate</code>, <code>Update</code> (default if omitted), <code>PostUpdate</code>, <code>Render</code>.    </em> Example: <code>@schedule(FixedUpdate)</code> for constant-timestep physics (50/60 Hz). 2. <strong><code>@state(...)</code> (or <code>@inState(...)</code>)</strong>: Restricts system execution to a specific application state.    * Example: <code>@state(GameState.Playing)</code> (lowered to <code>.run_if(in_state(GameState::Playing))</code>).</p>
+<hr>
+<h2 id="8-archetype-and-value-filtering-where">8. Archetype and Value Filtering: <code>where</code></h2>
+<p>The <code>where</code> clause defines fine-grained constraints on archetypes and values: <em> </em><em>Component presence</em><em>: <code>where Player</code> $\rightarrow$ <code>With&lt;Player&gt;</code> </em> <strong>Component absence</strong>: <code>where not Frozen</code> $\rightarrow$ <code>Without&lt;Frozen&gt;</code> <em> </em><em>Boolean combinations</em><em>: <code>where Player and not (Frozen or Stunned)</code> </em> <strong>Change detection</strong>: <code>where changed Transform</code> $\rightarrow$ <code>Changed&lt;Transform&gt;</code> <em> </em><em>Addition detection</em><em>: <code>where added Enemy</code> $\rightarrow$ <code>Added&lt;Enemy&gt;</code> </em> <strong>Value filtering</strong>: <code>where h.current &lt;= 0</code> $\rightarrow$ condition evaluated at the start of each entity iteration step.</p>
+<hr>
+<h2 id="9-ambient-context-and-conflict-disambiguation">9. Ambient Context and Conflict Disambiguation</h2>
+<p>Inside ECS systems, Boring automatically detects and injects infrastructure services (<code>time</code>, <code>input</code>, <code>commands</code>, and <code>@resource</code> variables) without cluttering the function signature.</p>
+<h3 id="91-direct-default-access-recommended">9.1 Direct Default Access (Recommended)</h3>
+<p>By default, ambient services and resources are accessed directly by their natural name:</p>
+<table><thead><tr><th>Boring Expression</th><th>ECS Meaning</th><th>Generated Rust / Bevy Equivalent</th></tr></thead><tbody><tr><td><code>time.delta</code> / <code>time.deltaSecs()</code></td><td>Elapsed frame delta time (seconds)</td><td><code>(time.delta_secs() as f64)</code> (via <code>Res&lt;Time&gt;</code>)</td></tr><tr><td><code>time.elapsed</code> / <code>time.elapsedSecs()</code></td><td>Total elapsed simulation time</td><td><code>time.elapsed_secs_f64()</code></td></tr><tr><td><code>input.pressed(...)</code></td><td>Key / button held state</td><td><code>input.pressed(...)</code> (via <code>Res&lt;ButtonInput&lt;KeyCode&gt;&gt;</code>)</td></tr><tr><td><code>input.justPressed(...)</code></td><td>Key pressed this frame</td><td><code>input.just_pressed(...)</code></td></tr><tr><td><code>input.justReleased(...)</code></td><td>Key released this frame</td><td><code>input.just_released(...)</code></td></tr><tr><td><code>commands.spawn(...)</code></td><td>Spawns an entity with components</td><td><code>commands.spawn(...)</code></td></tr><tr><td><code>commands.entity(e).despawn()</code></td><td>Despawns a specific entity</td><td><code>commands.entity(e).despawn()</code></td></tr><tr><td><code>&lt;resource_name&gt;</code> (e.g. <code>score += 10</code>)</td><td>Reads or mutates an <code>@resource</code> variable</td><td><code>res_score.0 += 10</code> (via <code>ResMut&lt;Res_score&gt;</code>)</td></tr><tr><td><code>entity</code></td><td>Current entity ID in query loop</td><td><code>Entity</code> from query loop</td></tr><tr><td><code>despawn()</code></td><td>Despawns current entity in query loop</td><td><code>commands.entity(__entity).despawn()</code></td></tr></tbody></table>
+<blockquote>[!NOTE] <strong>Naming conventions</strong>: In idiomatic Boring, methods and fields follow <code>camelCase</code> (<code>justPressed(...)</code>, <code>justReleased(...)</code>, <code>deltaSecs()</code>). The Boring transpiler automatically maps <code>camelCase</code> method and property names to the idiomatic <code>snake_case</code> required by Rust and Bevy (<code>just_pressed</code>, <code>delta_secs</code>). Both <code>camelCase</code> and <code>snake_case</code> are fully supported.</blockquote>
+<h3 id="92-explicit-qualification-ecs-and-resource-on-conflict">9.2 Explicit Qualification (<code>ecs.</code> and <code>resource.</code>) on Conflict</h3>
+<p>If a local variable or parameter shadows an ambient service or resource (such as a local variable named <code>score</code>, <code>time</code>, or <code>input</code>), the local variable takes precedence. You can disambiguate using qualified prefixes:</p>
+<ul><li><strong>Current Entity</strong>: <code>ecs.entity</code></li><li><strong>Current Entity Despawn</strong>: <code>ecs.despawn()</code></li><li><strong>Resources</strong>: <code>resource.score</code> or <code>ecs.resource.score</code> (or <code>resource.layerOrders</code>)</li><li><strong>Time</strong>: <code>ecs.time.delta</code> or <code>ecs.time.elapsed</code></li><li><strong>Input</strong>: <code>ecs.input.pressed(KeyCode.Space)</code></li><li><strong>Commands</strong>: <code>ecs.commands.spawn(...)</code></li></ul>
+<p>Legacy leading-dot syntax (<code>.entity</code>, <code>.despawn()</code>, <code>.time</code>, <code>.input</code>, <code>.commands</code>, <code>.resource.&lt;name&gt;</code>) remains supported inside ECS systems for backward compatibility.</p>
+<hr>
+<h2 id="10-modular-imports-use-ecs">10. Modular Imports: <code>use ecs.*</code></h2>
+<p>Specialized ECS types and subsystems (rendering, audio, input, sprites) are imported using the standard <code>ecs.*</code> namespace:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="kw">use</span> ecs.asset.RenderAssetUsages
+<span class="kw">use</span> ecs.render.Extent3d, TextureDimension, TextureFormat
+<span class="kw">use</span> ecs.audio.Volume
+<span class="kw">use</span> ecs.input.keyboard.KeyboardInput
+<span class="kw">use</span> ecs.input.ButtonState
+<span class="kw">use</span> ecs.sprite.Anchor</code></pre></div>
+<hr>
+<h2 id="11-the-game-decorator-and-game-framework">11. The <code>@game</code> Decorator and Game Framework</h2>
+<p>To write 100% native Boring games without any Bevy boilerplate (<code>App.new()</code>, <code>use bevy</code>, <code>DefaultPlugins</code>, manual main loop), Boring provides the <code>@game</code> decorator on a <code>data</code> or <code>struct</code> definition:</p>
+<div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code><span class="at">@game</span>
+<span class="kw">pub</span> <span class="kw">data</span> Breakout:
+    <span class="kt">string</span> title = <span class="s">"My Awesome Game"</span>
+    <span class="kt">int</span> width = <span class="nb">800</span>
+    <span class="kt">int</span> height = <span class="nb">600</span>
+    Color clear_color = Color.<span class="fn">srgb</span>(<span class="nb">0.9</span>, <span class="nb">0.9</span>, <span class="nb">0.9</span>)</code></pre></div>
+<h3 id="111-automatic-application-bootstrapping">11.1 Automatic Application Bootstrapping</h3>
+<p>When <code>@game</code> is present and no explicit <code>def main()</code> exists: 1. <strong>Window Configuration</strong>: <code>WindowPlugin</code> is configured with <code>width</code>, <code>height</code>, window <code>title</code>, and <code>clear_color</code>. 2. <strong>Automatic 2D Camera</strong>: If no <code>@schedule(Startup)</code> system spawns a camera (<code>Camera2D</code> or <code>Camera3D</code>), a default 2D camera (<code>Camera2d::default()</code>) is injected. 3. <strong>Resource Registration</strong>: All <code>@resource</code> declarations and the <code>@game</code> struct itself are initialized (<code>app.init_resource::&lt;T&gt;()</code>). 4. <strong>System Scheduling</strong>:    <em> Systems decorated with <code>@schedule(Startup)</code> are added to <code>Startup</code>.    </em> Systems decorated with <code>@schedule(Update)</code> (or without schedule attributes in a <code>@game</code> project) are added to <code>Update</code>.    <em> Systems decorated with <code>@schedule(FixedUpdate)</code> are added to <code>FixedUpdate</code>.    </em> Ordering constraints are set via <code>@after(other_system)</code> or <code>@before(other_system)</code>.    <em> Event observers (<code>On&lt;Event&gt;</code> / <code>Trigger&lt;Event&gt;</code> or <code>@observer</code>) are registered via <code>app.add_observer(...)</code>. 5. </em><em>Generation of <code>build_app()</code> and <code>main()</code></em>*: The compiler synthesizes both <code>pub fn build_app() -&gt; App</code> (for headless testing and external integration) and <code>fn main() { build_app().run(); }</code>.</p>
+<h3 id="112-built-in-standard-components">11.2 Built-in Standard Components</h3>
+<ul><li><strong><code>Camera2D</code> / <code>Camera2d</code></strong>: Standard 2D camera component.</li><li><strong><code>Sprite</code></strong>: Standard 2D sprite rendering component.</li><li><strong><code>Transform</code></strong>: Direct coordinate access (<code>.x</code>, <code>.y</code>, <code>.z</code> both for reading and reassignment <code>.x = ...</code>) automatically translated to <code>.translation.x</code>, <code>.translation.y</code>, <code>.translation.z</code> while preserving Bevy&#x27;s <code>f32</code> typing.</li></ul>
 </main>
 <script>
 // Build TOC from headings

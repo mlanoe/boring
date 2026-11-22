@@ -2249,6 +2249,24 @@ impl Transpiler {
     /// a function/method/field known to return Optional, etc.), in which case it's passed
     /// through unwrapped to avoid double-wrapping.
     pub(crate) fn emit_let_value_optional(&self, inner: &Type, value: &Expr, is_option_cast: bool) -> String {
+        // bare `T?` target with `[x, y]` for Vec2 / `[x, y, z]` for Vec3
+        if let Type::Named(n) = inner.without_mut() {
+            if (n == "Vec2" || n.ends_with("::Vec2")) && matches!(&value.kind, ExprKind::Array(elems) if elems.len() == 2) {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    return format!("Some(Vec2::new(({}) as f32, ({}) as f32))", e0, e1);
+                }
+            }
+            if (n == "Vec3" || n.ends_with("::Vec3")) && matches!(&value.kind, ExprKind::Array(elems) if elems.len() == 3) {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    let e2 = self.emit_expr(&elems[2]);
+                    return format!("Some(Vec3::new(({}) as f32, ({}) as f32, ({}) as f32))", e0, e1, e2);
+                }
+            }
+        }
         // Bare `let T? x = arr.pop()`: pass `Vec::pop()`'s `Option<T>` straight through
         // raw — skip map_method's default `.unwrap_or_default()` and don't wrap it in
         // `Some(...)` below (it's already Option-shaped). Mirrors the identical check in
@@ -2855,6 +2873,24 @@ impl Transpiler {
         } else {
             declared_ty
         };
+        // Coerce [x, y] to Vec2 and [x, y, z] to Vec3 when declared type is Vec2 / Vec3
+        if let Some(Type::Named(n)) = declared_ty {
+            if (n == "Vec2" || n.ends_with("::Vec2")) && matches!(&value.kind, ExprKind::Array(elems) if elems.len() == 2) {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    return format!("Vec2::new(({}) as f32, ({}) as f32)", e0, e1);
+                }
+            }
+            if (n == "Vec3" || n.ends_with("::Vec3")) && matches!(&value.kind, ExprKind::Array(elems) if elems.len() == 3) {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    let e2 = self.emit_expr(&elems[2]);
+                    return format!("Vec3::new(({}) as f32, ({}) as f32, ({}) as f32)", e0, e1, e2);
+                }
+            }
+        }
         // Fixed-size array: `[val for N]` or `[val; N]` with declared type `[T, N]` → `[val; N]`
         if let Some(Type::ArrayN(elem_ty, n)) = declared_ty {
             match &value.kind {

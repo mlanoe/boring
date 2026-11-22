@@ -758,7 +758,9 @@ fn expr_uses_tensor(e: &Expr) -> bool {
         | ExprKind::Nil
         | ExprKind::Void
         | ExprKind::Var(_)
-        | ExprKind::DotIdent(_) => false,
+        | ExprKind::DotIdent(_)
+        | ExprKind::EcsFetch(_)
+        | ExprKind::Query(_) => false,
         ExprKind::StringInterp(segs) => segs.iter().any(|s| match s {
             StringSegment::Lit(_) => false,
             StringSegment::Expr(e) => expr_uses_tensor(e),

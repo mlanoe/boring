@@ -920,6 +920,7 @@ fn labeled_comp_fill_stmts(
     for (i, (var_name, _)) in clauses.iter().enumerate() {
         body = vec![Stmt::For(ForStmt {
             vars: vec![var_name.clone()],
+            var_types: vec![None],
             iterable: Expr {
                 kind: ExprKind::Range {
                     start: Box::new(Expr { kind: ExprKind::Int(0), line, col, len: 0 }),
@@ -929,6 +930,8 @@ fn labeled_comp_fill_stmts(
                 line, col, len: 0,
             },
             key: None,
+            where_clause: None,
+            where_expr: None,
             body,
             line, col,
         })];

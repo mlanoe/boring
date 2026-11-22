@@ -193,6 +193,13 @@ impl Transpiler {
                 .cloned()
                 .or_else(|| self.var_struct_type.get(v.as_str()).cloned())
                 .or_else(|| {
+                    if self.in_ecs_query && !self.known_local_vars.contains(v.as_str()) {
+                        if let Some(info) = self.ecs_resource_info.get(v.as_str()) {
+                            if info.is_type {
+                                return Some(info.rust_type.clone());
+                            }
+                        }
+                    }
                     if let Some(inner) = self
                         .var_types
                         .get(v.as_str())
@@ -220,7 +227,43 @@ impl Transpiler {
                         .find(|(fname, _)| fname == v)?;
                     qualified_named_type_name(fty)
                 }),
+            ExprKind::DotIdent(name) => {
+                if self.in_ecs_query {
+                    if let Some(info) = self.ecs_resource_info.get(name) {
+                        if info.is_type {
+                            return Some(info.rust_type.clone());
+                        }
+                    }
+                }
+                None
+            }
             ExprKind::Field(inner, field) => {
+                if is_ecs_resource_obj(inner) {
+                    if let Some(info) = self.ecs_resource_info.get(field) {
+                        if info.is_type {
+                            return Some(info.rust_type.clone());
+                        }
+                    }
+                    let pascal = snake_to_pascal(&camel_to_snake(field));
+                    if self.struct_fields.contains_key(&pascal) {
+                        return Some(pascal);
+                    }
+                }
+                if self.in_ecs_query {
+                    if let ExprKind::DotIdent(d) = &inner.kind {
+                        if d == "resource" {
+                            if let Some(info) = self.ecs_resource_info.get(field) {
+                                if info.is_type {
+                                    return Some(info.rust_type.clone());
+                                }
+                            }
+                            let pascal = snake_to_pascal(&camel_to_snake(field));
+                            if self.struct_fields.contains_key(&pascal) {
+                                return Some(pascal);
+                            }
+                        }
+                    }
+                }
                 let inner_ty = self.resolve_expr_struct_type(inner)?;
                 self.struct_fields.get(inner_ty.as_str())?
                     .iter()
@@ -405,11 +448,29 @@ impl Transpiler {
                 // essential ownership metadata for an unannotated local bound to the slice.
                 if matches!(&index.kind, ExprKind::SliceRange { .. }) {
                     Some(inner_ty)
+                } else if let Some(sn) = self.resolve_expr_struct_type(inner) {
+                    if let Some(decl) = self.struct_decls.get(&sn) {
+                        if let Some(m) = decl.methods.iter().find(|m| m.name == "get") {
+                            if let Some(ret) = &m.return_ty {
+                                return Some(ret.clone());
+                            }
+                        }
+                    }
+                    indexed_elem_type(&inner_ty).cloned()
                 } else {
                     indexed_elem_type(&inner_ty).cloned()
                 }
             }
             ExprKind::LabeledIndex(inner, _) => {
+                if let Some(sn) = self.resolve_expr_struct_type(inner) {
+                    if let Some(decl) = self.struct_decls.get(&sn) {
+                        if let Some(m) = decl.methods.iter().find(|m| m.name == "get") {
+                            if let Some(ret) = &m.return_ty {
+                                return Some(ret.clone());
+                            }
+                        }
+                    }
+                }
                 indexed_elem_type(&self.resolve_expr_type(inner)?).cloned()
             }
             ExprKind::Call(callee, call_args) => {
@@ -844,7 +905,14 @@ impl Transpiler {
     pub(crate) fn expr_is_path_receiver(&self, obj: &Expr) -> bool {
         match &obj.kind {
             ExprKind::Var(v) => {
-                if v == "self" || self.known_local_vars.contains(v.as_str()) || self.user_top_level_names.contains(v.as_str()) { false }
+                if v == "self"
+                    || self.known_local_vars.contains(v.as_str())
+                    || self.user_top_level_names.contains(v.as_str())
+                    || (self.in_ecs_query && matches!(v.as_str(), "commands" | "input" | "time" | "resource" | "ecs"))
+                    || (self.in_ecs_query && self.ecs_resource_vars.contains(v.as_str()))
+                {
+                    false
+                }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
                 else {
                     let is_struct_field = self.self_type.as_ref()
@@ -4294,24 +4362,50 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_method_call(&self, obj: &Expr, method: &str, args: &[Arg]) -> String {
+        if method == "collect" && args.is_empty() {
+            return format!("{}.collect::<Vec<_>>()", self.emit_expr(obj));
+        }
         if self.in_ecs_query {
-            if let ExprKind::DotIdent(d) = &obj.kind {
-                if d == "input" {
-                    let key = if let Some(arg) = args.first() {
-                        match &arg.value.kind {
-                            ExprKind::Str(s) => format!("KeyCode::{}", s),
-                            ExprKind::DotIdent(s) => format!("KeyCode::{}", s),
-                            _ => self.emit_expr(&arg.value),
-                        }
+            if is_ecs_qualifier_obj(obj) {
+                if method == "despawn" {
+                    return "commands.entity(__entity).despawn()".to_string();
+                }
+                if method == "spawn" {
+                    let args_s = args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ");
+                    return if args.len() == 1 {
+                        format!("commands.spawn(({},))", args_s)
                     } else {
-                        "KeyCode::Space".to_string()
+                        format!("commands.spawn(({}))", args_s)
                     };
-                    match method {
-                        "is_key_pressed" | "pressed" => return format!("input.pressed({})", key),
-                        "is_key_just_pressed" | "just_pressed" => return format!("input.just_pressed({})", key),
-                        "is_key_just_released" | "just_released" => return format!("input.just_released({})", key),
-                        _ => {}
+                }
+            }
+            if is_time_qualifier_obj(obj) {
+                let rust_method = camel_to_snake(method);
+                match rust_method.as_str() {
+                    "delta" | "delta_secs" => return "(time.delta_secs() as f64)".to_string(),
+                    "delta_secs_f32" => return "time.delta_secs()".to_string(),
+                    "delta_secs_f64" => return "time.delta_secs_f64()".to_string(),
+                    "elapsed" | "elapsed_secs" | "elapsed_secs_f64" => return "(time.elapsed_secs_f64())".to_string(),
+                    "elapsed_secs_f32" => return "time.elapsed_secs()".to_string(),
+                    _ => return format!("time.{}({})", rust_method, self.emit_args(args)),
+                }
+            }
+            if is_input_qualifier_obj(obj) {
+                let key = if let Some(arg) = args.first() {
+                    match &arg.value.kind {
+                        ExprKind::Str(s) => format!("KeyCode::{}", s),
+                        ExprKind::DotIdent(s) => format!("KeyCode::{}", s),
+                        _ => self.emit_expr(&arg.value),
                     }
+                } else {
+                    "KeyCode::Space".to_string()
+                };
+                let rust_method = camel_to_snake(method);
+                match rust_method.as_str() {
+                    "is_key_pressed" | "pressed" => return format!("input.pressed({})", key),
+                    "is_key_just_pressed" | "just_pressed" => return format!("input.just_pressed({})", key),
+                    "is_key_just_released" | "just_released" => return format!("input.just_released({})", key),
+                    _ => {}
                 }
             }
         }
@@ -4767,7 +4861,14 @@ impl Transpiler {
                 // uppercase letter (e.g. `var Qh = []`), and a top-level `let` constant
                 // (`PADDLE_SIZE`) are still values, not type/module paths, and must
                 // dispatch as `.method()` -- checked before the uppercase heuristic below.
-                if v == "self" || self.known_local_vars.contains(v.as_str()) || self.user_top_level_names.contains(v.as_str()) { false }
+                if v == "self"
+                    || self.known_local_vars.contains(v.as_str())
+                    || self.user_top_level_names.contains(v.as_str())
+                    || (self.in_ecs_query && matches!(v.as_str(), "commands" | "input" | "time" | "resource" | "ecs"))
+                    || (self.in_ecs_query && self.ecs_resource_vars.contains(v.as_str()))
+                {
+                    false
+                }
                 else if v.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { true }
                 else {
                     // Struct fields accessed without `self.` in method bodies are NOT path receivers.
@@ -7806,7 +7907,19 @@ impl Transpiler {
             in_iter_stream: self.in_iter_stream,
             in_try_stream: self.in_try_stream,
             in_ecs_query: self.in_ecs_query,
+            ecs_fetch_params: std::cell::RefCell::new(self.ecs_fetch_params.borrow().clone()),
+            ecs_for_query_params: std::cell::RefCell::new(self.ecs_for_query_params.borrow().clone()),
+            ecs_query_throws: self.ecs_query_throws,
             ecs_resource_vars: self.ecs_resource_vars.clone(),
+            ecs_resource_info: self.ecs_resource_info.clone(),
+            ecs_resource_mutating_methods: self.ecs_resource_mutating_methods.clone(),
+            fns_needing_ecs_context: self.fns_needing_ecs_context.clone(),
+            fn_ecs_usage: self.fn_ecs_usage.clone(),
+            ecs_context_resource_types: self.ecs_context_resource_types.clone(),
+            ecs_context_mut_resource_types: self.ecs_context_mut_resource_types.clone(),
+            ecs_component_types: self.ecs_component_types.clone(),
+            current_fn_name: self.current_fn_name.clone(),
+            deep_scanned_programs: self.deep_scanned_programs.clone(),
             self_type: self.self_type.clone(),
             collection_vars: self.collection_vars.clone(),
             vec_vars: self.vec_vars.clone(),
@@ -8076,6 +8189,7 @@ impl Transpiler {
             in_req_fn: self.in_req_fn,
             in_struct_method: self.in_struct_method,
             modules: Vec::new(),
+            imported_programs: Vec::new(),
             lazy_vars: self.lazy_vars.clone(),
             lazy_var_types: self.lazy_var_types.clone(),
             callable_structs: self.callable_structs.clone(),

@@ -685,9 +685,10 @@ do_while_stmt   ::= "do" ":" block "while" expr NEWLINE
 loop_stmt       ::= "loop" ":" block
                   # inline:  `loop: stmt`
 
-for_stmt        ::= "for" IDENT ("," IDENT)* "in" expr ":" block   # with binding
-                  | "for" expr ":"  block                           # no binding (implicit `_`)
-                  # both forms also admit the inline (monoline) form via the block rule
+for_stmt        ::= "for" IDENT ("," IDENT)* "in" expr ("where" expr)? ":" block   # with binding and optional filter guard
+                  | "for" expr ("where" expr)? ":"  block                           # no binding (implicit `_`)
+                  | "for" ecs_query_pattern ("where" ecs_where_clause)? ":" block   # Bevy ECS query loop
+                  # all forms also admit the inline (monoline) form via the block rule
 
 try_stmt        ::= "try" ":" block
                     catch_clause*
@@ -961,6 +962,59 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
                   | do_expr                              # scoped block with own defer frame
                   | block_expr
                   | macro_call
+                  | query_expr
+
+# ─── Query expressions ────────────────────────────────────────────────────────
+#
+# Boring supports declarative queries for collections/iterators as well as Bevy ECS entities.
+#
+# 1. Collection queries:
+#   query [quantifier] [vars] in collection [where cond] [|> projection]
+#
+#   Quantifiers:
+#     - all (default when omitted): returns lazy Iterator[T]
+#     - first / first?: first matching element (T or T?)
+#     - any / any?: any matching element without enforcing traversal order (T or T?)
+#     - single / single?: assert exactly one matching element (T or T?); error if multiple
+#
+#   Examples:
+#     query x in numbers where x % 2 == 0
+#     query x in numbers where x > 2 |> x * 10
+#     query first? x in users where x.id == target_id
+#     query single? x in config where x.key == "port"
+#
+# 2. Bevy ECS entity queries / fetch:
+#   query [quantifier] ecs_component_list [where ecs_where_clause]
+#   query any [where ecs_where_clause]
+#
+#   Examples:
+#     query (Transform, Velocity) where With<Player>
+#     query single (Transform) where Ball
+#     query single? (Transform) where Ball
+#     query any where Ball
+query_expr          ::= collection_query | ecs_query
+
+collection_query    ::= "query" query_quantifier? (IDENT ("," IDENT)*)? "in" expr ("where" expr)? ("|>" expr)?
+
+query_quantifier    ::= "all"
+                      | "first" "?"?
+                      | "any" "?"?
+                      | "single" "?"?
+
+ecs_query           ::= "query" query_quantifier? ecs_component_list ("where" ecs_where_clause)?
+                      | "query" "any" ("where" ecs_where_clause)?
+
+ecs_component_list  ::= "(" ecs_component ("," ecs_component)* ")"
+                      | ecs_component
+
+ecs_component       ::= "mut"? IDENT
+
+ecs_query_pattern   ::= ecs_component_list
+                      | IDENT IDENT                     # e.g. `Player p`
+
+ecs_where_clause    ::= IDENT                           # e.g. With<Component> or bare Component tag
+                      | IDENT "<" IDENT ">"
+                      | "(" ecs_where_clause ("," ecs_where_clause)* ")"
 
 # `join` — await all tasks in a list concurrently and return a list of results.
 #   let results = join [f1, f2, f3]   → await all three futures in parallel

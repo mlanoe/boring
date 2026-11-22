@@ -44,25 +44,9 @@ pub enum Item {
     Alias(AliasDecl),
     Kernel(KernelDecl),
     Stmt(Stmt),
-    Query(QueryDecl),
 }
 
-/// An ECS query system: `[@attr]* query [name]?(params) [where filter]?: body`
-#[derive(Debug, Clone)]
-pub struct QueryDecl {
-    pub name: Option<String>,
-    pub params: Vec<Param>,
-    pub where_clause: Option<QueryWhereClause>,
-    pub attrs: Vec<Attr>,
-    pub body: Vec<Stmt>,
-    pub is_req: bool,
-    /// When declared inside a component/struct, the enclosing type name (`self` accesses this component).
-    pub self_type: Option<String>,
-    pub line: usize,
-    pub col: usize,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryWhereClause {
     pub terms: Vec<QueryFilterTerm>,
 }
@@ -73,6 +57,39 @@ pub enum QueryFilterTerm {
     Without(String),
     Changed(String),
     Added(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcsFetchKind {
+    All,
+    Single,
+    First,
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EcsFetchComponent {
+    pub is_mut: bool,
+    pub is_option: bool,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EcsFetchExpr {
+    pub kind: EcsFetchKind,
+    pub is_optional: bool,
+    pub components: Vec<EcsFetchComponent>,
+    pub where_clause: Option<QueryWhereClause>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryExpr {
+    pub kind: EcsFetchKind,
+    pub is_optional: bool,
+    pub vars: Vec<String>,
+    pub iterable: Box<Expr>,
+    pub where_clause: Option<Box<Expr>>,
+    pub projection: Option<Box<Expr>>,
 }
 
 /// `mod name:` — groups items into a named module for Rust transpilation.
@@ -153,6 +170,7 @@ pub struct FnDecl {
     /// `specialize_untyped`; the parameter itself stays untyped.
     pub slot_quals: Vec<(String, OwnerQual)>,
     pub where_clause: Vec<(String, String)>,
+    pub ecs_where_clause: Option<QueryWhereClause>,
     pub attrs: Vec<Attr>,
     pub line: usize,
     pub col: usize,
@@ -213,12 +231,13 @@ pub struct StructDecl {
     pub is_component: bool,
     /// Declared with `resource` instead of `struct` (ECS global resource).
     pub is_resource: bool,
+    /// Declared with `@game` decorator (ECS game entry point / config).
+    pub is_game: bool,
     pub is_native: bool, // body is `native` — implemented by the runtime
     pub protocols: Vec<String>,
     pub fields: Vec<FieldDecl>,
     pub inits: Vec<InitDecl>,
     pub methods: Vec<FnDecl>,
-    pub queries: Vec<QueryDecl>,
     pub conversions: Vec<AsDecl>,
     pub type_params: Vec<String>,
     pub where_clause: Vec<(String, String)>,
@@ -975,12 +994,17 @@ pub struct ThrowStmt {
 #[derive(Debug, Clone)]
 pub struct ForStmt {
     pub vars: Vec<String>,
+    pub var_types: Vec<Option<Type>>,
     pub iterable: Expr,
     /// `for x in xs with <key>:` — per-iteration identity key. Only meaningful inside a
     /// trailing array-block that collects into a trait-object array, where
     /// `desugar_array_block` consumes it; any ForStmt still carrying a key afterwards is
     /// a checker error.
     pub key: Option<Expr>,
+    /// Optional ECS query filter: `for ... where Filter:`
+    pub where_clause: Option<QueryWhereClause>,
+    /// Optional collection/stream filter condition: `for x in xs where condition:`
+    pub where_expr: Option<Expr>,
     pub body: Vec<Stmt>,
     pub line: usize,
     pub col: usize,
@@ -1222,6 +1246,12 @@ pub enum ExprKind {
     /// Rust macro invocation: `name!(args)`, `name![args]`, or `name!{args}`.
     /// The delimiter is irrelevant at the AST level.
     MacroCall { name: String, args: Vec<Expr> },
+
+    /// ECS single / first / any query expression: `single`, `single?`, `first`, `first?`, `any`, `any?`
+    EcsFetch(Box<EcsFetchExpr>),
+
+    /// Collection / stream query expression: `query [all | first[?] | any[?] | single[?]] vars in iterable [where cond] [|> proj]`
+    Query(Box<QueryExpr>),
 
     /// Trailing array-block sugar / trailing-colon-block, still unresolved:
     /// `CallName[(args)]:` followed by an indented block, e.g.
@@ -1652,6 +1682,15 @@ fn owner_qual_is_copy(q: &OwnerQual) -> bool {
 }
 
 impl Type {
+    /// Returns the simple type name if this is a named type, unwrapping mut/optional qualifiers.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Type::Named(n) => Some(n.as_str()),
+            Type::Mut(inner) | Type::Optional(inner) => inner.name(),
+            _ => None,
+        }
+    }
+
     /// True if this is a `mut Type` (owned-form) wrapper.
     /// A scalar value type (`int`, `uint`, the sized integers and floats, `bool`, fixed-point), whatever
     /// its spelling: `mut` on one is meaningless (a scalar has no `def` methods for it to unlock).
@@ -2416,8 +2455,13 @@ fn scan_expr_var_arg(
             ClosureBody::Block(stmts) => b!(stmts),
         },
         ExprKind::MacroCall { args, .. } => { for ex in args { e!(ex); } }
+        ExprKind::Query(q) => {
+            e!(&q.iterable);
+            if let Some(w) = &q.where_clause { e!(w); }
+            if let Some(p) = &q.projection { e!(p); }
+        }
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
-        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
+        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
     }
 }
 
@@ -2541,8 +2585,13 @@ fn with_expr_mutates(
             ClosureBody::Block(stmts) => b(stmts, ivp, imm),
         },
         ExprKind::MacroCall { args, .. } => args.iter().any(|ex| e(ex, ivp, imm)),
+        ExprKind::Query(q) => {
+            e(&q.iterable, ivp, imm)
+                || q.where_clause.as_ref().map(|w| e(w, ivp, imm)).unwrap_or(false)
+                || q.projection.as_ref().map(|p| e(p, ivp, imm)).unwrap_or(false)
+        }
         ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
-        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => false,
+        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => false,
     }
 }
 
@@ -2686,9 +2735,14 @@ pub fn walk_expr<'a>(expr: &'a Expr, f: &mut dyn FnMut(WalkNode<'a>)) {
             ClosureBody::Expr(e) => walk_expr(e, f),
             ClosureBody::Block(stmts) => walk_stmts(stmts, f),
         },
+        ExprKind::Query(q) => {
+            walk_expr(&q.iterable, f);
+            if let Some(w) = &q.where_clause { walk_expr(w, f); }
+            if let Some(p) = &q.projection { walk_expr(p, f); }
+        }
         ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)
         | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void
-        | ExprKind::DotIdent(_) => {}
+        | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
     }
 }
 

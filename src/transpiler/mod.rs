@@ -30,6 +30,7 @@ mod emit_expr;
 mod emit_methods;
 mod emit_kernel;
 mod emit_query;
+mod emit_game;
 pub(crate) mod unified;
 mod infer_qualifiers;
 mod infer_field_cross_file;
@@ -684,6 +685,19 @@ pub fn transpile_with_config(program: &Program, config: TranspileConfig) -> Tran
     TranspileOutput { code, errors, warnings: t.warnings.into_inner(), has_streams: t.has_streams, uses_log: t.uses_log.get(), uses_thiserror: t.uses_thiserror.get(), uses_reqwest: t.uses_reqwest, uses_tokio_util: t.uses_tokio_util.get(), uses_serde: t.uses_serde.get(), uses_unicode: t.uses_unicode.get(), uses_local_channel: t.uses_local_channel.get(), uses_local_broadcast: t.uses_local_broadcast.get(), uses_instrument: t.config.instrument, modules: t.modules, gpu_main_emitted: t.gpu_main_emitted.get(), screen_setup_fields: t.screen_setup_fields.into_inner() }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResourceInfo {
+    pub rust_type: String,
+    pub param_name: String,
+    pub is_type: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FnEcsUsage {
+    pub(crate) reads: std::collections::HashSet<String>,
+    pub(crate) writes: std::collections::HashSet<String>,
+}
+
 // ─── Transpiler state ─────────────────────────────────────────────────────────
 
 struct Transpiler {
@@ -742,8 +756,32 @@ struct Transpiler {
     pub(crate) in_try_stream: bool,
     /// True while emitting an ECS query body (`query (mut Pos p): ...`).
     pub(crate) in_ecs_query: bool,
+    /// Mapping from EcsFetch (line, col) to generated Bevy query parameter name
+    pub(crate) ecs_fetch_params: std::cell::RefCell<std::collections::HashMap<(usize, usize), String>>,
+    /// Mapping from ECS for loop (line, col) to generated Bevy query parameter name
+    pub(crate) ecs_for_query_params: std::cell::RefCell<std::collections::HashMap<(usize, usize), String>>,
+    /// True if current query system has `throws`
+    pub(crate) ecs_query_throws: bool,
     /// Variables declared with `@resource` or resource types.
     pub(crate) ecs_resource_vars: std::collections::HashSet<String>,
+    /// Resource information (type name, param name, is_type) keyed by alias.
+    pub(crate) ecs_resource_info: std::collections::HashMap<String, ResourceInfo>,
+    /// Mutating method names for resource types.
+    pub(crate) ecs_resource_mutating_methods: std::collections::HashSet<String>,
+    /// Functions that need the generated EcsContext parameter (`ecs: &mut EcsContext`).
+    pub(crate) fns_needing_ecs_context: std::collections::HashSet<String>,
+    /// Resources read / written per function via `ecs.resource.*`.
+    pub(crate) fn_ecs_usage: std::collections::HashMap<String, FnEcsUsage>,
+    /// All resource types used in EcsContext.
+    pub(crate) ecs_context_resource_types: Vec<String>,
+    /// Mutable resource types used in EcsContext.
+    pub(crate) ecs_context_mut_resource_types: std::collections::HashSet<String>,
+    /// Component types defined with `@component`.
+    pub(crate) ecs_component_types: std::collections::HashSet<String>,
+    /// Name of the function currently being emitted.
+    pub(crate) current_fn_name: Option<String>,
+    /// All programs collected during deep_pre_scan.
+    pub(crate) deep_scanned_programs: Vec<crate::ast::Program>,
     /// Name of the type currently being impl'd (for self-aware emit).
     pub(crate) self_type: Option<String>,
     /// Variables known to hold a collection (Vec/HashMap/HashSet) — use {:?} when formatting.
@@ -1487,6 +1525,7 @@ struct Transpiler {
     /// Per-file Rust output collected from inlined `.br` use imports.
     /// Each entry is (module_name, rust_code). Written as separate .rs files at build time.
     pub(crate) modules: Vec<(String, String)>,
+    pub(crate) imported_programs: Vec<crate::ast::Program>,
     /// True once the standard prelude has been emitted — prevents re-emission for inlined files.
     pub(crate) prelude_emitted: bool,
     /// True once `pre_scan`'s hardcoded builtin-enum seeding (`Error`/`MethodKind`/
@@ -1887,7 +1926,19 @@ impl Transpiler {
             in_iter_stream: false,
             in_try_stream: false,
             in_ecs_query: false,
+            ecs_fetch_params: std::cell::RefCell::new(std::collections::HashMap::new()),
+            ecs_for_query_params: std::cell::RefCell::new(std::collections::HashMap::new()),
+            ecs_query_throws: false,
             ecs_resource_vars: std::collections::HashSet::new(),
+            ecs_resource_info: std::collections::HashMap::new(),
+            ecs_resource_mutating_methods: std::collections::HashSet::new(),
+            fns_needing_ecs_context: std::collections::HashSet::new(),
+            fn_ecs_usage: std::collections::HashMap::new(),
+            ecs_context_resource_types: Vec::new(),
+            ecs_context_mut_resource_types: std::collections::HashSet::new(),
+            ecs_component_types: std::collections::HashSet::new(),
+            current_fn_name: None,
+            deep_scanned_programs: Vec::new(),
             self_type: None,
             collection_vars: std::collections::HashSet::new(),
             vec_vars: std::collections::HashSet::new(),
@@ -2127,6 +2178,7 @@ impl Transpiler {
             loaded: std::collections::HashSet::new(),
             emitted_external_uses: std::collections::HashSet::new(),
             modules: Vec::new(),
+            imported_programs: Vec::new(),
             prelude_emitted: false,
             builtins_seeded: false,
             emitted_fn_sigs: std::collections::HashSet::new(),
@@ -2278,6 +2330,106 @@ impl Transpiler {
             t.struct_req_methods.insert(key.to_string());
         }
         t
+    }
+
+    pub(crate) fn register_resource_type(&mut self, type_name: &str) {
+        let snake = camel_to_snake(type_name);
+        let camel = snake_to_camel(&snake);
+        let lower = type_name.to_lowercase();
+        let param_name = format!("res_{}", snake);
+        let info = ResourceInfo {
+            rust_type: type_name.to_string(),
+            param_name,
+            is_type: true,
+        };
+        self.ecs_resource_info.insert(type_name.to_string(), info.clone());
+        self.ecs_resource_info.insert(snake.clone(), info.clone());
+        self.ecs_resource_info.insert(camel.clone(), info.clone());
+        self.ecs_resource_info.insert(lower.clone(), info);
+
+        self.ecs_resource_vars.insert(type_name.to_string());
+        self.ecs_resource_vars.insert(snake);
+        self.ecs_resource_vars.insert(camel);
+        self.ecs_resource_vars.insert(lower);
+    }
+
+    pub(crate) fn register_resource_var(&mut self, var_name: &str) {
+        let rust_type = format!("Res_{}", var_name);
+        let snake = camel_to_snake(var_name);
+        let camel = snake_to_camel(&snake);
+        let lower = var_name.to_lowercase();
+        let param_name = format!("res_{}", snake);
+        let info = ResourceInfo {
+            rust_type: rust_type.clone(),
+            param_name,
+            is_type: false,
+        };
+        self.ecs_resource_info.insert(rust_type.clone(), info.clone());
+        self.ecs_resource_info.insert(var_name.to_string(), info.clone());
+        self.ecs_resource_info.insert(snake.clone(), info.clone());
+        self.ecs_resource_info.insert(camel.clone(), info.clone());
+        self.ecs_resource_info.insert(lower.clone(), info);
+
+        self.ecs_resource_vars.insert(rust_type);
+        self.ecs_resource_vars.insert(var_name.to_string());
+        self.ecs_resource_vars.insert(snake);
+        self.ecs_resource_vars.insert(camel);
+        self.ecs_resource_vars.insert(lower);
+    }
+
+    pub(crate) fn is_resource_type_name(&self, name: &str) -> bool {
+        self.ecs_resource_info.contains_key(name)
+            || matches!(
+                name,
+                "AssetServer"
+                    | "Time"
+                    | "ClearColor"
+                    | "ProjectPath"
+                    | "CollisionSound"
+                    | "EffectCache"
+            )
+            || name.starts_with("Assets<")
+            || name.starts_with("ButtonInput<")
+            || name.starts_with("Res<")
+            || name.starts_with("ResMut<")
+    }
+
+    pub(crate) fn is_resource_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named(n) => self.is_resource_type_name(n),
+            Type::Generic(g, _) => {
+                matches!(g.as_str(), "Assets" | "ButtonInput" | "Res" | "ResMut")
+                    || self.ecs_resource_info.contains_key(g)
+            }
+            Type::Mut(inner) | Type::Optional(inner) => self.is_resource_type(inner),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_bevy_system_fn(&self, f: &crate::ast::FnDecl) -> bool {
+        f.attrs.iter().any(|a| {
+            let n = a.name.to_ascii_lowercase();
+            matches!(
+                n.as_str(),
+                "observer"
+                    | "observe"
+                    | "startup"
+                    | "update"
+                    | "fixedupdate"
+                    | "fixed_update"
+                    | "schedule"
+            )
+        }) || f.params.iter().any(|p| {
+            if p.name == "commands" {
+                return true;
+            }
+            if let Some(Type::Generic(name, _)) = &p.ty {
+                if matches!(name.as_str(), "On" | "MessageReader" | "MessageWriter" | "EventReader" | "EventWriter") {
+                    return true;
+                }
+            }
+            false
+        })
     }
 
 
@@ -2796,6 +2948,7 @@ impl Transpiler {
         };
         // Pre-scan: collect enum variants and fn defaults before emitting anything.
         self.pre_scan(program);
+        self.analyze_ecs_context_usage();
 
         // Detect broadcast in single-thread mode early so the prelude can be emitted
         // before any function definitions.
@@ -2852,6 +3005,28 @@ impl Transpiler {
         self.line("use std::time::Duration;");
         if program_uses_ecs(program) {
             self.line("use bevy::prelude::*;");
+            self.line("use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};");
+            self.line("use bevy::asset::RenderAssetUsages;");
+            self.line("use bevy::audio::Volume;");
+            self.line("use bevy::input::keyboard::KeyboardInput;");
+            self.line("use bevy::input::ButtonState;");
+            self.line("use bevy::sprite::Anchor;");
+            self.line("pub type Camera2D = Camera2d;");
+            self.line("pub type Camera3D = Camera3d;");
+            if !self.ecs_context_resource_types.is_empty() {
+                self.blank();
+                self.line("pub struct EcsContext<'a> {");
+                let res_types = self.ecs_context_resource_types.clone();
+                for res_type in &res_types {
+                    let snake = camel_to_snake(res_type);
+                    if self.ecs_context_mut_resource_types.contains(res_type) {
+                        self.line(&format!("    pub {}: &'a mut {},", snake, res_type));
+                    } else {
+                        self.line(&format!("    pub {}: &'a {},", snake, res_type));
+                    }
+                }
+                self.line("}");
+            }
         }
         if matches!(self.config.threading, ThreadingMode::Single) && self.uses_local_channel.get() {
             self.line("use local_channel;");
@@ -3485,6 +3660,24 @@ impl Transpiler {
         // Auto-promotion: if any top-level stmt contains a `task expr` (detached or bound),
         // `main` must be async so `tokio::spawn` can be called.  We detect this here and
         // emit `#[tokio::main] async fn main()` instead of the plain `fn main()`.
+        let game_decl = program.items.iter().find_map(|item| match item {
+            Item::Struct(s) if s.is_game => Some(s),
+            _ => None,
+        });
+
+        if let Some(game) = game_decl {
+            self.emit_game_main(program, game, &stmts);
+            self.blank();
+            if !has_explicit_main {
+                self.line("fn main() {");
+                self.indent += 1;
+                self.line("build_app().run();");
+                self.indent -= 1;
+                self.line("}");
+                return;
+            }
+        }
+
         if stmts.is_empty() && !has_explicit_main {
             // Library-style file: no top-level statements, no user-defined main.
             // Emit a stub fn main() so the binary crate compiles.
@@ -3893,6 +4086,29 @@ impl Transpiler {
             || self.top_level_let_external_call(s).is_some()
             || self.top_level_let_is_string_literal(s)
             || self.top_level_let_is_typed_array(s)
+            || self.top_level_let_is_vec_array(s).is_some()
+    }
+
+    pub(crate) fn top_level_let_is_vec_array(&self, s: &LetStmt) -> Option<(&'static str, usize)> {
+        if !matches!(s.binding, crate::ast::BindingKind::Let) { return None; }
+        let ty = s.ty.as_ref()?;
+        match ty.without_mut() {
+            Type::Named(n) if n == "Vec2" || n.ends_with("::Vec2") => {
+                if matches!(&s.value.as_ref()?.kind, ExprKind::Array(elems) if elems.len() == 2) {
+                    Some(("Vec2", 2))
+                } else {
+                    None
+                }
+            }
+            Type::Named(n) if n == "Vec3" || n.ends_with("::Vec3") => {
+                if matches!(&s.value.as_ref()?.kind, ExprKind::Array(elems) if elems.len() == 3) {
+                    Some(("Vec3", 3))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// An immutable top-level `let` with a declared array type (plain `[T]`, sized, or a
@@ -4074,6 +4290,7 @@ impl Transpiler {
         "BackgroundGradient",
         "BorderGradient",
         "ClearColor",
+        "Anchor",
     ];
 
     /// Hand-verified argument-borrow requirements for external (Rust, non-Boring-authored)
@@ -5234,14 +5451,35 @@ impl Transpiler {
             match item {
                 Item::Struct(s) => {
                     self.user_types.insert(s.name.clone());
-                    if s.is_resource {
-                        self.ecs_resource_vars.insert(s.name.clone());
-                        self.ecs_resource_vars.insert(s.name.to_lowercase());
+                    if s.is_component {
+                        self.ecs_component_types.insert(s.name.clone());
+                    }
+                    if s.is_resource || s.is_game {
+                        self.register_resource_type(&s.name);
+                        for m in &s.methods {
+                            if m.mutating {
+                                self.ecs_resource_mutating_methods.insert(m.name.clone());
+                                self.ecs_resource_mutating_methods.insert(format!("{}::{}", s.name, m.name));
+                            }
+                        }
                     }
                 }
-                Item::Enum(e)   => { self.user_types.insert(e.name.clone()); }
+                Item::Ext(e) => {
+                    for m in &e.methods {
+                        if m.mutating {
+                            self.ecs_resource_mutating_methods.insert(m.name.clone());
+                            self.ecs_resource_mutating_methods.insert(format!("{}::{}", e.type_name, m.name));
+                        }
+                    }
+                }
+                Item::Enum(e)   => {
+                    self.user_types.insert(e.name.clone());
+                    if e.protocols.iter().any(|p| p == "Resource") {
+                        self.register_resource_type(&e.name);
+                    }
+                }
                 Item::Let(l) if l.is_resource => {
-                    self.ecs_resource_vars.insert(l.name.clone());
+                    self.register_resource_var(&l.name);
                 }
                 _ => {}
             }
@@ -5270,7 +5508,7 @@ impl Transpiler {
                 // plain CPU program with `let n = 255` at the top and an unrelated local
                 // `n` anywhere else (e.g. `fn countdown(n: isize)`) hit the exact same
                 // Rust restriction — confirmed via examples/hello.br.
-                if self.top_level_let_is_const_safe(s) || self.top_level_let_is_typed_array(s) {
+                if self.top_level_let_is_const_safe(s) || self.top_level_let_is_typed_array(s) || self.top_level_let_is_vec_array(s).is_some() {
                     self.gpu_top_level_const_names.insert(s.name.clone());
                 }
                 if matches!(s.binding, crate::ast::BindingKind::Let) && self.top_level_let_is_promotable(s) {
@@ -5572,7 +5810,7 @@ impl Transpiler {
                             self.arc_qualified_types.insert(n.to_string());
                         }
                     }
-                    if s.binding.is_mutable() {
+                    if s.binding.is_mutable() && !s.is_resource {
                         // Top-level mutable var declarations — collect type and initial value.
                         self.global_var_types.insert(s.name.clone(), s.ty.clone());
                         // `var v` with no initializer (deferred init, e.g. `var int x` with
@@ -5618,6 +5856,7 @@ impl Transpiler {
                     }
                     for v in &body_vars {
                         if top_var_names.contains(v)
+                            && !self.ecs_resource_vars.contains(v)
                             && !param_names.contains(v)
                             && !local_decls.contains(v)
                         {
@@ -5640,9 +5879,24 @@ impl Transpiler {
         for item in &program.items {
             match item {
                 Item::Fn(f) => collect_const_let_usage(&const_let_candidates, &f.params, &f.body, &mut self.global_lets_used_elsewhere),
-                Item::Struct(s) => for m in &s.methods {
-                    collect_const_let_usage(&const_let_candidates, &m.params, &m.body, &mut self.global_lets_used_elsewhere);
-                },
+                Item::Struct(s) => {
+                    for m in &s.methods {
+                        collect_const_let_usage(&const_let_candidates, &m.params, &m.body, &mut self.global_lets_used_elsewhere);
+                    }
+                    for f in &s.fields {
+                        if let Some(default_expr) = &f.default {
+                            let mut on_expr = |e: &mut Expr| {
+                                if let ExprKind::Var(v) = &e.kind {
+                                    if const_let_candidates.contains(v) {
+                                        self.global_lets_used_elsewhere.insert(v.clone());
+                                    }
+                                }
+                            };
+                            let mut on_stmt = |_s: &mut Stmt| {};
+                            crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.expr(&mut default_expr.clone());
+                        }
+                    }
+                }
                 Item::Enum(e) => for m in &e.methods {
                     collect_const_let_usage(&const_let_candidates, &m.params, &m.body, &mut self.global_lets_used_elsewhere);
                 },
@@ -5992,13 +6246,43 @@ fn program_uses_introspect(program: &Program) -> bool {
     items_use(&program.items)
 }
 
+fn is_ecs_fn_decl(f: &crate::ast::FnDecl) -> bool {
+    if f.ecs_where_clause.is_some() {
+        return true;
+    }
+    if f.attrs.iter().any(|a| {
+        matches!(
+            a.name.to_ascii_lowercase().as_str(),
+            "schedule" | "startup" | "update" | "fixedupdate" | "fixed_update" | "observer" | "observe" | "after" | "before" | "chain" | "on_event"
+        )
+    }) {
+        return true;
+    }
+    let custom = crate::transpiler::emit_query::scan_custom_ecs(&f.body);
+    if !custom.fetches.is_empty() || !custom.for_loops.is_empty() {
+        return true;
+    }
+    f.params.iter().any(|p| {
+        if p.name == "commands" {
+            return true;
+        }
+        if let Some(crate::ast::Type::Named(n)) = &p.ty {
+            if matches!(n.as_str(), "Commands" | "TextUiWriter" | "Time" | "Transform" | "Sprite" | "Visibility" | "Text2d") {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 fn program_uses_ecs(program: &Program) -> bool {
     use crate::ast::Item;
     fn items_use(items: &[Item]) -> bool {
         items.iter().any(|item| match item {
-            Item::Struct(s) => s.is_component || s.is_resource || !s.queries.is_empty(),
+            Item::Struct(s) => s.is_component || s.is_resource || s.is_game || s.methods.iter().any(is_ecs_fn_decl),
             Item::Let(l) => l.is_resource,
-            Item::Query(_) => true,
+            Item::Fn(f) => is_ecs_fn_decl(f),
+            Item::Use(u) => u.path.first().map(|s| s == "ecs").unwrap_or(false),
             Item::Mod(m)    => items_use(&m.items),
             _ => false,
         })

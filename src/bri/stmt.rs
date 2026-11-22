@@ -96,6 +96,10 @@ impl Printer {
                     let kt = self.expr(k, P_ELSE)?;
                     let _ = write!(head, " with {kt}");
                 }
+                if let Some(w) = &f.where_expr {
+                    let wt = self.expr(w, P_ELSE)?;
+                    let _ = write!(head, " where {wt}");
+                }
                 self.line(&format!("{head}:"));
                 self.block_inner(&f.body)
             }

@@ -2479,7 +2479,28 @@ impl Interpreter {
             // does the fixed-shape kernel-field equivalent. Reaching one of these here
             // means a desugar/lowering pass was skipped — an internal compiler bug,
             // not a user-facing error. See docs/array-multidim-proposal.md.
-            ExprKind::LabeledIndex(..) | ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
+            ExprKind::LabeledIndex(obj_expr, args) => {
+                let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+                if let Value::Object(ref inner_rc) = obj {
+                    let type_name = inner_rc.borrow().type_name.clone();
+                    let has_get = {
+                        let g = self.global.borrow();
+                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                            decl.methods.iter().any(|m| m.name == "get")
+                        } else {
+                            false
+                        }
+                    };
+                    if has_get {
+                        let arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                        let mut out_self = None;
+                        return self.call_method(obj, "get", arg_vals, expr.line, &mut out_self);
+                    }
+                    return Err(err_span(format!("cannot index into {}: method 'get' is not defined", type_name), expr.line, expr.col, expr.len));
+                }
+                Err(err("internal error: labeled multi-dim array expression reached the evaluator without being desugared first", expr.line))
+            }
+            ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
                 Err(err("internal error: labeled multi-dim array expression reached the evaluator without being desugared first", expr.line))
             }
 
@@ -2747,6 +2768,78 @@ impl Interpreter {
 
             ExprKind::SliceRange { .. } => {
                 Err(err("SliceRange cannot appear outside an index expression", line))
+            }
+
+            ExprKind::EcsFetch(_) => {
+                Err(err("ECS fetch expressions (single/first/any) require a live Bevy ECS World", line))
+            }
+
+            ExprKind::Query(q) => self.eval_query_expr(q, env, line),
+        }
+    }
+
+    pub(crate) fn eval_query_expr(&mut self, q: &QueryExpr, env: EnvRef, line: usize) -> Eval {
+        let iterable_val = self.eval_expr(&q.iterable, Rc::clone(&env))?;
+        let items = self.collect_iterable(iterable_val, line)?;
+        let mut filtered_projected = Vec::new();
+
+        for (idx, item) in items.into_iter().enumerate() {
+            let child = Env::child(Rc::clone(&env));
+            Self::bind_for_item(&q.vars, idx as i64, item, &child);
+
+            if let Some(where_expr) = &q.where_clause {
+                let cond_val = self.eval_expr(where_expr, Rc::clone(&child))?;
+                if !self.expect_bool(cond_val, where_expr.line)? {
+                    continue;
+                }
+            }
+
+            let result_item = if let Some(proj) = &q.projection {
+                self.eval_expr(proj, Rc::clone(&child))?
+            } else if q.vars.len() == 1 {
+                child.borrow().get(&q.vars[0]).unwrap_or(Value::Nil)
+            } else {
+                let tuple_items = q.vars.iter().map(|v| child.borrow().get(v).unwrap_or(Value::Nil)).collect();
+                Value::Tuple(tuple_items)
+            };
+
+            filtered_projected.push(result_item);
+
+            if matches!(q.kind, EcsFetchKind::First | EcsFetchKind::Any) {
+                break;
+            }
+            if matches!(q.kind, EcsFetchKind::Single) && filtered_projected.len() > 1 {
+                return Err(err("query single: expected at most one matching element, found multiple", line));
+            }
+        }
+
+        match q.kind {
+            EcsFetchKind::All => Ok(Value::Array(filtered_projected.into())),
+            EcsFetchKind::First | EcsFetchKind::Any => {
+                if let Some(first) = filtered_projected.into_iter().next() {
+                    Ok(first)
+                } else if q.is_optional {
+                    Ok(Value::Nil)
+                } else {
+                    let name = match q.kind {
+                        EcsFetchKind::First => "query first",
+                        _ => "query any",
+                    };
+                    Err(err(format!("{}: matching element not found", name), line))
+                }
+            }
+            EcsFetchKind::Single => {
+                if filtered_projected.len() == 1 {
+                    Ok(filtered_projected.swap_remove(0))
+                } else if filtered_projected.is_empty() {
+                    if q.is_optional {
+                        Ok(Value::Nil)
+                    } else {
+                        Err(err("query single: no matching element found", line))
+                    }
+                } else {
+                    Err(err("query single: expected at most one matching element, found multiple", line))
+                }
             }
         }
     }
@@ -3859,7 +3952,7 @@ impl Interpreter {
             Item::Let(d)    => Some((&d.name, d.is_pub)),
             Item::Mod(d)    => Some((&d.name, false)),
             Item::Kernel(d) => Some((&d.name, d.is_pub)),
-            Item::Use(_) | Item::Alias(_) | Item::Trait(_) | Item::Ext(_) | Item::Stmt(_) | Item::Query(_) => None,
+            Item::Use(_) | Item::Alias(_) | Item::Trait(_) | Item::Ext(_) | Item::Stmt(_) => None,
         }
     }
 

@@ -69,12 +69,60 @@ impl Transpiler {
             ExprKind::Bool(b)  => b.to_string(),
             ExprKind::Nil      => "None".into(),
             ExprKind::Void     => "()".into(),
+            ExprKind::EcsFetch(f) => {
+                let param_name = self.ecs_fetch_params.borrow().get(&(expr.line, expr.col)).cloned().unwrap_or_else(|| "query".to_string());
+                match f.kind {
+                    EcsFetchKind::Single => {
+                        if f.is_optional {
+                            format!("{}.iter().next()", param_name)
+                        } else if self.ecs_query_throws {
+                            format!("{}.get_single().map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(format!(\"{{:?}}\", e)))?", param_name)
+                        } else {
+                            format!("{}.into_inner()", param_name)
+                        }
+                    }
+                    EcsFetchKind::First => {
+                        if f.is_optional {
+                            format!("{}.iter().next()", param_name)
+                        } else if self.ecs_query_throws {
+                            format!("{}.iter().next().ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(\"no matching entity found\"))?", param_name)
+                        } else {
+                            format!("{}.iter().next().expect(\"no matching entity found\")", param_name)
+                        }
+                    }
+                    EcsFetchKind::All => {
+                        let any_mut = f.components.iter().any(|c| c.is_mut);
+                        if any_mut {
+                            format!("(&mut {})", param_name)
+                        } else {
+                            format!("(&{})", param_name)
+                        }
+                    }
+                    EcsFetchKind::Any => {
+                        if f.components.is_empty() {
+                            format!("!{}.is_empty()", param_name)
+                        } else if f.is_optional {
+                            format!("{}.iter().next()", param_name)
+                        } else if self.ecs_query_throws {
+                            format!("{}.iter().next().ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(\"no matching entity found\"))?", param_name)
+                        } else {
+                            format!("{}.iter().next().expect(\"no matching entity found\")", param_name)
+                        }
+                    }
+                }
+            }
+            ExprKind::Query(q) => self.emit_collection_query(q),
             ExprKind::Var(n)   => {
-                if self.in_ecs_query && self.ecs_resource_vars.contains(n) {
-                    return if self.struct_fields.contains_key(n) {
-                        format!("res_{}", n.to_lowercase())
+                if self.in_ecs_query && n == "entity" && !self.known_local_vars.contains(n.as_str()) {
+                    return "__entity".to_string();
+                }
+                if self.in_ecs_query && self.ecs_resource_vars.contains(n) && !self.known_local_vars.contains(n.as_str()) {
+                    let is_type = self.ecs_resource_info.get(n).map(|i| i.is_type).unwrap_or_else(|| self.struct_fields.contains_key(n));
+                    let param_name = self.ecs_resource_info.get(n).map(|i| i.param_name.clone()).unwrap_or_else(|| format!("res_{}", camel_to_snake(n)));
+                    return if is_type {
+                        param_name
                     } else {
-                        format!("res_{}.0", n.to_lowercase())
+                        format!("{}.0", param_name)
                     };
                 }
                 // In init body, `self` is the local `__self` variable.
@@ -639,15 +687,28 @@ impl Transpiler {
             }
 
             ExprKind::DotIdent(name) => {
+                if name == "resource" && !self.in_ecs_query {
+                    self.push_error(
+                        expr.line,
+                        expr.col,
+                        "`.resource` is only allowed inside ECS systems; use `ecs.resource` in regular functions".to_string(),
+                    );
+                    return "/* invalid .resource outside ECS system */".to_string();
+                }
                 if self.in_ecs_query {
                     if name == "entity" {
                         return "__entity".to_string();
                     }
+                    if name == "commands" {
+                        return "commands".to_string();
+                    }
                     if self.ecs_resource_vars.contains(name) {
-                        return if self.struct_fields.contains_key(name) {
-                            format!("res_{}", name.to_lowercase())
+                        let is_type = self.ecs_resource_info.get(name).map(|i| i.is_type).unwrap_or_else(|| self.struct_fields.contains_key(name));
+                        let param_name = self.ecs_resource_info.get(name).map(|i| i.param_name.clone()).unwrap_or_else(|| format!("res_{}", camel_to_snake(name)));
+                        return if is_type {
+                            param_name
                         } else {
-                            format!("res_{}.0", name.to_lowercase())
+                            format!("{}.0", param_name)
                         };
                     }
                 }
@@ -829,7 +890,15 @@ impl Transpiler {
             // Lowered away by the labeled-array desugar pass before codegen ever runs
             // (see docs/array-multidim-proposal.md) — reaching one here means that
             // pass was skipped, an internal compiler bug.
-            ExprKind::LabeledIndex(..) | ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
+            ExprKind::LabeledIndex(obj, args) => {
+                if let Some(sn) = self.resolve_expr_struct_type(obj) {
+                    if self.struct_method_names.get(&sn).is_some_and(|ms| ms.contains("get")) {
+                        return self.emit_method_call(obj, "get", args);
+                    }
+                }
+                panic!("labeled multi-dim array expression reached codegen without being desugared first")
+            }
+            ExprKind::LabeledArrayComp { .. } | ExprKind::RelabelCast(..) => {
                 panic!("labeled multi-dim array expression reached codegen without being desugared first")
             }
             // Lowered away by `desugar_array_block` before codegen ever runs (see
@@ -1885,6 +1954,15 @@ impl Transpiler {
                 );
             }
         }
+        // Custom struct subscript getter via conventional `get` method
+        if !matches!(idx.kind, ExprKind::SliceRange { .. }) {
+            if let Some(sn) = self.resolve_expr_struct_type(obj) {
+                if self.struct_method_names.get(&sn).is_some_and(|ms| ms.contains("get")) {
+                    let arg = Arg { label: None, value: idx.clone(), spread: false, default_rest: false };
+                    return self.emit_method_call(obj, "get", &[arg]);
+                }
+            }
+        }
         // Slice: a[M..<N], a[..<N], a[M..], a[..]  →  obj[M..N].to_vec()
         if let ExprKind::SliceRange { start, end, inclusive } = &idx.kind {
             // Detect whether the receiver is a string to emit a char-safe slice.
@@ -2670,14 +2748,73 @@ impl Transpiler {
     /// dispatch, mutex/rwlock/managed-mode field reads, transient fields, module-path
     /// vs. instance-field disambiguation, and the general mapped-field fallback.
     fn emit_expr_field(&self, obj: &Expr, field: &String) -> String {
+        if !self.in_ecs_query && is_ecs_resource_obj(obj) {
+            let snake = camel_to_snake(field);
+            let is_type = self.ecs_resource_info.get(field).map(|i| i.is_type).unwrap_or(true);
+            return if is_type {
+                format!("ecs.{}", snake)
+            } else {
+                format!("ecs.{}.0", snake)
+            };
+        }
+        if let ExprKind::DotIdent(d) = &obj.kind {
+            if d == "resource" && !self.in_ecs_query {
+                self.push_error(
+                    obj.line,
+                    obj.col,
+                    "`.resource` is only allowed inside ECS systems; use `ecs.resource` in regular functions".to_string(),
+                );
+                return "/* invalid .resource outside ECS system */".to_string();
+            }
+        }
+        if self.in_ecs_query && matches!(&obj.kind, ExprKind::Var(v) if v == "ecs") {
+            match field.as_str() {
+                "commands" => return "commands".to_string(),
+                "input" => return "input".to_string(),
+                "time" => return "time".to_string(),
+                "entity" => return "__entity".to_string(),
+                _ => {}
+            }
+        }
         if self.in_ecs_query {
-            if let ExprKind::DotIdent(d) = &obj.kind {
-                if d == "time" {
-                    if field == "delta" {
-                        return "(time.delta_secs() as f64)".to_string();
-                    } else if field == "elapsed" {
-                        return "(time.elapsed_secs_f64())".to_string();
-                    }
+            if is_time_qualifier_obj(obj) {
+                let snake = camel_to_snake(field);
+                if matches!(snake.as_str(), "delta" | "delta_secs") {
+                    return "(time.delta_secs() as f64)".to_string();
+                } else if matches!(snake.as_str(), "elapsed" | "elapsed_secs" | "elapsed_secs_f64") {
+                    return "(time.elapsed_secs_f64())".to_string();
+                }
+            }
+            if is_resource_qualifier_obj(obj) {
+                let snake = camel_to_snake(field);
+                let camel = snake_to_camel(&snake);
+                let param_name = if self.known_local_vars.contains(field.as_str()) {
+                    field.clone()
+                } else if self.known_local_vars.contains(&snake) {
+                    snake.clone()
+                } else if self.known_local_vars.contains(&camel) {
+                    camel.clone()
+                } else if let Some(info) = self.ecs_resource_info.get(field) {
+                    info.param_name.clone()
+                } else {
+                    format!("res_{}", snake)
+                };
+
+                let is_type = self.ecs_resource_info.get(field).map(|i| i.is_type).unwrap_or(true);
+                return if is_type {
+                    param_name
+                } else {
+                    format!("{}.0", param_name)
+                };
+            }
+            if matches!(field.as_str(), "x" | "y" | "z") {
+                let is_transform = self.resolve_struct_name(obj)
+                    .map(|sn| sn == "Transform")
+                    .unwrap_or(false)
+                    || matches!(&obj.kind, ExprKind::Var(v) if v == "transform" || v.ends_with("_transform"));
+                if is_transform {
+                    let base = self.emit_expr(obj);
+                    return format!("{}.translation.{}", base, field);
                 }
             }
         }
@@ -3250,7 +3387,7 @@ impl Transpiler {
         let mut hoist: Vec<(String, &Expr)> = Vec::new();
         for (recv, idx) in &idxs {
             if matches!(idx.kind, ExprKind::Int(_) | ExprKind::Var(_)) { continue; }
-            if self.expr_is_dict(recv) || self.index_receiver_is_string(recv) { continue; }
+            if self.expr_is_dict(recv) || self.index_receiver_is_string(recv) || self.resolve_expr_struct_type(recv).is_some() { continue; }
             if mentions(idx) { hoist.push((format!("{:?}", idx), idx)); }
         }
         if hoist.is_empty() { return None; }
@@ -3289,6 +3426,34 @@ impl Transpiler {
                 let target_s = self.emit_expr(target);
                 self.in_lhs_assign.set(false);
                 return format!("{} = {}", target_s, lit);
+            }
+        }
+        // Custom struct subscript setter via conventional `set` method
+        if let ExprKind::Index(arr_obj, idx_expr) = &target.kind {
+            if !matches!(idx_expr.kind, ExprKind::SliceRange { .. }) {
+                if let Some(sn) = self.resolve_expr_struct_type(arr_obj) {
+                    if self.struct_method_names.get(&sn).is_some_and(|ms| ms.contains("set")) {
+                        let args = vec![
+                            Arg { label: None, value: *idx_expr.clone(), spread: false, default_rest: false },
+                            Arg { label: None, value: value.clone(), spread: false, default_rest: false },
+                        ];
+                        return self.emit_method_call(arr_obj, "set", &args);
+                    }
+                }
+            }
+        }
+        if let ExprKind::LabeledIndex(obj, args) = &target.kind {
+            if let Some(sn) = self.resolve_expr_struct_type(obj) {
+                if self.struct_method_names.get(&sn).is_some_and(|ms| ms.contains("set")) {
+                    let mut set_args = args.clone();
+                    set_args.push(Arg {
+                        label: None,
+                        value: value.clone(),
+                        spread: false,
+                        default_rest: false,
+                    });
+                    return self.emit_method_call(obj, "set", &set_args);
+                }
             }
         }
         // `xs[i] = v` into a `[Trait'shared]` / `[Trait'owned]` slot: wrap a concrete value (or
@@ -4581,6 +4746,41 @@ impl Transpiler {
         } else {
             rhs_s
         };
+        if let ExprKind::Field(obj, f) = &target.kind {
+            if matches!(f.as_str(), "translation" | "scale")
+                && (self.resolve_struct_name(obj).map(|sn| sn == "Transform").unwrap_or(false)
+                    || (self.in_ecs_query && matches!(&obj.kind, ExprKind::Var(v) if v == "transform" || v.ends_with("_transform"))))
+                && matches!(&value.kind, ExprKind::Array(elems) if elems.len() == 3)
+            {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    let e2 = self.emit_expr(&elems[2]);
+                    return format!("{} = Vec3::new(({}) as f32, ({}) as f32, ({}) as f32)", self.emit_expr(target), e0, e1, e2);
+                }
+            }
+            if f.as_str() == "custom_size"
+                && (self.resolve_struct_name(obj).map(|sn| sn == "Sprite").unwrap_or(false)
+                    || (self.in_ecs_query && matches!(&obj.kind, ExprKind::Var(v) if v == "sprite" || v.ends_with("_sprite"))))
+                && matches!(&value.kind, ExprKind::Array(elems) if elems.len() == 2)
+            {
+                if let ExprKind::Array(elems) = &value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    return format!("{} = Some(Vec2::new(({}) as f32, ({}) as f32))", self.emit_expr(target), e0, e1);
+                }
+            }
+        }
+        let is_transform_coord = matches!(&target.kind, ExprKind::Field(obj, f)
+            if matches!(f.as_str(), "x" | "y" | "z") && (
+                self.resolve_struct_name(obj).map(|sn| sn == "Transform").unwrap_or(false)
+                || (self.in_ecs_query && matches!(&obj.kind, ExprKind::Var(v) if v == "transform" || v.ends_with("_transform")))
+            ));
+        let rhs_s = if is_transform_coord {
+            format!("({}) as f32", rhs_s)
+        } else {
+            rhs_s
+        };
         // When assigning to an optional-typed target, wrap non-optional RHS in Some().
         // Covers three target shapes:
         //  - a local `var T? x` variable: `x = throws_call()?` → `x = Some(throws_call()?)`.
@@ -4728,26 +4928,56 @@ impl Transpiler {
 
     pub(crate) fn emit_call(&self, callee: &Expr, args: &[Arg]) -> String {
         if self.in_ecs_query {
+            let is_despawn = match &callee.kind {
+                ExprKind::DotIdent(d) => d == "despawn",
+                ExprKind::Var(v) if !self.known_local_vars.contains(v.as_str()) => v == "despawn",
+                ExprKind::Field(base, field) => field == "despawn" && is_ecs_qualifier_obj(base),
+                _ => false,
+            };
+            if is_despawn {
+                return "commands.entity(__entity).despawn()".to_string();
+            }
+
+            let is_spawn = match &callee.kind {
+                ExprKind::DotIdent(d) => d == "spawn",
+                ExprKind::Var(v) if !self.known_local_vars.contains(v.as_str()) => v == "spawn",
+                ExprKind::Field(base, field) => field == "spawn" && is_ecs_qualifier_obj(base),
+                _ => false,
+            };
+            if is_spawn {
+                let args_s = args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ");
+                return if args.len() == 1 {
+                    format!("commands.spawn(({},))", args_s)
+                } else {
+                    format!("commands.spawn(({}))", args_s)
+                };
+            }
+
             if let ExprKind::DotIdent(d) = &callee.kind {
                 match d.as_str() {
-                    "despawn" => {
-                        return "commands.entity(__entity).despawn()".to_string();
-                    }
-                    "spawn" => {
-                        let args_s = args.iter().map(|a| self.emit_expr(&a.value)).collect::<Vec<_>>().join(", ");
-                        return if args.len() == 1 {
-                            format!("commands.spawn(({},))", args_s)
-                        } else {
-                            format!("commands.spawn(({}))", args_s)
-                        };
-                    }
                     "resource" => {
+                        if !self.in_ecs_query {
+                            self.push_error(
+                                callee.line,
+                                callee.col,
+                                "`.resource` is only allowed inside ECS systems; use `ecs.resource` in regular functions".to_string(),
+                            );
+                            return "/* invalid .resource outside ECS system */".to_string();
+                        }
                         if let Some(arg) = args.first() {
                             let name = self.emit_expr(&arg.value);
                             return format!("res_{}.clone()", name.to_lowercase());
                         }
                     }
                     "mut_resource" => {
+                        if !self.in_ecs_query {
+                            self.push_error(
+                                callee.line,
+                                callee.col,
+                                "`.mut_resource` is only allowed inside ECS systems; use `ecs.resource` in regular functions".to_string(),
+                            );
+                            return "/* invalid .mut_resource outside ECS system */".to_string();
+                        }
                         if let Some(arg) = args.first() {
                             let name = self.emit_expr(&arg.value);
                             return format!("res_{}", name.to_lowercase());
@@ -4893,6 +5123,11 @@ impl Transpiler {
                 if let Some(decl) = chosen {
                     let mangled = mangle_overload_name(name, &decl.params);
                     let mut args_s = self.emit_args_coerced_vec(&mangled, args);
+                    if self.fns_needing_ecs_context.contains(name.as_str()) {
+                        if let Some(arg) = self.emit_ecs_context_arg() {
+                            args_s.push(arg);
+                        }
+                    }
                     let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                     let base = Self::with_hoisted_args(&hoisted, format!("{}({})", mangled, args_s.join(", ")));
                     let is_task = self.in_async && self.task_fns.contains(name.as_str());
@@ -4908,6 +5143,11 @@ impl Transpiler {
             // User-defined functions (and stdlib functions registered in fn_sigs).
             if self.fn_sigs.contains_key(name.as_str()) {
                 let mut args_s = self.emit_args_coerced_vec(name, args);
+                if self.fns_needing_ecs_context.contains(name.as_str()) {
+                    if let Some(arg) = self.emit_ecs_context_arg() {
+                        args_s.push(arg);
+                    }
+                }
                 let hoisted = Self::hoist_lent_conflicts(&mut args_s);
                 let base = Self::with_hoisted_args(&hoisted, format!("{}({})", escape_rust_keyword(name), args_s.join(", ")));
                 let is_task = self.in_async
@@ -5328,6 +5568,31 @@ impl Transpiler {
         }
     }
 
+    pub(crate) fn emit_ecs_context_arg(&self) -> Option<String> {
+        if self.in_ecs_query {
+            let mut fields = Vec::new();
+            for res_type in &self.ecs_context_resource_types {
+                let snake = camel_to_snake(res_type);
+                let param_name = match self.ecs_resource_info.get(res_type) {
+                    Some(info) => info.param_name.clone(),
+                    None => format!("res_{}", snake),
+                };
+                if self.ecs_context_mut_resource_types.contains(res_type) {
+                    fields.push(format!("{}: &mut *{}", snake, param_name));
+                } else {
+                    fields.push(format!("{}: &*{}", snake, param_name));
+                }
+            }
+            Some(format!("&mut EcsContext {{ {} }}", fields.join(", ")))
+        } else if self.current_fn_name.as_deref().is_some_and(|n| self.fns_needing_ecs_context.contains(n)) {
+            Some("&mut *ecs".to_string())
+        } else if self.known_local_vars.contains("ecs") {
+            Some("&mut ecs".to_string())
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn emit_pipe(&self, lhs: &Expr, name: &str, args: &[Arg]) -> String {
         // If the name is a known standalone function, insert lhs as first argument.
         // Otherwise treat it as a method call on lhs.
@@ -5339,6 +5604,11 @@ impl Transpiler {
             all_args.push(Arg { label: None, value: lhs.clone(), spread: false, default_rest: false });
             all_args.extend_from_slice(args);
             let mut all_args = self.emit_args_coerced_vec(name, &all_args);
+            if self.fns_needing_ecs_context.contains(name) {
+                if let Some(arg) = self.emit_ecs_context_arg() {
+                    all_args.push(arg);
+                }
+            }
             let hoisted = Self::hoist_lent_conflicts(&mut all_args);
             let base = Self::with_hoisted_args(&hoisted, format!("{}({})", escape_rust_keyword(name), all_args.join(", ")));
             let is_task = self.in_async && self.task_fns.contains(name);
@@ -5655,6 +5925,29 @@ impl Transpiler {
                         // A string literal for a generic `T` field (`Slot(value = "a")`) is a
                         // `string` — owned `Rc<str>`/`Arc<str>`, never a `&'static str`.
                         self.emit_let_value(Some(&Type::Str), eff_value)
+                    } else if (name == "Transform" || name.ends_with("::Transform"))
+                        && matches!(label, "translation" | "scale")
+                        && matches!(&eff_value.kind, ExprKind::Array(elems) if elems.len() == 3)
+                    {
+                        if let ExprKind::Array(elems) = &eff_value.kind {
+                            let e0 = self.emit_expr(&elems[0]);
+                            let e1 = self.emit_expr(&elems[1]);
+                            let e2 = self.emit_expr(&elems[2]);
+                            format!("Vec3::new(({}) as f32, ({}) as f32, ({}) as f32)", e0, e1, e2)
+                        } else {
+                            self.emit_struct_field_value(field_ty, eff_value)
+                        }
+                    } else if (name == "Sprite" || name.ends_with("::Sprite"))
+                        && label == "custom_size"
+                        && matches!(&eff_value.kind, ExprKind::Array(elems) if elems.len() == 2)
+                    {
+                        if let ExprKind::Array(elems) = &eff_value.kind {
+                            let e0 = self.emit_expr(&elems[0]);
+                            let e1 = self.emit_expr(&elems[1]);
+                            format!("Some(Vec2::new(({}) as f32, ({}) as f32))", e0, e1)
+                        } else {
+                            self.emit_struct_field_value(field_ty, eff_value)
+                        }
                     } else {
                         self.emit_struct_field_value(field_ty, eff_value)
                     }
@@ -5665,6 +5958,52 @@ impl Transpiler {
         if name == "Ok" || name == "Err" {
             let args_s = self.emit_args(args);
             return format!("{}({})", name, args_s);
+        }
+        if (name == "Vec2" || name.ends_with("::Vec2")) && args.len() == 1 && matches!(&args[0].value.kind, ExprKind::Array(elems) if elems.len() == 2) {
+            if let ExprKind::Array(elems) = &args[0].value.kind {
+                let e0 = self.emit_expr(&elems[0]);
+                let e1 = self.emit_expr(&elems[1]);
+                return format!("Vec2::new(({}) as f32, ({}) as f32)", e0, e1);
+            }
+        }
+        if (name == "Vec3" || name.ends_with("::Vec3")) && args.len() == 1 && matches!(&args[0].value.kind, ExprKind::Array(elems) if elems.len() == 3) {
+            if let ExprKind::Array(elems) = &args[0].value.kind {
+                let e0 = self.emit_expr(&elems[0]);
+                let e1 = self.emit_expr(&elems[1]);
+                let e2 = self.emit_expr(&elems[2]);
+                return format!("Vec3::new(({}) as f32, ({}) as f32, ({}) as f32)", e0, e1, e2);
+            }
+        }
+        if name == "EcsContext" {
+            let mut fields = Vec::new();
+            for arg in args {
+                let label = match &arg.label {
+                    Some(l) => l.clone(),
+                    None => {
+                        if let ExprKind::Closure(params, _, _, _, _) = &arg.value.kind {
+                            params[0].name.clone()
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+                let val_expr = if let (None, ExprKind::Closure(params, _, body, _, _)) = (&arg.label, &arg.value.kind) {
+                    if params.len() == 1 {
+                        if let ClosureBody::Expr(e) = body { e.as_ref() } else { &arg.value }
+                    } else { &arg.value }
+                } else { &arg.value };
+
+                let val_s = self.emit_expr(val_expr);
+                let snake = camel_to_snake(&label);
+                let is_mut = self.ecs_context_mut_resource_types.iter()
+                    .any(|t| camel_to_snake(t) == snake);
+                if is_mut {
+                    fields.push(format!("{}: &mut {}", snake, val_s));
+                } else {
+                    fields.push(format!("{}: &{}", snake, val_s));
+                }
+            }
+            return format!("EcsContext {{ {} }}", fields.join(", "));
         }
         // Non-fn type alias resolving to a qualified type: construct via the alias.
         // e.g. `AP(3, 4)` where `AP = APoint'owned` (Box<APoint>) → `Box::new(APoint::new(3, 4))`.
@@ -6154,7 +6493,17 @@ impl Transpiler {
             // Fallback: literal tuple-struct call for hand-verified external types (see
             // `Transpiler::KNOWN_EXTERNAL_TUPLE_STRUCTS`'s doc in src/transpiler/mod.rs),
             // else ::new(args) (requires a new() function to exist).
-            let args_s = self.emit_args(args);
+            let args_s = if name == "Anchor" && args.len() == 1 && matches!(&args[0].value.kind, ExprKind::Array(elems) if elems.len() == 2) {
+                if let ExprKind::Array(elems) = &args[0].value.kind {
+                    let e0 = self.emit_expr(&elems[0]);
+                    let e1 = self.emit_expr(&elems[1]);
+                    format!("Vec2::new(({}) as f32, ({}) as f32)", e0, e1)
+                } else {
+                    self.emit_args(args)
+                }
+            } else {
+                self.emit_args(args)
+            };
             if self.is_known_external_tuple_struct(name) {
                 return format!("{}({})", name, args_s);
             }
@@ -6188,6 +6537,12 @@ impl Transpiler {
             ExprKind::Var(v) => self.local_struct(v)
                 .or_else(|| self.local_type(v.as_str()).and_then(&named)),
             ExprKind::Field(base, field) => {
+                if is_resource_qualifier_obj(base) {
+                    if let Some(info) = self.ecs_resource_info.get(field) {
+                        return Some(info.rust_type.clone());
+                    }
+                    return Some(snake_to_pascal(&camel_to_snake(field)));
+                }
                 let struct_name = self.resolve_struct_name(base)?;
                 self.struct_fields.get(struct_name.as_str())?
                     .iter().find(|(fname, _)| fname == field)
@@ -6917,6 +7272,48 @@ fn param_ty_is_copy_scalar(t: &Type) -> bool {
         Type::Int | Type::Uint | Type::Uint8 | Type::Float16 | Type::Float32 | Type::Float64 | Type::Bool
             | Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128
             | Type::Uint16 | Type::Uint32 | Type::Uint64 | Type::Uint128)
+}
+
+impl Transpiler {
+    pub(crate) fn emit_collection_query(&self, q: &QueryExpr) -> String {
+        let iter_expr = self.emit_expr(&q.iterable);
+        let vars_pat = if q.vars.len() == 1 {
+            escape_rust_keyword(&q.vars[0])
+        } else {
+            format!("({})", q.vars.iter().map(|v| escape_rust_keyword(v)).collect::<Vec<_>>().join(", "))
+        };
+        // Build base iterator
+        let mut chain = format!("({}).into_iter()", iter_expr);
+        if let Some(w) = &q.where_clause {
+            let cond = self.emit_expr(w);
+            chain = format!("{}.filter(|{}| {})", chain, vars_pat, cond);
+        }
+        if let Some(p) = &q.projection {
+            let proj = self.emit_expr(p);
+            chain = format!("{}.map(|{}| {})", chain, vars_pat, proj);
+        }
+        match q.kind {
+            EcsFetchKind::All => chain,
+            EcsFetchKind::First | EcsFetchKind::Any => {
+                if q.is_optional {
+                    format!("{}.next()", chain)
+                } else if self.in_throws || self.in_try_body {
+                    format!("{}.next().ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(\"query found no matching element\"))?", chain)
+                } else {
+                    format!("{}.next().expect(\"query found no matching element\")", chain)
+                }
+            }
+            EcsFetchKind::Single => {
+                if q.is_optional {
+                    format!("{{ let mut __it = {}; match __it.next() {{ None => None, Some(__first) => if __it.next().is_some() {{ panic!(\"query single found multiple matching elements\"); }} else {{ Some(__first) }} }} }}", chain)
+                } else if self.in_throws || self.in_try_body {
+                    format!("{{ let mut __it = {}; match __it.next() {{ None => return Err(Box::<dyn std::error::Error + Send + Sync>::from(\"query single found no matching element\")), Some(__first) => if __it.next().is_some() {{ return Err(Box::<dyn std::error::Error + Send + Sync>::from(\"query single found multiple matching elements\")); }} else {{ __first }} }} }}", chain)
+                } else {
+                    format!("{{ let mut __it = {}; match __it.next() {{ None => panic!(\"query single found no matching element\"), Some(__first) => if __it.next().is_some() {{ panic!(\"query single found multiple matching elements\"); }} else {{ __first }} }} }}", chain)
+                }
+            }
+        }
+    }
 }
 
 

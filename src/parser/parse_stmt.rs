@@ -1269,6 +1269,43 @@ impl Parser {
         Ok(LoopStmt { body, line, col })
     }
 
+    /// Returns true if the current position starts an ECS query loop form:
+    /// `for [entity,] [mut] Type var [, ...] [where filter]:`
+    pub(crate) fn is_for_ecs_query_ahead(&self) -> bool {
+        let mut i = self.pos;
+        let mut has_where = false;
+        let mut has_in = false;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::Colon | TokenKind::Newline | TokenKind::Eof => break,
+                TokenKind::Where => { has_where = true; break; }
+                TokenKind::In => { has_in = true; break; }
+                _ => i += 1,
+            }
+        }
+        if has_where { return true; }
+        if has_in { return false; }
+        // If no `in` and no `where`, check if starts with `mut Type` or `Type name`
+        if matches!(self.peek(), TokenKind::Mut) { return true; }
+        if let TokenKind::Ident(s) = self.peek() {
+            if s == "entity" {
+                if let Some(TokenKind::Comma) = self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                    return true;
+                }
+            }
+            if Self::is_type_name(s) {
+                // Check if followed by an ident (e.g. `Type var`) or `?`
+                if let Some(TokenKind::Ident(_)) = self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                    return true;
+                }
+                if let Some(TokenKind::Question) = self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Returns true if the current position starts a `for var [, var] in` binding form.
     /// Scans forward past comma-separated idents; returns true only if `in` follows.
     pub(crate) fn is_for_with_vars(&self) -> bool {
@@ -1292,21 +1329,81 @@ impl Parser {
         let saved = self.allow_noparen_closure;
         self.allow_noparen_closure = false; self.allow_trailing_closure = false;
 
-        let (vars, iterable, key) = if self.is_for_with_vars() {
+        let (vars, var_types, iterable, key, where_clause, where_expr) = if self.is_for_ecs_query_ahead() {
+            // ECS query loop: `for entity, ScratchSprite sprite where ScratchSprite:`
+            let mut vars = Vec::new();
+            let mut var_types = Vec::new();
+            while !self.check(&TokenKind::Colon) && !self.check(&TokenKind::Where) && !self.check(&TokenKind::Eof) {
+                let is_mut = self.eat(&TokenKind::Mut);
+                let is_entity = !is_mut && matches!(self.peek(), TokenKind::Ident(s) if s == "entity");
+                if is_entity {
+                    self.advance();
+                    vars.push("entity".to_string());
+                    var_types.push(Some(Type::Named("Entity".to_string())));
+                } else if is_mut || matches!(self.peek(), TokenKind::Ident(s) if Self::is_type_name(s)) {
+                    let mut ty = self.parse_type()?;
+                    if is_mut {
+                        ty = Type::Mut(Box::new(ty));
+                    }
+                    if self.eat(&TokenKind::Question) {
+                        ty = Type::Optional(Box::new(ty));
+                    }
+                    let var_name = if matches!(self.peek(), TokenKind::Ident(_)) && !matches!(self.peek(), TokenKind::Where) {
+                        self.expect_ident()?
+                    } else {
+                        match &ty {
+                            Type::Named(n) => n.to_lowercase(),
+                            Type::Mut(inner) => inner.name().map(|n| n.to_lowercase()).unwrap_or_else(|| format!("comp_{}", vars.len())),
+                            _ => format!("comp_{}", vars.len()),
+                        }
+                    };
+                    vars.push(var_name);
+                    var_types.push(Some(ty));
+                } else {
+                    let var_name = self.expect_ident()?;
+                    vars.push(var_name);
+                    var_types.push(None);
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            let where_clause = if self.eat(&TokenKind::Where) {
+                Some(self.parse_query_where_clause()?)
+            } else {
+                None
+            };
+            let iterable = Expr {
+                kind: ExprKind::Nil,
+                line, col, len: 0,
+            };
+            (vars, var_types, iterable, None, where_clause, None)
+        } else if self.is_for_with_vars() {
             // `for i in expr:` or `for i, j in expr:` — explicit variable(s)
             let mut vars = vec![self.expect_ident()?];
             while self.eat(&TokenKind::Comma) {
                 vars.push(self.expect_ident()?);
             }
+            let var_types = vec![None; vars.len()];
             self.expect(&TokenKind::In)?;
             let iterable = self.parse_expr()?;
             // `for x in xs with <key>:` — iteration identity (boring-ui keyed rows).
             let key = if self.eat(&TokenKind::With) { Some(self.parse_expr()?) } else { None };
-            (vars, iterable, key)
+            let where_expr = if self.eat(&TokenKind::Where) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            (vars, var_types, iterable, key, None, where_expr)
         } else {
             // `for expr:` — no variable, implicit `_` (e.g. `for 1..<8:`)
             let iterable = self.parse_expr()?;
-            (vec!["_".to_string()], iterable, None)
+            let where_expr = if self.eat(&TokenKind::Where) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            (vec!["_".to_string()], vec![None], iterable, None, None, where_expr)
         };
 
         self.allow_noparen_closure = saved; self.allow_trailing_closure = true;
@@ -1319,7 +1416,7 @@ impl Parser {
             self.expect_newline()?;
             self.parse_block()?
         };
-        Ok(ForStmt { vars, iterable, key, body, line, col })
+        Ok(ForStmt { vars, var_types, iterable, key, where_clause, where_expr, body, line, col })
     }
 
     /// `with <name> [, <name> ...]:` — scoped access block.

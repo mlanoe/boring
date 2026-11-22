@@ -136,9 +136,18 @@ impl Parser {
         }
         let task   = prefix_task;
         let stream = prefix_stream;
-        let throws = self.eat(&TokenKind::Throws);
+        let mut throws = self.eat(&TokenKind::Throws);
         let mut throws_ty: Option<Type> = None;
         if throws {
+            throws_ty = self.parse_throws_type()?;
+        }
+        let ecs_where_clause = if self.eat(&TokenKind::Where) {
+            Some(self.parse_query_where_clause()?)
+        } else {
+            None
+        };
+        if !throws && self.eat(&TokenKind::Throws) {
+            throws = true;
             throws_ty = self.parse_throws_type()?;
         }
         self.expect(&TokenKind::Colon)?;
@@ -247,6 +256,7 @@ impl Parser {
             implicit_quals,
             slot_quals,
             where_clause,
+            ecs_where_clause,
             attrs: vec![],
             line,
             col,
@@ -448,7 +458,7 @@ impl Parser {
                 // Variadic marker sits between type and name: `int... args`
                 variadic = self.eat(&TokenKind::DotDotDot);
 
-                if matches!(self.peek(), TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set) {
+                if matches!(self.peek(), TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set) {
                     let name = self.expect_ident()?;
                     // Also accept `Type name...` (marker after name)
                     if !variadic { variadic = self.eat(&TokenKind::DotDotDot); }
@@ -891,6 +901,7 @@ impl Parser {
             type_params: vec![],
             implicit_quals: vec![], slot_quals: vec![],
             where_clause: vec![],
+            ecs_where_clause: None,
             attrs: vec![],
             line,
             col,
@@ -1131,7 +1142,7 @@ impl Parser {
                 name, qualifier: None, params, return_ty, body,
                 is_pub: false, throws, task, stream: false, stream_capacity: None, mutating,
                 return_mutable, is_native: false, throws_ty,
-                type_params, implicit_quals: vec![], slot_quals: vec![], where_clause: vec![], attrs: vec![], line, col,
+                type_params, implicit_quals: vec![], slot_quals: vec![], where_clause: vec![], ecs_where_clause: None, attrs: vec![], line, col,
             }))
         } else {
             self.expect_newline()?;

@@ -273,7 +273,10 @@ impl<'a> Walker<'a> {
                 for v in &f.vars { self.taint(v); }
                 self.header();
                 self.expr(&f.iterable);
-                self.looped(|s| s.stmts(&f.body));
+                self.looped(|s| {
+                    if let Some(w) = &f.where_expr { s.expr(w); }
+                    s.stmts(&f.body);
+                });
             }
             Stmt::Guard(g) => {
                 match &g.cond {
@@ -336,7 +339,12 @@ impl<'a> Walker<'a> {
                 stmt: self.cur,
             }),
             ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_)
-            | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
+            | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
+            ExprKind::Query(q) => {
+                self.expr(&q.iterable);
+                if let Some(w) = &q.where_clause { self.expr(w); }
+                if let Some(p) = &q.projection { self.expr(p); }
+            }
             ExprKind::StringInterp(segs) => {
                 for seg in segs {
                     match seg {

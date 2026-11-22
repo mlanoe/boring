@@ -738,7 +738,6 @@ fn collect_items(items: &[Item], facts: &mut TraitBorrowFacts) {
                 count_methods(&k.methods, facts);
                 for m in &k.methods { scan(&m.body, facts); }
             }
-            Item::Query(q) => scan(&q.body, facts),
             Item::Mod(m) => collect_items(&m.items, facts),
             Item::Let(l) => scan(&[Stmt::Let(l.clone())], facts),
             Item::Stmt(s) => scan(std::slice::from_ref(s), facts),

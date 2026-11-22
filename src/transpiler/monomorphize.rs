@@ -578,7 +578,6 @@ fn substitute_types_in_item(item: &mut Item, subst: &HashMap<String, Type>) {
         }
         Item::Alias(a) => { a.ty = substitute_type(&a.ty, subst); }
         Item::Stmt(s) => substitute_types_in_stmt(s, subst),
-        Item::Query(q) => substitute_types_in_stmts(&mut q.body, subst),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) => {}
     }
 }
@@ -619,7 +618,12 @@ fn substitute_types_in_expr_inner(expr: &mut Expr, subst: &HashMap<String, Type>
     match &mut expr.kind {
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_)
             | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void | ExprKind::Var(_)
-            | ExprKind::DotIdent(_) => {}
+            | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
+        ExprKind::Query(q) => {
+            substitute_types_in_expr(&mut q.iterable, subst);
+            if let Some(w) = &mut q.where_clause { substitute_types_in_expr(w, subst); }
+            if let Some(p) = &mut q.projection { substitute_types_in_expr(p, subst); }
+        }
         ExprKind::StringInterp(segs) => substitute_types_in_string_segments(segs, subst),
         ExprKind::BinOp(_, l, r) => { substitute_types_in_expr(l, subst); substitute_types_in_expr(r, subst); }
         ExprKind::UnaryOp(_, e) => substitute_types_in_expr(e, subst),
@@ -1036,7 +1040,6 @@ fn collect_in_item(item: &Item, enclosing: &[String], ctx: &mut CollectCtx) {
         Item::Mod(m) => { for it in &m.items { collect_in_item(it, enclosing, ctx); } }
         Item::Let(l) => { if let Some(v) = &l.value { collect_in_expr(v, enclosing, ctx); } }
         Item::Stmt(s) => collect_in_stmt(s, enclosing, ctx),
-        Item::Query(q) => collect_in_stmts(&q.body, enclosing, ctx),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) | Item::Alias(_) => {}
     }
 }
@@ -1161,7 +1164,12 @@ fn collect_in_expr(expr: &Expr, enclosing: &[String], ctx: &mut CollectCtx) {
     match &expr.kind {
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_)
             | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void | ExprKind::Var(_)
-            | ExprKind::DotIdent(_) => {}
+            | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
+        ExprKind::Query(q) => {
+            collect_in_expr(&q.iterable, enclosing, ctx);
+            if let Some(w) = &q.where_clause { collect_in_expr(w, enclosing, ctx); }
+            if let Some(p) = &q.projection { collect_in_expr(p, enclosing, ctx); }
+        }
         ExprKind::StringInterp(segs) => {
             for seg in segs {
                 match seg {
@@ -1542,7 +1550,6 @@ fn rewrite_in_item(item: &mut Item, instantiations: &InstantiationMap, method_in
         Item::Mod(m) => { for it in &mut m.items { rewrite_in_item(it, instantiations, method_instantiations); } }
         Item::Let(l) => { if let Some(v) = &mut l.value { rewrite_in_expr(v, instantiations, method_instantiations); } }
         Item::Stmt(s) => rewrite_in_stmt(s, instantiations, method_instantiations),
-        Item::Query(q) => rewrite_in_stmts(&mut q.body, instantiations, method_instantiations),
         Item::Use(_) | Item::Trait(_) | Item::Kernel(_) | Item::Alias(_) => {}
     }
 }
@@ -1645,7 +1652,12 @@ fn rewrite_in_expr(expr: &mut Expr, instantiations: &InstantiationMap, method_in
     match &mut expr.kind {
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_)
             | ExprKind::Bool(_) | ExprKind::Nil | ExprKind::Void | ExprKind::Var(_)
-            | ExprKind::DotIdent(_) => {}
+            | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
+        ExprKind::Query(q) => {
+            rewrite_in_expr(&mut q.iterable, instantiations, method_instantiations);
+            if let Some(w) = &mut q.where_clause { rewrite_in_expr(w, instantiations, method_instantiations); }
+            if let Some(p) = &mut q.projection { rewrite_in_expr(p, instantiations, method_instantiations); }
+        }
         ExprKind::StringInterp(segs) => {
             for seg in segs {
                 match seg {

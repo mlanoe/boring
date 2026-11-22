@@ -192,7 +192,7 @@
     },
 
     "type-definition": {
-      "match": "\\b(struct|enum|trait)\\s+([A-Z][A-Za-z0-9_]*)\\b",
+      "match": "\\b(struct|data|enum|trait)\\s+([A-Z][A-Za-z0-9_]*)\\b",
       "captures": {
         "1": { "name": "keyword.other.declaration.boring" },
         "2": { "name": "entity.name.type.boring" }
@@ -211,12 +211,12 @@
 
     "control-keywords": {
       "name": "keyword.control.boring",
-      "match": "\\b(if|elif|else|while|do|loop|for|in|break|continue|guard|match|return|throw|try|catch|defer|yield|wait|dispatch)\\b"
+      "match": "\\b(if|elif|else|while|do|loop|for|in|where|query|break|continue|guard|match|return|throw|try|catch|defer|yield|wait|dispatch)\\b"
     },
 
     "declaration-keywords": {
       "name": "keyword.other.declaration.boring",
-      "match": "\\b(let|mut|var|lazy|new|def|req|struct|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|join|sync|with|kernel)\\b"
+      "match": "\\b(let|mut|var|lazy|new|def|req|struct|data|enum|trait|use|ext|as|type|mod|init|pub|native|stream|set|task|static|transient|pass|join|sync|with|kernel|single|first|any|all)\\b"
     },
 
     "operator-keywords": {

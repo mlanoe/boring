@@ -58,7 +58,7 @@ impl Transpiler {
             Item::Alias(a)  => self.emit_alias(a),
             Item::Let(s)    => {
                 if s.is_resource {
-                    let vis = if s.is_pub { "pub " } else { "pub " };
+                    let vis = "pub ";
                     let ty_s = match &s.ty {
                         Some(t) => self.emit_type(t),
                         None => match &s.value {
@@ -179,6 +179,21 @@ impl Transpiler {
                             "{}static {}: std::sync::LazyLock<{}> = std::sync::LazyLock::new(|| {});",
                             vis, s.name, rust_ty, val_str
                         ));
+                    } else if let Some((vec_name, _)) = self.top_level_let_is_vec_array(s) {
+                        let val = s.value.as_ref().unwrap();
+                        let ExprKind::Array(elems) = &val.kind else { unreachable!() };
+                        let val_str = if vec_name == "Vec2" {
+                            let e0 = self.emit_expr(&elems[0]);
+                            let e1 = self.emit_expr(&elems[1]);
+                            format!("Vec2::new(({}) as f32, ({}) as f32)", e0, e1)
+                        } else {
+                            let e0 = self.emit_expr(&elems[0]);
+                            let e1 = self.emit_expr(&elems[1]);
+                            let e2 = self.emit_expr(&elems[2]);
+                            format!("Vec3::new(({}) as f32, ({}) as f32, ({}) as f32)", e0, e1, e2)
+                        };
+                        let const_name = s.name.to_uppercase();
+                        self.line(&format!("{}const {}: {} = {};", vis, const_name, vec_name, val_str));
                     } else if self.top_level_let_is_typed_array(s) {
                         let rust_ty = match &s.ty {
                             Some(ty) => self.emit_type(ty),
@@ -265,7 +280,6 @@ impl Transpiler {
                     ));
                 }
             }
-            Item::Query(q) => self.emit_query(q),
         }
     }
 
@@ -405,21 +419,43 @@ impl Transpiler {
             }
         }
 
-        let path = u.path.join("::");
-        // Filter out items already imported by the standard prelude to avoid
+        let path = if u.path.first().map(|s| s.as_str()) == Some("ecs") {
+            let sub = u.path.get(1).map(String::as_str);
+            match sub {
+                Some("input") => {
+                    if u.path.get(2).map(String::as_str) == Some("keyboard") {
+                        "bevy::input::keyboard".to_string()
+                    } else {
+                        "bevy::input".to_string()
+                    }
+                }
+                Some("render") => "bevy::render::render_resource".to_string(),
+                Some("sprite") => "bevy::sprite".to_string(),
+                Some("audio") => "bevy::audio".to_string(),
+                Some("asset") => "bevy::asset".to_string(),
+                Some("window") => "bevy::window".to_string(),
+                Some("time") => "bevy::time".to_string(),
+                Some("ui") => "bevy::ui".to_string(),
+                None => "bevy::prelude".to_string(),
+                Some(other) => format!("bevy::{}", other),
+            }
+        } else {
+            u.path.join("::")
+        };
+
+        // Filter out items already imported by the standard/ECS prelude to avoid
         // "defined multiple times" errors (e.g. `use std.collections.HashMap`).
-        let prelude_types = ["HashMap", "HashSet"];
-        // `Duration` is unconditionally in the prelude too (`use std::time::Duration;`,
-        // always emitted — see this file's caller) — a program that also writes
-        // `use tokio.time.Duration, timeout` (a common combo: `timeout` genuinely needs
-        // importing, `Duration` doesn't but is easy to list alongside it) would otherwise
-        // re-import it and hit E0252 ("defined multiple times"). `std::time`/`tokio::time`
-        // are the only two realistic source paths for a `Duration` item.
+        let prelude_types = [
+            "HashMap", "HashSet", "Duration",
+            "Extent3d", "TextureDimension", "TextureFormat", "RenderAssetUsages",
+            "Anchor", "KeyboardInput", "ButtonState", "Volume",
+            "Camera2D", "Camera3D", "Camera2d", "Camera3d",
+            "Transform", "Sprite", "Commands", "Entity", "Vec2", "Vec3", "Time", "ClearColor",
+        ];
         let is_time_path = matches!(path.as_str(), "std::time" | "tokio::time");
-        let filtered_items: Vec<&String> = if path == "std::collections" {
+        let is_ecs_or_prelude_path = path.starts_with("bevy") || path.starts_with("std::collections") || is_time_path;
+        let filtered_items: Vec<&String> = if is_ecs_or_prelude_path {
             u.items.iter().filter(|item| !prelude_types.contains(&item.as_str())).collect()
-        } else if is_time_path {
-            u.items.iter().filter(|item| item.as_str() != "Duration").collect()
         } else {
             u.items.iter().collect()
         };
@@ -496,6 +532,7 @@ impl Transpiler {
             return self.deep_pre_scan_uses(program, visited);
         }
         self.pre_scan(program);
+        self.deep_scanned_programs.push(program.clone());
         if self.is_gpu_target {
             self.compute_gpu_device_only_fns(program);
         }
@@ -1001,6 +1038,7 @@ impl Transpiler {
         let module_code = std::mem::take(&mut self.out);
         self.out = saved_out;
 
+        self.imported_programs.push(program.clone());
         self.modules.push((module_name, module_code));
     }
 
@@ -1052,6 +1090,7 @@ impl Transpiler {
         let module_code = std::mem::take(&mut self.out);
         self.out = saved_out;
 
+        self.imported_programs.push(program.clone());
         self.modules.push((module.to_string(), module_code));
     }
 
@@ -1422,6 +1461,7 @@ impl Transpiler {
         } else {
             None
         };
+        let is_bevy_system = self_ty.is_none() && self.is_bevy_system_fn(f);
         let params_s: Vec<String> = f.params.iter().enumerate().map(|(i, p)| {
             let is_gpu_arg_param = gpu_arg_param_flags.as_ref()
                 .map(|flags| flags.get(i).copied().unwrap_or(false))
@@ -1442,6 +1482,8 @@ impl Transpiler {
                 let borrowed = self_ty.is_none()
                     && self.fn_gpu_borrow_params.get(&f.name).and_then(|fl| fl.get(i)).copied().unwrap_or(false);
                 format!("{}: {}BoringKernelArg<{}>", p.name, if borrowed { "&" } else { "" }, host_ty)
+            } else if is_bevy_system {
+                self.emit_bevy_system_param(p)
             } else {
                 self.emit_param(p, self_ty.is_some())
             }
@@ -1507,17 +1549,16 @@ impl Transpiler {
                 }
             }
             None => {
+                let mut all = Vec::new();
                 // For cancellable task fns, prepend the implicit cancel token parameter.
                 if is_cancellable {
-                    let cancel_param = "__task_cancel: tokio_util::sync::CancellationToken".to_string();
-                    if params_s.is_empty() {
-                        cancel_param
-                    } else {
-                        format!("{}, {}", cancel_param, params_s.join(", "))
-                    }
-                } else {
-                    params_s.join(", ")
+                    all.push("__task_cancel: tokio_util::sync::CancellationToken".to_string());
                 }
+                all.extend(params_s);
+                if self.fns_needing_ecs_context.contains(&f.name) {
+                    all.push("ecs: &mut EcsContext".to_string());
+                }
+                all.join(", ")
             }
         }
     }
@@ -1812,6 +1853,10 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_fn(&mut self, f: &FnDecl, self_ty: Option<&str>) {
+        if self.is_ecs_fn(f) {
+            self.emit_ecs_fn(f, self_ty);
+            return;
+        }
         let previous_scope = std::mem::replace(&mut self.type_scope, format!("{}::{}", self_ty.unwrap_or(""), f.name));
         let previous_pos = self.cur_pos.replace((0, 0));
         self.emit_fn_scoped(f, self_ty);
@@ -1873,7 +1918,7 @@ impl Transpiler {
         // before the transpiler ever runs (see `emit_struct.rs`'s own note on this).
         for attr in &f.attrs {
             // `api` is a Boring-side contract marker (checker/api.rs), not Rust attribute syntax.
-            if matches!(attr.name.as_str(), "singleton" | "provide" | "inject" | "api") { continue; }
+            if matches!(attr.name.to_ascii_lowercase().as_str(), "singleton" | "provide" | "inject" | "api" | "schedule" | "startup" | "update" | "fixedupdate" | "fixed_update" | "after" | "before" | "chain" | "observer" | "observe") { continue; }
             let args_s = if attr.args.is_empty() {
                 String::new()
             } else {
@@ -2108,6 +2153,10 @@ impl Transpiler {
         // whisper-boring: encoder.br's resident `h2` leaking into decoder.br's own,
         // unrelated, genuinely-plain `h2`, causing it to pass through unwrapped where
         // `BoringKernelArg::Host(..)` was required.
+        let prev_current_fn_name = self.current_fn_name.clone();
+        if self_ty.is_none() {
+            self.current_fn_name = Some(f.name.clone());
+        }
         let prev_resident_call_vars = std::mem::take(&mut self.resident_call_vars);
         if self_ty.is_none() {
             self.current_fn_returns_resident = self.fn_returns_resident.get(&f.name).cloned();
@@ -2280,6 +2329,9 @@ impl Transpiler {
             // Register __task_cancel as a known local so emit_expr can resolve it.
             self.known_local_vars.insert("__task_cancel".to_string());
         }
+        if self.fns_needing_ecs_context.contains(&f.name) {
+            self.known_local_vars.insert("ecs".to_string());
+        }
         // Managed multi-thread: emit a lock guard let-binding for each managed param
         // to avoid double-lock deadlock when the same param's fields are accessed
         // more than once in a single expression (std::sync::Mutex is not reentrant).
@@ -2408,6 +2460,7 @@ impl Transpiler {
         self.in_async          = prev_async;
         self.current_fn_type_params = prev_fn_type_params;
         self.current_fn_type_bounds = prev_fn_type_bounds;
+        self.current_fn_name = prev_current_fn_name;
         self.indent -= 1;
         self.line("}");
     }
@@ -2777,6 +2830,45 @@ impl Transpiler {
                 format!("{}: {}", name, ty_s)
             }
             None     => name,
+        }
+    }
+
+    pub(crate) fn emit_bevy_system_param(&self, p: &Param) -> String {
+        if p.name == "commands" && p.ty.is_none() {
+            return "mut commands: Commands".to_string();
+        }
+        let escaped_name = escape_rust_keyword(&p.name);
+        if let Some(ty) = &p.ty {
+            let ty_str = self.emit_type(ty);
+            let is_already_res = ty_str.starts_with("Res<") || ty_str.starts_with("ResMut<");
+            let is_special = ty_str == "Commands"
+                || ty_str.starts_with("Commands<")
+                || ty_str == "TextUiWriter"
+                || ty_str.starts_with("Single<")
+                || ty_str.starts_with("Query<")
+                || ty_str.starts_with("On<")
+                || ty_str.starts_with("Local<")
+                || ty_str.starts_with("EventReader<")
+                || ty_str.starts_with("EventWriter<")
+                || ty_str.starts_with("MessageReader<")
+                || ty_str.starts_with("MessageWriter<");
+
+            if !is_already_res && !is_special && self.is_resource_type(ty) {
+                if p.mutable {
+                    return format!("mut {}: ResMut<{}>", escaped_name, ty_str);
+                } else {
+                    return format!("{}: Res<{}>", escaped_name, ty_str);
+                }
+            }
+
+            let is_mut = p.mutable || ty_str == "Commands" || ty_str.starts_with("ResMut<");
+            if is_mut {
+                format!("mut {}: {}", escaped_name, ty_str)
+            } else {
+                format!("{}: {}", escaped_name, ty_str)
+            }
+        } else {
+            self.emit_param(p, false)
         }
     }
 

@@ -192,7 +192,6 @@ impl Printer {
             Item::Alias(a) => self.alias_decl(a),
             Item::Kernel(k) => self.kernel_decl(k),
             Item::Stmt(s) => self.stmt(s),
-            Item::Query(_) => Ok(()),
         }
     }
 

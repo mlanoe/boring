@@ -16,6 +16,7 @@ BORING_KW = {
     "stream","yield","channel","sync","kernel","with",
     "nil","true","false","as","and","or","not","is","self","void","pass","init",
     "view","bind","state","env","data","query","where",
+    "single","first","any","all",
 }
 BORING_TYPES = {
     "int","uint","float","bool","string","str","Self",
@@ -83,6 +84,9 @@ def highlight_boring(code: str) -> str:
             # macro call: word followed by !
             if j < n and code[j] == '!':
                 result.append(f'<span class="fm">{html.escape(word)}!</span>')
+                i = j + 1
+            elif word in ("first", "single", "any") and j < n and code[j] == '?':
+                result.append(f'<span class="kw">{html.escape(word)}?</span>')
                 i = j + 1
             elif word in BORING_KW:
                 result.append(f'<span class="kw">{html.escape(word)}</span>')

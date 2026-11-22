@@ -64,7 +64,7 @@ impl KernelTranspiler {
             // (see `validator::kernel::KernelValidator::check_item`) rejects any `Item::Kernel`
             // as an error before this transpiler ever runs. Kept as a no-op rather than a panic
             // for callers that invoke `transpile_kernel` directly without validating first.
-            Item::Kernel(_) | Item::Query(_) => {}
+            Item::Kernel(_) => {}
         }
     }
 

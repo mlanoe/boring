@@ -1362,7 +1362,7 @@ impl Checker {
             Item::Stmt(s)   => self.check_stmt(s),
             Item::Kernel(k) => self.check_kernel_decl(k),
             Item::Trait(t)  => self.check_trait(t),
-            Item::Use(_) | Item::Alias(_) | Item::Query(_) => {}
+            Item::Use(_) | Item::Alias(_) => {}
         }
     }
 
@@ -2597,6 +2597,9 @@ impl Checker {
                 self.check_expr(&s.iterable);
                 self.push_scope();
                 for v in &s.vars { self.define(v, BindingKind::Let); }
+                if let Some(w) = &s.where_expr {
+                    self.check_expr(w);
+                }
                 self.check_block_in_current_scope(&s.body);
                 self.pop_scope();
             }
@@ -3343,10 +3346,25 @@ impl Checker {
                 self.check_move_read(name, expr.line, expr.col);
             }
 
+            ExprKind::Query(q) => {
+                self.check_expr(&q.iterable);
+                self.push_scope();
+                for v in &q.vars {
+                    self.define(v, BindingKind::Let);
+                }
+                if let Some(w) = &q.where_clause {
+                    self.check_expr(w);
+                }
+                if let Some(p) = &q.projection {
+                    self.check_expr(p);
+                }
+                self.pop_scope();
+            }
+
             // Leaves — nothing to recurse into.
             ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_)
             | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil
-            | ExprKind::Void | ExprKind::DotIdent(_) => {}
+            | ExprKind::Void | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
         }
     }
 

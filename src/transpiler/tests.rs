@@ -397,7 +397,7 @@ component Velocity:
 
 component Frozen: pass
 
-query movement(mut Position pos, Velocity vel) where not Frozen:
+def movement(mut Position pos, Velocity vel) where not Frozen:
     pos.x += vel.dx * .time.delta
     pos.y += vel.dy * .time.delta
 ";
@@ -417,7 +417,7 @@ component Position:
     pub float y
 
 @schedule(Startup)
-query setup_world():
+def setup_world():
     .spawn(Position(x = 1.0, y = 2.0))
 ";
         let code = transpile_src_with_config(src, TranspileConfig::default());
@@ -432,7 +432,8 @@ query setup_world():
 component Health:
     pub int current
 
-query death_check(Health h):
+@schedule(Update)
+def death_check(Health h):
     .despawn()
 ";
         let code = transpile_src_with_config(src, TranspileConfig::default());
@@ -452,7 +453,7 @@ data Position:
     float y
 
     @schedule(Update)
-    query movement(Velocity vel) where not Frozen:
+    def movement(Velocity vel) where not Frozen:
         self.x += vel.dx * .time.delta
         self.y += vel.dy * .time.delta
 
@@ -483,7 +484,8 @@ data Position:
     float x
     float y
 
-query add_score(Position pos):
+@schedule(Update)
+def add_score(Position pos):
     score += 10
 ";
         let code = transpile_src_with_config(src, TranspileConfig::default());
@@ -491,6 +493,386 @@ query add_score(Position pos):
         assert!(code.contains("pub struct Res_score(pub isize);"), "expected Res_score struct, got:\n{}", code);
         assert!(code.contains("mut res_score: ResMut<Res_score>"), "expected ResMut<Res_score>, got:\n{}", code);
         assert!(code.contains("res_score.0 = res_score.0.wrapping_add((10 as isize));"), "expected res_score update, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_dot_resource_access() {
+        let src = "\
+@resource
+data LayerOrders:
+    dict<string, int> ranks
+
+    req int get(string tid):
+        self.ranks[tid]
+
+@resource
+var int score = 0
+
+@component
+data Transform:
+    float z
+
+@component
+data ScratchSprite:
+    string target_id
+
+@schedule(Update)
+def sync_layers(mut Transform transform, ScratchSprite tag):
+    let order = .resource.layerOrders.get(tag.target_id)
+    transform.z = order as float
+
+@schedule(Update)
+def increment_score():
+    .resource.score += 1
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        // sync_layers should take Query<(&mut Transform, &ScratchSprite)> and res_layer_orders: Res<LayerOrders>
+        assert!(code.contains("pub fn sync_layers(mut query: Query<(&mut Transform, &ScratchSprite)>, res_layer_orders: Res<LayerOrders>)"),
+            "expected sync_layers signature, got:\n{}", code);
+        assert!(code.contains("let order = res_layer_orders.get("),
+            "expected res_layer_orders.get, got:\n{}", code);
+
+        // increment_score should take mut res_score: ResMut<Res_score> and NO query loop
+        assert!(code.contains("pub fn increment_score(mut res_score: ResMut<Res_score>)"),
+            "expected increment_score signature, got:\n{}", code);
+        assert!(code.contains("res_score.0 += 1;"),
+            "expected res_score += 1, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_ecs_resource_in_def_generates_context_and_reborrows() {
+        let src = "\
+@resource
+data Vars:
+    [int] globals
+
+    def void set(int slot, int val):
+        self.globals[slot] = val
+
+def step_thread(int slot):
+    ecs.resource.vars.set(slot, 42)
+
+@schedule(Update)
+def run_threads():
+    step_thread(0)
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub struct EcsContext<'a> {"), "expected EcsContext struct in:\n{}", code);
+        assert!(code.contains("pub vars: &'a mut Vars,"), "expected pub vars in EcsContext:\n{}", code);
+        assert!(code.contains("fn step_thread(slot: isize, ecs: &mut EcsContext)"), "expected ecs param in step_thread:\n{}", code);
+        assert!(code.contains("ecs.vars.set("), "expected ecs.vars.set call:\n{}", code);
+        assert!(code.contains("step_thread(0, &mut EcsContext { vars: &mut *res_vars });"), "expected passing &mut EcsContext in query call:\n{}", code);
+    }
+
+    #[test]
+    fn test_ecs_resource_subscript_in_def() {
+        let src = "\
+@resource
+data Vars:
+    [int] globals
+
+    req int get(int slot):
+        return self.globals[slot]
+
+    def set(int slot, int val):
+        self.globals[slot] = val
+
+def step_thread(int slot):
+    ecs.resource.vars[slot] = 42
+    let x = ecs.resource.vars[slot]
+
+@schedule(Update)
+def run_threads():
+    step_thread(0)
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("ecs.vars.set("), "expected ecs.vars.set, got:\n{}", code);
+        assert!(code.contains("let x = ecs.vars.get("), "expected ecs.vars.get, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_ecs_context_local_provider_stops_propagation() {
+        let src = "\
+@resource
+data Vars:
+    [int] globals
+
+    def void set(int slot, int val):
+        self.globals[slot] = val
+
+def step_thread(int slot):
+    ecs.resource.vars.set(slot, 42)
+
+def run_headless():
+    var vars = Vars(globals = [0, 0, 0])
+    var ecs = EcsContext(vars = vars)
+    step_thread(0)
+
+def test_entry():
+    run_headless()
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn step_thread(slot: isize, ecs: &mut EcsContext)"), "step_thread needs ecs:\n{}", code);
+        assert!(code.contains("fn run_headless()"), "run_headless should NOT need ecs param:\n{}", code);
+        assert!(!code.contains("fn run_headless(ecs:"), "run_headless should NOT have ecs param:\n{}", code);
+        assert!(code.contains("fn test_entry()"), "test_entry should NOT need ecs param:\n{}", code);
+        assert!(!code.contains("fn test_entry(ecs:"), "test_entry should NOT have ecs param:\n{}", code);
+        assert!(code.contains("let mut ecs = EcsContext { vars: &mut vars };"), "expected EcsContext construction:\n{}", code);
+        assert!(code.contains("step_thread(0, &mut ecs);"), "expected step_thread call passing ecs:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_many_resources_grouped_in_tuples() {
+        let mut src = String::new();
+        for i in 0..18 {
+            src.push_str(&format!("@resource\ndata Res{i}:\n    int v\n\n"));
+        }
+        src.push_str("@schedule(Update)\ndef big_system():\n");
+        for i in 0..18 {
+            src.push_str(&format!("    let _ = .resource.res{i}\n"));
+        }
+        let code = transpile_src_with_config(&src, TranspileConfig::default());
+        // Since there are 18 resources, Bevy's 16-parameter limit is exceeded, so boring chunks them into tuples
+        assert!(code.contains("pub fn big_system(("), "expected tuple parameter grouping in:\n{}", code);
+    }
+
+    #[test]
+    fn test_dot_resource_outside_query_is_compiler_error() {
+        let src = "\
+@resource
+data Vars:
+    [int] globals
+
+def step_thread():
+    let x = .resource.vars
+";
+        let errs = transpile_src_errors(src);
+        assert!(errs.contains("`.resource` is only allowed inside ECS systems"),
+            "expected error for .resource outside ECS system, got:\n{}", errs);
+    }
+
+    #[test]
+    fn test_query_resource_passed_to_mut_fn() {
+        let src = "\
+@resource
+data Vars:
+    int value
+
+@resource
+data Pending:
+    [int] queue
+
+def mutate_vars(mut Vars vars):
+    vars.value = 100
+
+def read_vars(Vars vars):
+    let v = vars.value
+
+@schedule(Update)
+def run_system():
+    mutate_vars(.resource.vars)
+
+@schedule(Update)
+def run_system_read():
+    read_vars(.resource.vars)
+
+@schedule(Update)
+def run_system_method():
+    .resource.pending.queue.reverse()
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn run_system(mut res_vars: ResMut<Vars>)"),
+            "expected ResMut<Vars>, got:\n{}", code);
+        assert!(code.contains("pub fn run_system_read(res_vars: Res<Vars>)"),
+            "expected Res<Vars>, got:\n{}", code);
+        assert!(code.contains("pub fn run_system_method(mut res_pending: ResMut<Pending>)"),
+            "expected ResMut<Pending>, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_system_param_separation() {
+        let src = "\
+@resource
+data Score:
+    int value
+
+@component
+data Position:
+    float x
+
+def handle_events(mut Commands commands, Res<Score> score, mut Position pos):
+    pos.x += score.value as float
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        // Commands and Res<Score> should NOT be inside Query<...>!
+        assert!(code.contains("mut query: Query<&mut Position>"),
+            "expected Query<&mut Position>, got:\n{}", code);
+        assert!(code.contains("mut commands: Commands"),
+            "expected mut commands: Commands, got:\n{}", code);
+        assert!(code.contains("score: Res<Score>"),
+            "expected score: Res<Score>, got:\n{}", code);
+        assert!(code.contains("for mut pos in &mut query"),
+            "expected for mut pos in &mut query, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_game_bootstrap_default_camera() {
+        let src = "\
+@game
+data Breakout:
+    pass
+
+@schedule(Startup)
+def setup(mut Commands commands):
+    pass
+
+@schedule(Update)
+def move_paddle(mut Commands commands):
+    pass
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub type Camera2D = Camera2d;"), "expected Camera2D alias, got:\n{}", code);
+        assert!(code.contains("fn __boring_default_camera(mut commands: Commands)"), "expected default camera system, got:\n{}", code);
+        assert!(code.contains("app.add_plugins(DefaultPlugins.set(WindowPlugin {"), "expected WindowPlugin, got:\n{}", code);
+        assert!(code.contains("title: \"Breakout\".into()"), "expected title Breakout, got:\n{}", code);
+        assert!(code.contains("resolution: (800u32, 600u32).into()"), "expected default resolution, got:\n{}", code);
+        assert!(code.contains("app.add_systems(Startup, (__boring_default_camera, setup));"), "expected Startup systems with default camera, got:\n{}", code);
+        assert!(code.contains("app.add_systems(Update, move_paddle);"), "expected Update systems, got:\n{}", code);
+        assert!(code.contains("build_app().run();"), "expected build_app().run(), got:\n{}", code);
+    }
+
+    #[test]
+    fn test_game_custom_window_and_explicit_camera() {
+        let src = "\
+@game
+data Pong:
+    string title = \"Super Pong\"
+    int width = 1024
+    int height = 768
+    Color clear_color = Color.srgb(0.1, 0.1, 0.1)
+
+@resource
+data Score:
+    int count = 0
+
+@schedule(Startup)
+def spawn_camera(mut Commands commands):
+    commands.spawn(Camera2D())
+
+@schedule(Update)
+@after(spawn_camera)
+def update_score(mut ResMut<Score> score):
+    score.count += 1
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("title: \"Super Pong\".into()"), "expected title Super Pong, got:\n{}", code);
+        assert!(code.contains("resolution: (1024u32, 768u32).into()"), "expected custom resolution, got:\n{}", code);
+        assert!(code.contains("app.insert_resource(ClearColor("), "expected ClearColor, got:\n{}", code);
+        assert!(code.contains("app.init_resource::<Score>();"), "expected init_resource Score, got:\n{}", code);
+        assert!(code.contains("app.init_resource::<Pong>();"), "expected init_resource Pong, got:\n{}", code);
+        // Explicit camera was spawned -> __boring_default_camera should NOT be generated!
+        assert!(!code.contains("__boring_default_camera"), "expected no __boring_default_camera, got:\n{}", code);
+        assert!(code.contains("app.add_systems(Startup, spawn_camera);"), "expected Startup spawn_camera, got:\n{}", code);
+        assert!(code.contains("update_score.after(spawn_camera)"), "expected update_score.after(spawn_camera), got:\n{}", code);
+    }
+
+    #[test]
+    fn test_transform_convenience_access() {
+        let src = "\
+@component
+data Velocity:
+    float x = 0.0
+
+@schedule(Update)
+def move_paddle(mut Transform transform, Velocity velocity):
+    transform.x = transform.x + 10.0
+    let cur_y = transform.y
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("transform.translation.x"),
+            "expected transform.translation.x in code, got:\n{}", code);
+        assert!(code.contains("transform.translation.y"),
+            "expected transform.translation.y read, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_resource_params_auto_wrapped() {
+        let src = "\
+@resource
+data Score:
+    int count = 0
+
+@schedule(Startup)
+def setup_game(mut Commands commands, AssetServer asset_server, mut Assets<Mesh> meshes):
+    pass
+
+@schedule(Update)
+def update_score(Score score, mut Score mut_score):
+    pass
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("fn setup_game(mut commands: Commands, asset_server: Res<AssetServer>, mut meshes: ResMut<Assets<Mesh>>)"),
+            "expected setup_game with wrapped resources, got:\n{}", code);
+        assert!(code.contains("fn update_score(score: Res<Score>, mut mut_score: ResMut<Score>)"),
+            "expected update_score with wrapped resources, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_ecs_use_mapping_and_enriched_prelude() {
+        let src = "\
+use ecs.input.KeyboardInput
+use ecs.render.Extent3d
+use ecs.audio.Volume
+
+@schedule(Startup)
+def init_game(mut Commands commands):
+    pass
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("use bevy::prelude::*;"), "expected bevy::prelude::*, got:\n{}", code);
+        assert!(code.contains("use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};"),
+            "expected Extent3d in prelude, got:\n{}", code);
+        assert!(code.contains("use bevy::input::keyboard::KeyboardInput;"),
+            "expected KeyboardInput in prelude, got:\n{}", code);
+        assert!(code.contains("use bevy::audio::Volume;"),
+            "expected Volume in prelude, got:\n{}", code);
+    }
+
+    #[test]
+    fn test_vec2_vec3_array_coercion() {
+        let src = "\
+pub let Vec2 PADDLE_SIZE = [120.0, 20.0]
+pub let Vec3 BALL_START = [0.0, -50.0, 1.0]
+
+@schedule(Startup)
+def setup(mut Commands commands):
+    let Vec2 v2 = [1.0, 2.0]
+    let Vec3 v3 = [1.0, 2.0, 3.0]
+    let Vec2? opt_v2 = [4.0, 5.0]
+    let t = Transform(translation = [1.0, 2.0, 3.0], scale = [4.0, 5.0, 6.0], _)
+    let s = Sprite(custom_size = [10.0, 20.0], _)
+    let a = Anchor([0.0, -1.0])
+";
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub const PADDLE_SIZE: Vec2 = Vec2::new((120.0) as f32, (20.0) as f32);"),
+            "expected const PADDLE_SIZE, got:\n{}", code);
+        assert!(code.contains("pub const BALL_START: Vec3 = Vec3::new((0.0) as f32, (-50.0) as f32, (1.0) as f32);")
+            || code.contains("pub const BALL_START: Vec3 = Vec3::new((0.0) as f32, ((-50.0)) as f32, (1.0) as f32);"),
+            "expected const BALL_START, got:\n{}", code);
+        assert!(code.contains("let v2: Vec2 = Vec2::new((1.0) as f32, (2.0) as f32);"),
+            "expected v2, got:\n{}", code);
+        assert!(code.contains("let v3: Vec3 = Vec3::new((1.0) as f32, (2.0) as f32, (3.0) as f32);"),
+            "expected v3, got:\n{}", code);
+        assert!(code.contains("let opt_v2: Option<Vec2> = Some(Vec2::new((4.0) as f32, (5.0) as f32));"),
+            "expected opt_v2, got:\n{}", code);
+        assert!(code.contains("translation: Vec3::new((1.0) as f32, (2.0) as f32, (3.0) as f32)"),
+            "expected translation, got:\n{}", code);
+        assert!(code.contains("scale: Vec3::new((4.0) as f32, (5.0) as f32, (6.0) as f32)"),
+            "expected scale, got:\n{}", code);
+        assert!(code.contains("custom_size: Some(Vec2::new((10.0) as f32, (20.0) as f32))"),
+            "expected custom_size, got:\n{}", code);
+        assert!(code.contains("Anchor(Vec2::new((0.0) as f32, ((-1.0)) as f32))"),
+            "expected Anchor, got:\n{}", code);
     }
 
     #[test]
@@ -2474,4 +2856,261 @@ data Outer:
         // inner field must stay pure value (pub inner: Inner), never Arc<Mutex<Inner>> or RefCell
         assert!(code.contains("pub inner: Inner"), "got:\n{}", code);
         assert!(!code.contains("Mutex<Inner>"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_custom_ecs_query_transpile() {
+        let src = r#"
+@component
+struct Ball:
+    int id
+
+@component
+struct Velocity:
+    float32 x
+    float32 y
+
+@component
+struct Transform:
+    float32 x
+
+@component
+struct Brick:
+    int hp
+
+@component
+struct Collider:
+    int id
+
+pub def check_collisions(mut commands) throws:
+    mut ball = single (mut Velocity, Transform) where Ball
+    for entity, Transform collider_trans, Brick? maybe_brick where Collider:
+        if maybe_brick != nil:
+            commands.entity(entity).despawn()
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn check_collisions("), "got:\n{}", code);
+        assert!(code.contains("ball_query: Query<(&mut Velocity, &Transform), With<Ball>>"), "got:\n{}", code);
+        assert!(code.contains("collider_query: Query<(Entity, &Transform, Option<&Brick>), With<Collider>>"), "got:\n{}", code);
+        assert!(code.contains("-> Result<(), Box<dyn std::error::Error + Send + Sync>>"), "got:\n{}", code);
+        assert!(code.contains("ball_query.get_single().map_err("), "got:\n{}", code);
+        assert!(code.contains("for (entity, collider_trans, maybe_brick) in &collider_query"), "got:\n{}", code);
+        assert!(code.contains("Ok(())"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_query_fetch_expressions() {
+        let src = r#"
+@component
+struct Ball:
+    int id
+
+@component
+struct Transform:
+    float32 x
+
+@component
+struct Brick:
+    int hp
+
+pub def ecs_system() throws:
+    let ball = query single (Transform) where Ball
+    let maybe_bonus = query single? (Transform) where Ball
+    let has_ball = query any where Ball
+    let bricks = query (Entity, Transform) where Brick
+    let all_bricks = query all (Entity, Transform) where Brick
+    if bricks.isEmpty():
+        return
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn ecs_system("), "got:\n{}", code);
+        assert!(code.contains("ball_query: Query<&Transform, With<Ball>>"), "got:\n{}", code);
+        assert!(code.contains("ball_query.get_single().map_err("), "got:\n{}", code);
+        assert!(code.contains("ball_query_1.iter().next()"), "got:\n{}", code);
+        assert!(code.contains("!ball_query_2.is_empty()"), "got:\n{}", code);
+        assert!(code.contains("brick_query: Query<(Entity, &Transform), With<Brick>>"), "got:\n{}", code);
+        assert!(code.contains("(&brick_query)"), "got:\n{}", code);
+        assert!(code.contains("brick_query_1: Query<(Entity, &Transform), With<Brick>>"), "got:\n{}", code);
+        assert!(code.contains("(&brick_query_1)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_ambient_and_qualified_ecs_access() {
+        let src = r#"
+@resource
+var int score = 0
+
+@component
+struct Paddle:
+    int id
+
+pub def move_paddle(mut Transform transform) where Paddle:
+    let dt = time.delta as float32
+    let dt2 = ecs.time.delta as float32
+    if input.pressed(KeyCode.ArrowLeft):
+        transform.x -= 100.0 * dt
+    if ecs.input.pressed(KeyCode.ArrowRight):
+        transform.x += 100.0 * dt2
+    commands.spawn(Paddle(id = 1))
+    ecs.commands.spawn(Paddle(id = 2))
+    resource.score += 10
+    ecs.resource.score += 20
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn move_paddle("), "got:\n{}", code);
+        assert!(code.contains("time: Res<Time>"), "got:\n{}", code);
+        assert!(code.contains("input: Res<ButtonInput<KeyCode>>"), "got:\n{}", code);
+        assert!(code.contains("mut commands: Commands"), "got:\n{}", code);
+        assert!(code.contains("mut res_score: ResMut<Res_score>"), "got:\n{}", code);
+        assert!(code.contains("time.delta_secs()"), "got:\n{}", code);
+        assert!(code.contains("input.pressed("), "got:\n{}", code);
+        assert!(code.contains("commands.spawn("), "got:\n{}", code);
+        assert!(code.contains("res_score.0 += 10"), "got:\n{}", code);
+        assert!(code.contains("res_score.0 += 20"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_ambient_and_qualified_entity_and_despawn() {
+        let src = r#"
+@component
+data Enemy:
+    bool is_dead
+
+@component
+data Ghost:
+    bool vanished
+
+def kill_enemy(Enemy e) where Dead:
+    let my_id = entity
+    despawn()
+
+def kill_ghost(Ghost g) where Vanished:
+    let gid = ecs.entity
+    ecs.despawn()
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn kill_enemy("), "got:\n{}", code);
+        assert!(code.contains("mut commands: Commands"), "got:\n{}", code);
+        assert!(code.contains("(__entity, e)"), "got:\n{}", code);
+        assert!(code.contains("let my_id = __entity;"), "got:\n{}", code);
+        assert!(code.contains("commands.entity(__entity).despawn()"), "got:\n{}", code);
+
+        assert!(code.contains("pub fn kill_ghost("), "got:\n{}", code);
+        assert!(code.contains("(__entity, g)"), "got:\n{}", code);
+        assert!(code.contains("let gid = __entity"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_camel_case_input_and_time_methods() {
+        let src = r#"
+@component
+data Player:
+    int id
+
+def handle_player_input(Player p):
+    if input.justPressed(KeyCode.Space):
+        let dt = time.deltaSecs()
+        let total = time.elapsedSecs()
+    if ecs.input.justReleased(KeyCode.Escape):
+        let dt2 = ecs.time.delta_secs()
+    if input.just_pressed(KeyCode.Enter):
+        let dt3 = time.deltaSecs
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("pub fn handle_player_input("), "got:\n{}", code);
+        assert!(code.contains("input: Res<ButtonInput<KeyCode>>"), "got:\n{}", code);
+        assert!(code.contains("time: Res<Time>"), "got:\n{}", code);
+        assert!(code.contains("input.just_pressed(KeyCode::Space)"), "got:\n{}", code);
+        assert!(code.contains("let dt = (time.delta_secs() as f64);"), "got:\n{}", code);
+        assert!(code.contains("let total = (time.elapsed_secs_f64());"), "got:\n{}", code);
+        assert!(code.contains("input.just_released(KeyCode::Escape)"), "got:\n{}", code);
+        assert!(code.contains("let dt2 = (time.delta_secs() as f64);"), "got:\n{}", code);
+        assert!(code.contains("input.just_pressed(KeyCode::Enter)"), "got:\n{}", code);
+        assert!(code.contains("let dt3 = (time.delta_secs() as f64)"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_for_where_and_collection_query_transpile() {
+        let src = r#"
+def test():
+    let nums = [1, 2, 3, 4, 5]
+    for x in nums where x > 2:
+        print "{x}"
+
+    let q1 = query x in nums where x % 2 == 0
+    let q2 = query x in nums where x % 2 == 0 |> x * 10
+    let first_match = query first? x in nums where x == 3
+    let single_match = query single? x in nums where x == 4
+    let any_match = query any? x in nums where x > 2
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(code.contains("if !((x > 2)) { continue; }"), "got:\n{}", code);
+        assert!(code.contains(".into_iter().filter(|x| ((x % 2) == 0))"), "got:\n{}", code);
+        assert!(code.contains(".into_iter().filter(|x| ((x % 2) == 0)).map(|x| (x * 10))"), "got:\n{}", code);
+        assert!(code.contains(".into_iter().filter(|x| (x == 3)).next()"), "got:\n{}", code);
+        assert!(code.contains("query single"), "got:\n{}", code);
+        assert!(code.contains(".into_iter().filter(|x| (x > 2)).next()"), "got:\n{}", code);
+    }
+
+    #[test]
+    fn test_for_where_and_collection_query_interpreter() {
+        let src = r#"
+var sum = 0
+for x in [1, 2, 3, 4, 5, 6] where x % 2 == 0:
+    sum = sum + x
+
+let evens = query x in [1, 2, 3, 4] where x % 2 == 0
+let doubled = query x in [1, 2, 3, 4] where x > 2 |> x * 10
+let collected = (query x in [1, 2, 3] |> x + 1).collect()
+let found = query first? x in [10, 20, 30] where x > 15
+let not_found = query first? x in [10, 20, 30] where x > 100
+let s_found = query single? x in [10, 20, 30] where x == 20
+let s_not_found = query single? x in [10, 20, 30] where x > 50
+let a_found = query any? x in [10, 20, 30] where x > 15
+"#;
+        let tokens = crate::lexer::lex(src).expect("lex error");
+        let program = crate::parser::parse(tokens).expect("parse error");
+        let mut interp = crate::interpreter::Interpreter::new();
+        interp.exec_program(&program).expect("exec error");
+
+        assert_eq!(interp.global.borrow().get("sum"), Some(crate::interpreter::Value::Int(12)));
+        assert_eq!(
+            interp.global.borrow().get("evens"),
+            Some(crate::interpreter::Value::Array(std::rc::Rc::new(vec![
+                crate::interpreter::Value::Int(2),
+                crate::interpreter::Value::Int(4),
+            ])))
+        );
+        assert_eq!(
+            interp.global.borrow().get("doubled"),
+            Some(crate::interpreter::Value::Array(std::rc::Rc::new(vec![
+                crate::interpreter::Value::Int(30),
+                crate::interpreter::Value::Int(40),
+            ])))
+        );
+        assert_eq!(
+            interp.global.borrow().get("collected"),
+            Some(crate::interpreter::Value::Array(std::rc::Rc::new(vec![
+                crate::interpreter::Value::Int(2),
+                crate::interpreter::Value::Int(3),
+                crate::interpreter::Value::Int(4),
+            ])))
+        );
+        assert_eq!(interp.global.borrow().get("found"), Some(crate::interpreter::Value::Int(20)));
+        assert_eq!(interp.global.borrow().get("not_found"), Some(crate::interpreter::Value::Nil));
+        assert_eq!(interp.global.borrow().get("s_found"), Some(crate::interpreter::Value::Int(20)));
+        assert_eq!(interp.global.borrow().get("s_not_found"), Some(crate::interpreter::Value::Nil));
+        assert_eq!(interp.global.borrow().get("a_found"), Some(crate::interpreter::Value::Int(20)));
+
+        // Test error on multiple elements with `query single`
+        let src_err = r#"let bad = query single x in [1, 2, 3] where x > 1"#;
+        let p_err = crate::parser::parse(crate::lexer::lex(src_err).unwrap()).unwrap();
+        let mut interp_err = crate::interpreter::Interpreter::new();
+        assert!(interp_err.exec_program(&p_err).is_err());
+
+        // Test error on missing element with non-optional `query first`
+        let src_err2 = r#"let bad = query first x in [1, 2, 3] where x > 10"#;
+        let p_err2 = crate::parser::parse(crate::lexer::lex(src_err2).unwrap()).unwrap();
+        let mut interp_err2 = crate::interpreter::Interpreter::new();
+        assert!(interp_err2.exec_program(&p_err2).is_err());
     }

@@ -238,8 +238,8 @@ fn slot_seed(default: &Expr, inner: &Type) -> Expr {
 
 fn plain_struct(name: String, is_pub: bool, fields: Vec<FieldDecl>, line: usize, col: usize) -> StructDecl {
     StructDecl {
-        name, is_pub, is_view: false, is_data: false, is_component: false, is_resource: false, is_native: false, protocols: vec![], fields,
-        inits: vec![], methods: vec![], queries: vec![], conversions: vec![], type_params: vec![],
+        name, is_pub, is_view: false, is_data: false, is_component: false, is_resource: false, is_game: false, is_native: false, protocols: vec![], fields,
+        inits: vec![], methods: vec![], conversions: vec![], type_params: vec![],
         where_clause: vec![], setters: vec![], type_methods: vec![], type_vars: vec![],
         assoc_type_defs: vec![], attrs: vec![], line, col,
     }

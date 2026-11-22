@@ -755,6 +755,9 @@ impl Interpreter {
             if elems_mut {
                 child.borrow_mut().mark_content_mutable(&s.vars[0]);
             }
+            if !self.check_for_where_guard(s, &child)? {
+                continue;
+            }
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,
@@ -772,7 +775,7 @@ impl Interpreter {
     /// convention as `arr.enumerate()`. Factored out so each lazy loop below
     /// (`exec_for_range`/`_str`/`_dict`) shares it with `exec_for`'s own eager-item
     /// loop instead of re-deriving it.
-    fn bind_for_item(vars: &[String], idx: i64, item: Value, child: &EnvRef) {
+    pub(crate) fn bind_for_item(vars: &[String], idx: i64, item: Value, child: &EnvRef) {
         if vars.len() == 1 {
             child.borrow_mut().define(&vars[0], item);
         } else {
@@ -808,6 +811,9 @@ impl Interpreter {
         for (idx, n) in iter.enumerate() {
             let child = Env::child(Rc::clone(&env));
             Self::bind_for_item(&s.vars, idx as i64, Value::Int(n), &child);
+            if !self.check_for_where_guard(s, &child)? {
+                continue;
+            }
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,
@@ -827,6 +833,9 @@ impl Interpreter {
         for (idx, c) in text.chars().enumerate() {
             let child = Env::child(Rc::clone(&env));
             Self::bind_for_item(&s.vars, idx as i64, Value::Str(c.to_string()), &child);
+            if !self.check_for_where_guard(s, &child)? {
+                continue;
+            }
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,
@@ -848,6 +857,9 @@ impl Interpreter {
         for (idx, (k, v)) in pairs.into_iter().enumerate() {
             let child = Env::child(Rc::clone(&env));
             Self::bind_for_item(&s.vars, idx as i64, Value::Tuple(vec![k, v]), &child);
+            if !self.check_for_where_guard(s, &child)? {
+                continue;
+            }
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,
@@ -888,6 +900,9 @@ impl Interpreter {
                     }
                 }
             }
+            if !self.check_for_where_guard(s, &child)? {
+                continue;
+            }
             match self.exec_block(&s.body, child) {
                 Ok(()) => {}
                 Err(Signal::Break(_)) => break,
@@ -896,6 +911,16 @@ impl Interpreter {
             }
         }
         Ok(())
+    }
+
+    fn check_for_where_guard(&mut self, s: &ForStmt, child: &EnvRef) -> Result<bool, Signal> {
+        if let Some(guard) = &s.where_expr {
+            let val = self.eval_expr(guard, Rc::clone(child))?;
+            if !self.expect_bool(val, guard.line)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn collect_iterable(&mut self, val: Value, line: usize) -> Result<Vec<Value>, Signal> {
@@ -919,6 +944,20 @@ impl Interpreter {
                     return Err(err("cannot iterate over a channel sender", line));
                 }
                 Ok(buf.borrow_mut().drain(..).collect())
+            }
+            Value::Object(_) => {
+                let mut iter_val = val;
+                let mut items = Vec::new();
+                loop {
+                    let mut out_self: Option<Value> = None;
+                    let item = self.call_method(iter_val.clone(), "next", vec![], line, &mut out_self)?;
+                    if let Some(new_self) = out_self {
+                        iter_val = new_self;
+                    }
+                    if matches!(item, Value::Nil) { break; }
+                    items.push(item);
+                }
+                Ok(items)
             }
             other => Err(err(format!("'{}' is not iterable", other.type_name()), line)),
         }

@@ -360,7 +360,7 @@ impl Transpiler {
             if !derive_names.iter().any(|d| d == "Component") {
                 derive_names.push("Component".to_string());
             }
-            if s.fields.is_empty() {
+            if !has_derive && s.fields.is_empty() {
                 if !derive_names.iter().any(|d| d == "Copy") {
                     derive_names.push("Copy".to_string());
                 }
@@ -369,8 +369,11 @@ impl Transpiler {
                 }
             }
         }
-        if s.is_resource && !derive_names.iter().any(|d| d == "Resource") {
+        if (s.is_resource || s.is_game) && !derive_names.iter().any(|d| d == "Resource") {
             derive_names.push("Resource".to_string());
+        }
+        if !has_derive && (s.is_resource || s.is_game) && !derive_names.iter().any(|d| d == "Default") {
+            derive_names.push("Default".to_string());
         }
         if !derive_names.is_empty() {
             self.line(&format!("#[derive({})]", derive_names.join(", ")));
@@ -378,7 +381,7 @@ impl Transpiler {
         // Any other explicit attrs (not `derive`, already folded into `derive_names` above)
         // still emit verbatim, unchanged.
         for attr in &s.attrs {
-            if attr.name == "derive" || attr.name == "api" || attr.name == "component" || attr.name == "resource" { continue; }
+            if attr.name == "derive" || attr.name == "api" || attr.name == "component" || attr.name == "resource" || attr.name.eq_ignore_ascii_case("game") { continue; }
             let args_s = if attr.args.is_empty() { String::new() } else { format!("({})", attr.args.join(", ")) };
             self.line(&format!("#[{}{}]", attr.name, args_s));
         }
@@ -625,6 +628,7 @@ impl Transpiler {
         // If there are no declared protocols, emit everything here (no trait to split against).
         let has_protocols = !s.protocols.is_empty();
         for f in &s.methods {
+            if self.is_ecs_fn(f) { continue; }
             // Skip methods overridden by an ext block — the ext block's version takes precedence.
             let overridden = self.struct_ext_method_overrides
                 .contains(&format!("{}::{}", s.name, mangle_overload_name(&f.name, &f.params)));
@@ -662,9 +666,11 @@ impl Transpiler {
         self.indent -= 1;
         self.line("}");
 
-        // Queries declared inside the component/struct: emit as Bevy systems.
-        for q in &s.queries {
-            self.emit_query(q);
+        // ECS methods declared inside the component/struct: emit as Bevy systems.
+        for m in &s.methods {
+            if self.is_ecs_fn(m) {
+                self.emit_ecs_fn(m, Some(&s.name));
+            }
         }
 
         // Protocol conformances declared in header: `struct X as Trait1, Trait2:`.

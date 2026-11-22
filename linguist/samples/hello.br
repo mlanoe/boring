@@ -31,7 +31,7 @@ def string sign(int n):
 
 print "{sign(5)}, {sign(-3)}, {sign(0)}"
 
-for w in ["boring", "is", "fun"]:
+for w in ["boring", "is", "fun"] where w != "is":
     print "  {w}"
 
 var i = 0
@@ -74,7 +74,9 @@ print describe(Color.Blue(128))
 let numbers = [1, 2, 3, 4, 5]
 let doubled = numbers.map((n): n * 2)
 let evens   = numbers.filter((n): n % 2 == 0)
-print "doubled={doubled}, evens={evens}"
+let q_evens = (query x in numbers where x % 2 == 0 |> x * 10).collect()
+let q_first = query first? x in numbers where x > 3
+print "doubled={doubled}, evens={evens}, q_evens={q_evens}, q_first={q_first}"
 
 let {string=int} scores = {"Alice" = 90, "Bob" = 85}
 print "Alice={scores["Alice"]}"

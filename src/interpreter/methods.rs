@@ -1607,22 +1607,54 @@ impl Interpreter {
             if args.len() < min_args || args.len() > max_args {
                 continue;
             }
-            let all_match = decl.params.iter().zip(args.iter()).all(|(p, v)| {
-                match &p.ty {
-                    None => true,
-                    Some(ty) => Self::value_matches_type_static(v, ty),
+            let mut matched = true;
+            let mut pos_idx = 0;
+            for arg in args {
+                let (val, param) = match arg {
+                    Value::Labeled { label, value } => {
+                        match decl.params.iter().find(|p| p.name == *label) {
+                            Some(p) => (value.as_ref(), p),
+                            None => { matched = false; break; }
+                        }
+                    }
+                    other => {
+                        while pos_idx < decl.params.len() && args.iter().any(|a| matches!(a, Value::Labeled { label, .. } if *label == decl.params[pos_idx].name)) {
+                            pos_idx += 1;
+                        }
+                        if pos_idx >= decl.params.len() {
+                            matched = false;
+                            break;
+                        }
+                        let p = &decl.params[pos_idx];
+                        pos_idx += 1;
+                        (other, p)
+                    }
+                };
+                if let Some(ty) = &param.ty {
+                    if !Self::value_matches_type_static(val, ty) {
+                        matched = false;
+                        break;
+                    }
                 }
-            });
-            if all_match {
+            }
+            if matched {
                 return Some(decl);
             }
         }
-        // Fallback: return first candidate
-        candidates.into_iter().next()
+        // Fallback: candidate matching arity first
+        candidates.iter().find(|d| {
+            let min = d.params.iter().filter(|p| p.default.is_none()).count();
+            let max = d.params.len();
+            args.len() >= min && args.len() <= max
+        }).copied().or_else(|| candidates.into_iter().next())
     }
 
     /// Simplified static type check for overload resolution (no self reference needed).
     fn value_matches_type_static(val: &Value, ty: &crate::ast::Type) -> bool {
+        let val = match val {
+            Value::Labeled { value, .. } => value.as_ref(),
+            other => other,
+        };
         use crate::ast::Type;
         match ty {
             Type::Int    => matches!(val, Value::Int(_)),
@@ -1803,6 +1835,7 @@ impl Interpreter {
             _ => unreachable!(),
         };
         match method {
+            "collect" if args.is_empty() => Ok(Some(Value::Array(arr))),
             "len" | "length" => Ok(Some(Value::Int(arr.len() as i64))),
             "clear" if args.is_empty() => Ok(Some(Value::Array(Vec::new().into()))),
             "push" => {
@@ -2897,6 +2930,22 @@ impl Interpreter {
                     Ok(Value::Str(chars[i as usize].to_string()))
                 }
             }
+            Value::Object(ref inner_rc) => {
+                let type_name = inner_rc.borrow().type_name.clone();
+                let has_get = {
+                    let g = self.global.borrow();
+                    if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                        decl.methods.iter().any(|m| m.name == "get")
+                    } else {
+                        false
+                    }
+                };
+                if has_get {
+                    let mut out_self = None;
+                    return self.call_method(obj, "get", vec![idx], line, &mut out_self);
+                }
+                Err(err_span(format!("cannot index into {}: method 'get' is not defined", type_name), line, col, len))
+            }
             other => Err(err_span(format!("cannot index into {}", other.type_name()), line, col, len)),
         }
     }
@@ -3534,9 +3583,56 @@ impl Interpreter {
                             line,
                         ));
                     }
+                    Value::Object(ref inner_rc) => {
+                        let type_name = inner_rc.borrow().type_name.clone();
+                        let has_set = {
+                            let g = self.global.borrow();
+                            if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                                decl.methods.iter().any(|m| m.name == "set")
+                            } else {
+                                false
+                            }
+                        };
+                        if has_set {
+                            let mut out_self = None;
+                            self.call_method(obj.clone(), "set", vec![idx, val], line, &mut out_self)?;
+                            if let Some(new_self) = out_self {
+                                self.assign(obj_expr, new_self, env, line)?;
+                            }
+                            return Ok(());
+                        }
+                        return Err(err(format!("cannot index-assign on {}: method 'set' is not defined", type_name), line));
+                    }
                     _ => return Err(err("cannot index-assign on non-array/dict", line)),
                 }
                 Ok(())
+            }
+            ExprKind::LabeledIndex(obj_expr, args) => {
+                let obj = self.eval_expr(obj_expr, Rc::clone(&env))?;
+                if let Value::Object(ref inner_rc) = obj {
+                    let type_name = inner_rc.borrow().type_name.clone();
+                    let has_set = {
+                        let g = self.global.borrow();
+                        if let Some(Value::Struct { ref decl, .. }) = g.get(&type_name) {
+                            decl.methods.iter().any(|m| m.name == "set")
+                        } else {
+                            false
+                        }
+                    };
+                    if has_set {
+                        let mut arg_vals = self.eval_args(args, Rc::clone(&env))?;
+                        arg_vals.push(val);
+                        let mut out_self = None;
+                        self.call_method(obj.clone(), "set", arg_vals, line, &mut out_self)?;
+                        if let Some(new_self) = out_self {
+                            self.assign(obj_expr, new_self, env, line)?;
+                        }
+                        return Ok(());
+                    }
+                    Err(err(format!("cannot index-assign on {}: method 'set' is not defined", type_name), line))
+                } else {
+                    Err(err("cannot index-assign on non-object", line))
+                }
             }
             _ => Err(err("invalid assignment target", line)),
         }

@@ -449,9 +449,6 @@ impl Parser {
                         }
                         Ok(Item::Let(let_stmt))
                     }
-                    TokenKind::Query => Ok(Item::Query(
-                        self.parse_query_decl(attrs)?,
-                    )),
                     TokenKind::Enum => {
                         Ok(Item::Enum(self.parse_enum_decl_with_attrs(is_pub, attrs)?))
                     }
@@ -580,7 +577,6 @@ impl Parser {
             TokenKind::Data => Ok(Item::Struct(self.parse_data_decl(is_pub)?)),
             TokenKind::Component => Ok(Item::Struct(self.parse_component_decl(is_pub)?)),
             TokenKind::Resource => Ok(Item::Struct(self.parse_resource_decl(is_pub)?)),
-            TokenKind::Query => Ok(Item::Query(self.parse_query_decl(vec![])?)),
             TokenKind::Enum => Ok(Item::Enum(self.parse_enum_decl(is_pub)?)),
             TokenKind::Trait => Ok(Item::Trait(self.parse_trait_decl()?)),
             TokenKind::Ext => Ok(Item::Ext(self.parse_ext_decl()?)),
@@ -1747,7 +1743,7 @@ impl Parser {
                     i += 2;
                 }
                 i = self.skip_type_suffix_qualifiers(i);
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
+                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
             }
             // Array type `[...]` or Set/Dict type `{...}` before a param name
             TokenKind::LBracket | TokenKind::LBrace => {
@@ -1769,7 +1765,7 @@ impl Parser {
                     i += 1;
                 }
                 i = self.skip_type_suffix_qualifiers(i);
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
+                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
             }
             // Tuple type `(T1, T2, ...)` before a param/variable name.
             TokenKind::LParen => {
@@ -1792,7 +1788,7 @@ impl Parser {
                 }
                 matches!(
                     self.tokens.get(i).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
+                    Some(TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
                 )
             }
             // `<Trait>` impl-shorthand: `< Ident >` where Ident is a PascalCase type name.
@@ -1806,7 +1802,7 @@ impl Parser {
                     Some(TokenKind::Gt)
                 ) && matches!(
                     self.tokens.get(self.pos + 3).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_) | TokenKind::Query | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
+                    Some(TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
                 )
             }
             _ => false,
@@ -2247,38 +2243,8 @@ impl Parser {
         self.parse_struct_or_view(is_pub, vec![], false, false, false, true)
     }
 
-    fn parse_query_decl(&mut self, attrs: Vec<Attr>) -> Result<crate::ast::QueryDecl, ParseError> {
-        let line = self.line();
-        let col = self.col();
-        self.expect(&TokenKind::Query)?;
-        let is_req = self.eat(&TokenKind::Req);
-        let name = if matches!(self.peek(), TokenKind::Ident(_)) {
-            Some(self.expect_ident()?)
-        } else {
-            None
-        };
-        let params = self.parse_params()?;
-        let where_clause = if self.eat(&TokenKind::Where) {
-            Some(self.parse_query_where_clause()?)
-        } else {
-            None
-        };
-        self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
-        Ok(crate::ast::QueryDecl {
-            name,
-            params,
-            where_clause,
-            attrs,
-            body,
-            is_req,
-            self_type: None,
-            line,
-            col,
-        })
-    }
-
-    fn parse_query_where_clause(&mut self) -> Result<crate::ast::QueryWhereClause, ParseError> {
+    pub(crate) fn parse_query_where_clause(&mut self) -> Result<crate::ast::QueryWhereClause, ParseError> {
+        let has_paren = self.eat(&TokenKind::LParen);
         let mut terms = Vec::new();
         loop {
             if self.eat(&TokenKind::Not) {
@@ -2302,6 +2268,9 @@ impl Parser {
             } else {
                 break;
             }
+        }
+        if has_paren {
+            self.expect(&TokenKind::RParen)?;
         }
         Ok(crate::ast::QueryWhereClause { terms })
     }
@@ -2349,13 +2318,8 @@ impl Parser {
         let is_component = is_component || has_comp_attr;
         let has_res_attr = attrs.iter().any(|a| a.name == "resource" || a.name == "Resource");
         let is_resource = is_resource || has_res_attr;
-        if is_view {
-            self.advance();
-        } else if self.check(&TokenKind::Data) {
-            self.advance();
-        } else if self.check(&TokenKind::Component) {
-            self.advance();
-        } else if self.check(&TokenKind::Resource) {
+        let is_game = attrs.iter().any(|a| a.name.eq_ignore_ascii_case("game"));
+        if is_view || self.check(&TokenKind::Data) || self.check(&TokenKind::Component) || self.check(&TokenKind::Resource) {
             self.advance();
         } else {
             self.expect(&TokenKind::Struct)?;
@@ -2371,6 +2335,8 @@ impl Parser {
                 protocols.push(self.expect_ident()?);
             }
         }
+        let is_resource = is_resource || protocols.iter().any(|p| p == "Resource");
+        let is_component = is_component || protocols.iter().any(|p| p == "Component");
         self.expect(&TokenKind::Colon)?;
         if self.check(&TokenKind::Pass) {
             self.advance();
@@ -2382,12 +2348,12 @@ impl Parser {
                 is_data,
                 is_component,
                 is_resource,
+                is_game,
                 is_native: false,
                 protocols,
                 fields: vec![],
                 inits: vec![],
                 methods: vec![],
-                queries: vec![],
                 conversions: vec![],
                 type_params,
                 where_clause,
@@ -2410,12 +2376,12 @@ impl Parser {
                 is_data,
                 is_component,
                 is_resource,
+                is_game,
                 is_native: true,
                 protocols,
                 fields: vec![],
                 inits: vec![],
                 methods: vec![],
-                queries: vec![],
                 conversions: vec![],
                 type_params,
                 where_clause,
@@ -2437,6 +2403,7 @@ impl Parser {
             is_data,
             is_component,
             is_resource,
+            is_game,
             protocols,
             type_params,
             where_clause,
@@ -2455,6 +2422,7 @@ impl Parser {
         is_data: bool,
         is_component: bool,
         is_resource: bool,
+        is_game: bool,
         protocols: Vec<String>,
         type_params: Vec<String>,
         where_clause: Vec<(String, String)>,
@@ -2465,7 +2433,6 @@ impl Parser {
         let mut fields = Vec::new();
         let mut inits = Vec::new();
         let mut methods = Vec::new();
-        let mut queries = Vec::new();
         let mut conversions = Vec::new();
         let mut setters = Vec::new();
         let mut type_methods = Vec::new();
@@ -2480,43 +2447,19 @@ impl Parser {
             match self.peek().clone() {
                 TokenKind::At => {
                     let attrs = self.parse_attrs();
-                    if self.check(&TokenKind::Query) {
-                        let mut q = self.parse_query_decl(attrs)?;
-                        q.self_type = Some(name.clone());
-                        queries.push(q);
-                    } else if self.check(&TokenKind::Def) {
+                    if self.check(&TokenKind::Def) {
                         let mut m = self.parse_fn_decl(false, true)?;
                         m.attrs = attrs;
                         methods.push(m);
                     } else if self.check(&TokenKind::Req) {
-                        if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Query)) {
-                            self.advance();
-                            let mut q = self.parse_query_decl(attrs)?;
-                            q.is_req = true;
-                            q.self_type = Some(name.clone());
-                            queries.push(q);
-                        } else {
-                            let mut m = self.parse_fn_decl(false, false)?;
-                            m.attrs = attrs;
-                            methods.push(m);
-                        }
+                        let mut m = self.parse_fn_decl(false, false)?;
+                        m.attrs = attrs;
+                        methods.push(m);
                     } else {
                         let mut f = self.parse_field_decl()?;
                         f.attrs.extend(attrs);
                         fields.push(f);
                     }
-                }
-                TokenKind::Query => {
-                    let mut q = self.parse_query_decl(vec![])?;
-                    q.self_type = Some(name.clone());
-                    queries.push(q);
-                }
-                TokenKind::Req if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Query)) => {
-                    self.advance();
-                    let mut q = self.parse_query_decl(vec![])?;
-                    q.is_req = true;
-                    q.self_type = Some(name.clone());
-                    queries.push(q);
                 }
                 // `view` bodies: contextual `state`/`bind`/`env` fields and the implicit `body()`.
                 TokenKind::Ident(ref s)
@@ -2708,12 +2651,12 @@ impl Parser {
             is_data,
             is_component,
             is_resource,
+            is_game,
             is_native: false,
             protocols,
             fields,
             inits,
             methods,
-            queries,
             conversions,
             type_params,
             where_clause,
@@ -3341,10 +3284,6 @@ impl Parser {
                 self.advance();
                 Ok("resource".to_string())
             }
-            TokenKind::Query => {
-                self.advance();
-                Ok("query".to_string())
-            }
             TokenKind::Where => {
                 self.advance();
                 Ok("where".to_string())
@@ -3445,7 +3384,6 @@ impl Parser {
             TokenKind::Data => Some("data".into()),
             TokenKind::Component => Some("component".into()),
             TokenKind::Resource => Some("resource".into()),
-            TokenKind::Query => Some("query".into()),
             TokenKind::Where => Some("where".into()),
             TokenKind::Mod => Some("mod".into()),
             TokenKind::New => Some("new".into()),

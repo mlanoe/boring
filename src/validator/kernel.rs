@@ -574,7 +574,9 @@ impl KernelValidator {
             | ExprKind::Bool(_)
             | ExprKind::Nil
             | ExprKind::Void
-            | ExprKind::DotIdent(_) => {}
+            | ExprKind::DotIdent(_)
+            | ExprKind::EcsFetch(_)
+            | ExprKind::Query(_) => {}
             ExprKind::Var(name) => {
                 if FLOAT_CONSTS.contains(&name.as_str()) && !self.bound.contains(name) {
                     self.error(
@@ -1106,7 +1108,7 @@ impl KernelValidator {
             }
             Item::Alias(a) => self.check_alias(a),
             Item::Stmt(s) => self.check_stmt(s),
-            Item::Use(_) | Item::Query(_) => {}
+            Item::Use(_) => {}
             Item::Kernel(k) => {
                 // GPU kernels have no meaning under the Rust-for-Linux target: there is no
                 // host/device split here (unlike cuda/metal/wgpu/rocm, which emit device

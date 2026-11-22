@@ -938,6 +938,42 @@ pub(crate) fn camel_to_snake(s: &str) -> String {
     out
 }
 
+/// Convert snake_case to camelCase: `layer_orders` → `layerOrders`
+pub(crate) fn snake_to_camel(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut capitalize_next = false;
+    for (i, c) in s.chars().enumerate() {
+        if c == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            out.extend(c.to_uppercase());
+            capitalize_next = false;
+        } else if i == 0 {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Convert snake_case to PascalCase: `layer_orders` → `LayerOrders`
+pub(crate) fn snake_to_pascal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+    for c in s.chars() {
+        if c == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            out.extend(c.to_uppercase());
+            capitalize_next = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Wrap a boring identifier in `r#` if it's a Rust keyword.
 pub(crate) fn escape_rust_keyword(name: &str) -> String {
     match name {
@@ -1144,7 +1180,12 @@ pub(crate) fn collect_vars_in(expr: &Expr, out: &mut Vec<String>) {
 
         // Leaf nodes (no sub-expressions containing variable references)
         ExprKind::Int(_) | ExprKind::UInt64(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_)
-        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) => {}
+        | ExprKind::Nil | ExprKind::Void | ExprKind::DotIdent(_) | ExprKind::EcsFetch(_) => {}
+        ExprKind::Query(q) => {
+            collect_vars_in(&q.iterable, out);
+            if let Some(w) = &q.where_clause { collect_vars_in(w, out); }
+            if let Some(p) = &q.projection { collect_vars_in(p, out); }
+        }
 
         // Normally eliminated by `desugar_array_block` before this capture-analysis
         // pass ever runs (see `ExprKind::TrailingArrayBlock`'s own doc comment) —
@@ -1178,6 +1219,7 @@ pub(crate) fn collect_vars_in_stmt(stmt: &Stmt, out: &mut Vec<String>) {
         }
         Stmt::For(f) => {
             collect_vars_in(&f.iterable, out);
+            if let Some(w) = &f.where_expr { collect_vars_in(w, out); }
             for s in &f.body { collect_vars_in_stmt(s, out); }
         }
         Stmt::WhileLet(w) => {
@@ -1271,9 +1313,33 @@ pub(crate) fn collect_local_decl_names(stmts: &[Stmt], out: &mut std::collection
     for stmt in stmts {
         match stmt {
             Stmt::Let(l) => { out.insert(l.name.clone()); }
+            Stmt::LetDestructure(ld) => {
+                for b in &ld.bindings {
+                    if b.name != "_" {
+                        out.insert(b.name.clone());
+                    }
+                }
+            }
             Stmt::If(i) => {
                 for (_, body) in &i.branches { collect_local_decl_names(body, out); }
                 if let Some(b) = &i.else_body { collect_local_decl_names(b, out); }
+            }
+            Stmt::IfLet(il) => {
+                for c in &il.clauses {
+                    if let CondClause::Let(name, _) = c {
+                        out.insert(name.clone());
+                    }
+                }
+                collect_local_decl_names(&il.then_body, out);
+                for eb in &il.elif_branches {
+                    for c in &eb.clauses {
+                        if let CondClause::Let(name, _) = c {
+                            out.insert(name.clone());
+                        }
+                    }
+                    collect_local_decl_names(&eb.body, out);
+                }
+                if let Some(b) = &il.else_body { collect_local_decl_names(b, out); }
             }
             Stmt::While(w) => collect_local_decl_names(&w.body, out),
             Stmt::For(f) => {
@@ -1284,10 +1350,22 @@ pub(crate) fn collect_local_decl_names(stmts: &[Stmt], out: &mut std::collection
                 out.insert(w.name.clone());
                 collect_local_decl_names(&w.body, out);
             }
+            Stmt::Guard(g) => {
+                if let GuardCond::Clauses(cs) = &g.cond {
+                    for c in cs {
+                        if let CondClause::Let(name, _) = c {
+                            out.insert(name.clone());
+                        }
+                    }
+                }
+                collect_local_decl_names(&g.else_body, out);
+            }
             Stmt::Try(t) => {
                 collect_local_decl_names(&t.body, out);
                 for c in &t.catch_clauses { collect_local_decl_names(&c.body, out); }
             }
+            Stmt::Loop(l) => collect_local_decl_names(&l.body, out),
+            Stmt::With(w) => collect_local_decl_names(&w.body, out),
             _ => {}
         }
     }
@@ -1390,7 +1468,11 @@ fn scan_stmt_for_default_rest(stmt: &Stmt, out: &mut std::collections::HashSet<S
         Stmt::DoWhile(d) => { scan_stmts_for_default_rest(&d.body, out); scan_expr_for_default_rest(&d.condition, out); }
         Stmt::Loop(l) => scan_stmts_for_default_rest(&l.body, out),
         Stmt::Wait(e, _) => scan_expr_for_default_rest(e, out),
-        Stmt::For(f) => { scan_expr_for_default_rest(&f.iterable, out); scan_stmts_for_default_rest(&f.body, out); }
+        Stmt::For(f) => {
+            scan_expr_for_default_rest(&f.iterable, out);
+            if let Some(w) = &f.where_expr { scan_expr_for_default_rest(w, out); }
+            scan_stmts_for_default_rest(&f.body, out);
+        }
         Stmt::Guard(g) => {
             match &g.cond {
                 GuardCond::Expr(e) => scan_expr_for_default_rest(e, out),
@@ -3309,4 +3391,55 @@ pub(crate) fn only_read_uses(body: &[Stmt], name: &str, arg_ok: &dyn Fn(&str, bo
         },
     });
     total == safe && !escapes
+}
+
+pub(crate) fn is_ecs_qualifier_obj(obj: &Expr) -> bool {
+    matches!(&obj.kind, ExprKind::Var(v) if v == "ecs")
+}
+
+pub(crate) fn is_ecs_resource_obj(obj: &Expr) -> bool {
+    if let ExprKind::Field(base, field) = &obj.kind {
+        if field == "resource" {
+            if let ExprKind::Var(v) = &base.kind {
+                return v == "ecs";
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn is_resource_qualifier_obj(obj: &Expr) -> bool {
+    match &obj.kind {
+        ExprKind::Var(v) => v == "resource",
+        ExprKind::DotIdent(d) => d == "resource",
+        ExprKind::Field(base, field) if field == "resource" => matches!(&base.kind, ExprKind::Var(v) if v == "ecs"),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_time_qualifier_obj(obj: &Expr) -> bool {
+    match &obj.kind {
+        ExprKind::Var(v) => v == "time",
+        ExprKind::DotIdent(d) => d == "time",
+        ExprKind::Field(base, field) if field == "time" => matches!(&base.kind, ExprKind::Var(v) if v == "ecs"),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_input_qualifier_obj(obj: &Expr) -> bool {
+    match &obj.kind {
+        ExprKind::Var(v) => v == "input",
+        ExprKind::DotIdent(d) => d == "input",
+        ExprKind::Field(base, field) if field == "input" => matches!(&base.kind, ExprKind::Var(v) if v == "ecs"),
+        _ => false,
+    }
+}
+
+pub(crate) fn is_commands_qualifier_obj(obj: &Expr) -> bool {
+    match &obj.kind {
+        ExprKind::Var(v) => v == "commands",
+        ExprKind::DotIdent(d) => d == "commands",
+        ExprKind::Field(base, field) if field == "commands" => matches!(&base.kind, ExprKind::Var(v) if v == "ecs"),
+        _ => false,
+    }
 }

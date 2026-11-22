@@ -502,6 +502,63 @@ impl Printer {
                 let head = if *has_parens { format!("{c}({})", self.args(args)?) } else { c };
                 format!("{head}:\n{}", self.block_text(body)?)
             }
+            ExprKind::EcsFetch(f) => {
+                let op = match f.kind {
+                    EcsFetchKind::All => "query",
+                    EcsFetchKind::Single => if f.is_optional { "query single?" } else { "query single" },
+                    EcsFetchKind::First => if f.is_optional { "query first?" } else { "query first" },
+                    EcsFetchKind::Any => if f.is_optional { "query any?" } else { "query any" },
+                };
+                let comps: Vec<String> = f.components.iter().map(|c| {
+                    let m = if c.is_mut { "mut " } else { "" };
+                    let opt = if c.is_option { "?" } else { "" };
+                    format!("{}{}{}", m, c.ty.name().unwrap_or("?"), opt)
+                }).collect();
+                let comps_str = if comps.is_empty() {
+                    String::new()
+                } else if comps.len() == 1 {
+                    comps[0].clone()
+                } else {
+                    format!("({})", comps.join(", "))
+                };
+                if let Some(w) = &f.where_clause {
+                    let terms: Vec<String> = w.terms.iter().map(|t| match t {
+                        QueryFilterTerm::With(s) => s.clone(),
+                        QueryFilterTerm::Without(s) => format!("not {}", s),
+                        QueryFilterTerm::Changed(s) => format!("changed {}", s),
+                        QueryFilterTerm::Added(s) => format!("added {}", s),
+                    }).collect();
+                    if comps_str.is_empty() {
+                        format!("{} where {}", op, terms.join(", "))
+                    } else {
+                        format!("{} {} where {}", op, comps_str, terms.join(", "))
+                    }
+                } else {
+                    if comps_str.is_empty() {
+                        op.to_string()
+                    } else {
+                        format!("{} {}", op, comps_str)
+                    }
+                }
+            }
+            ExprKind::Query(q) => {
+                let op = match q.kind {
+                    EcsFetchKind::All => "query",
+                    EcsFetchKind::Single => if q.is_optional { "query single?" } else { "query single" },
+                    EcsFetchKind::First => if q.is_optional { "query first?" } else { "query first" },
+                    EcsFetchKind::Any => if q.is_optional { "query any?" } else { "query any" },
+                };
+                let vars = if q.vars.len() == 1 { q.vars[0].clone() } else { format!("({})", q.vars.join(", ")) };
+                let iter = self.expr(&q.iterable, P_PIPE)?;
+                let mut res = format!("{} {} in {}", op, vars, iter);
+                if let Some(w) = &q.where_clause {
+                    res.push_str(&format!(" where {}", self.expr(w, P_PIPE)?));
+                }
+                if let Some(p) = &q.projection {
+                    res.push_str(&format!(" |> {}", self.expr(p, P_PIPE)?));
+                }
+                res
+            }
         })
     }
 
