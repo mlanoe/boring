@@ -1047,7 +1047,7 @@ impl Parser {
                     // type (`x as [float, width, height]`) starts with a *type* token
                     // (`float`, not `label =`), so this never misfires on that.
                     let is_relabel = self.check(&TokenKind::LBracket)
-                        && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+                        && self.tokens.get(self.pos + 1).map(|t| Self::is_ident_kind(&t.kind)).unwrap_or(false)
                         && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Eq));
                     if is_relabel {
                         self.advance(); // consume `[`
@@ -1154,7 +1154,7 @@ impl Parser {
     /// Returns true if the current position looks like a no-paren single-param trailing closure: `Ident ':'`.
     pub(crate) fn peek_is_trailing_closure_no_paren(&self) -> bool {
         self.allow_noparen_closure
-            && matches!(self.tokens.get(self.pos).map(|t| &t.kind), Some(TokenKind::Ident(_)))
+            && self.peek_is_ident()
             && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Colon))
     }
 
@@ -1450,7 +1450,7 @@ impl Parser {
     pub(crate) fn peek_is_trailing_body_no_colon(&self) -> bool {
         if !self.allow_trailing_closure { return false; }
         // Must be an Ident (variable or function call start) — not LBracket, LParen, literals
-        if !matches!(self.tokens.get(self.pos).map(|t| &t.kind), Some(TokenKind::Ident(_))) {
+        if !self.peek_is_ident() {
             return false;
         }
         // If Ident is followed by `:`, that's the no-paren closure param form — let it win
@@ -2623,7 +2623,7 @@ impl Parser {
             Some(TokenKind::LBracket | TokenKind::LBrace) => true,
             _ => false,
         };
-        let name_is_ident = matches!(name_tok, Some(TokenKind::Ident(_)));
+        let name_is_ident = name_tok.map(Self::is_ident_kind).unwrap_or(false);
         type_is_named && name_is_ident
     }
 

@@ -673,28 +673,36 @@ impl Parser {
                 TokenKind::Tick => {
                     // Ownership qualifier 'xxx. Most qualifier names are a generic
                     // `Ident` ('shared, 'actor, 'owned, 'inline, 'weak, 'observed, 'new,
-                    // 'atomic, 'copy, 'const, ...), but four are reserved keywords with
+                    // 'atomic, 'copy, 'const, ...), but several are reserved keywords with
                     // their own dedicated token, not `Ident` at all — 'static, 'guard,
-                    // 'task, 'req (see parse_type.rs's qualifier match, right next to
-                    // this same list) — missing them here left the scanner's position
+                    // 'task, 'req, 'kernel, 'mut (see parse_type.rs's qualifier match,
+                    // right next to this same list) — missing them here left the scanner's position
                     // sitting *on* the un-consumed qualifier token instead of past it,
                     // so `is_fn_decl_shorthand()` misread the rest of the type and wrongly
                     // returned `false` for any bare (no `def`/`req`) return-type-first
-                    // function declaration whose return type carries one of these four
-                    // qualifiers (`Config'static loadConfig(): ...` failed to parse at
-                    // all — confirmed via a real "expected newline, got Tick" error).
-                    i += 1;
-                    if i < n
-                        && matches!(
-                            &self.tokens[i].kind,
-                            TokenKind::Ident(_)
-                                | TokenKind::Static
-                                | TokenKind::Guard
-                                | TokenKind::Task
-                                | TokenKind::Req
-                        )
-                    {
+                    // function declaration whose return type carries one of these qualifiers
+                    // (`Config'static loadConfig(): ...` or `[float32]'kernel'unified f(): ...`
+                    // failed to parse at all — confirmed via a real "expected newline, got Tick" error).
+                    // Chained qualifiers (e.g. `'kernel'unified`, `'actor'task`, `'guard'weak`)
+                    // are consumed in a loop.
+                    while i < n && matches!(&self.tokens[i].kind, TokenKind::Tick) {
                         i += 1;
+                        if i < n
+                            && matches!(
+                                &self.tokens[i].kind,
+                                TokenKind::Ident(_)
+                                    | TokenKind::Static
+                                    | TokenKind::Guard
+                                    | TokenKind::Task
+                                    | TokenKind::Req
+                                    | TokenKind::Kernel
+                                    | TokenKind::Mut
+                            )
+                        {
+                            i += 1;
+                        } else {
+                            break;
+                        }
                     }
                 }
                 TokenKind::Question => {

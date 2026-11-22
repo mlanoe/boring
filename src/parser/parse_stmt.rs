@@ -1309,11 +1309,11 @@ impl Parser {
     /// Returns true if the current position starts a `for var [, var] in` binding form.
     /// Scans forward past comma-separated idents; returns true only if `in` follows.
     pub(crate) fn is_for_with_vars(&self) -> bool {
-        if !matches!(self.peek(), TokenKind::Ident(_)) { return false; }
+        if !self.peek_is_ident() { return false; }
         let mut i = self.pos;
         loop {
             match self.tokens.get(i).map(|t| &t.kind) {
-                Some(TokenKind::Ident(_)) => { i += 1; }
+                Some(k) if Self::is_ident_kind(k) => { i += 1; }
                 Some(TokenKind::Comma)    => { i += 1; }
                 Some(TokenKind::In)       => return true,
                 _                         => return false,
@@ -1348,7 +1348,7 @@ impl Parser {
                     if self.eat(&TokenKind::Question) {
                         ty = Type::Optional(Box::new(ty));
                     }
-                    let var_name = if matches!(self.peek(), TokenKind::Ident(_)) && !matches!(self.peek(), TokenKind::Where) {
+                    let var_name = if self.peek_is_ident() && !matches!(self.peek(), TokenKind::Where) {
                         self.expect_ident()?
                     } else {
                         match &ty {

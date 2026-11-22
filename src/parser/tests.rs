@@ -831,4 +831,89 @@ mod dispatch_tests {
         let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
         assert_eq!(program.items.len(), 1);
     }
+
+    #[test]
+    fn soft_keywords_as_labeled_args_and_struct_constructor() {
+        let src = "\
+struct Config:
+    int query
+    int data
+    int component
+    int resource
+    int where
+    int get
+    int set
+
+def test_fn(int query, int data, int component, int resource, int where, int get, int set):
+    query + data
+
+def main():
+    let c = Config(query = 1, data = 2, component = 3, resource = 4, where = 5, get = 6, set = 7)
+    let r = test_fn(query = 10, data = 20, component = 30, resource = 40, where = 50, get = 60, set = 70)
+";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        assert_eq!(program.items.len(), 3);
+    }
+
+    #[test]
+    fn view_state_query_and_soft_keywords_lowering() {
+        let src = "\
+view Page:
+    state string query = \"a\"
+    state int data = 1
+    state int component = 2
+    state int resource = 3
+    state int where = 4
+    state int get = 5
+    state int set = 6
+
+    body():
+        nil
+";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        let lowered = crate::lower_view::lower_module(program);
+        assert!(lowered.is_ok(), "failed to lower view: {:?}", lowered.err());
+    }
+}
+
+#[cfg(test)]
+mod shorthand_fn_qualifier_tests {
+    use crate::ast::*;
+
+    #[test]
+    fn shorthand_fn_with_kernel_unified_array_return_type() {
+        let src = "[float32]'kernel'unified get_empty_buffer(int n):\n    [0.0 as float32 for ..<n]\n";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        let Item::Fn(f) = &program.items[0] else { panic!("expected function") };
+        assert_eq!(f.name, "get_empty_buffer");
+        assert!(matches!(&f.return_ty, Some(Type::Qualified(inner, OwnerQual::GpuUnified)) if matches!(&**inner, Type::Array(_))));
+    }
+
+    #[test]
+    fn shorthand_fn_with_kernel_global_array_return_type() {
+        let src = "[float32]'kernel'global upload_weights([float32] weights):\n    weights\n";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        let Item::Fn(f) = &program.items[0] else { panic!("expected function") };
+        assert_eq!(f.name, "upload_weights");
+        assert!(matches!(&f.return_ty, Some(Type::Qualified(inner, OwnerQual::GpuGlobal)) if matches!(&**inner, Type::Array(_))));
+    }
+
+    #[test]
+    fn shorthand_fn_with_bare_kernel_qualifier() {
+        let src = "[float32]'kernel get_buffer(int n):\n    [0.0 as float32 for ..<n]\n";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        let Item::Fn(f) = &program.items[0] else { panic!("expected function") };
+        assert_eq!(f.name, "get_buffer");
+    }
+
+    #[test]
+    fn shorthand_fn_with_actor_task_and_guard_qualifiers() {
+        let src = "[int]'actor'task worker(int id):\n    [id]\n\nConfig'guard get_config():\n    cfg\n";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        assert_eq!(program.items.len(), 2);
+        let Item::Fn(f1) = &program.items[0] else { panic!("expected function") };
+        assert_eq!(f1.name, "worker");
+        let Item::Fn(f2) = &program.items[1] else { panic!("expected function") };
+        assert_eq!(f2.name, "get_config");
+    }
 }

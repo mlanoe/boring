@@ -5659,6 +5659,10 @@ impl Transpiler {
         // These names are specific enough to tokio/async-std that sync conflicts are unlikely.
         const TOKIO_ASYNC_METHODS: &[&str] = &[
             "read_line", "write_all", "acquire", "recv",
+            // `TcpListener`/`UnixListener::accept` (dual sync/async stdlib type, see
+            // `tokio_async_module_for` and `TOKIO_ASYNC_STATIC_TYPE` above — same
+            // real-world repro: a `task:`-using `async fn` server loop's `listener.accept()`).
+            "accept",
         ];
         let is_tokio_async = TOKIO_ASYNC_METHODS.contains(&method);
         // When the receiver's struct type is known, check the qualified
