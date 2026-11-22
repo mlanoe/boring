@@ -5898,6 +5898,11 @@ impl Transpiler {
                     // `&BoringKernelArg<T>` position (`compute_gpu_borrow_params`): lend the
                     // caller's value — a reborrow of the enclosing function's own borrowed
                     // parameter, `&local`, `&obj.field`, a resident call, or a temporary for a host array.
+                    let is_mut_borrow = sig.get(i).map(|t| {
+                        matches!(t.without_mut(), crate::ast::Type::Qualified(_, crate::ast::OwnerQual::BorrowMut | crate::ast::OwnerQual::BorrowOptionMut))
+                    }).unwrap_or(false);
+                    let amp = if is_mut_borrow { "&mut " } else { "&" };
+
                     let lent = if let ExprKind::Var(vname) = &a.value.kind {
                         if !self.with_open_names.contains(vname.as_str())
                             && self.current_fn_gpu_borrow_param_names.contains(vname.as_str())
@@ -5907,16 +5912,16 @@ impl Transpiler {
                             && (self.resident_call_vars.contains_key(vname.as_str())
                                 || self.current_fn_gpu_arg_param_names.contains(vname.as_str()))
                         {
-                            format!("&{}", vname)
+                            format!("{}{}", amp, vname)
                         } else {
-                            format!("&BoringKernelArg::Host({}.clone())", vname)
+                            format!("{}BoringKernelArg::Host({}.clone())", amp, vname)
                         }
                     } else if self.expr_is_gpu_resident_field(&a.value) {
-                        format!("&{}", self.emit_expr(&a.value))
+                        format!("{}{}", amp, self.emit_expr(&a.value))
                     } else if let Some(arg_s) = self.try_emit_resident_call_as_kernel_arg(&a.value, sig.get(i)) {
-                        format!("&({})", arg_s)
+                        format!("{}({})", amp, arg_s)
                     } else {
-                        format!("&BoringKernelArg::Host(({}).clone())", self.emit_expr(&a.value))
+                        format!("{}BoringKernelArg::Host(({}).clone())", amp, self.emit_expr(&a.value))
                     };
                     result.push(lent);
                     i += 1;
