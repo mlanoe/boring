@@ -823,8 +823,79 @@ impl Transpiler {
         let mut applied: std::collections::HashMap<(String, usize), crate::ast::OwnerQual> =
             std::collections::HashMap::new();
         for _round in 0..=fn_count {
-            if !self.pre_infer_fn_qualifiers_round(program, &mut applied) { break; }
+            if !self.pre_infer_fn_qualifiers_round(program, &mut applied, None) { break; }
         }
+    }
+
+    /// Same fixed point as `pre_infer_fn_qualifiers`, restricted to the functions/methods that
+    /// could possibly see a different result after `changed` free functions' signatures were
+    /// edited out from under them (see `unqualify_host_only_gpu_array_params`'s call site): every
+    /// method (its own by-reference decisions are call-site driven, not this pass's main output —
+    /// see `pre_infer_fn_qualifiers_round`'s `apply_to`, which only ever writes a method's own
+    /// signature for an Actor/Guard result), plus every free function that is one of `changed` or
+    /// transitively calls one of them by name (`targets_affected_by`). A free function the walk
+    /// cannot reach from `changed` has the exact same body and the exact same callee signatures as
+    /// before this edit, so re-running inference on it would reproduce the result already on file
+    /// from the whole-program pass that ran earlier in `global_pre_scan` — this only skips
+    /// recomputing results that can't have changed, it never widens what counts as "changed".
+    pub(crate) fn pre_infer_fn_qualifiers_scoped(
+        &mut self,
+        program: &crate::ast::Program,
+        changed: &std::collections::HashSet<String>,
+    ) {
+        let included = Self::targets_affected_by(program, changed);
+        let scope_size = included.iter().filter(|b| **b).count();
+        let mut applied: std::collections::HashMap<(String, usize), crate::ast::OwnerQual> =
+            std::collections::HashMap::new();
+        for _round in 0..=scope_size {
+            if !self.pre_infer_fn_qualifiers_round(program, &mut applied, Some(&included)) { break; }
+        }
+    }
+
+    /// `included[i]` for `qualifier_inference_targets(program)[i]`: every method (unconditionally
+    /// — see `pre_infer_fn_qualifiers_scoped`'s doc), plus every free function in `changed` or
+    /// reachable backwards from it through direct, by-name free-function calls (the only call
+    /// shape `collect_called_names` records, which is also the only shape this pass's signature
+    /// edits can ever flow through: a method is never called by a bare name).
+    fn targets_affected_by(program: &crate::ast::Program, changed: &std::collections::HashSet<String>) -> Vec<bool> {
+        let targets = Self::qualifier_inference_targets(program);
+        let mut included = vec![false; targets.len()];
+        // A name may name several overloads: keep every matching index, not just one.
+        let mut free_fn_idx: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+        let mut direct_calls: Vec<Vec<String>> = Vec::with_capacity(targets.len());
+        for (i, (self_ty, f)) in targets.iter().enumerate() {
+            if self_ty.is_some() {
+                included[i] = true;
+            } else {
+                free_fn_idx.entry(f.name.as_str()).or_default().push(i);
+            }
+            let mut names = Vec::new();
+            crate::transpiler::helpers::collect_called_names(&f.body, &mut names);
+            direct_calls.push(names);
+        }
+        // Reverse edges, free-function names only: who calls this name directly.
+        let mut callers_of: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+        for (i, names) in direct_calls.iter().enumerate() {
+            for n in names { callers_of.entry(n.as_str()).or_default().push(i); }
+        }
+        let mut worklist: Vec<String> = changed.iter().cloned().collect();
+        let mut queued: std::collections::HashSet<String> = worklist.iter().cloned().collect();
+        while let Some(name) = worklist.pop() {
+            if let Some(idxs) = free_fn_idx.get(name.as_str()) {
+                for &idx in idxs { included[idx] = true; }
+            }
+            if let Some(callers) = callers_of.get(name.as_str()) {
+                for &idx in callers {
+                    if included[idx] { continue; }
+                    included[idx] = true;
+                    let (self_ty, f) = &targets[idx];
+                    if self_ty.is_none() && queued.insert(f.name.clone()) {
+                        worklist.push(f.name.clone());
+                    }
+                }
+            }
+        }
+        included
     }
 
     /// Every function body the pre-pass infers: free functions (`None`) and the methods of
@@ -845,13 +916,19 @@ impl Transpiler {
     }
 
     /// One pass of `pre_infer_fn_qualifiers`; `true` when it changed any signature.
+    /// `included`, when given, restricts the round to the targets `targets_affected_by` flagged
+    /// (by index into `qualifier_inference_targets(program)`, which is deterministic across
+    /// rounds since `program` itself is never mutated between them) — see
+    /// `pre_infer_fn_qualifiers_scoped`.
     fn pre_infer_fn_qualifiers_round(
         &mut self,
         program: &crate::ast::Program,
         applied: &mut std::collections::HashMap<(String, usize), crate::ast::OwnerQual>,
+        included: Option<&[bool]>,
     ) -> bool {
         let mut changed = false;
-        for (self_ty, f) in Self::qualifier_inference_targets(program) {
+        for (i, (self_ty, f)) in Self::qualifier_inference_targets(program).into_iter().enumerate() {
+            if let Some(incl) = included { if !incl[i] { continue; } }
             if f.is_native { continue; }
             // A method's parameter types live in `struct_method_overload_decls`, not `fn_sigs`.
             // Methods whose borrowed parameters were already resolved by trait-borrow

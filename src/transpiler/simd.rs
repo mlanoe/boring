@@ -31,9 +31,32 @@ pub fn transpile_simd_unified(program: &Program, stem: &str, version: &str) -> S
 }
 
 fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bool) -> SimdOutput {
+    // Dynamic (runtime-format) tensor ops -- `kernel.tensors.moe_linear(...)` and friends,
+    // see `tensor_host.rs` -- need this pre-pass no matter the backend: without it, such a
+    // call passes straight through unrecognized and falls back to a literal method-call
+    // rendering that references a native `gpu::tensor::*` Rust module this backend never
+    // generates or links (E0433 "cannot find module `gpu`"). CPU/simd has no native
+    // quantized-GEMM path at all, so always request the fully portable lowering, matching
+    // every GPU backend's own identical call (`rocm`/`cuda`/`wgpu`/`metal`::mod.rs).
+    let portable_tensor_config = crate::transpiler::tensor_host::TensorLinearConfig {
+        portable_tiled_dynamic_quantized_linear: true,
+        ..Default::default()
+    };
+    let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &portable_tensor_config);
+    let program = &tensor_host.program;
     // Plain-data structs in kernel bodies / device functions are scalar-replaced first.
     let struct_lowered = crate::desugar_gpu_struct::desugar(program);
     let program = &struct_lowered;
+    // Program-wide const-generic kernel monomorphisation (shared with Metal/CUDA/ROCm/wgpu,
+    // see `kernel_generic.rs`'s doc comment): every `Name<args>(...)` construction, wherever
+    // it appears (top level, `req`/`def` bodies, ...), becomes a plain call of a specialised
+    // non-generic kernel. Without this, a generic kernel constructed inside a function body
+    // (the common case -- e.g. a `dispatch N in [...]:` ladder) is never recognized as a
+    // kernel construction at all and falls through to the ordinary tuple-call codegen, which
+    // is wrong for a kernel struct (its fields are set via `::new()` + setters, not a
+    // positional constructor).
+    let (generic_lowered, generic_errors) = crate::transpiler::kernel_generic::monomorphise_generic_kernels(program);
+    let program = &generic_lowered;
     // `screen.setAccessibility` / `screen.accessibilityRequests` are wgpu-only: a no-op here.
     let accessibility_stripped = crate::transpiler::screen_input::strip_accessibility(program);
     let program = &accessibility_stripped;
@@ -100,7 +123,7 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
 
     let mut e = Emitter {
         out: String::new(),
-        errors: general.errors,
+        errors: general.errors.into_iter().chain(generic_errors).chain(tensor_host.errors.clone()).collect(),
         fields: std::collections::HashSet::new(),
         field_axes: std::collections::HashMap::new(),
         local_axes: std::collections::HashMap::new(),
@@ -7324,7 +7347,7 @@ mod __coop {
     mod fiber_win {
         use super::*;
         use std::ffi::c_void;
-        extern "system" {
+        unsafe extern "system" {
             fn ConvertThreadToFiber(parameter: *mut c_void) -> *mut c_void;
             fn CreateFiber(stack: usize, start: extern "system" fn(*mut c_void), parameter: *mut c_void) -> *mut c_void;
             fn SwitchToFiber(fiber: *mut c_void);

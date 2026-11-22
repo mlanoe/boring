@@ -1,4 +1,6 @@
 /target
+/target-session/
+/boring/
 examples/*/target/
 # Generated Rust projects from --emit-rust
 tests/cases/*_rust/

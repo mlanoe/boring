@@ -565,7 +565,16 @@ struct DeviceEmitter {
     current_fields: Vec<KernelFieldDecl>,
     current_kernel: String,
     auto_sync: bool,
-    top_level_scalars: std::collections::HashMap<String, String>,
+    // Stores the unevaluated RHS `Expr`, not a pre-rendered string: rendering happens lazily at
+    // the actual reference site (see its lookup below). A top-level scalar's value is rendered
+    // eagerly here would call `expr()` on EVERY top-level scalar constant in the whole program,
+    // including ones no kernel ever references — a `let int X = 1099511627776` (2^40, a GGUF
+    // bounds-check constant with nothing to do with the GPU) hit this exact case: `expr()`'s
+    // `ExprKind::Int` arm pushes a hard "out of u32 range" error unconditionally, failing the
+    // whole wgpu build over a constant no kernel body ever touches. Deferring the render to the
+    // lookup site means the error (still correct WGSL cannot represent it) only fires if a
+    // kernel genuinely tries to use the value.
+    top_level_scalars: std::collections::HashMap<String, Expr>,
     /// Buffer/uniform field name → kernel-prefixed WGSL variable name for the kernel
     /// currently being emitted. All kernels share one WGSL module, so their storage/uniform
     /// bindings live in one flat global namespace — two kernels both declaring a field
@@ -710,8 +719,7 @@ impl DeviceEmitter {
                 if let Some(val) = &s.value {
                     let is_scalar = crate::transpiler::helpers::is_scalar_let_value(val, s.ty.as_ref());
                     if is_scalar {
-                        let rhs = self.expr(val);
-                        self.top_level_scalars.insert(s.name.clone(), rhs);
+                        self.top_level_scalars.insert(s.name.clone(), val.clone());
                     }
                 }
             }
@@ -2088,7 +2096,10 @@ impl DeviceEmitter {
                     // reserved-keyword sanitization as the field-shadow case above, so a
                     // reference always agrees with how `Stmt::Let`/`plain_params_wgsl`/
                     // `Stmt::For` spelled its declaration.
-                    self.top_level_scalars.get(name).cloned().unwrap_or_else(|| wgsl_safe_ident(name))
+                    match self.top_level_scalars.get(name).cloned() {
+                        Some(val) => self.expr(&val),
+                        None => wgsl_safe_ident(name),
+                    }
                 }
             }
 

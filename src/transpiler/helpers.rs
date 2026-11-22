@@ -2629,7 +2629,7 @@ pub(crate) fn reachable_free_fns(program: &Program) -> std::collections::HashSet
     reachable
 }
 
-fn collect_called_names(stmts: &[Stmt], out: &mut Vec<String>) {
+pub(crate) fn collect_called_names(stmts: &[Stmt], out: &mut Vec<String>) {
     for stmt in stmts { collect_called_names_stmt(stmt, out); }
 }
 

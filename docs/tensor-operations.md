@@ -231,6 +231,7 @@ algorithm = "auto"
 
 [tensor.linear.decode]
 q8_0 = "warp-broadcast"
+q4_k = "warp-broadcast"
 
 [tensor.linear.prefill]
 algorithm = "auto"
@@ -247,6 +248,25 @@ choose a hand-written native path.
 For fixed matrices, `auto` is the default. CUDA additionally accepts `tf32`, an
 explicit reduced-precision choice requiring sm_80+. ROCm accepts `rocblas`,
 which links rocBLAS and uses SGEMM where eligible.
+
+`decode = "warp-broadcast"` decodes a format's per-block scale (and, for the
+K-quant formats that carry one, its per-sub-block minimum too) once per
+warp/wavefront and shares it with every lane via a shuffle, instead of each
+lane re-deriving it independently (the plain `warp` decode). Available for
+`q8_0` and every K-quant format (`q4_k`, `q5_k`, `q6_k`, `q3_k`, `q2_k`) today.
+Every one of these variants is opt-in by format, never implied by the general
+`auto` default, precisely so a project can measure it on its own target
+hardware before relying on it -- the gain is real on at least one real GPU per
+variant (see each one's `tensor_host.rs` doc comment for which), but none of
+them has been cross-checked on every vendor/architecture this project
+supports. Each K-quant variant has been verified to produce token-identical
+output against the plain `warp` decode on a real model (Qwen2.5, gfx1032).
+
+There is intentionally no static GPU-name-to-algorithm lookup table shipped by
+the project: cross-hardware performance data for every combination of GPU and
+decode variant isn't something this project can curate and keep current, and a
+stale table would be worse than no table. Per-format `boring.toml` keys are the
+supported way for a project to record what it measured on its own hardware.
 
 `[tensor.linear.prefill] precision = "half"` is an explicit speed/accuracy
 tradeoff for native Metal prefill and CUDA WMMA prefill. It rounds staged

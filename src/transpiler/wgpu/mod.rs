@@ -338,6 +338,12 @@ pub(super) fn resolve_effective_kernels(program: &Program) -> (Vec<KernelDecl>, 
 
 /// Scan every top-level `let`/`var` statement for `Name<arg, ...>()` calls
 /// that match the given kernel name; return each unique concrete arg list.
+/// In practice this branch is unreachable for any kernel `monomorphise_generic_kernels`
+/// already handles (every `int`/`uint`-const-generic kernel -- see `kernel_generic.rs`,
+/// called earlier in this same pipeline and in every other GPU backend's), since by
+/// then no `Item::Kernel` has `type_params` left for `resolve_effective_kernels` to
+/// match against. Kept only so an unsupported generic shape that pass rejects (and
+/// therefore leaves untouched) still degrades gracefully here instead of panicking.
 fn collect_instantiations(program: &Program, kernel_name: &str) -> Vec<Vec<i64>> {
     let mut found = Vec::new();
     for item in &program.items {

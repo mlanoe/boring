@@ -61,7 +61,7 @@ mod __boring_rocblas_ffi {
     pub type rocblas_status = c_int;
     pub const ROCBLAS_OP_NONE: c_int = 111;
     pub const ROCBLAS_OP_TRANSPOSE: c_int = 112;
-    extern "C" {
+    unsafe extern "C" {
         pub fn rocblas_create_handle(handle: *mut rocblas_handle) -> rocblas_status;
         pub fn rocblas_set_stream(handle: rocblas_handle, stream: *mut c_void) -> rocblas_status;
         pub fn rocblas_sgemm(
@@ -99,6 +99,79 @@ fn boring_rocblas_sgemm(
             &alpha, b as *const f32, lda, a as *const f32, k, &beta, c as *mut f32, n,
         ) == 0
     }
+}
+
+// ── Pre-flight architecture check (opt-in rocBLAS path only) ───────────────
+//
+// rocBLAS needs a Tensile GEMM kernel library matching the GPU's exact
+// architecture string (e.g. "gfx1030") and calls C's `abort()` from inside
+// `rocblas_create_handle` when one is missing (confirmed on a real gfx1032 /
+// RX 6600 card) -- a hard process abort, not a catchable Rust panic or
+// `Result`. `hipDeviceComputeCapability` can't be used to tell these apart: it
+// collapses every RDNA2 SKU to the same (10, 3) pair. This reads the real
+// `gcnArchName` string from `hipGetDeviceProperties` instead. `hipDeviceProp_t`'s
+// exact byte layout has changed across ROCm releases (that's why nothing else
+// in this file binds it field-by-field), so this writes into a buffer far
+// larger than any real version of the struct and scans the raw bytes for a
+// NUL-terminated `"gfx..."` token rather than trusting a hardcoded field
+// offset -- safe regardless of which ROCm version actually wrote it, as long
+// as the real struct never exceeds the oversized buffer (it does not; real
+// `hipDeviceProp_t` is on the order of 1-2 KB).
+#[repr(C, align(8))]
+struct __BoringHipDevicePropBuf([u8; 8192]);
+
+unsafe extern "C" {
+    fn hipGetDeviceProperties(prop: *mut __BoringHipDevicePropBuf, device_id: c_int) -> c_int;
+}
+
+fn __boring_hip_gcn_arch_name(ordinal: i32) -> Option<String> {
+    let mut buf = __BoringHipDevicePropBuf([0u8; 8192]);
+    unsafe {
+        if hipGetDeviceProperties(&mut buf, ordinal) != 0 {
+            return None;
+        }
+    }
+    let bytes = &buf.0;
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        if &bytes[i..i + 3] == b"gfx" {
+            let end = bytes[i..].iter().position(|&b| b == 0).map(|p| i + p).unwrap_or(bytes.len());
+            if end > i + 3 && end - i <= 32 {
+                if let Ok(s) = std::str::from_utf8(&bytes[i..end]) {
+                    if s[3..].chars().all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '+') {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Bare numeric architecture token ("gfx1030" out of "gfx1030:sramecc+:xnack-"
+/// or "gfx906-xnack-" -- Tensile library file names use the dash spelling).
+fn __boring_hip_arch_base(name: &str) -> &str {
+    let end = name[3..].find(|c: char| !c.is_ascii_digit()).map(|p| 3 + p).unwrap_or(name.len());
+    &name[..end]
+}
+
+/// Whether the local ROCm install actually ships a Tensile/rocBLAS kernel
+/// library for this exact architecture -- the real condition
+/// `rocblas_create_handle` needs to succeed, checked directly against this
+/// machine's own install instead of guessing from a hardcoded supported-GPU
+/// list that would inevitably drift out of date across ROCm releases.
+fn __boring_rocblas_tensile_available(arch_base: &str) -> bool {
+    let root = std::env::var("ROCM_PATH")
+        .or_else(|_| std::env::var("HIP_PATH"))
+        .unwrap_or_else(|_| if cfg!(windows) { String::new() } else { "/opt/rocm".to_string() });
+    if root.is_empty() {
+        return true; // can't locate the install -- don't block a setup we can't verify
+    }
+    let root = root.trim_end_matches(['/', '\\']);
+    let lib_dir = if cfg!(windows) { format!("{root}/bin/rocblas/library") } else { format!("{root}/lib/rocblas/library") };
+    let Ok(entries) = std::fs::read_dir(&lib_dir) else { return true }; // can't verify -- don't block a working setup
+    entries.flatten().any(|e| e.file_name().to_string_lossy().contains(arch_base))
 }
 "#;
 
@@ -618,6 +691,18 @@ impl HostEmitter {
         self.line("fn boring_gpu_init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {");
         self.indent += 1;
         self.line("let ctx = HipContext::new(0)?;");
+        if self.rocblas {
+            self.line("if let Some(arch) = __boring_hip_gcn_arch_name(0) {");
+            self.indent += 1;
+            self.line("let base = __boring_hip_arch_base(&arch);");
+            self.line("if !__boring_rocblas_tensile_available(base) {");
+            self.indent += 1;
+            self.line("return Err(format!(\"[tensor.matmul] algorithm = \\\"rocblas\\\" is set, but no rocBLAS Tensile kernel library was found for this GPU's architecture ({arch}); rocBLAS aborts the whole process (not a catchable error) rather than failing cleanly on unsupported hardware, so this is checked before it gets the chance. Remove that option from boring.toml to use the portable kernels instead, which run on every architecture.\").into());");
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+        }
         self.line("let module = ctx.load_module(BORING_HIP_CO)?;");
         self.line("let _ = BORING_CTX.set(ctx);");
         self.line("let _ = BORING_MODULE.set(module);");
@@ -776,8 +861,22 @@ struct HostEmitter {
     /// but every call site, in either emitter, must agree on every function's
     /// signature for cross-calls between the two to type-check.
     fn_ref_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Free function name → per-parameter "does this ref need `&mut` rather than plain
+    /// `&`?" flags (`Type::grants_mut`, e.g. `mut [uint8]`/`File& mut`) — only meaningful
+    /// where the matching `fn_ref_params` flag is also true. Same whole-program population
+    /// and cross-emitter-agreement rationale as `fn_ref_params` above.
+    fn_mut_params: std::collections::HashMap<String, Vec<bool>>,
     /// The general pass's own code (signatures of the ordinary functions a loop body may call).
     general_code_text: String,
+    /// The general pipeline's own Rust type for a Boring `string` (`"std::rc::Rc<str>"`
+    /// single-threaded, `"std::sync::Arc<str>"` multi — detected from `general_code`,
+    /// see `emit_program`'s doc). Used for a `string`-typed PARAMETER specifically
+    /// (`emit_fn`), so a call between this emitter and the general-pipeline splice
+    /// agrees on the type either way (`rust_type(Type::Str)` stays plain `String` for
+    /// every other use -- locals, fields, a `File.create`/`File.open` argument, etc.,
+    /// where an owned, directly-`AsRef<Path>`-capable string is simpler). Ported from
+    /// `metal::host`'s identical field/doc comment.
+    string_rust_type: String,
     /// Loop variables of `for k in screen.key_events:` in scope (they are `String`s here).
     event_vars: Vec<String>,
     /// Declared struct AND enum names (both, despite the field name) — a
@@ -814,12 +913,21 @@ struct HostEmitter {
     /// `BoringKernelArg::Host(...)` to match the declared `BoringKernelArg<T>` return
     /// type every general-spliced caller unconditionally expects.
     in_resident_return: bool,
+    /// Per-position residency flags while emitting a function whose return type is
+    /// a `Tuple` with at least one GPU-resident element (e.g. `split_qkv_gpu`'s
+    /// `([float32]'kernel'unified, ..., ...)`) — the tuple analogue of
+    /// `in_resident_return`/`resident_elem`, ported from `metal::host`'s identical
+    /// `in_resident_tuple_return`/`try_resident_tuple_expr`.
+    in_resident_tuple_return: Option<Vec<bool>>,
     /// Free function name → its `Type` when GPU-resident-returning (see
     /// `emit_fn`'s `resident_elem`). A call from one kernel-touching function
     /// to another that returns `BoringKernelArg<T>` must materialize the result —
     /// this emitter has no cross-function residency-preservation optimization
     /// of its own, unlike the general pipeline's `resident_call_vars`.
     fn_returns_resident: std::collections::HashMap<String, Type>,
+    /// Tuple analogue of `fn_returns_resident` — per-position residency flags for a
+    /// function whose return type is a `Tuple` with at least one resident element.
+    fn_returns_resident_tuple: std::collections::HashMap<String, Vec<bool>>,
     fn_gpu_array_params: std::collections::HashMap<String, Vec<bool>>,
     /// Local variable names (current function only, reset per `emit_fn` call)
     /// bound to a call into a `fn_returns_resident` function WHOSE OWN `let`
@@ -903,7 +1011,9 @@ impl HostEmitter {
             in_throws: false,
             variant_to_enum: std::collections::HashMap::new(),
             fn_ref_params: std::collections::HashMap::new(),
+            fn_mut_params: std::collections::HashMap::new(),
             general_code_text: String::new(),
+            string_rust_type: "std::sync::Arc<str>".into(),
             event_vars: Vec::new(),
             struct_names: std::collections::HashSet::new(),
             struct_field_names: std::collections::HashMap::new(),
@@ -912,7 +1022,9 @@ impl HostEmitter {
             tenv: Default::default(),
             ref_params: std::collections::HashSet::new(),
             in_resident_return: false,
+            in_resident_tuple_return: None,
             fn_returns_resident: std::collections::HashMap::new(),
+            fn_returns_resident_tuple: std::collections::HashMap::new(),
             fn_gpu_array_params: std::collections::HashMap::new(),
             resident_locals: std::collections::HashSet::new(),
             fn_gpu_borrow_params: std::collections::HashMap::new(),
@@ -1571,14 +1683,16 @@ impl HostEmitter {
     /// See `is_ref_worthy_type` (module-level free fn) — bound method form for
     /// call sites already holding `&self`.
     fn coerce_call_arg(&mut self, arg: &Expr, callee_expects_ref: bool) -> String {
+        self.coerce_call_arg_mut(arg, callee_expects_ref, false)
+    }
+
+    /// Like `coerce_call_arg`, but `wants_mut` (from `fn_mut_params`) picks `&mut`
+    /// over plain `&` when the callee's parameter is content-mutable (`mut [T]`,
+    /// `T& mut`) -- otherwise identical, including the `(true, false)` case.
+    fn coerce_call_arg_mut(&mut self, arg: &Expr, callee_expects_ref: bool, wants_mut: bool) -> String {
         let is_ref_var = matches!(&arg.kind, ExprKind::Var(v) if self.ref_params.contains(v.as_str()));
         let s = self.expr(arg);
-        match (callee_expects_ref, is_ref_var) {
-            (true, true) => s,
-            (true, false) => format!("&({})", s),
-            (false, true) => format!("({}).clone()", s),
-            (false, false) => s,
-        }
+        crate::transpiler::gpu_common::coerce_call_arg(s, is_ref_var, callee_expects_ref, wants_mut)
     }
 
     /// True when `obj` (an `Index`/`Assign` target's receiver) is known to be a
@@ -1752,6 +1866,17 @@ impl HostEmitter {
         boring_main_throws: bool,
         top_level_kernel_touching: bool,
     ) {
+        // Detected before any `emit_fn` call below (`general_code` is only spliced
+        // into `self.out` later, well after kernel-touching functions are emitted —
+        // see `self.general_code_text`'s own doc) so a `string`-typed parameter on a
+        // kernel-touching function matches the general pipeline's own convention for
+        // the SAME Boring `string` type. Ported from `metal::host`'s identical
+        // `string_rust_type` detection/doc comment.
+        self.string_rust_type = if general_code.contains("Rc<str>") {
+            "std::rc::Rc<str>".into()
+        } else {
+            "std::sync::Arc<str>".into()
+        };
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
         {
             let mut fn_used: Vec<String> = Vec::new();
@@ -1810,19 +1935,15 @@ impl HostEmitter {
                 if f.throws {
                     self.fn_throws.insert(f.name.clone());
                 }
-                let ref_flags: Vec<bool> = f.params.iter()
-                    .map(|p| p.ty.as_ref().is_some_and(|ty| is_ref_worthy_type(ty, &self.struct_names)))
-                    .collect();
-                self.fn_ref_params.insert(f.name.clone(), ref_flags);
+                let conv = crate::transpiler::gpu_common::scan_fn_call_convention(f, &self.struct_names);
+                self.fn_ref_params.insert(f.name.clone(), conv.ref_flags);
+                self.fn_mut_params.insert(f.name.clone(), conv.mut_flags);
+                if let Some(rt) = conv.resident { self.fn_returns_resident.insert(f.name.clone(), rt); }
+                if let Some(flags) = conv.resident_tuple { self.fn_returns_resident_tuple.insert(f.name.clone(), flags); }
                 self.fn_gpu_array_params.insert(
                     f.name.clone(),
                     f.params.iter().map(|p| p.ty.as_ref().is_some_and(is_gpu_array_param)).collect(),
                 );
-                if let Some(rt) = &f.return_ty {
-                    if rt.gpu_resident_qual().is_some() {
-                        self.fn_returns_resident.insert(f.name.clone(), rt.clone());
-                    }
-                }
             }
             if let Item::Enum(e) = item {
                 for v in &e.variants {
@@ -2606,9 +2727,11 @@ impl HostEmitter {
                 Some(ty) => {
                     let base = if is_gpu_array_param(ty) {
                         format!("{}BoringKernelArg<{}>", if borrow_flags.get(pi).copied().unwrap_or(false) { "&" } else { "" }, elem_rust_type(ty))
+                    } else if is_string_type(ty) {
+                        self.string_rust_type.clone()
                     } else { rust_type(ty) };
                     let rendered = if is_ref_worthy_type(ty, &self.struct_names) {
-                        format!("&{}", base)
+                        format!("&{}{}", if p.grants_content_mut() { "mut " } else { "" }, base)
                     } else {
                         base
                     };
@@ -2625,10 +2748,11 @@ impl HostEmitter {
             None => params.join(", "),
         };
         let resident_elem = f.return_ty.as_ref().and_then(|t| t.gpu_resident_qual().map(|_| elem_rust_type(t)));
-        let plain_ret = match &resident_elem {
-            Some(elem) => format!("BoringKernelArg<{}>", elem),
-            None => f.return_ty.as_ref().map(rust_type).unwrap_or_else(|| "()".into()),
-        };
+        let resident_tuple = self.fn_returns_resident_tuple.get(&f.name).cloned();
+        let plain_ret = crate::transpiler::gpu_common::resident_return_type(
+            f.return_ty.as_ref(), resident_elem.as_deref(), resident_tuple.as_ref(),
+            elem_rust_type, rust_type,
+        );
         let ret = if f.throws {
             format!("Result<{}, Box<dyn std::error::Error + Send + Sync>>", plain_ret)
         } else {
@@ -2649,6 +2773,8 @@ impl HostEmitter {
         self.in_throws = f.throws;
         let outer_in_resident_return = self.in_resident_return;
         self.in_resident_return = resident_elem.is_some();
+        let outer_in_resident_tuple_return = self.in_resident_tuple_return.take();
+        self.in_resident_tuple_return = resident_tuple;
         let outer_ref_params = std::mem::take(&mut self.ref_params);
         let outer_resident_locals = std::mem::take(&mut self.resident_locals);
         let outer_borrowed_gpu_params = std::mem::take(&mut self.borrowed_gpu_params);
@@ -2667,7 +2793,9 @@ impl HostEmitter {
             if i + 1 == len {
                 if f.throws {
                     if let Stmt::Expr(e) = stmt {
-                        let wrapped = if self.in_resident_return {
+                        let wrapped = if let Some(tuple) = self.try_resident_tuple_expr(e) {
+                            tuple
+                        } else if self.in_resident_return {
                             match &e.kind { ExprKind::Var(name) if self.resident_locals.contains(name.as_str()) => Some(format!("{}.clone()", name)), _ => None }
                                 .or_else(|| self.try_resident_field_expr(e)).unwrap_or_else(|| {
                                 let s = self.expr(e);
@@ -2699,6 +2827,7 @@ impl HostEmitter {
         self.tenv.restore_locals(outer_tenv_locals);
         self.in_throws = outer_in_throws;
         self.in_resident_return = outer_in_resident_return;
+        self.in_resident_tuple_return = outer_in_resident_tuple_return;
         self.ref_params = outer_ref_params;
         self.resident_locals = outer_resident_locals;
         self.borrowed_gpu_params = outer_borrowed_gpu_params;
@@ -2796,20 +2925,38 @@ impl HostEmitter {
                 }
             }
             Stmt::Guard(g) => {
-                if let GuardCond::Expr(cond) = &g.cond {
-                    let c = self.expr(cond);
-                    self.line(&format!("if !({}) {{", c));
-                    self.indent += 1;
-                    for s in &g.else_body { self.emit_stmt(s); }
-                    self.indent -= 1;
-                    self.line("}");
-                } else {
-                    {
-                    let (line, col) = stmt.line_col();
-                    crate::transpiler::helpers::report_unsupported(line, col,
-                        "this statement is not supported in ROCm host code — use `let`/assignment/`if`/`for`/`while`/`return`/`throw`, \
-                         and `guard <cond> else:` (not `guard let`)");
-                }
+                match &g.cond {
+                    GuardCond::Expr(cond) => {
+                        let c = self.expr(cond);
+                        self.line(&format!("if !({}) {{", c));
+                        self.indent += 1;
+                        for s in &g.else_body { self.emit_stmt(s); }
+                        self.indent -= 1;
+                        self.line("}");
+                    }
+                    // `guard let x = expr else: body` / the `guard let x else: body`
+                    // shorthand (parser desugars it to `CondClause::Let(x, Var(x))`,
+                    // rebinding an already-`Option`-typed `x` to its unwrapped form —
+                    // see `parse_guard_stmt`). Only a single `let` clause is needed by
+                    // this codebase's own kernel-touching functions (no comma-chained
+                    // `guard let a = .., let b = ..`); that combination still falls to
+                    // the diagnostic below rather than being silently mishandled.
+                    GuardCond::Clauses(clauses) if clauses.len() == 1 && matches!(&clauses[0], CondClause::Let(..)) => {
+                        let CondClause::Let(name, value) = &clauses[0] else { unreachable!() };
+                        let val = self.expr(value);
+                        let name_esc = crate::transpiler::helpers::escape_rust_keyword(name);
+                        self.line(&format!("let Some({name_esc}) = ({val}) else {{"));
+                        self.indent += 1;
+                        for s in &g.else_body { self.emit_stmt(s); }
+                        self.indent -= 1;
+                        self.line("};");
+                    }
+                    _ => {
+                        let (line, col) = stmt.line_col();
+                        crate::transpiler::helpers::report_unsupported(line, col,
+                            "this statement is not supported in ROCm host code — use `let`/assignment/`if`/`for`/`while`/`return`/`throw`, \
+                             and `guard <cond> else:` (not `guard let`)");
+                    }
                 }
             }
             Stmt::Throw(t) => {
@@ -3160,6 +3307,8 @@ impl HostEmitter {
             in_throws: self.in_throws,
             variant_to_enum: self.variant_to_enum.clone(),
             fn_ref_params: self.fn_ref_params.clone(),
+            fn_mut_params: self.fn_mut_params.clone(),
+            string_rust_type: self.string_rust_type.clone(),
             general_code_text: self.general_code_text.clone(),
             event_vars: self.event_vars.clone(),
             struct_names: self.struct_names.clone(),
@@ -3169,7 +3318,9 @@ impl HostEmitter {
             tenv: self.tenv.clone(),
             ref_params: self.ref_params.clone(),
             in_resident_return: self.in_resident_return,
+            in_resident_tuple_return: self.in_resident_tuple_return.clone(),
             fn_returns_resident: self.fn_returns_resident.clone(),
+            fn_returns_resident_tuple: self.fn_returns_resident_tuple.clone(),
             fn_gpu_array_params: self.fn_gpu_array_params.clone(),
             resident_locals: self.resident_locals.clone(),
             fn_gpu_borrow_params: self.fn_gpu_borrow_params.clone(),
@@ -3568,6 +3719,7 @@ impl HostEmitter {
                 // (the general-pipeline splice) or vice versa always lines up.
                 let callee_name = if let ExprKind::Var(name) = &callee.kind { Some(name.as_str()) } else { None };
                 let ref_flags = callee_name.and_then(|n| self.fn_ref_params.get(n)).cloned();
+                let mut_ref_flags = callee_name.and_then(|n| self.fn_mut_params.get(n)).cloned();
                 let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
                 let borrow_flags = callee_name.and_then(|n| self.fn_gpu_borrow_params.get(n)).cloned();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
@@ -3583,6 +3735,7 @@ impl HostEmitter {
                         return format!("BoringKernelArg::Host(({}).clone())", self.expr(&a.value));
                     }
                     let expects_ref = ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
+                    let wants_mut_ref = mut_ref_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                     // `screen.key_events` / `key_up_events` (`Vec<String>` here) to a `[string]` parameter,
                     // and a float host value (`screen.time`, an `f64`) to a `float32` one.
                     if let Some(n) = callee_name {
@@ -3611,7 +3764,7 @@ impl HostEmitter {
                             return crate::transpiler::screen_input::to_string_type(ty, &v);
                         }
                     }
-                    self.coerce_call_arg(&a.value, expects_ref)
+                    self.coerce_call_arg_mut(&a.value, expects_ref, wants_mut_ref)
                 }).collect();
                 let fn_s = self.expr(callee);
                 let call = format!("{}({})", fn_s, args_s.join(", "));
@@ -3681,6 +3834,35 @@ impl HostEmitter {
                         }
                     }).collect();
                     return format!("{}.{method}({})", self.expr(obj), args_s.join(", "));
+                }
+                // `Type.method(...)` (an external static/associated call — `File.create`,
+                // `File.open`, ...) → `Type::method(...)`, mirroring the general
+                // pipeline's identical uppercase-receiver heuristic
+                // (`emit_methods.rs`'s `is_path_receiver`): a bare `Var` receiver whose
+                // first letter is uppercase is a type/module path, not an instance,
+                // unless it's actually a tracked kernel variable (kernel struct
+                // instances are also capitalized by convention).
+                if let ExprKind::Var(name) = &obj.kind {
+                    if name.chars().next().is_some_and(|c| c.is_uppercase())
+                        && !self.var_kernel_type.contains_key(name.as_str())
+                    {
+                        // `File::create`/`File::open` take `impl AsRef<Path>`. `&str`
+                        // implements it directly but `Arc<str>`/`Rc<str>`/`String` (this
+                        // emitter's own `string` conventions -- see `string_rust_type`)
+                        // do not, so deref through to `str` rather than just borrowing
+                        // the owned value outright (`&*expr`, not `&expr`) -- works for
+                        // any of the three uniformly, and also avoids moving a local
+                        // (e.g. `path`) that a later `guard`/`throw` error message in
+                        // the same function body still needs to read (a real E0382
+                        // confirmed via `save_snapshot_file`'s `try? File.create(path)`
+                        // then `throw "... {path}"`).
+                        let borrow = name == "File";
+                        let args_s: Vec<String> = args.iter().map(|a| {
+                            let s = self.expr(&a.value);
+                            if borrow { format!("&*({s})") } else { s }
+                        }).collect();
+                        return format!("{}::{}({})", name, method, args_s.join(", "));
+                    }
                 }
                 if let ExprKind::Var(name) = &obj.kind {
                     if self.screen_var.as_deref() == Some(name.as_str()) && args.len() == 1 {
@@ -3893,6 +4075,26 @@ impl HostEmitter {
             }
             ExprKind::Else(val, default) => {
                 format!("{}.unwrap_or({})", self.expr(val), self.expr(default))
+            }
+            // `try? expr` (parsed as `TryElse(expr, Nil)`) / `try expr else default` —
+            // call a throws/Result-returning expression and convert to `Option`/fall
+            // back to a default, mirroring the general pipeline's `emit_expr.rs`
+            // handling (simplified: no builtin-specific `fs.*`/`fromJson` short
+            // circuits, not needed by this codebase's kernel-touching functions).
+            // The inner expression must not get `?`-propagation — evaluate it with
+            // `in_throws` cleared so a throws Boring function call emits its plain
+            // `Result`-returning form instead of `expr?`.
+            ExprKind::TryElse(inner, default) => {
+                let outer_in_throws = self.in_throws;
+                self.in_throws = false;
+                let inner_s = self.expr(inner);
+                self.in_throws = outer_in_throws;
+                if matches!(default.kind, ExprKind::Nil) {
+                    format!("{}.ok()", inner_s)
+                } else {
+                    let default_s = self.expr(default);
+                    format!("{}.unwrap_or_else(|_| {})", inner_s, default_s)
+                }
             }
             ExprKind::If(i) => {
                 let mut out = String::new();
@@ -4117,6 +4319,32 @@ impl HostEmitter {
             },
             _ => None,
         }
+    }
+
+    /// Render a tuple tail according to the declared per-position residency
+    /// (`in_resident_tuple_return`). Ported from `metal::host`'s identical helper —
+    /// see its doc comment and `fn_returns_resident_tuple`'s own doc for the full
+    /// rationale (a function whose return type is a `Tuple` with at least one
+    /// `'kernel'unified`/`'kernel'global`-qualified element, e.g. `split_qkv_gpu`).
+    fn try_resident_tuple_expr(&mut self, e: &Expr) -> Option<String> {
+        let flags = self.in_resident_tuple_return.clone()?;
+        let ExprKind::Tuple(elems) = &e.kind else { return None; };
+        if elems.len() != flags.len() { return None; }
+        let parts = elems.iter().enumerate().map(|(i, elem)| {
+            if !flags[i] {
+                return self.expr(elem);
+            }
+            if let ExprKind::Var(name) = &elem.kind {
+                if self.resident_locals.contains(name.as_str()) {
+                    return format!("{}.clone()", name);
+                }
+            }
+            self.try_resident_field_expr(elem).unwrap_or_else(|| {
+                let value = self.expr(elem);
+                format!("BoringKernelArg::Host({value})")
+            })
+        }).collect::<Vec<_>>();
+        Some(format!("({})", parts.join(", ")))
     }
 
     fn host_field_type(&self, field: &KernelFieldDecl) -> String {

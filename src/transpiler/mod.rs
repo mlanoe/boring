@@ -2768,15 +2768,21 @@ impl Transpiler {
         }
         let mut pairs = Vec::new();
         collect(&program.items, &cloned.items, &mut pairs);
+        let mut changed_names = std::collections::HashSet::new();
         for (name, old_ps, new_ps) in pairs {
             if old_ps.iter().zip(&new_ps).all(|(a, b)| a.ty == b.ty) { continue; }
             let types: Vec<Type> = new_ps.iter().filter_map(helpers::sig_param_type).collect();
             self.fn_sigs.insert(mangle_overload_name(&name, &old_ps), types.clone());
-            if self.fn_sigs.contains_key(&name) { self.fn_sigs.insert(name, types); }
+            if self.fn_sigs.contains_key(&name) { self.fn_sigs.insert(name.clone(), types.clone()); }
+            changed_names.insert(name);
         }
         // The global pre-pass could not borrow these parameters (a declared qualifier is never
-        // refined): redo it so a caller emitted before its callee already sees `&Vec<T>`.
-        self.pre_infer_fn_qualifiers(&cloned);
+        // refined): redo it so a caller emitted before its callee already sees `&Vec<T>` — scoped
+        // to the functions/methods that can actually observe this (see
+        // `pre_infer_fn_qualifiers_scoped`'s doc) instead of the whole program, since every other
+        // function's inference inputs are unchanged from the whole-program pass already run in
+        // `global_pre_scan`.
+        self.pre_infer_fn_qualifiers_scoped(&cloned, &changed_names);
         Some(cloned)
     }
 

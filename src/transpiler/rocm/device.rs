@@ -134,6 +134,22 @@ impl DeviceEmitter {
         let ret = decl.return_ty.as_ref().map(c_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
             let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
+            // A read-only (non-`mut`) array/buffer parameter renders as a `const`
+            // pointer, matching `field_params`'s identical `FieldBinding::Let`
+            // convention for a kernel struct's own global/unified fields. Without
+            // this, a kernel's own read-only `'global` field — already emitted
+            // `const T*` as that kernel's entry-point parameter (`field_params`
+            // below) — cannot be passed into a plain `__device__` helper function
+            // taking the same array type: HIP/CUDA's C++ const-correctness
+            // rejects the call ("would lose const qualifier"). Confirmed on a
+            // real build: the synthesized portable tiled quantized-linear
+            // kernel's `weight_at` dispatcher took a bare `uint8_t*`, called
+            // from a tile loop holding the kernel's own const `w_packed` field.
+            let ty = if ty.ends_with('*') && !p.ty.as_ref().is_some_and(Type::grants_mut) {
+                format!("const {ty}")
+            } else {
+                ty
+            };
             format!("{} {}", ty, c_gpu_safe_ident(&p.name))
         }).collect();
         self.fx_enter(&[], &decl.params, decl.return_ty.as_ref());

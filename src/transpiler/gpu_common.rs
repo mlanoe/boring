@@ -154,7 +154,99 @@ pub(crate) fn is_ref_worthy_type(ty: &Type, struct_names: &std::collections::Has
     match ty {
         Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::Dict(_, _) | Type::Set(_) => true,
         Type::Named(n) => struct_names.contains(n),
+        // An explicit borrow (`File&`, `[uint8]&`) always renders as a Rust `&`/`&mut`
+        // parameter, regardless of what it wraps -- matches `metal::host`'s identical
+        // arm on its own (not yet shared) copy of this function.
+        Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut) => true,
         _ => false,
+    }
+}
+
+/// True for a Boring `string` type, under either spelling (`Type::Str` from a
+/// `string`-typed `let`/field, or `Type::Named("string"|"str")` from a parameter/
+/// return-type annotation). Matches `metal::host`'s identical (not yet shared)
+/// free function of the same name.
+pub(crate) fn is_string_type(ty: &Type) -> bool {
+    matches!(ty.without_mut(), Type::Str)
+        || matches!(ty.without_mut(), Type::Named(n) if n == "string" || n == "str")
+}
+
+/// Per-parameter by-ref/by-mut flags, plus GPU-resident-return info, scanned once
+/// from a single `Item::Fn` — shared by the ROCm and CUDA restricted host emitters'
+/// whole-program `Item::Fn` pre-pass (`fn_ref_params`/`fn_mut_params`/
+/// `fn_returns_resident`/`fn_returns_resident_tuple`, each backend's own doc comment
+/// explains why this must be whole-program and agree across emitters). `resident`
+/// and `resident_tuple` are mutually exclusive: a `Type::Tuple` never itself
+/// satisfies `gpu_resident_qual`, only its elements can.
+pub(crate) struct FnCallConvention {
+    pub ref_flags: Vec<bool>,
+    pub mut_flags: Vec<bool>,
+    pub resident: Option<Type>,
+    pub resident_tuple: Option<Vec<bool>>,
+}
+
+pub(crate) fn scan_fn_call_convention(f: &FnDecl, struct_names: &std::collections::HashSet<String>) -> FnCallConvention {
+    let ref_flags = f.params.iter()
+        .map(|p| p.ty.as_ref().is_some_and(|ty| is_ref_worthy_type(ty, struct_names)))
+        .collect();
+    let mut_flags = f.params.iter().map(Param::grants_content_mut).collect();
+    let (resident, resident_tuple) = match &f.return_ty {
+        Some(rt) if rt.gpu_resident_qual().is_some() => (Some(rt.clone()), None),
+        Some(Type::Tuple(elems)) => {
+            let flags: Vec<bool> = elems.iter().map(|t| t.gpu_resident_qual().is_some()).collect();
+            if flags.iter().any(|&resident| resident) { (None, Some(flags)) } else { (None, None) }
+        }
+        _ => (None, None),
+    };
+    FnCallConvention { ref_flags, mut_flags, resident, resident_tuple }
+}
+
+/// Coerce an already-rendered argument expression (`rendered`, from the emitter's own
+/// `self.expr(arg)`) to match the callee's declared by-ref/owned parameter convention
+/// (`fn_ref_params`/`fn_mut_params`). `is_ref_var` is true when the argument
+/// expression is itself a tracked already-by-reference local (`self.ref_params`), so
+/// passing it through unchanged is correct either way. Shared by the ROCm and CUDA
+/// restricted host emitters' `coerce_call_arg_mut`.
+pub(crate) fn coerce_call_arg(rendered: String, is_ref_var: bool, callee_expects_ref: bool, wants_mut: bool) -> String {
+    match (callee_expects_ref, is_ref_var) {
+        (true, true) => rendered,
+        (true, false) => if wants_mut { format!("&mut ({rendered})") } else { format!("&({rendered})") },
+        (false, true) => format!("({rendered}).clone()"),
+        (false, false) => rendered,
+    }
+}
+
+/// The Rust return type for a function whose return type may itself be GPU-resident
+/// (`resident_elem`, already rendered to its element type string) or a `Tuple` with
+/// some resident elements (`resident_tuple`, from `FnCallConvention`) — wrapping
+/// either the whole type or just the resident tuple positions in
+/// `BoringKernelArg<T>`. `elem_ty`/`base_ty` are the backend's own
+/// `elem_rust_type`/`rust_type` free functions (passed through rather than called
+/// directly here, since a backend needing a different host-element convention —
+/// e.g. Metal's `general_host_elem_type` bridge — can still share this shape).
+/// Shared by the ROCm and CUDA restricted host emitters' `emit_fn`.
+pub(crate) fn resident_return_type(
+    return_ty: Option<&Type>,
+    resident_elem: Option<&str>,
+    resident_tuple: Option<&Vec<bool>>,
+    elem_ty: fn(&Type) -> String,
+    base_ty: fn(&Type) -> String,
+) -> String {
+    if let Some(elem) = resident_elem {
+        return format!("BoringKernelArg<{elem}>");
+    }
+    match (return_ty, resident_tuple) {
+        (Some(Type::Tuple(elems)), Some(flags)) => {
+            let parts: Vec<String> = elems.iter().enumerate().map(|(i, ty)| {
+                if flags.get(i).copied().unwrap_or(false) {
+                    format!("BoringKernelArg<{}>", elem_ty(ty))
+                } else {
+                    base_ty(ty)
+                }
+            }).collect();
+            format!("({})", parts.join(", "))
+        }
+        _ => return_ty.map(base_ty).unwrap_or_else(|| "()".into()),
     }
 }
 

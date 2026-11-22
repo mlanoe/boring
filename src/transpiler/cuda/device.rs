@@ -111,11 +111,15 @@ impl DeviceEmitter {
         self.blank();
         self.line("#include <cuda_runtime.h>");
         self.line("#include <stdint.h>");
+        // `__half` (float16 conversions, KV-cache quantization, etc.) is used by
+        // ordinary generated kernels regardless of the opt-in `half_wmma` prefill
+        // path -- confirmed by a real `nvcc` compile (`identifier "__half" is
+        // undefined`) once a kernel using it was reached that this backend had
+        // never actually compiled before. Unlike `mma.h` (only meaningful for the
+        // WMMA path), this header is cheap and always safe to include.
+        self.line("#include <cuda_fp16.h>");
         if self.tf32 || self.half_wmma {
             self.line("#include <mma.h>");
-        }
-        if self.half_wmma {
-            self.line("#include <cuda_fp16.h>");
         }
         self.blank();
         // Boring built-in Dimension type (mirrors host-side struct, see
@@ -159,6 +163,16 @@ impl DeviceEmitter {
         let ret = decl.return_ty.as_ref().map(c_type).unwrap_or_else(|| "void".into());
         let params: Vec<String> = decl.params.iter().map(|p| {
             let ty = p.ty.as_ref().map(c_type).unwrap_or_else(|| "int64_t".into());
+            // A read-only (non-`mut`) array/buffer parameter renders as a `const`
+            // pointer, matching `field_params`'s identical `FieldBinding::Let`
+            // convention for a kernel struct's own global/unified fields — mirrors
+            // `rocm::device`'s identical fix (see its doc comment there for the
+            // full rationale, confirmed on a real ROCm build).
+            let ty = if ty.ends_with('*') && !p.ty.as_ref().is_some_and(Type::grants_mut) {
+                format!("const {ty}")
+            } else {
+                ty
+            };
             format!("{} {}", ty, c_gpu_safe_ident(&p.name))
         }).collect();
         self.fx_enter(&[], &decl.params, decl.return_ty.as_ref());

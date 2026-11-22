@@ -1631,6 +1631,29 @@ fn rocblas_is_never_linked_or_called_by_default() {
 }
 
 #[test]
+fn rocblas_opt_in_checks_tensile_arch_before_creating_a_handle() {
+    // rocBLAS calls `abort()` from inside `rocblas_create_handle` when no Tensile
+    // kernel library matches the GPU's exact architecture (confirmed on a real
+    // gfx1032/RX 6600 card) -- a hard process abort, not a catchable Rust error.
+    // The opt-in build must check this itself, before ever reaching that call,
+    // and fail with a normal `Result` error instead.
+    let (_hip, host, _build, _) = run_rocm_with_config("rocblas_arch_guard", FIXED_MATMUL, Some(ROCBLAS_CONFIG));
+    assert!(host.contains("fn __boring_hip_gcn_arch_name"), "{host}");
+    assert!(host.contains("fn __boring_rocblas_tensile_available"), "{host}");
+    assert!(host.contains("__boring_hip_gcn_arch_name(0)"), "{host}");
+    assert!(host.contains("no rocBLAS Tensile kernel library was found"), "{host}");
+    // The check must run before the module/kernels load, not after.
+    let check_pos = host.find("__boring_rocblas_tensile_available(base)").expect("arch check present");
+    let module_pos = host.find("ctx.load_module(BORING_HIP_CO)").expect("module load present");
+    assert!(check_pos < module_pos, "arch check must happen before loading GPU kernels");
+
+    // Not opted in: none of this is emitted.
+    let (_hip2, host2, _build2, _) = run_rocm_with_config("rocblas_arch_guard_default", FIXED_MATMUL, None);
+    assert!(!host2.contains("__boring_hip_gcn_arch_name"), "{host2}");
+    assert!(!host2.contains("__boring_rocblas_tensile_available"), "{host2}");
+}
+
+#[test]
 fn rocblas_opt_in_tries_sgemm_for_fixed_matmul_and_keeps_scalar_fallback() {
     let (hip, host, build, _) = run_rocm_with_config("rocblas_fixed", FIXED_MATMUL, Some(ROCBLAS_CONFIG));
     assert!(build.contains("cargo:rustc-link-lib=dylib=rocblas"), "{build}");

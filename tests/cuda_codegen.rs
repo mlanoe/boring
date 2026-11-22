@@ -1790,7 +1790,12 @@ req [float32]'kernel'unified compute([float32]'kernel'global a, [uint8]'kernel'g
 fn quantized_prefill_stays_scalar_tiled_without_half_opt_in() {
     let (cu, host, build, _) = run_cuda_with_config("quant_default", QUANT_LINEAR, None);
     assert!(!cu.contains("nvcuda::wmma"), "{cu}");
-    assert!(!cu.contains("cuda_fp16"), "{cu}");
+    // `cuda_fp16.h` is unconditional now (ordinary generated kernels -- KV-cache
+    // quantization, etc. -- use `__half` regardless of the opt-in WMMA path; a
+    // real `nvcc` build hit "identifier \"__half\" is undefined" without it).
+    // Only `mma.h`, which is meaningful solely for WMMA, stays opt-in.
+    assert!(cu.contains("#include <cuda_fp16.h>"), "{cu}");
+    assert!(!cu.contains("#include <mma.h>"), "{cu}");
     assert!(!build.contains("-arch="), "{build}");
     assert!(host.contains("(((n + 15) / 16"), "{host}");
 }

@@ -306,30 +306,42 @@ fn emit_build_rs(rocblas: bool) -> String {
 use std::process::Command;
 use std::path::PathBuf;
 
-// The ROCm Windows HIP SDK ships `hipcc` only as `hipcc.bat` (a thin wrapper
-// that shells out to the bundled `hipcc` Perl script) -- there is no plain
-// `hipcc.exe`. `Command::new("hipcc")` resolves directly through
-// `CreateProcessW`, which (unlike a real shell) does not know how to launch
-// a `.bat` file on its own, so on Windows it silently falls through PATH to
-// whatever OTHER program happens to be named `hipcc` (confirmed on a real
-// machine: a Python-installed package's unrelated `hipcc.exe` shadowed the
-// real ROCm one further down PATH, so this build script quietly compiled
-// nothing with the real HIP compiler and nothing ever errored until linking
-// failed for a missing `amdhip64.lib`). Routing through `cmd /C hipcc` gets
-// past that, but `hipcc.bat` itself just shells out to a bundled `hipcc`
-// Perl script, which resolves its own directory with `File::Basename::dirname`
-// -- confirmed on a real machine that this returns "." (not the real
-// directory) under a Windows-targeted but MSYS/Cygwin-flavored Perl (e.g.
-// Git for Windows' bundled perl.exe, since its File::Basename doesn't treat
-// `\` as a separator), which then can't find `hipcc.bin.exe` next to itself
-// and aborts with "hipcc.bin not present". The HIP SDK's own Perl script,
-// stripped of its path-finding, just execs `<its own dir>/hipcc.bin.exe`
-// with the same arguments -- so going straight to that real compiler
-// binary (which this function finds itself, from `rocm_path`) sidesteps
+// Through HIP SDK 6.2, the ROCm Windows installer shipped `hipcc` only as
+// `hipcc.bat` (a thin wrapper that shells out to the bundled `hipcc` Perl
+// script) -- there was no plain `hipcc.exe`. `Command::new("hipcc")` resolves
+// directly through `CreateProcessW`, which (unlike a real shell) does not know
+// how to launch a `.bat` file on its own, so on Windows it silently falls
+// through PATH to whatever OTHER program happens to be named `hipcc`
+// (confirmed on a real machine: a Python-installed package's unrelated
+// `hipcc.exe` shadowed the real ROCm one further down PATH, so this build
+// script quietly compiled nothing with the real HIP compiler and nothing ever
+// errored until linking failed for a missing `amdhip64.lib`). Routing through
+// `cmd /C hipcc` gets past that, but `hipcc.bat` itself just shells out to a
+// bundled `hipcc` Perl script, which resolves its own directory with
+// `File::Basename::dirname` -- confirmed on a real machine that this returns
+// "." (not the real directory) under a Windows-targeted but MSYS/Cygwin-
+// flavored Perl (e.g. Git for Windows' bundled perl.exe, since its
+// File::Basename doesn't treat `\` as a separator), which then can't find
+// `hipcc.bin.exe` next to itself and aborts with "hipcc.bin not present". The
+// HIP SDK's own Perl script, stripped of its path-finding, just execs
+// `<its own dir>/hipcc.bin.exe` with the same arguments -- so going straight
+// to that real compiler binary (found below, from `rocm_path`) sidesteps
 // `hipcc.bat`, cmd.exe, and any Perl interpreter entirely.
+//
+// Starting with HIP SDK 6.4, AMD's Windows installer ships a real, standalone
+// `hipcc.exe` instead (confirmed on a real machine: calling it directly, with
+// no wrapper at all, compiles cleanly -- the Perl/`.bat`/`.bin.exe` chain above
+// is gone). Since `hipcc.bin.exe` no longer exists in that layout, prefer
+// `hipcc.exe` when present and only fall back to the old `hipcc.bin.exe` path
+// for an older SDK install that still needs the workaround above.
 fn hipcc_command(rocm_path: &str) -> Command {
     if cfg!(windows) {
-        Command::new(format!("{rocm_path}/bin/hipcc.bin.exe"))
+        let direct = format!("{rocm_path}/bin/hipcc.exe");
+        if std::path::Path::new(&direct).is_file() {
+            Command::new(direct)
+        } else {
+            Command::new(format!("{rocm_path}/bin/hipcc.bin.exe"))
+        }
     } else {
         Command::new("hipcc")
     }
