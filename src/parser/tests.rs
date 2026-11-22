@@ -824,4 +824,11 @@ mod dispatch_tests {
         assert!(score.is_resource);
         assert_eq!(score.fields.len(), 1);
     }
+
+    #[test]
+    fn soft_keywords_as_labeled_args_and_command_args_parse() {
+        let src = "def main():\n    let b = Buf(data= [10, 20], component= 1, resource= 2, where= 3, get= 4, set= 5, query= 6)\n    let int? where = 1\n    print where\n";
+        let program = crate::parser::parse(crate::lexer::lex(src).expect("lex")).expect("parse");
+        assert_eq!(program.items.len(), 1);
+    }
 }

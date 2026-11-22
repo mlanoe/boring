@@ -458,7 +458,7 @@ impl Parser {
                 // Variadic marker sits between type and name: `int... args`
                 variadic = self.eat(&TokenKind::DotDotDot);
 
-                if matches!(self.peek(), TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set) {
+                if self.peek_is_ident() {
                     let name = self.expect_ident()?;
                     // Also accept `Type name...` (marker after name)
                     if !variadic { variadic = self.eat(&TokenKind::DotDotDot); }

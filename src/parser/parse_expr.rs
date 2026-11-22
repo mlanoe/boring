@@ -941,7 +941,7 @@ impl Parser {
                     // followed by `=` (not `==`) lookahead already used to detect
                     // labeled call arguments in `parse_arg`, so `a[i]`/`a[i == j]`/
                     // `a[..<n]` etc. are never misdetected as this form.
-                    let is_labeled_index = matches!(self.peek(), TokenKind::Ident(_))
+                    let is_labeled_index = self.peek_is_ident()
                         && self.check2(&TokenKind::Eq)
                         && !matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Eq));
                     if is_labeled_index {
@@ -1133,19 +1133,22 @@ impl Parser {
     /// Returns true if the current token can start a primary expression (used for command-style calls).
     /// Excludes newline, EOF, dedent, and tokens that would be ambiguous in statement position.
     pub(crate) fn peek_starts_expr(&self) -> bool {
-        matches!(
-            self.tokens.get(self.pos).map(|t| &t.kind),
-            Some(TokenKind::Str(_))
-            | Some(TokenKind::StringInterp(_))
-            | Some(TokenKind::Int(_))
-            | Some(TokenKind::UInt64(_))
-            | Some(TokenKind::Float(_))
-            | Some(TokenKind::Bool(_))
-            | Some(TokenKind::Nil)
-            | Some(TokenKind::LParen)
-            | Some(TokenKind::LBracket)
-            | Some(TokenKind::Ident(_))
-        )
+        self.peek_is_ident()
+            || matches!(
+                self.tokens.get(self.pos).map(|t| &t.kind),
+                Some(TokenKind::Str(_))
+                    | Some(TokenKind::StringInterp(_))
+                    | Some(TokenKind::Int(_))
+                    | Some(TokenKind::UInt64(_))
+                    | Some(TokenKind::Float(_))
+                    | Some(TokenKind::Bool(_))
+                    | Some(TokenKind::Nil)
+                    | Some(TokenKind::LParen)
+                    | Some(TokenKind::LBracket)
+                    | Some(TokenKind::LBrace)
+                    | Some(TokenKind::SelfKw)
+                    | Some(TokenKind::Wait)
+            )
     }
 
     /// Returns true if the current position looks like a no-paren single-param trailing closure: `Ident ':'`.
@@ -1597,7 +1600,7 @@ impl Parser {
         }
         // Labeled arg: `ident= expr` or `ident: expr`
         // Detected by `Ident` followed immediately by `Eq` or `Colon`.
-        if matches!(self.peek(), TokenKind::Ident(_))
+        if self.peek_is_ident()
             && self.check2(&TokenKind::Eq) {
                 // Make sure it is not `ident ==` (equality check)
                 let after_eq_pos = self.pos + 2;
@@ -2296,7 +2299,7 @@ impl Parser {
                         // pure parser-level convenience, no new desugar/interpreter/
                         // transpiler work: a name that's never referenced in `value` is
                         // simply never looked up.
-                        if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::Eq) {
+                        if self.peek_is_ident() && self.check2(&TokenKind::Eq) {
                             let mut clauses = Vec::new();
                             loop {
                                 let label = self.expect_ident()?;
@@ -2312,7 +2315,7 @@ impl Parser {
                             return Ok(Expr { kind, line, col, len: self.span_len(line, col) });
                         }
                         // `[v for i in ..<n]` or `[f(x) for x in collection]` — computed form
-                        let kind = if matches!(self.peek(), TokenKind::Ident(_)) && self.check2(&TokenKind::In) {
+                        let kind = if self.peek_is_ident() && self.check2(&TokenKind::In) {
                             let var = self.expect_ident()?;
                             self.expect(&TokenKind::In)?;
                             if self.check(&TokenKind::DotDotLt) || self.check(&TokenKind::DotDotEq) {

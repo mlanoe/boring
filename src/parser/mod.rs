@@ -1743,7 +1743,7 @@ impl Parser {
                     i += 2;
                 }
                 i = self.skip_type_suffix_qualifiers(i);
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
+                i < self.tokens.len() && Self::is_ident_kind(&self.tokens[i].kind)
             }
             // Array type `[...]` or Set/Dict type `{...}` before a param name
             TokenKind::LBracket | TokenKind::LBrace => {
@@ -1765,7 +1765,7 @@ impl Parser {
                     i += 1;
                 }
                 i = self.skip_type_suffix_qualifiers(i);
-                i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
+                i < self.tokens.len() && Self::is_ident_kind(&self.tokens[i].kind)
             }
             // Tuple type `(T1, T2, ...)` before a param/variable name.
             TokenKind::LParen => {
@@ -1786,10 +1786,7 @@ impl Parser {
                         }
                     }
                 }
-                matches!(
-                    self.tokens.get(i).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
-                )
+                self.tokens.get(i).map(|t| Self::is_ident_kind(&t.kind)).unwrap_or(false)
             }
             // `<Trait>` impl-shorthand: `< Ident >` where Ident is a PascalCase type name.
             // Must verify Gt follows, then an Ident (param name).
@@ -1800,10 +1797,7 @@ impl Parser {
                 ) && matches!(
                     self.tokens.get(self.pos + 2).map(|t| &t.kind),
                     Some(TokenKind::Gt)
-                ) && matches!(
-                    self.tokens.get(self.pos + 3).map(|t| &t.kind),
-                    Some(TokenKind::Ident(_) | TokenKind::Component | TokenKind::Resource | TokenKind::Data | TokenKind::Where | TokenKind::Get | TokenKind::Set)
-                )
+                ) && self.tokens.get(self.pos + 3).map(|t| Self::is_ident_kind(&t.kind)).unwrap_or(false)
             }
             _ => false,
         }
@@ -3265,6 +3259,23 @@ impl Parser {
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────
+
+    pub(crate) fn is_ident_kind(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Ident(_)
+                | TokenKind::Data
+                | TokenKind::Component
+                | TokenKind::Resource
+                | TokenKind::Where
+                | TokenKind::Get
+                | TokenKind::Set
+        )
+    }
+
+    pub(crate) fn peek_is_ident(&self) -> bool {
+        Self::is_ident_kind(self.peek())
+    }
 
     fn expect_ident(&mut self) -> Result<String, ParseError> {
         match self.peek().clone() {
