@@ -1741,3 +1741,4 @@ transpile_test!(mem_places);
 transpile_test!(optional_builtin_stored);
 transpile_test!(optional_hole_untyped_let);
 transpile_test!(optional_reassign_untyped_var);
+transpile_test!(dict_untyped_index_optional_arg);

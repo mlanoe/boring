@@ -43,6 +43,7 @@ pub(crate) struct TensorLinearConfig {
     pub native_dynamic_q8_linear: bool,
     pub portable_tiled_dynamic_quantized_linear: bool,
     pub portable_tiled_dynamic_float_linear: bool,
+    pub skip_fixed_host_calls: bool,
 }
 
 impl Default for TensorLinearConfig {
@@ -63,6 +64,7 @@ impl Default for TensorLinearConfig {
             native_dynamic_q8_linear: false,
             portable_tiled_dynamic_quantized_linear: false,
             portable_tiled_dynamic_float_linear: false,
+            skip_fixed_host_calls: false,
         }
     }
 }
@@ -230,7 +232,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
             }
         }
         let Item::Stmt(Stmt::Expr(call)) = item else {
-            if item_uses_host_tensor(item) {
+            if !tensor_config.skip_fixed_host_calls && item_uses_host_tensor(item) {
                 errors.push(super::TranspileError::at_line(
                     "kernel.tensors host calls in GPU builds are currently supported only as top-level statements",
                     item_line(item),
@@ -239,7 +241,7 @@ pub(crate) fn lower_with_config(program: &Program, tensor_config: &TensorLinearC
             items.push(item.clone());
             continue;
         };
-        let Some((method, names)) = host_call(call) else {
+        let Some((method, names)) = (!tensor_config.skip_fixed_host_calls).then(|| host_call(call)).flatten() else {
             items.push(item.clone());
             continue;
         };
@@ -519,7 +521,7 @@ fn lower_function_body(
             index += 1;
             continue;
         }
-        let Some((method, names)) = host_call(call) else {
+        let Some((method, names)) = (!tensor_config.skip_fixed_host_calls).then(|| host_call(call)).flatten() else {
             out.push(stmt.clone());
             index += 1;
             continue;

@@ -1,0 +1,14 @@
+# Regression fixture for PROP-01: nested map chained reads (map.get(k1)?.get(k2))
+# Verifies that chained reads on maps emit .get().and_then(...) without cloning intermediate maps.
+
+pub struct Table:
+    var {string={string=int}} local_table = {=}
+
+    pub req int? get_val(string k1, string k2):
+        return local_table.get(k1)?.get(k2)
+
+    pub req int get_or_default(string k1, string k2, int def_val):
+        return local_table.get(k1)?.get(k2) else def_val
+
+    pub req int? get_3(string k1, string k2, string k3, {string={string={string=int}}} deep):
+        return deep.get(k1)?.get(k2)?.get(k3)

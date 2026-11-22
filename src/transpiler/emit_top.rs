@@ -2014,13 +2014,7 @@ impl Transpiler {
         // Auto-detect: a function that declares T'actor locals or consumes stream functions
         // will generate .await calls and therefore implicitly needs to be async.
         // Also implicit async when a param is a `task` closure (fn type with task=true).
-        let has_task_fn_param = f.params.iter().any(|p| {
-            let ty = p.ty.as_ref();
-            let resolved = ty.and_then(|t| if let Type::Named(n) = t {
-                self.fn_type_aliases.get(n.as_str())
-            } else { None }).or(ty);
-            matches!(resolved, Some(Type::Fn(_, _, _, true, _)))
-        });
+        let has_task_fn_param = fn_has_task_closure_param(f, &self.fn_type_aliases);
         let implicit_async = !f.task && self_ty.is_none()
             && (body_has_stream_for(&f.body, &self.stream_fns, &self.stream_async_method_names)
                 || body_has_channel_or_task(&f.body)
@@ -2033,7 +2027,21 @@ impl Transpiler {
                 // without the `task` qualifier), but any free function calling an
                 // already-async function needs exactly the same promotion to be able to
                 // `.await` that call — not just the program's entry point.
-                || body_calls_task_fn(&f.body, &self.task_fns));
+                || body_calls_task_fn(&f.body, &self.task_fns)
+                // `f` itself may already be in `task_fns` without any of the checks above ever
+                // being true FOR ITS OWN BODY — `compute_implicit_async_fns`'s (async_analysis.rs)
+                // whole-program fixed point inserts a function directly on a seed like "its body
+                // calls a tokio-dual-type method on one of its own parameters"
+                // (`fn_body_has_direct_tokio_async_call`), which is a property of what `f`'s body
+                // does with ITS OWN name, not a call TO its own name — `body_calls_task_fn` above
+                // only ever matches a call to some OTHER already-async function. Without this,
+                // such a leaf function (e.g. a `write_text(sock, ...)` wrapping a raw
+                // `sock.write_all(...)`) stayed a plain `fn` forever despite being correctly
+                // registered in `task_fns`, even though every CALLER of it got promoted fine
+                // (confirmed via boring-llm's ROCm-target server: `write_text`/`read_some`
+                // themselves never flipped async, while `respond`/`dispatch_request`/`serve_conn`,
+                // which merely call them by name, did).
+                || self.task_fns.contains(&f.name));
         let is_async = f.task || implicit_async;
         // A method is never implicitly async (its callers would need `.await` too, which is
         // resolved from the declaration alone), so a `for` over an async stream inside a
@@ -2160,10 +2168,27 @@ impl Transpiler {
             self.fn_current_params_rebind_only = prev_rebind_only;
             self.fn_current_params_lent = prev_lent;
         }
+        // `compute_fn_all_params`/`compute_fn_return_type` render each declared type via
+        // `emit_type`, which resolves a dual sync/async stdlib type (`TcpStream`, ... — see
+        // `emit_type`'s `Type::Named` arm) to its tokio form when `self.in_async` is true.
+        // `self.in_async` itself isn't set to THIS function's own `is_async` until body
+        // emission further down, so without this, a function's signature always reads the
+        // PREVIOUS function's `in_async` value instead of its own — confirmed via boring-llm's
+        // ROCm-target server: every async-promoted handler (`respond`, `write_text`, ...) kept
+        // emitting a plain, unqualified `TcpStream` parameter (resolving to `std::net::
+        // TcpStream` via the top-of-file `use`) even once correctly declared `async fn`, so its
+        // tokio-flavored caller's argument and its own `.read()`/`.write_all()` calls (needing
+        // the tokio form to type-check as `impl Future`) never matched. Scoped tightly around
+        // just these two calls (not the whole function) so the existing, separately-managed
+        // `self.in_async` lifecycle below (body emission, and the `f.stream` branch's own
+        // `emit_iter_stream_fn`/`emit_stream_fn`, which set their own) is untouched.
+        let prev_in_async_for_sig = self.in_async;
+        self.in_async = is_async;
         let all_params = self.compute_fn_all_params(f, self_ty, is_cancellable);
 
         // ── Stream functions: iterator (sequential) or async_stream (async) ──
         if f.stream {
+            self.in_async = prev_in_async_for_sig;
             let is_iter = match self_ty {
                 Some(t) => self.stream_iter_methods.contains(&format!("{}::{}", t, f.name)),
                 None => self.stream_iter_fns.contains(&f.name),
@@ -2175,6 +2200,7 @@ impl Transpiler {
         }
 
         let ret_ty = self.compute_fn_return_type(f);
+        self.in_async = prev_in_async_for_sig;
 
         // Use mangled name for overloaded functions/methods so each variant compiles as a distinct Rust fn.
         let is_free_overload = self_ty.is_none() && self.overloaded_fn_names.contains(&f.name);
@@ -3334,7 +3360,9 @@ impl Transpiler {
     pub(crate) fn emit_body(&mut self, stmts: &[Stmt]) {
         if stmts.is_empty() { return; }
         let saved = self.nil_tested_vars.clone();
-        collect_nil_tested_vars(stmts, &mut self.nil_tested_vars);
+        let mut vars = saved.clone();
+        self.collect_nil_tested_vars(stmts, &mut vars);
+        self.nil_tested_vars = vars;
         self.emit_body_inner(stmts);
         self.nil_tested_vars = saved;
     }
@@ -4249,7 +4277,22 @@ impl Transpiler {
             Type::Bool  => "bool".into(),
             Type::Nil | Type::Void => "()".into(),
             Type::Never => "!".into(),
-            Type::Named(n) => self.emit_named_type(n, false),
+            Type::Named(n) => {
+                // A dual sync/async stdlib type (`TcpListener`/`TcpStream`/...) used as a plain
+                // declared type (a parameter, a local's annotation, ...) inside an async function
+                // must resolve to its tokio form here too, not just at a `.bind()`/`.accept()`
+                // call site (see `tokio_async_module_for`'s doc comment and
+                // `TOKIO_ASYNC_STATIC_TYPE`/`TOKIO_ASYNC_METHODS` in emit_methods.rs) — otherwise
+                // a function like `def serve_conn(mut TcpStream sock)` declares a `std::net::
+                // TcpStream` parameter while every caller (inside a `task:`-using async fn) passes
+                // the tokio one, a real E0308 confirmed via boring-llm's ROCm-target server.
+                if self.in_async {
+                    if let Some(module) = Self::tokio_async_module_for(n) {
+                        return format!("{module}::{n}");
+                    }
+                }
+                self.emit_named_type(n, false)
+            }
             Type::TypeParam(n) => n.clone(),
             Type::Optional(inner) => format!("Option<{}>", self.emit_type(inner)),
             Type::Array(inner)    => format!("Vec<{}>", self.emit_type(inner)),
@@ -4631,10 +4674,221 @@ impl Transpiler {
 
     // ── Structs ───────────────────────────────────────────────────────────────
 
+    /// Collects every variable name used in an optional context (`x == nil`, `x != nil`,
+    /// `x is nil`, `x is not nil`, passed to an Optional parameter, returned as Optional,
+    /// assigned to an Optional place, or unwrapped via `if let`/`while let`/`guard let`/`else`).
+    fn collect_nil_tested_vars(&self, stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        let mut local_opt_vars = std::collections::HashSet::new();
+        for stmt in stmts {
+            if let Stmt::Let(s) = stmt {
+                if let Some(ty) = &s.ty {
+                    if matches!(ty.without_mut(), Type::Optional(_)) {
+                        local_opt_vars.insert(s.name.clone());
+                    }
+                }
+            }
+        }
+
+        // Tail expression in an Optional-returning function:
+        if matches!(self.fn_return_ty.as_ref().map(Type::without_mut), Some(Type::Optional(_))) {
+            if let Some(Stmt::Expr(e)) = stmts.last() {
+                if let ExprKind::Var(name) = &e.kind {
+                    out.insert(name.clone());
+                }
+            }
+        }
+
+        let out_cell = std::cell::RefCell::new(std::collections::HashSet::new());
+        let mut owned = stmts.to_vec();
+        let mut on_expr = |e: &mut Expr| {
+            match &e.kind {
+                ExprKind::BinOp(op, l, r) => {
+                    if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::IsNot) {
+                        let v = if matches!(r.kind, ExprKind::Nil) { Some(l) }
+                            else if matches!(l.kind, ExprKind::Nil) { Some(r) } else { None };
+                        if let Some(v) = v {
+                            if let ExprKind::Var(name) = &v.kind { out_cell.borrow_mut().insert(name.clone()); }
+                        }
+                    }
+                }
+                ExprKind::Else(l, _) => {
+                    if let ExprKind::Var(name) = &l.kind {
+                        out_cell.borrow_mut().insert(name.clone());
+                    }
+                }
+                ExprKind::OptionalField(obj, _)
+                | ExprKind::OptionalMethodCall(obj, _, _) => {
+                    if let ExprKind::Var(name) = &obj.kind {
+                        out_cell.borrow_mut().insert(name.clone());
+                    }
+                }
+                ExprKind::Assign(lhs, rhs) | ExprKind::QuestionAssign(lhs, rhs) => {
+                    if let ExprKind::Var(vname) = &rhs.kind {
+                        let is_opt_dest = match &lhs.kind {
+                            ExprKind::Var(tname) => {
+                                local_opt_vars.contains(tname)
+                                    || self.optional_vars.contains(tname.as_str())
+                                    || self.fn_current_params.get(tname.as_str())
+                                        .is_some_and(|t| matches!(t.without_mut(), Type::Optional(_)))
+                            }
+                            ExprKind::Field(obj, fname) => {
+                                let struct_name = match &obj.kind {
+                                    ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+                                    _ => self.resolve_expr_struct_type(obj),
+                                };
+                                struct_name.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                                    .and_then(|fs| fs.iter().find(|(n, _)| n == fname))
+                                    .is_some_and(|(_, ty)| matches!(ty.without_mut(), Type::Optional(_)))
+                            }
+                            _ => false,
+                        };
+                        if is_opt_dest {
+                            out_cell.borrow_mut().insert(vname.clone());
+                        }
+                    }
+                }
+                ExprKind::Call(callee, args) | ExprKind::GenericCall(callee, _, args) => {
+                    if let ExprKind::Var(fn_name) = &callee.kind {
+                        let local_ft = self.local_fn_type(fn_name.as_str());
+                        let param_types = self.fn_sigs.get(fn_name.as_str())
+                            .or(match &local_ft {
+                                Some(Type::Fn(_, ptys, ..)) => Some(ptys),
+                                _ => None,
+                            });
+                        if let Some(pts) = param_types {
+                            let pnames = self.fn_param_names.get(fn_name.as_str());
+                            for (i, arg) in args.iter().enumerate() {
+                                if let ExprKind::Var(vname) = &arg.value.kind {
+                                    let p_idx = if let Some(lbl) = &arg.label {
+                                        pnames.and_then(|pns| pns.iter().position(|n| n == lbl)).unwrap_or(i)
+                                    } else {
+                                        i
+                                    };
+                                    if pts.get(p_idx).is_some_and(|pt| matches!(pt.without_mut(), Type::Optional(_))) {
+                                        out_cell.borrow_mut().insert(vname.clone());
+                                    }
+                                }
+                            }
+                        } else {
+                            for (k, pts) in &self.fn_sigs {
+                                if k == fn_name || k.starts_with(&format!("{fn_name}__")) {
+                                    let pnames = self.fn_param_names.get(k.as_str());
+                                    for (i, arg) in args.iter().enumerate() {
+                                        if let ExprKind::Var(vname) = &arg.value.kind {
+                                            let p_idx = if let Some(lbl) = &arg.label {
+                                                pnames.and_then(|pns| pns.iter().position(|n| n == lbl)).unwrap_or(i)
+                                            } else {
+                                                i
+                                            };
+                                            if pts.get(p_idx).is_some_and(|pt| matches!(pt.without_mut(), Type::Optional(_))) {
+                                                out_cell.borrow_mut().insert(vname.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ExprKind::MethodCall(recv, method, args) => {
+                    let struct_name = match &recv.kind {
+                        ExprKind::Var(v) if v == "self" => self.self_type.clone(),
+                        _ => self.resolve_expr_struct_type(recv),
+                    };
+                    let method_key = struct_name.map(|sn| format!("{sn}::{method}"));
+                    let decls = method_key.as_ref()
+                        .and_then(|k| self.struct_method_overload_decls.get(k))
+                        .map(|ds| ds.as_slice());
+                    if let Some(decls) = decls {
+                        for decl in decls {
+                            for (i, arg) in args.iter().enumerate() {
+                                if let ExprKind::Var(vname) = &arg.value.kind {
+                                    let p_idx = if let Some(lbl) = &arg.label {
+                                        decl.params.iter().position(|p| p.name == *lbl).unwrap_or(i)
+                                    } else {
+                                        i
+                                    };
+                                    if decl.params.get(p_idx).and_then(|p| p.ty.as_ref())
+                                        .is_some_and(|pt| matches!(pt.without_mut(), Type::Optional(_)))
+                                    {
+                                        out_cell.borrow_mut().insert(vname.clone());
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let suffix = format!("::{method}");
+                        for (k, ds) in &self.struct_method_overload_decls {
+                            if k.ends_with(&suffix) {
+                                for decl in ds {
+                                    for (i, arg) in args.iter().enumerate() {
+                                        if let ExprKind::Var(vname) = &arg.value.kind {
+                                            let p_idx = if let Some(lbl) = &arg.label {
+                                                decl.params.iter().position(|p| p.name == *lbl).unwrap_or(i)
+                                            } else {
+                                                i
+                                            };
+                                            if decl.params.get(p_idx).and_then(|p| p.ty.as_ref())
+                                                .is_some_and(|pt| matches!(pt.without_mut(), Type::Optional(_)))
+                                            {
+                                                out_cell.borrow_mut().insert(vname.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        let mut on_stmt = |stmt: &mut Stmt| {
+            match stmt {
+                Stmt::Return(r) => {
+                    if matches!(self.fn_return_ty.as_ref().map(Type::without_mut), Some(Type::Optional(_))) {
+                        if let Some(v) = &r.value {
+                            if let ExprKind::Var(name) = &v.kind {
+                                out_cell.borrow_mut().insert(name.clone());
+                            }
+                        }
+                    }
+                }
+                Stmt::IfLet(i) => {
+                    for c in i.clauses.iter().chain(i.elif_branches.iter().flat_map(|b| b.clauses.iter())) {
+                        if let CondClause::Let(_, e) | CondClause::LetPat(_, e) = c {
+                            if let ExprKind::Var(name) = &e.kind {
+                                out_cell.borrow_mut().insert(name.clone());
+                            }
+                        }
+                    }
+                }
+                Stmt::WhileLet(w) => {
+                    if let ExprKind::Var(name) = &w.value.kind {
+                        out_cell.borrow_mut().insert(name.clone());
+                    }
+                }
+                Stmt::Guard(g) => {
+                    if let GuardCond::Clauses(cs) = &g.cond {
+                        for c in cs {
+                            if let CondClause::Let(_, e) | CondClause::LetPat(_, e) = c {
+                                if let ExprKind::Var(name) = &e.kind {
+                                    out_cell.borrow_mut().insert(name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut owned);
+        out.extend(out_cell.into_inner());
+    }
 }
 
-/// Collects every variable name compared against `nil` (`x == nil`, `x != nil`,
-/// `x is nil`, `x is not nil`) anywhere in `stmts`.
 /// True when `name` appears as a bare `Var` argument of a call/method call or as a bare
 /// array/tuple element anywhere in `body` (a by-value use that moves a managed param).
 fn param_moved_in_body(name: &str, body: &[Stmt]) -> bool {
@@ -4647,27 +4901,10 @@ fn param_moved_in_body(name: &str, body: &[Stmt]) -> bool {
                 | ExprKind::GenericCall(_, _, args) | ExprKind::Pipe(_, _, args)
                     if args.iter().any(|a| is_var(&a.value)) => { found = true; }
                 ExprKind::Array(es) | ExprKind::Tuple(es)
-                    if es.iter().any(is_var) => { found = true; }
+                if es.iter().any(is_var) => { found = true; }
                 _ => {}
             }
         }
     });
     found
-}
-
-fn collect_nil_tested_vars(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
-    let mut owned = stmts.to_vec();
-    let mut on_expr = |e: &mut Expr| {
-        if let ExprKind::BinOp(op, l, r) = &e.kind {
-            if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::IsNot) {
-                let v = if matches!(r.kind, ExprKind::Nil) { Some(l) }
-                    else if matches!(l.kind, ExprKind::Nil) { Some(r) } else { None };
-                if let Some(v) = v {
-                    if let ExprKind::Var(name) = &v.kind { out.insert(name.clone()); }
-                }
-            }
-        }
-    };
-    let mut on_stmt = |_: &mut Stmt| {};
-    crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut owned);
 }

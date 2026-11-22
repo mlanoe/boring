@@ -335,6 +335,43 @@ fn type_of(e: &Expr, env: &Env, owner: Option<&str>, d: &Decls) -> Option<Type> 
                 _ => None,
             }
         }
+        ExprKind::OptionalMethodCall(recv, m, args) if m == "get" && args.len() == 1 => {
+            let inner_opt = type_of(recv, env, owner, d)?;
+            let inner_ty = match inner_opt.without_mut() {
+                Type::Optional(inner) => inner.without_mut(),
+                other => other,
+            };
+            match inner_ty {
+                Type::Dict(_, v) => Some(Type::Optional(v.clone())),
+                _ => None,
+            }
+        }
+        ExprKind::OptionalMethodCall(recv, m, _) => {
+            let inner_opt = type_of(recv, env, owner, d)?;
+            let inner_ty = match inner_opt.without_mut() {
+                Type::Optional(inner) => inner.without_mut(),
+                other => other,
+            };
+            let o = struct_of(inner_ty)?;
+            let ret = d.methods.get(&(o, m.clone()))?.clone()?;
+            match ret {
+                Type::Optional(_) => Some(ret),
+                other => Some(Type::Optional(Box::new(other))),
+            }
+        }
+        ExprKind::OptionalField(recv, f) => {
+            let inner_opt = type_of(recv, env, owner, d)?;
+            let inner_ty = match inner_opt.without_mut() {
+                Type::Optional(inner) => inner.without_mut(),
+                other => other,
+            };
+            let o = struct_of(inner_ty)?;
+            let field_ty = d.fields.get(&o)?.iter().find(|(name, _)| name == f).map(|(_, t)| t.clone())?;
+            match field_ty {
+                Type::Optional(_) => Some(field_ty),
+                other => Some(Type::Optional(Box::new(other))),
+            }
+        }
         ExprKind::MethodCall(recv, m, _) => {
             let o = struct_of(&type_of(recv, env, owner, d)?)?;
             d.methods.get(&(o, m.clone()))?.clone()

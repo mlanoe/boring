@@ -1771,6 +1771,22 @@ pub(crate) fn body_calls_task_fn(stmts: &[Stmt], task_fns: &std::collections::Ha
     false
 }
 
+/// True if any of `f`'s parameters is a `task` closure (an `Fn(...)` type with its `task`
+/// flag set) — calling such a parameter needs `.await`, so `f` itself is implicitly async.
+/// Shared by `emit_top.rs`'s per-function `implicit_async` check and
+/// `async_analysis.rs`'s whole-program fixed point (`compute_implicit_async_fns`), which must
+/// agree on exactly the same criterion for a function to end up consistently (not just
+/// sometimes) marked async.
+pub(crate) fn fn_has_task_closure_param(f: &FnDecl, fn_type_aliases: &std::collections::HashMap<String, Type>) -> bool {
+    f.params.iter().any(|p| {
+        let ty = p.ty.as_ref();
+        let resolved = ty.and_then(|t| if let Type::Named(n) = t {
+            fn_type_aliases.get(n.as_str())
+        } else { None }).or(ty);
+        matches!(resolved, Some(Type::Fn(_, _, _, true, _)))
+    })
+}
+
 /// Returns true when the stream body contains no async operations (no `wait`, no task fn calls,
 /// no `task` expressions). Used to decide whether to emit an `Iterator` instead of an async stream.
 pub(crate) fn body_is_sequential(stmts: &[Stmt], task_fns: &std::collections::HashSet<String>) -> bool {

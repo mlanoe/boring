@@ -219,7 +219,7 @@ impl Transpiler {
                 ExprKind::Field(..) if self.expr_is_gpu_resident_field(tail) => self.struct_field_type_from_expr(tail).cloned(),
                 _ => None,
             };
-            let Some(ty) = ty else { return None };
+            let ty = ty?;
             let host = elem_of(&ty);
             match &elem_ty {
                 None => elem_ty = Some(ty),

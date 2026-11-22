@@ -523,10 +523,15 @@ impl Transpiler {
                 let is_write = crate::ast::with_block_mutates(&s.body, name, &mut is_var_param, &mut is_mutating_method);
 
                 if self.config.is_simd_target {
-                    self.line(&format!(
-                        "let {}{name} = match {scrutinee} {{ BoringKernelArg::Host(v) => v.clone() }};",
-                        if is_write { "mut " } else { "" },
-                    ));
+                    if is_write {
+                        self.line(&format!(
+                            "let {name} = match &mut {name} {{ BoringKernelArg::Host(v) => v }};",
+                        ));
+                    } else {
+                        self.line(&format!(
+                            "let {name} = match {scrutinee} {{ BoringKernelArg::Host(v) => v }};",
+                        ));
+                    }
                     self.var_types.insert(name.clone(), Type::Array(Box::new(inner_ty)));
                     self.known_local_vars.insert(name.clone());
                     self.with_open_names.insert(name.clone());
@@ -787,7 +792,7 @@ impl Transpiler {
         if let Some(q) = self.inferred_qualifiers.get(v.as_str()) {
             return q.is_owned_or_new();
         }
-        if let Some(ty) = self.local_type(v.as_str()) {
+        if let Some(ty) = self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str())) {
             return matches!(ty.without_mut(), Type::Qualified(_, q) if q.is_owned_or_new());
         }
         false

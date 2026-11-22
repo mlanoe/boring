@@ -1169,6 +1169,34 @@ impl HostEmitter {
         self.indent -= 1;
         self.line("}");
         self.blank();
+        // Element access for a local that stays in the `Host` variant for its whole
+        // lifetime in host code (e.g. element-by-element initialisation of a `'kernel'unified`
+        // local before its first kernel dispatch) — a plain `a[i]`/`a[i] = v` on the variable
+        // itself, not through a `with` block. A `Resident` buffer has no host-side slice to
+        // borrow from, so indexing it directly panics -- `with` is the only sanctioned way to
+        // read/write a buffer that may already be GPU-resident.
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T> std::ops::Index<usize> for BoringKernelArg<T> {");
+        self.indent += 1;
+        self.line("type Output = T;");
+        self.line("fn index(&self, i: usize) -> &T {");
+        self.indent += 1;
+        self.line("match self { BoringKernelArg::Resident(..) => panic!(\"BoringKernelArg: cannot index a GPU-resident buffer directly; use `with` instead\"), BoringKernelArg::Host(v) => &v[i] }");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T> std::ops::IndexMut<usize> for BoringKernelArg<T> {");
+        self.indent += 1;
+        self.line("fn index_mut(&mut self, i: usize) -> &mut T {");
+        self.indent += 1;
+        self.line("match self { BoringKernelArg::Resident(..) => panic!(\"BoringKernelArg: cannot index a GPU-resident buffer directly; use `with` instead\"), BoringKernelArg::Host(v) => &mut v[i] }");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.blank();
         self.line("#[allow(dead_code)] fn __boring_gpu_device() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_gpu_queue() -> Device { boring_metal_device() }");
         self.line("#[allow(dead_code)] fn __boring_last_choice(_kernel: &str) -> std::sync::Arc<str> { \"metal\".into() }");

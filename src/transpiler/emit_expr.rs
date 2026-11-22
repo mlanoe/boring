@@ -727,6 +727,9 @@ impl Transpiler {
             ExprKind::Cast(e, ty) => self.emit_expr_cast(e, ty),
 
             ExprKind::OptionalField(obj, field) => {
+                if let Some(code) = self.try_emit_chained_dict_read(expr) {
+                    return code;
+                }
                 // Use .clone() so the result is Option<T> (owned), not Option<&T>.
                 // This makes nil-coalescing (`?.field else default`) work with matching types.
                 let obj_s = self.emit_expr(obj);
@@ -751,7 +754,12 @@ impl Transpiler {
                     format!("{}.as_ref().map(|__v| __v.{}.clone())", obj_s, field)
                 }
             }
-            ExprKind::OptionalMethodCall(obj, method, args) => self.emit_optional_method_call(obj, method, args, ""),
+            ExprKind::OptionalMethodCall(obj, method, args) => {
+                if let Some(code) = self.try_emit_chained_dict_read(expr) {
+                    return code;
+                }
+                self.emit_optional_method_call(obj, method, args, "")
+            }
 
             ExprKind::Closure(params, _ret_ty, body, throws, task) =>
                 self.emit_expr_closure(params, body, *throws, *task),
@@ -1942,6 +1950,7 @@ impl Transpiler {
     fn emit_expr_index(&self, obj: &Expr, idx: &Expr) -> String {
         if let ExprKind::Var(name) = &obj.kind {
             if self.is_gpu_target
+                && !self.config.is_simd_target
                 && !self.with_open_names.contains(name.as_str())
                 && (self.current_fn_gpu_arg_param_names.contains(name.as_str())
                     || self.current_fn_gpu_borrow_param_names.contains(name.as_str())
@@ -5372,6 +5381,120 @@ impl Transpiler {
         }).collect::<Vec<_>>().join(", ")
     }
 
+    /// Emits chained reads on nested maps/dictionaries (`map.get(k1)?.get(k2)`)
+    /// without intermediate map cloning (PROP-01).
+    pub(crate) fn try_emit_chained_dict_read(&self, expr: &Expr) -> Option<String> {
+        enum Step<'a> {
+            Get(&'a Expr),
+            Field(&'a str),
+            Method(&'a str, &'a [Arg]),
+        }
+        let mut steps = Vec::new();
+        let mut curr = expr;
+        loop {
+            match &curr.kind {
+                ExprKind::OptionalMethodCall(inner, method, args) => {
+                    if method == "get" && args.len() == 1 {
+                        steps.push(Step::Get(&args[0].value));
+                    } else {
+                        steps.push(Step::Method(method.as_str(), args.as_slice()));
+                    }
+                    curr = inner;
+                }
+                ExprKind::OptionalField(inner, field) => {
+                    steps.push(Step::Field(field.as_str()));
+                    curr = inner;
+                }
+                _ => break,
+            }
+        }
+        if steps.is_empty() {
+            return None;
+        }
+
+        let is_root_dict = |e: &Expr| -> bool {
+            self.expr_is_dict(e)
+                || matches!(
+                    self.resolve_expr_type(e).as_ref().map(Type::without_mut),
+                    Some(Type::Dict(..))
+                )
+        };
+
+        let is_opt_dict = |e: &Expr| -> bool {
+            matches!(
+                self.resolve_expr_type(e).as_ref().map(Type::without_mut),
+                Some(Type::Optional(inner)) if matches!(inner.without_mut(), Type::Dict(..))
+            )
+        };
+
+        let (root_expr, is_dict_lookup) = match &curr.kind {
+            ExprKind::MethodCall(dict_expr, method, args)
+                if method == "get" && args.len() == 1 && is_root_dict(dict_expr) =>
+            {
+                steps.push(Step::Get(&args[0].value));
+                (dict_expr.as_ref(), true)
+            }
+            ExprKind::Index(dict_expr, key) if is_root_dict(dict_expr) => {
+                steps.push(Step::Get(key.as_ref()));
+                (dict_expr.as_ref(), true)
+            }
+            _ => {
+                if is_opt_dict(curr) {
+                    (curr, false)
+                } else {
+                    return None;
+                }
+            }
+        };
+
+        steps.reverse();
+
+        let root_s = self.emit_expr(root_expr);
+        let mut code = if is_dict_lookup {
+            let Step::Get(k0) = steps[0] else { return None; };
+            let k0_s = self.emit_dict_key_borrow(k0);
+            format!("{}.get({})", root_s, k0_s)
+        } else {
+            format!("{}.as_ref()", root_s)
+        };
+
+        let remaining = if is_dict_lookup { &steps[1..] } else { &steps[..] };
+        if remaining.is_empty() {
+            return None;
+        }
+
+        for (i, step) in remaining.iter().enumerate() {
+            let is_last = i == remaining.len() - 1;
+            match step {
+                Step::Get(k) => {
+                    let k_s = self.emit_dict_key_borrow(k);
+                    if is_last {
+                        code = format!("{}.and_then(|__v| __v.get({})).cloned()", code, k_s);
+                    } else {
+                        code = format!("{}.and_then(|__v| __v.get({}))", code, k_s);
+                    }
+                }
+                Step::Field(f) => {
+                    if is_last {
+                        code = format!("{}.map(|__v| __v.{}.clone())", code, f);
+                    } else {
+                        code = format!("{}.map(|__v| &__v.{})", code, f);
+                    }
+                }
+                Step::Method(m, args) => {
+                    let args_s: Vec<String> = args.iter().map(|a| self.emit_expr_owned(&a.value)).collect();
+                    let args_str = args_s.join(", ");
+                    if is_last {
+                        code = format!("{}.map(|__v| __v.{}({}).clone())", code, m, args_str);
+                    } else {
+                        code = format!("{}.map(|__v| __v.{}({}))", code, m, args_str);
+                    }
+                }
+            }
+        }
+        Some(code)
+    }
+
     /// Emits `obj?.method(args)` (turbofish == "") or `obj?.method<T>(args)`
     /// (turbofish == "::<T>") — same 4 branches (shadow-param / managed-mutex /
     /// managed-refcell / plain) as the original inlined `OptionalMethodCall` arm,
@@ -5799,7 +5922,7 @@ impl Transpiler {
     /// Emits one constructor-argument value for field `label` of struct `name`, applying the
     /// field's qualifier wrapping (`'actor`/`'guard`/`'task`/`'observed`/recursive `Box`).
     /// Shared by the labeled and positional struct-literal paths so they cannot diverge.
-    fn emit_ctor_field_value(&self, name: &str, label: &str, field_ty: Option<&Type>, eff_value: &Expr) -> String {
+    pub(crate) fn emit_ctor_field_value(&self, name: &str, label: &str, field_ty: Option<&Type>, eff_value: &Expr) -> String {
         let mutex_key = format!("{}::{}", name, label);
                     if let Some((inner_struct_name, base)) = self.observed_fields.get(&mutex_key).cloned() {
                         // `'observed`-qualified field, constructed via a labeled-arg struct
@@ -5832,7 +5955,8 @@ impl Transpiler {
                     } else if self.struct_mutex_fields.contains(&mutex_key) {
                         // If the value is already an actor/rc variable, just clone the Rc pointer.
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.is_mutex_local(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            if self.is_mutex_local(v.as_str()) || self.rc_vars.contains(v.as_str())
+                                || self.fn_current_params.get(v.as_str()).is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Actor))))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_fields);
                         if already_rc {
                             // A view state's own cell (`NameEditor(name = st.name)`) is passed as the cell.
@@ -5861,7 +5985,8 @@ impl Transpiler {
                         }
                     } else if self.struct_mutex_task_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            if self.var_mutex_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str())
+                                || self.fn_current_params.get(v.as_str()).is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::ActorTask))))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_mutex_task_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);
@@ -5881,7 +6006,8 @@ impl Transpiler {
                         }
                     } else if self.struct_rwlock_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.is_rwlock_local(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            if self.is_rwlock_local(v.as_str()) || self.rc_vars.contains(v.as_str())
+                                || self.fn_current_params.get(v.as_str()).is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::Guard))))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);
@@ -5901,7 +6027,8 @@ impl Transpiler {
                         }
                     } else if self.struct_rwlock_task_fields.contains(&mutex_key) {
                         let already_rc = matches!(&eff_value.kind, ExprKind::Var(v)
-                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str()))
+                            if self.var_rwlock_task_types.contains(v.as_str()) || self.rc_vars.contains(v.as_str())
+                                || self.fn_current_params.get(v.as_str()).is_some_and(|t| matches!(t.without_mut(), Type::Qualified(_, OwnerQual::GuardTask))))
                             || self.expr_reads_qualified_field(eff_value, &self.struct_rwlock_task_fields);
                         if already_rc {
                             let raw = self.emit_expr(eff_value);

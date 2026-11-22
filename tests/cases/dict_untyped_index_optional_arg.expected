@@ -1,0 +1,8 @@
+fn: 10 42
+fn: nil 42
+method: 10
+method: nil
+ret: 10
+ret: nil
+assign: 10
+assign: nil

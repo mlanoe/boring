@@ -12,6 +12,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A call missing a required argument is now a checker error**, not a warning: `boring run` and `boring build` reject it up front instead of running anyway / emitting Rust that rustc rejects with E0061. A `T?` parameter without a default is still required (no implicit `nil`). The other call-arity diagnostics (too many positional arguments, unknown label, argument bound twice) stay warnings.
 - **`boring check` now runs the semantic checker** (same front end and diagnostics as `run`/`build`); it used to only lex and parse, and exited 0 on any checker error.
 
+### Fixed
+
+- **`a[i] = v` on a `'kernel'unified`/`'kernel'global` local that is still plain host data (its whole lifetime, or before its first kernel dispatch) failed to compile on the cuda/rocm/metal/wgpu targets** — generated Rust indexed `BoringKernelArg<T>` directly (`error[E0608]: cannot index into a value of type`), since the wrapper enum had no `Index`/`IndexMut` impl (only a `with` block materialized it to a plain `Vec` first). `BoringKernelArg<T>` now implements `Index`/`IndexMut` on all four GPU host backends (indexes through to the `Host` variant's `Vec`, panics on `Resident` — the same restriction a bare read outside `with` already enforces at the checker level). Tests: `wgpu_codegen`'s `fixed_point_*`/`host_init_derived_scalar_field_not_dropped_real_gpu_dispatch` (10 cases).
+
 ## [0.9.14] — 2026-11-16 *(cargo test: 4920/4920 passing across 169 suites, 5 ignored · clippy: clean · self-hosted interpreter: moved to boring-self-interpreter, not run for this cut)*
 
 ### Highlights

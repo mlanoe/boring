@@ -60,6 +60,7 @@ mod simd_display;
 mod screen_input;
 mod gpu_analysis;
 mod gpu_common;
+mod async_analysis;
 pub(crate) use gpu_analysis::*;
 
 // ─── Transpilation config ─────────────────────────────────────────────────────
@@ -2967,6 +2968,13 @@ impl Transpiler {
         // Pre-scan: collect enum variants and fn defaults before emitting anything.
         self.pre_scan(program);
         self.analyze_ecs_context_usage();
+        // Whole-program fixed point for "needs async" (async_analysis.rs) — must run before
+        // ANY function in `program` is emitted below (both the early-return path for an
+        // inlined `use`d file and the entry-file path further down call
+        // `emit_program_items`), so `self.task_fns` is already transitively complete by the
+        // time `emit_top.rs`'s own per-function check reads it, regardless of which order
+        // this file's functions happen to appear in.
+        self.compute_implicit_async_fns(program);
 
         // Detect broadcast in single-thread mode early so the prelude can be emitted
         // before any function definitions.

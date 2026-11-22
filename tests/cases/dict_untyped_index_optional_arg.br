@@ -1,0 +1,58 @@
+struct EditHistory:
+    int id
+
+struct Runtime:
+    var mut {int=EditHistory} histories = {=}
+
+    def void restoreMethod(EditHistory? history):
+        if let h = history:
+            print "method: {h.id}"
+        else:
+            print "method: nil"
+
+def void restoreFn(Runtime rt, int handle, EditHistory? history, int extra):
+    if let h = history:
+        print "fn: {h.id} {extra}"
+    else:
+        print "fn: nil {extra}"
+
+EditHistory? lookupHistory(Runtime rt, int handle):
+    let priorHistory = rt.histories[handle]
+    return priorHistory
+
+def void testAssign(Runtime rt, int handle):
+    var EditHistory? slot = nil
+    let priorHistory = rt.histories[handle]
+    slot = priorHistory
+    if let s = slot:
+        print "assign: {s.id}"
+    else:
+        print "assign: nil"
+
+def main():
+    var mut Runtime rt = Runtime()
+    rt.histories[1] = EditHistory(id = 10)
+
+    let h1 = rt.histories[1]
+    restoreFn(rt, 1, h1, 42)
+    let h2 = rt.histories[2]
+    restoreFn(rt, 2, h2, 42)
+
+    let m1 = rt.histories[1]
+    rt.restoreMethod(m1)
+    let m2 = rt.histories[2]
+    rt.restoreMethod(m2)
+
+    let r1 = lookupHistory(rt, 1)
+    if let r = r1:
+        print "ret: {r.id}"
+    else:
+        print "ret: nil"
+    let r2 = lookupHistory(rt, 2)
+    if let r = r2:
+        print "ret: {r.id}"
+    else:
+        print "ret: nil"
+
+    testAssign(rt, 1)
+    testAssign(rt, 2)

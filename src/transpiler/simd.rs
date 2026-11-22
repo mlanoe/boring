@@ -41,13 +41,16 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
     let portable_tensor_config = crate::transpiler::tensor_host::TensorLinearConfig {
         portable_tiled_dynamic_quantized_linear: true,
         portable_tiled_dynamic_float_linear: true,
+        skip_fixed_host_calls: true,
         ..Default::default()
     };
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &portable_tensor_config);
     // Type-generic structs / helper functions used in device code become concrete copies first.
-    let (device_generic, device_generic_errors) = crate::transpiler::device_generic::monomorphise_device_generics(&tensor_host.program);
-    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&device_generic));
-    let program = &optional_lowered;
+    let (device_generic, device_generic_errors) = crate::transpiler::device_generic::monomorphise_device_generics_for_simd(&tensor_host.program);
+    // Plain-data structs in kernel bodies / device functions are scalar-replaced first.
+    // Note: SIMD has native Rust `Option` support, so `desugar_gpu_optional` is not run.
+    let struct_lowered = crate::desugar_gpu_struct::desugar(&device_generic);
+    let program = &struct_lowered;
     // Program-wide const-generic kernel monomorphisation (shared with Metal/CUDA/ROCm/wgpu,
     // see `kernel_generic.rs`'s doc comment): every `Name<args>(...)` construction, wherever
     // it appears (top level, `req`/`def` bodies, ...), becomes a plain call of a specialised
@@ -946,6 +949,7 @@ fn __boring_simd_parallel_threshold() -> usize {
 impl<T> BoringKernelArg<T> { fn len(&self) -> usize { match self { Self::Host(v) => v.len() } } }
 impl<T> std::ops::Deref for BoringKernelArg<T> { type Target = Vec<T>; fn deref(&self) -> &Vec<T> { match self { Self::Host(v) => v } } }
 impl<T> std::ops::DerefMut for BoringKernelArg<T> { fn deref_mut(&mut self) -> &mut Vec<T> { match self { Self::Host(v) => v } } }
+impl<T: std::fmt::Display> std::fmt::Display for BoringKernelArg<T> { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { match self { Self::Host(v) => write!(f, "{}", BoringFmt(v.as_slice())) } } }
 "#;
 
 /// Per free function: host width of each numeric parameter, device type of the numeric

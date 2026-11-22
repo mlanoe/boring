@@ -345,8 +345,8 @@ impl Cx {
                 Some(inner) => {
                     seeded.opts.insert(p.name.clone(), inner.clone());
                     seeded.int_flag.insert(p.name.clone());
-                    params.push(Param { name: has_name(&p.name), ty: Some(Type::Int32), mutable: false, rebindable: true, var_mut: false, ..p.clone() });
-                    params.push(Param { ty: Some(inner.clone()), rebindable: true, ..p.clone() });
+                    params.push(Param { name: has_name(&p.name), ty: Some(Type::Int32), mutable: false, rebindable: false, var_mut: false, ..p.clone() });
+                    params.push(Param { ty: Some(inner.clone()), mutable: false, rebindable: false, var_mut: false, ..p.clone() });
                 }
                 None => params.push(p.clone()),
             }

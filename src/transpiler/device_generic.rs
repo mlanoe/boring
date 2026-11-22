@@ -66,6 +66,40 @@ fn mentions(t: &Type, names: &HashSet<String>) -> Option<String> {
 }
 
 pub(crate) fn monomorphise_device_generics(program: &Program) -> (Program, Vec<TranspileError>) {
+    monomorphise_device_generics_impl(program, false)
+}
+
+pub(crate) fn monomorphise_device_generics_for_simd(program: &Program) -> (Program, Vec<TranspileError>) {
+    monomorphise_device_generics_impl(program, true)
+}
+
+fn fn_needs_monomorphisation_for_simd(f: &FnDecl, struct_names: &HashSet<String>) -> bool {
+    let mut names = HashSet::new();
+    for p in &f.params {
+        if let Some(t) = &p.ty {
+            type_names(t, &mut names);
+        }
+    }
+    if let Some(r) = &f.return_ty {
+        type_names(r, &mut names);
+    }
+    if names.iter().any(|n| struct_names.contains(n)) {
+        return true;
+    }
+    let mut has_op = false;
+    let mut on_expr = |e: &mut Expr| {
+        if matches!(e.kind, ExprKind::BinOp(..) | ExprKind::UnaryOp(..)) {
+            has_op = true;
+        }
+    };
+    let mut on_stmt = |_: &mut Stmt| {};
+    let mut w = Walker { expr: &mut on_expr, stmt: &mut on_stmt };
+    let mut body = f.body.clone();
+    w.stmts(&mut body);
+    has_op
+}
+
+fn monomorphise_device_generics_impl(program: &Program, is_simd: bool) -> (Program, Vec<TranspileError>) {
     // The parser reads a one-letter type in a signature as a type parameter (`add(V a, V b)`), also
     // when a struct `V` is declared: such a name is the struct, not a parameter.
     let declared: HashSet<&str> = program.items.iter().filter_map(|i| match i {
@@ -78,8 +112,14 @@ pub(crate) fn monomorphise_device_generics(program: &Program) -> (Program, Vec<T
         Item::Struct(s) if !s.type_params.is_empty() && s.type_params.iter().all(|p| is_ordinary(p) && !declared.contains(p.as_str())) => Some((s.name.clone(), s.clone())),
         _ => None,
     }).collect();
+    let struct_names: HashSet<String> = structs.keys().cloned().collect();
     let fns: HashMap<String, FnDecl> = program.items.iter().filter_map(|i| match i {
-        Item::Fn(f) if !f.type_params.is_empty() && f.qualifier.is_none() && f.type_params.iter().all(|p| is_ordinary(p) && !declared.contains(p.as_str())) => Some((f.name.clone(), f.clone())),
+        Item::Fn(f) if !f.type_params.is_empty() && f.qualifier.is_none() && f.type_params.iter().all(|p| is_ordinary(p) && !declared.contains(p.as_str())) => {
+            if is_simd && !fn_needs_monomorphisation_for_simd(f, &struct_names) {
+                return None;
+            }
+            Some((f.name.clone(), f.clone()))
+        }
         _ => None,
     }).collect();
     if structs.is_empty() && fns.is_empty() {

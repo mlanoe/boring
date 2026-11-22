@@ -2128,3 +2128,56 @@ def main() throws:
         "the real fn main() must await boring_main() once it's async, got:\n{rs}");
     assert!(toml.contains("tokio ="), "Cargo.toml must depend on tokio, got:\n{toml}");
 }
+
+// Deeper regression coverage for the same bug class as the test above, but for the actual
+// multi-hop shape that exposed it on boring-llm's real server (the test above's two-function
+// chain -- `run_wrapper` calling the directly-`task:`-containing `accept_once` -- is shallow
+// enough that even the old single forward pass handled it correctly, since nothing in between
+// them needs a fixed point). Here `leaf_write` has NO `task:`/`channel` anywhere in its own
+// body: its only "needs async" signal is a direct `sock.write_all(...)` call on its own
+// `TcpStream` parameter -- a real async requirement (the tokio flavor of `write_all` returns a
+// `Future`) independent of any caller, exactly like boring-llm's `write_text`/`read_some`. Three
+// *more* functions (`middle`, `outer`, `spawn_handler`) sit between that leaf and the `task:`
+// spawn, each only ever calling the next by name -- the transitive closure a real fixed point
+// must compute, not a single order-dependent sweep.
+#[test]
+fn multi_hop_tokio_socket_call_promotes_every_function_in_the_chain() {
+    let (_, rs, _, _) = run_rocm("multi_hop_task_chain", r#"
+kernel Noop:
+    mut [float32]'unified out
+    init(int n):
+        out = [0.0 as float32 for ..<n]
+    def ():
+        out[.thread.x] = 1.0
+
+use std.net.TcpStream
+
+def leaf_write(var TcpStream sock) throws:
+    let w = try? sock.write_all([0 as uint8])
+    guard let w else throw "write failed"
+
+def middle(var TcpStream sock) throws:
+    leaf_write(sock)
+
+def outer(var TcpStream sock) throws:
+    middle(sock)
+
+def spawn_handler(var TcpStream sock) throws:
+    task: outer(sock)
+
+def main() throws:
+    mut k = Noop(4)
+    kernel:
+        k(block = 4, grid = 1)
+"#);
+    assert!(rs.contains("async fn leaf_write("),
+        "leaf_write's own body calls write_all directly on its TcpStream param -- a real async requirement independent of any caller, got:\n{rs}");
+    assert!(rs.contains("tokio::net::TcpStream") && rs.contains(".write_all("),
+        "leaf_write's socket param must resolve to the tokio form, got:\n{rs}");
+    assert!(rs.contains("async fn middle("),
+        "middle calls the now-async leaf_write and must become async too, got:\n{rs}");
+    assert!(rs.contains("async fn outer("),
+        "outer calls the now-async middle and must become async too (two hops removed from the direct seed), got:\n{rs}");
+    assert!(rs.contains("async fn spawn_handler("),
+        "spawn_handler calls the now-async outer and must become async too (three hops removed), got:\n{rs}");
+}

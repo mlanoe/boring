@@ -1052,6 +1052,13 @@ impl Transpiler {
             self.indent += 1;
             // Add init params to known_local_vars so bare param names don't resolve to self.field.
             for p in &init.params { self.known_local_vars.insert(p.name.clone()); }
+            let prev_fn_current_params = std::mem::take(&mut self.fn_current_params);
+            self.fn_current_params = init.params.iter()
+                .filter_map(|p| {
+                    let p_ty = p.ty.as_ref().or_else(|| fields.iter().find(|f| f.name == p.name).map(|f| &f.ty))?;
+                    Some((p.name.clone(), p_ty.clone()))
+                })
+                .collect();
             let mut resident_init_params: Vec<String> = Vec::new();
             for p in &init.params {
                 let p_ty = p.ty.as_ref().or_else(|| fields.iter().find(|f| f.name == p.name).map(|f| &f.ty));
@@ -1129,7 +1136,7 @@ impl Transpiler {
                         if let Some(field) = field_assign_name(target) {
                             let field_decl = fields.iter().find(|f| f.name == field);
                             let field_ty = field_decl.map(|f| &f.ty);
-                            let val_s = self.emit_struct_field_value(field_ty, value);
+                            let val_s = self.emit_ctor_field_value(struct_name, &field, field_ty, value);
                             field_vals.push((field.clone(), val_s));
                         }
                     }
@@ -1206,6 +1213,7 @@ impl Transpiler {
             self.indent -= 1;
             self.line("}");
             // Clean up init param names from known_local_vars.
+            self.fn_current_params = prev_fn_current_params;
             for p in &init.params { self.known_local_vars.remove(p.name.as_str()); }
             for name in &resident_init_params {
                 self.current_fn_gpu_arg_param_names.remove(name);

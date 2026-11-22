@@ -939,6 +939,32 @@ impl<'a> HostEmitter<'a> {
         self.line("    }");
         self.line("}");
         self.blank();
+        // Element access for a local that stays in the `Host` variant for its whole
+        // lifetime in host code (e.g. element-by-element initialisation of a `'kernel'unified`
+        // local before its first kernel dispatch) — a plain `a[i]`/`a[i] = v` on the variable
+        // itself, not through a `with` block. A `Resident` buffer has no host-side slice to
+        // borrow from, so indexing it directly panics -- `with` is the only sanctioned way to
+        // read/write a buffer that may already be GPU-resident.
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T> std::ops::Index<usize> for BoringKernelArg<T> {");
+        self.line("    type Output = T;");
+        self.line("    fn index(&self, i: usize) -> &T {");
+        self.line("        match self {");
+        self.line("            BoringKernelArg::Resident(..) => panic!(\"BoringKernelArg: cannot index a GPU-resident buffer directly; use `with` instead\"),");
+        self.line("            BoringKernelArg::Host(v) => &v[i],");
+        self.line("        }");
+        self.line("    }");
+        self.line("}");
+        self.line("#[allow(dead_code)]");
+        self.line("impl<T> std::ops::IndexMut<usize> for BoringKernelArg<T> {");
+        self.line("    fn index_mut(&mut self, i: usize) -> &mut T {");
+        self.line("        match self {");
+        self.line("            BoringKernelArg::Resident(..) => panic!(\"BoringKernelArg: cannot index a GPU-resident buffer directly; use `with` instead\"),");
+        self.line("            BoringKernelArg::Host(v) => &mut v[i],");
+        self.line("        }");
+        self.line("    }");
+        self.line("}");
+        self.blank();
 
         // Staging-buffer pool for D2H readbacks. GPU targets run their whole
         // dispatch/readback chain on a single thread (see the GPU-target

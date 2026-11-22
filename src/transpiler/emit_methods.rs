@@ -76,7 +76,7 @@ pub(super) fn receiver_type_name(ty: &Type) -> Option<String> {
     let mut cur = ty.without_mut();
     loop {
         match cur {
-            Type::Qualified(inner, _) | Type::Dyn(inner) | Type::Impl(inner) => cur = inner.without_mut(),
+            Type::Qualified(inner, _) | Type::Dyn(inner) | Type::Impl(inner) | Type::Optional(inner) => cur = inner.without_mut(),
             Type::Named(n) | Type::TypeParam(n) => return Some(n.clone()),
             _ => return None,
         }
@@ -280,7 +280,7 @@ impl Transpiler {
                 self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name)
             }
             // `make()` / `obj.make()` — the callee's declared return type.
-            ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+            ExprKind::Call(..) | ExprKind::MethodCall(..) | ExprKind::OptionalMethodCall(..) | ExprKind::OptionalField(..) => {
                 self.resolve_expr_type(expr).as_ref().and_then(receiver_type_name)
             }
             _ => None,
@@ -576,6 +576,45 @@ impl Transpiler {
                 match self.resolve_expr_type(recv)?.without_mut() {
                     Type::Dict(_, v) => Some(Type::Optional(Box::new(v.without_mut().clone()))),
                     _ => None,
+                }
+            }
+            ExprKind::OptionalMethodCall(recv, method, _) if method == "get" => {
+                let inner_opt = self.resolve_expr_type(recv)?;
+                let inner_ty = match inner_opt.without_mut() {
+                    Type::Optional(inner) => inner.without_mut(),
+                    other => other,
+                };
+                match inner_ty {
+                    Type::Dict(_, v) => Some(Type::Optional(Box::new(v.without_mut().clone()))),
+                    _ => None,
+                }
+            }
+            ExprKind::OptionalMethodCall(recv, method, _) => {
+                let inner_opt = self.resolve_expr_type(recv)?;
+                let inner_ty = match inner_opt.without_mut() {
+                    Type::Optional(inner) => inner.without_mut(),
+                    other => other,
+                };
+                let owner = receiver_type_name(inner_ty)?;
+                let ret = self.struct_method_return_types.get(&format!("{}::{}", owner, method))?.clone();
+                match ret {
+                    Type::Optional(_) => Some(ret),
+                    other => Some(Type::Optional(Box::new(other))),
+                }
+            }
+            ExprKind::OptionalField(recv, field) => {
+                let inner_opt = self.resolve_expr_type(recv)?;
+                let inner_ty = match inner_opt.without_mut() {
+                    Type::Optional(inner) => inner.without_mut(),
+                    other => other,
+                };
+                let owner = receiver_type_name(inner_ty)?;
+                let fty = self.struct_fields.get(owner.as_str())?
+                    .iter().find(|(fname, _)| fname == field)
+                    .map(|(_, fty)| fty.clone())?;
+                match fty {
+                    Type::Optional(_) => Some(fty),
+                    other => Some(Type::Optional(Box::new(other))),
                 }
             }
             // `dict.keys()` / `dict.values()` are arrays of the key / value type, so an
@@ -939,6 +978,7 @@ impl Transpiler {
     /// chain regardless of `x`'s actual type.
     pub(crate) fn is_option_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
+            ExprKind::OptionalMethodCall(..) | ExprKind::OptionalField(..) => true,
             ExprKind::MethodCall(recv, method, args) | ExprKind::Pipe(recv, method, args) => {
                 // A call whose own receiver is a known user struct/enum is never guessed to
                 // be Option-shaped from name alone — its methods are real declared members,
@@ -1421,8 +1461,7 @@ impl Transpiler {
         };
         let call = format!("{}::{}({})", type_name, rust_method, vals.join(", "));
         // Known async static methods need .await (+ ? in throws context) in async context
-        const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
-        if self.in_async && TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method) {
+        if self.in_async && Self::TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method) {
             // `type_name` may be a dual sync/async stdlib type (`std.net.TcpListener`,
             // `std.fs.File`, ... — see `EXTERNAL_NON_CLONE_TYPES`): the `use` import this
             // file emitted (`emit_use`) always brings in the plain `std::` path, since it
@@ -3927,6 +3966,27 @@ impl Transpiler {
         "JoinHandle", "Receiver", "Mutex", "RwLock",
     ];
 
+    /// Dual sync/async stdlib *instance* methods (`sock.read(..)`, `sock.write_all(..)`, ...)
+    /// that need `.await` once the receiver is a tokio type — i.e. once the function calling
+    /// them is `async fn`. Single source of truth for both the call-site `.await` insertion
+    /// further down this file and `compute_implicit_async_fns`'s (async_analysis.rs) whole-
+    /// program fixed point, which seeds a function as needing async on a direct call to one of
+    /// these (on a parameter typed as a `tokio_async_module_for` dual type) regardless of what
+    /// its own caller does — the two forms' return types differ (`Result<_,_>` vs `impl
+    /// Future`), so this is a real, caller-independent async requirement.
+    pub(crate) const TOKIO_ASYNC_METHODS: &[&str] = &[
+        "read", "read_line", "write_all", "acquire", "recv",
+        // `TcpListener`/`UnixListener::accept` (dual sync/async stdlib type, see
+        // `tokio_async_module_for` above — same real-world repro: a `task:`-using `async
+        // fn` server loop's `listener.accept()`).
+        "accept",
+    ];
+
+    /// Dual sync/async stdlib type's own *static* constructors (`TcpListener::bind`,
+    /// `File::open`, ...) — the static-call analogue of `TOKIO_ASYNC_METHODS` above, same
+    /// shared-source-of-truth role.
+    pub(crate) const TOKIO_ASYNC_STATIC_TYPE: &[&str] = &["open", "create", "connect", "bind"];
+
     /// The `tokio` module a dual sync/async stdlib type's async form lives in, for the
     /// handful of `EXTERNAL_NON_CLONE_TYPES` that have one (`std::net::TcpListener` /
     /// `tokio::net::TcpListener`, etc.). `None` for every other external type, including
@@ -4944,9 +5004,7 @@ impl Transpiler {
             };
             let call = format!("{}::{}({})", obj_qualified, rust_method_name, vals.join(", "));
             // Known tokio async static methods (File::open, File::create, etc.) need .await
-            const TOKIO_ASYNC_STATIC: &[&str] = &["open", "create", "connect", "bind"];
-
-            if self.in_async && TOKIO_ASYNC_STATIC.iter().any(|&m| m == rust_method_name) {
+            if self.in_async && Self::TOKIO_ASYNC_STATIC_TYPE.iter().any(|&m| m == rust_method_name) {
                 return format!("{}.await", call);
             }
             return call;
@@ -5657,14 +5715,17 @@ impl Transpiler {
         // Add .await for task (async) instance methods when inside an async context.
         // Also await known tokio async I/O methods that aren't declared in Boring source.
         // These names are specific enough to tokio/async-std that sync conflicts are unlikely.
-        const TOKIO_ASYNC_METHODS: &[&str] = &[
-            "read_line", "write_all", "acquire", "recv",
-            // `TcpListener`/`UnixListener::accept` (dual sync/async stdlib type, see
-            // `tokio_async_module_for` and `TOKIO_ASYNC_STATIC_TYPE` above — same
-            // real-world repro: a `task:`-using `async fn` server loop's `listener.accept()`).
-            "accept",
-        ];
-        let is_tokio_async = TOKIO_ASYNC_METHODS.contains(&method);
+        // Checked against `rust_method` (the already snake_cased Rust name), not the raw
+        // `method` (Boring source casing, e.g. `writeAll`) — `TOKIO_ASYNC_METHODS` is written
+        // in Rust's own snake_case, so comparing it against `method` directly only ever
+        // matched a call a Boring author happened to spell in snake_case already (confirmed
+        // via boring-llm's `sock.writeAll(...)`: `method` = "writeAll", never in the list,
+        // so `.await` silently never got appended for the camelCase spelling every real
+        // caller actually uses). Guarded on `!is_user_struct_receiver` so a user-declared
+        // struct's own method of the same name (e.g. a `Reader`-style struct's `read()`) is
+        // never mistaken for the external/tokio one — same false-positive-by-name lesson as
+        // the `contains`/`remove`/... guards elsewhere in this function.
+        let is_tokio_async = !is_user_struct_receiver && Self::TOKIO_ASYNC_METHODS.contains(&rust_method.as_str());
         // When the receiver's struct type is known, check the qualified
         // "StructName::method" key ONLY -- otherwise a same-named-but-non-throwing
         // method on a different struct (e.g. EncoderBlock.forward vs
@@ -5708,7 +5769,27 @@ impl Transpiler {
             && (((!receiver_has_method && self.fn_throws.contains(method)) || struct_throws)
                 || external_throws);
         if self.in_async && (self.instance_task_methods.contains(method) || is_tokio_async) {
-            if propagates_throw { format!("{}.await?", call) } else { format!("{}.await", call) }
+            let awaited = if propagates_throw { format!("{}.await?", call) } else { format!("{}.await", call) };
+            // Unlike the sync `std::io::Read`/`Write` methods (always in scope via the
+            // prelude), their tokio async equivalents dispatch through an extension trait that
+            // must be imported — `AsyncReadExt`/`AsyncBufReadExt`/`AsyncWriteExt` aren't
+            // otherwise referenced anywhere in the generated file, so without this the call
+            // is a plain "method not found" error (confirmed via boring-llm's `write_text`:
+            // `sock.write_all(...)` on a `tokio::net::TcpStream` needs `AsyncWriteExt` in
+            // scope). A scoped `use ... as _;` inside a block expression (same pattern
+            // `emit_methods.rs`'s `OpenOptions`/`write_all` literal-append path already uses
+            // just below) keeps this local to the one call site rather than adding a
+            // file-wide import that would need its own "does anything in this file actually
+            // need it" tracking.
+            match is_tokio_async.then_some(rust_method.as_str()).and_then(|m| match m {
+                "read" => Some("tokio::io::AsyncReadExt"),
+                "read_line" => Some("tokio::io::AsyncBufReadExt"),
+                "write_all" => Some("tokio::io::AsyncWriteExt"),
+                _ => None,
+            }) {
+                Some(trait_path) => format!("{{ use {trait_path} as _; {awaited} }}"),
+                None => awaited,
+            }
         } else if propagates_throw {
             if external_throws { format!("({}?)", call) } else { format!("{}?", call) }
         } else {
@@ -5970,9 +6051,23 @@ impl Transpiler {
                 // call passed here must materialize back to a host `Vec<T>`.
                 if let Some(materialized) = self.try_materialize_resident_expr(&a.value) {
                     let param_ty_here = sig.get(i);
+                    let param_mutable = mutable_flags.get(i).copied().unwrap_or(false);
+                    let is_borrow_mut = param_mutable || matches!(param_ty_here, Some(Type::Qualified(_, OwnerQual::BorrowMut)));
+                    if is_borrow_mut {
+                        if let ExprKind::Var(vname) = &a.value.kind {
+                            let match_expr = if self.config.is_simd_target {
+                                format!("match &mut {vname} {{ BoringKernelArg::Host(v) => v }}")
+                            } else {
+                                format!("match &mut {vname} {{ BoringKernelArg::Resident(..) => panic!(\"cannot borrow GPU-resident buffer mutably as host Vec\"), BoringKernelArg::Host(v) => v }}")
+                            };
+                            result.push(match_expr);
+                            i += 1;
+                            continue;
+                        }
+                    }
                     let needs_ref = matches!(
                         param_ty_here,
-                        Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut))
+                        Some(Type::Qualified(_, OwnerQual::Borrow))
                     );
                     result.push(if needs_ref {
                         format!("&({})", materialized)
@@ -7566,7 +7661,7 @@ impl Transpiler {
                     .map(|elem_ty| matches!(elem_ty.without_mut(), Type::Dict(..)))
                     .unwrap_or(false)
             }
-            _ => false,
+            _ => matches!(self.resolve_expr_type(expr).as_ref().map(Type::without_mut), Some(Type::Dict(..))),
         }
     }
 

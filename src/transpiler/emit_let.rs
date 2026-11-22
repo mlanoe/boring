@@ -524,6 +524,9 @@ impl Transpiler {
                         } else { None };
 
                         let name = ctor_name.or_else(|| {
+                            if !matches!(inferred_qual, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::ActorTask | OwnerQual::GuardTask) {
+                                return None;
+                            }
                             let is_task = matches!(inferred_qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
                             let is_guard = matches!(inferred_qual, OwnerQual::Guard | OwnerQual::GuardTask);
                             if self.lock_handle_place(&arg.value, is_task, is_guard).is_some() {
@@ -537,6 +540,9 @@ impl Transpiler {
                                 }
                                 None
                             })?;
+                            if matches!(ty.without_mut(), Type::Qualified(..)) {
+                                return None;
+                            }
                             let mut cur = ty.without_mut();
                             while let Type::Qualified(inner, _) = cur {
                                 cur = inner.without_mut();
@@ -565,6 +571,9 @@ impl Transpiler {
                     } else { None };
 
                     let name = ctor_name.or_else(|| {
+                        if !matches!(inferred_qual, OwnerQual::Actor | OwnerQual::Guard | OwnerQual::ActorTask | OwnerQual::GuardTask) {
+                            return None;
+                        }
                         let is_task = matches!(inferred_qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
                         let is_guard = matches!(inferred_qual, OwnerQual::Guard | OwnerQual::GuardTask);
                         if self.lock_handle_place(s_value, is_task, is_guard).is_some() {
@@ -575,6 +584,9 @@ impl Transpiler {
                                 self.fn_return_types.get(fname.as_str()).cloned()
                             } else { None }
                         })?;
+                        if matches!(ty.without_mut(), Type::Qualified(..)) {
+                            return None;
+                        }
                         let mut cur = ty.without_mut();
                         while let Type::Qualified(inner, _) = cur {
                             cur = inner.without_mut();
@@ -590,29 +602,7 @@ impl Transpiler {
                     });
                     name.map(|n| (n, false))
                 }
-                _ => {
-                    let is_task = matches!(inferred_qual, OwnerQual::ActorTask | OwnerQual::GuardTask);
-                    let is_guard = matches!(inferred_qual, OwnerQual::Guard | OwnerQual::GuardTask);
-                    if self.lock_handle_place(s_value, is_task, is_guard).is_none() {
-                        let ty = self.resolve_expr_type(s_value);
-                        ty.and_then(|t| {
-                            let mut cur = t.without_mut().clone();
-                            while let Type::Qualified(inner, _) = cur {
-                                cur = inner.without_mut().clone();
-                            }
-                            if let Type::Named(n) = cur {
-                                if self.struct_fields.contains_key(n.as_str())
-                                    && !self.generic_struct_names.contains(n.as_str())
-                                {
-                                    return Some((n, false));
-                                }
-                            }
-                            None
-                        })
-                    } else {
-                        None
-                    }
-                }
+                _ => None,
             };
             if let Some((type_name, is_optional)) = type_name_opt {
                 let base_ty = crate::ast::Type::Named(type_name);
@@ -1857,14 +1847,18 @@ impl Transpiler {
         // `let [mut T'actor] a = [T(..)]` / `{K = mut V'actor}`: each fresh constructor element is
         // wrapped in the actor constructor when the literal is emitted.
         if let (Some(ty), Some(v)) = (&s.ty, &s.value) { self.register_elem_wrap_lits(ty, v); }
-        // Untyped `let hit = dict[key]` whose name is later tested against `nil` is an
-        // optional lookup (`HashMap::get(..).cloned()`), not the panicking read.
+        // Untyped `let hit = dict[key]` whose name is later tested against `nil` or used in
+        // an optional context is an optional lookup (`HashMap::get(..).cloned()`), not the panicking read.
         if s.ty.is_none() && self.nil_tested_vars.contains(s.name.as_str()) {
             if let Some(v) = &s.value {
                 if matches!(&v.kind, ExprKind::Index(d, _) if self.expr_is_dict(d)) {
                     if let Some(elem) = self.resolve_expr_type(v) {
                         let mut typed = s.clone();
-                        typed.ty = Some(Type::Optional(Box::new(elem.without_mut().clone())));
+                        let opt_ty = match elem.without_mut() {
+                            Type::Optional(inner) => Type::Optional(inner.clone()),
+                            other => Type::Optional(Box::new(other.clone())),
+                        };
+                        typed.ty = Some(opt_ty);
                         return self.emit_let_inner(&typed, is_last);
                     }
                 }
@@ -2128,6 +2122,9 @@ impl Transpiler {
                             }
                             None
                         })?;
+                        if matches!(ty.without_mut(), Type::Qualified(..)) {
+                            return None;
+                        }
                         let mut cur = ty.without_mut();
                         while let Type::Qualified(inner, _) = cur {
                             cur = inner.without_mut();
@@ -3425,7 +3422,7 @@ impl Transpiler {
                         let already_rc_expr = inner.starts_with("Rc::new(") || inner.starts_with("Rc::clone(")
                             || Self::do_block_tail_is_shared_pointer(value, &inner);
                         let is_existing_shared_var = matches!(&value.kind, ExprKind::Var(v)
-                                if matches!(self.local_type(v.as_str()),
+                                if matches!(self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str())),
                                     Some(Type::Qualified(_, OwnerQual::Shared))));
                         if already_rc_expr {
                             inner
@@ -3446,7 +3443,10 @@ impl Transpiler {
                         {
                             return inner;
                         }
-                        let is_existing_arc = matches!(&value.kind, ExprKind::Var(v) if self.arc_vars.contains(v.as_str()));
+                        let is_existing_arc = matches!(&value.kind, ExprKind::Var(v)
+                            if self.arc_vars.contains(v.as_str())
+                                || matches!(self.fn_current_params.get(v.as_str()).or_else(|| self.local_type(v.as_str())),
+                                    Some(Type::Qualified(_, OwnerQual::Shared))));
                         if is_existing_arc || is_inferred_shared {
                             format!("Arc::clone(&{})", inner)
                         } else if is_heap {
