@@ -2868,3 +2868,16 @@ let _result = v1 + v2
 "#;
     assert_eq!(run_src(src), Value::Int(52));
 }
+
+#[test]
+fn test_interpreter_float32_assign() {
+    let src = r#"
+var float32 w = 1.0 as float32
+w = 0.0
+let float32 x = 2.0 as float32
+let y = w * x
+let _result = y
+"#;
+    assert_eq!(run_src(src), Value::Float32(0.0));
+}
+

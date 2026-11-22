@@ -394,6 +394,7 @@ interp_test!(fixed_point_policies);
 interp_test!(fixed_point_wide);
 interp_test!(fixed_point_math);
 interp_test!(float32_array_literal_width_and_cast);
+interp_test!(interpreter_float32_assign);
 interp_test!(float64_array_literal_width_and_cast);
 interp_test!(optional_interp_numeric);
 // Generic METHOD call via turbofish (`obj.method<T>(...)`, V1 monomorphization

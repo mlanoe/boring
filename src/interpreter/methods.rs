@@ -3571,9 +3571,18 @@ impl Interpreter {
                         };
                         let mut found = false;
                         for (k, v) in &mut pairs {
-                            if Value::key_eq(k, &key) { *v = val.clone(); found = true; break; }
+                            if Value::key_eq(k, &key) {
+                                *v = Self::coerce_array_elem_literal(val.clone(), v);
+                                found = true;
+                                break;
+                            }
                         }
-                        if !found { pairs.push((key, val)); }
+                        if !found {
+                            let val = pairs.first()
+                                .map(|(_, existing)| Self::coerce_array_elem_literal(val.clone(), existing))
+                                .unwrap_or(val);
+                            pairs.push((key, val));
+                        }
                         self.assign_content(obj_expr, Value::Dict(pairs), env, line)?;
                     }
                     Value::Set(_) => {

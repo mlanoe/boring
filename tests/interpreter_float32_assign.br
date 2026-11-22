@@ -1,0 +1,14 @@
+def main():
+    var float32 w = 1.0 as float32
+    w = 0.0
+    let float32 x = 2.0 as float32
+    let y = w * x
+    print "{y}"
+
+    w = 3.5
+    let z = w * x
+    print "{z}"
+
+    w = 2
+    let u = w * x
+    print "{u}"

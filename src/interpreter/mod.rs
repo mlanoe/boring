@@ -1038,20 +1038,71 @@ impl Env {
         matches!(self.get_with_self_fields(name), Some((_, true)))
     }
 
+    /// Coerce assigned float/numeric literal to the variable's existing or declared float width.
+    fn coerce_reassigned_float(&self, name: &str, value: Value) -> Value {
+        let is_f32 = match self.vars.get(name) {
+            Some(Value::Float32(_)) => true,
+            _ => match self.declared_types.get(name).map(|t| strip_qualifiers(t.without_mut())) {
+                Some(Type::Float32) => true,
+                Some(Type::Named(n)) if matches!(n.as_str(), "float32" | "Float32" | "f32") => true,
+                _ => false,
+            },
+        };
+        if is_f32 {
+            return match value {
+                Value::Float64(f) => Value::Float32(f as f32),
+                Value::Int(n) => Value::Float32(n as f32),
+                other => other,
+            };
+        }
+        let is_f16 = match self.vars.get(name) {
+            Some(Value::Float16(_)) => true,
+            _ => match self.declared_types.get(name).map(|t| strip_qualifiers(t.without_mut())) {
+                Some(Type::Float16) => true,
+                Some(Type::Named(n)) if matches!(n.as_str(), "float16" | "Float16" | "f16") => true,
+                _ => false,
+            },
+        };
+        if is_f16 {
+            return match value {
+                Value::Float64(f) => Value::Float16(half::f16::from_f64(f)),
+                Value::Int(n) => Value::Float16(half::f16::from_f64(n as f64)),
+                other => other,
+            };
+        }
+        let is_f64 = match self.vars.get(name) {
+            Some(Value::Float64(_)) => true,
+            _ => match self.declared_types.get(name).map(|t| strip_qualifiers(t.without_mut())) {
+                Some(Type::Float64) => true,
+                Some(Type::Named(n)) if matches!(n.as_str(), "float" | "float64" | "Float" | "Float64" | "f64") => true,
+                _ => false,
+            },
+        };
+        if is_f64 {
+            return match value {
+                Value::Int(n) => Value::Float64(n as f64),
+                other => other,
+            };
+        }
+        value
+    }
+
     /// Returns Err if the variable exists but is immutable, Ok(false) if not found, Ok(true) if set.
     #[allow(clippy::result_unit_err)]
     pub fn set(&mut self, name: &str, value: Value) -> Result<bool, ()> {
         if self.vars.contains_key(name) {
             // Lazy vars can be set once (they are in lazy_vars until first assignment).
             if self.lazy_vars.contains(name) {
-                self.vars.insert(name.to_string(), value);
+                let final_value = self.coerce_reassigned_float(name, value);
+                self.vars.insert(name.to_string(), final_value);
                 self.lazy_vars.remove(name);
                 return Ok(true);
             }
             if !self.mutable.contains(name) {
                 return Err(());
             }
-            self.vars.insert(name.to_string(), value);
+            let final_value = self.coerce_reassigned_float(name, value);
+            self.vars.insert(name.to_string(), final_value);
             Ok(true)
         } else if let Some(ref parent) = self.parent {
             parent.borrow_mut().set(name, value)
