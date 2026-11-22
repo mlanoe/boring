@@ -1842,7 +1842,7 @@ def main() throws:
     kernel:
         t(block = 3, grid = 1)
     let y = t.out
-    with y:
+    with y, x:
         for r in 0..<3:
             let err = abs(y[r] - x[r])
             print "{err} {sqrt(err)} {floor(2.5)}"
