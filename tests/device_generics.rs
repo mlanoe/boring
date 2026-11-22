@@ -60,7 +60,7 @@ fn metal_runs_monomorphised_generics() {
     let (dir, out) = build(&src, "metal", "run");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let run = Command::new("cargo")
-        .args(["run", "--quiet", "--manifest-path"])
+        .args(["run", "--quiet", "--offline", "--manifest-path"])
         .arg(dir.join("main_metal/Cargo.toml"))
         .arg("--target-dir")
         .arg(dir.join("target"))
@@ -71,6 +71,24 @@ fn metal_runs_monomorphised_generics() {
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     // Thread i: q = Pair<int>(i, 3); sum 3+i; mid = 2i + 3; swap(q).a = 3; bias 100; twice(i) = 2i.
     // Total = (3+i) + (2i+3) + 3 + 100 + 2i = 109 + 5i. fout: 1.5 + 2.0 + 2 * 0.25 = 4.
+    assert_eq!(stdout, "109 114 119 124\n4 4");
+}
+
+#[test]
+fn simd_runs_monomorphised_generics() {
+    let src = std::fs::read_to_string(FIXTURE).unwrap();
+    let (dir, out) = build(&src, "simd", "run_simd");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let run = Command::new("cargo")
+        .args(["run", "--quiet", "--offline", "--manifest-path"])
+        .arg(dir.join("main_simd/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(dir.join("target"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(stdout, "109 114 119 124\n4 4");
 }
 

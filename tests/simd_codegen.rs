@@ -7739,7 +7739,7 @@ fn build_and_run_simd(name: &str, source: &str, rustflags: Option<&str>) -> (Str
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let mut command = Command::new("cargo");
     command
-        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .args(["run", "--quiet", "--offline", "--release", "--manifest-path"])
         .arg(root.join(format!("{name}_simd/Cargo.toml")))
         .arg("--target-dir")
         .arg(root.join(if rustflags.is_some() { "target_alt" } else { "target" }));
@@ -8232,4 +8232,37 @@ fn host_only_functions_with_struct_values_are_not_cloned_for_device_code() {
     )
     .unwrap();
     assert!(!generated.contains("pick__dev"), "a function no kernel calls must not get a device clone");
+}
+
+#[test]
+fn simd_const_generic_kernel_runs_correctly() {
+    let (stdout, stderr, ok) = build_and_run_simd(
+        "const_generic_kernel",
+        r#"
+mut [float32]'kernel'unified x = [1.0 as float32 for ..<8]
+mut [float32]'kernel'unified y = [0.0 as float32 for ..<8]
+kernel Scaled<int FACTOR>:
+    let [float32]'global x
+    mut [float32]'unified y
+    init([float32]'global a, [float32]'unified b):
+        x = a
+        y = b
+    def ():
+        let i = .thread.x
+        y[i] = x[i] * (FACTOR as float32)
+mut k = Scaled<4>(x, y)
+kernel:
+    k(block = 8)
+print "{k.y[0]} {k.y[7]}"
+"#,
+        None,
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "4 4");
+    let generated = fs::read_to_string(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("simd_const_generic_kernel/const_generic_kernel_simd/src/main.rs"),
+    )
+    .unwrap();
+    assert!(generated.contains("struct Scaled_4"));
+    assert!(!generated.contains("Scaled::<4>"));
 }

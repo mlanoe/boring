@@ -43,10 +43,10 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
         ..Default::default()
     };
     let tensor_host = crate::transpiler::tensor_host::lower_with_config(program, &portable_tensor_config);
-    let program = &tensor_host.program;
-    // Plain-data structs in kernel bodies / device functions are scalar-replaced first.
-    let struct_lowered = crate::desugar_gpu_struct::desugar(program);
-    let program = &struct_lowered;
+    // Type-generic structs / helper functions used in device code become concrete copies first.
+    let (device_generic, device_generic_errors) = crate::transpiler::device_generic::monomorphise_device_generics(&tensor_host.program);
+    let optional_lowered = crate::desugar_gpu_optional::desugar(&crate::desugar_gpu_struct::desugar(&device_generic));
+    let program = &optional_lowered;
     // Program-wide const-generic kernel monomorphisation (shared with Metal/CUDA/ROCm/wgpu,
     // see `kernel_generic.rs`'s doc comment): every `Name<args>(...)` construction, wherever
     // it appears (top level, `req`/`def` bodies, ...), becomes a plain call of a specialised
@@ -123,7 +123,7 @@ fn transpile_simd_with(program: &Program, stem: &str, version: &str, unified: bo
 
     let mut e = Emitter {
         out: String::new(),
-        errors: general.errors.into_iter().chain(generic_errors).chain(tensor_host.errors.clone()).collect(),
+        errors: general.errors.into_iter().chain(device_generic_errors).chain(generic_errors).chain(tensor_host.errors.clone()).collect(),
         fields: std::collections::HashSet::new(),
         field_axes: std::collections::HashMap::new(),
         local_axes: std::collections::HashMap::new(),
