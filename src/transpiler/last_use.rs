@@ -22,10 +22,11 @@
 //!   borrowed — rustc E0505);
 //! * only names introduced by a plain `let`/`var`/`mut` of a *syntactically owned* value
 //!   (declared `[T]`/`{K=V}`/`{T}`/`Named` type, a collection literal/comprehension, or a
-//!   constructor call) are eligible, and only if no other binding form (parameter, `for`
-//!   variable, pattern, destructure, closure parameter, comprehension variable, ...) uses the
-//!   same name — a parameter or pattern-bound name may be a Rust reference, where a move would
-//!   change the type rather than skip a copy.
+//!   constructor call), an eligible by-value parameter, or a `match` / `if let` / `guard let`
+//!   pattern binding are eligible, and only if no other binding form (`for` variable, destructure,
+//!   closure parameter, comprehension variable, ...) uses the same name. Parameters or pattern-bound
+//!   names that turn out to be Rust references (`&T`/`&mut T`, lock handles, `Rc`/`Arc`, etc.) are
+//!   still filtered out by `is_last_use_move` / `last_use_representation_ok` in the emitter.
 //!
 //! The matches below are exhaustive on purpose (no `_` arm): a new AST variant must be classified
 //! here, otherwise a use hidden inside it would silently be missed.
@@ -81,7 +82,11 @@ pub(crate) fn last_use_sites(params: &[Param], body: &[Stmt]) -> LastUseSites {
         defers: Vec::new(),
     };
     for p in params {
-        w.tainted.insert(p.name.clone());
+        if Walker::owned_param(p) {
+            w.decls.entry(p.name.clone()).or_default().push(0);
+        } else {
+            w.taint(&p.name);
+        }
         if let Some(d) = &p.default {
             w.expr(d);
         }
@@ -152,6 +157,21 @@ impl<'a> Walker<'a> {
         self.tainted.insert(name.to_string());
     }
 
+    fn declare_pat_var(&mut self, name: &str) {
+        if name != "_" {
+            self.decls.entry(name.to_string()).or_default().push(self.loop_depth);
+        }
+    }
+
+    fn declare_pattern(&mut self, p: &Pattern) {
+        match p {
+            Pattern::Bind(n) => self.declare_pat_var(n),
+            Pattern::Variant(_, subs) | Pattern::Tuple(subs) => for s in subs { self.declare_pattern(s) },
+            Pattern::Some(inner) => self.declare_pattern(inner),
+            Pattern::Wildcard | Pattern::Lit(_) | Pattern::None => {}
+        }
+    }
+
     fn taint_pattern(&mut self, p: &Pattern) {
         match p {
             Pattern::Bind(n) => self.taint(n),
@@ -183,6 +203,19 @@ impl<'a> Walker<'a> {
         for s in stmts { self.stmt(s); }
     }
 
+    fn owned_param(p: &Param) -> bool {
+        if p.rebindable {
+            return false;
+        }
+        match &p.ty {
+            Some(t) => matches!(
+                t.without_mut(),
+                Type::Qualified(_, OwnerQual::Inline | OwnerQual::Owned)
+            ),
+            None => false,
+        }
+    }
+
     fn owned_let_init(s: &LetStmt) -> bool {
         match (&s.ty, &s.value) {
             (_, None) => false,
@@ -207,8 +240,8 @@ impl<'a> Walker<'a> {
         for c in clauses {
             self.header();
             match c {
-                CondClause::Let(name, e) => { self.expr(e); self.taint(name); }
-                CondClause::LetPat(p, e) => { self.expr(e); self.taint_pattern(p); }
+                CondClause::Let(name, e) => { self.expr(e); self.declare_pat_var(name); }
+                CondClause::LetPat(p, e) => { self.expr(e); self.declare_pattern(p); }
                 CondClause::Expr(e) => self.expr(e),
             }
         }
@@ -315,7 +348,7 @@ impl<'a> Walker<'a> {
         self.header();
         self.expr(&m.subject);
         for arm in &m.arms {
-            for p in &arm.patterns { self.taint_pattern(p); }
+            for p in &arm.patterns { self.declare_pattern(p); }
             if let Some(g) = &arm.guard { self.header(); self.expr(g); }
             match &arm.body {
                 MatchBody::Expr(e) => { self.header(); self.expr(e); }
@@ -446,7 +479,7 @@ impl<'a> Walker<'a> {
             ExprKind::Match(m) => self.nested(|s| {
                 s.expr(&m.subject);
                 for arm in &m.arms {
-                    for p in &arm.patterns { s.taint_pattern(p); }
+                    for p in &arm.patterns { s.declare_pattern(p); }
                     if let Some(g) = &arm.guard { s.expr(g); }
                     match &arm.body {
                         MatchBody::Expr(x) => s.expr(x),

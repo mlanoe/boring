@@ -22,43 +22,7 @@ impl Transpiler {
     fn wrap_optional_tail(&self, e: &Expr) -> String {
         let raw = self.emit_expr_owned(e);
         let already_opt = raw == "None" || raw.starts_with("Some(")
-            || is_try_optional(e)
-            || matches!(&e.kind, ExprKind::Var(v)
-                if self.optional_vars.contains(v.as_str())
-                || self.local_type(v.as_str())
-                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
-            || matches!(&e.kind, ExprKind::Call(callee, _)
-                if matches!(&callee.kind, ExprKind::Var(fn_name)
-                    if self.fn_return_types.get(fn_name.as_str())
-                        .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
-            || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
-                if matches!(&recv.kind, ExprKind::Var(v)
-                    if self.local_struct(v).as_ref().map(|sty| {
-                        self.struct_method_return_types
-                            .get(&format!("{}::{}", sty, method))
-                            .map(|t| matches!(t, Type::Optional(_)))
-                            .unwrap_or(false)
-                    }).unwrap_or(false)))
-            // Field read of a `T?`-declared field, or a call/method-call whose
-            // own declared return type is `T?` (any receiver shape, not just a
-            // bare var — see `expr_is_declared_optional`'s doc for why the
-            // MethodCall check above alone isn't enough, e.g. `items[0].as_str()`).
-            // See docs/option-return-double-some-wrap-bug.md.
-            || self.expr_is_declared_optional(e)
-            // If-expression whose branches already produce Option (nil/some/method)
-            || matches!(&e.kind, ExprKind::If(if_stmt) if {
-                fn branch_ends_optional(body: &[Stmt]) -> bool {
-                    match body.last() {
-                        Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
-                            || matches!(&e.kind, ExprKind::Call(callee, _)
-                                if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
-                            || matches!(&e.kind, ExprKind::MethodCall(_, _, _)),
-                        _ => false,
-                    }
-                }
-                if_stmt.branches.iter().any(|(_, b)| branch_ends_optional(b))
-                    || if_stmt.else_body.as_ref().map(|b| branch_ends_optional(b)).unwrap_or(false)
-            });
+            || self.expr_produces_optional(e);
         if already_opt { raw } else { format!("Some({})", raw) }
     }
 

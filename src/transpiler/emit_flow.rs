@@ -75,28 +75,7 @@ impl Transpiler {
                     let inner = self.emit_expr_owned(e);
                     // Check if the return expression is already an Option.
                     let already_opt = inner.starts_with("Some(") || inner == "None"
-                        || is_try_optional(e)
-                        || matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
-                        || matches!(&e.kind, ExprKind::Var(v) if self.local_type(v.as_str())
-                            .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
-                        || matches!(&e.kind, ExprKind::Call(callee, _)
-                            if matches!(&callee.kind, ExprKind::Var(fn_name)
-                                if self.fn_return_types.get(fn_name.as_str())
-                                    .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
-                        || (inner.ends_with("?") && matches!(&e.kind, ExprKind::Call(_, _)))
-                        || matches!(&e.kind, ExprKind::MethodCall(recv, method, _)
-                            if matches!(&recv.kind, ExprKind::Var(v)
-                                if self.local_struct(v).as_ref().map(|sty| {
-                                    self.struct_method_return_types
-                                        .get(&format!("{}::{}", sty, method))
-                                        .map(|t| matches!(t, Type::Optional(_)))
-                                        .unwrap_or(false)
-                                }).unwrap_or(false)))
-                        // Field read of a `T?`-declared field, or a call/method-call whose own
-                        // declared return type is `T?` (any receiver shape — see emit_stmt.rs's
-                        // tail-return twin of this check and `expr_is_declared_optional`'s doc).
-                        // See docs/option-return-double-some-wrap-bug.md.
-                        || self.expr_is_declared_optional(e);
+                        || self.expr_produces_optional(e);
                     if already_opt { inner } else { format!("Some({})", inner) }
                 } else if matches!(&self.fn_return_ty, Some(Type::Array(_)))
                     && !self.in_req_fn

@@ -775,7 +775,9 @@ impl Transpiler {
             // The clone-or-move decision of each by-value read of a local (`last_use.rs`) is a function of the
             // body alone: known before emission. Two bodies of one scope (overloads) are bound to none.
             {
-                let sites = crate::transpiler::last_use::last_use_sites(&f.params, &f.body);
+                let f_lu = self.with_inferred_trait_borrows(f, self_ty);
+                let f_ref = f_lu.as_ref().unwrap_or(f);
+                let sites = crate::transpiler::last_use::last_use_sites(&f_ref.params, &f_ref.body);
                 let mut lu = self.last_use_table.borrow_mut();
                 match lu.get(&scope) {
                     Some(prev) if prev.as_ref() != Some(&sites) => { lu.insert(scope.clone(), None); }
@@ -2321,6 +2323,7 @@ impl Transpiler {
         let prev_var_mutex_task_types = std::mem::take(&mut self.var_mutex_task_types);
         let prev_var_rwlock_types  = std::mem::take(&mut self.var_rwlock_types);
         let prev_known_local_vars  = std::mem::take(&mut self.known_local_vars);
+        let prev_ref_bound_vars    = std::mem::take(&mut self.ref_bound_vars);
         self.fn_handle_vars.clear();
         let prev_optional_vars    = std::mem::take(&mut self.optional_vars);
         let prev_var_types        = std::mem::take(&mut self.var_types);
@@ -2550,6 +2553,7 @@ impl Transpiler {
         self.var_mutex_task_types = prev_var_mutex_task_types;
         self.var_rwlock_types  = prev_var_rwlock_types;
         self.known_local_vars  = prev_known_local_vars;
+        self.ref_bound_vars    = prev_ref_bound_vars;
         self.optional_vars     = prev_optional_vars;
         self.var_types         = prev_var_types;
         self.string_vars       = prev_string_vars;
@@ -2987,6 +2991,55 @@ impl Transpiler {
         self.last_use_sites.contains(&(format!("{}{}", crate::transpiler::last_use::REUSED_PREFIX, v), expr.line, expr.col))
     }
 
+    /// True when `v` is currently a Rust reference (`&T` / `&mut T`), e.g. a borrowed/rebindable
+    /// parameter or a pattern variable bound by matching a reference.
+    pub(crate) fn is_ref_binding(&self, v: &str) -> bool {
+        if self.ref_bound_vars.contains(v)
+            || self.dyn_borrowed_vars.borrow().contains(v)
+            || self.fn_current_params_lent.contains(v)
+            || self.fn_current_params_rebind_only.contains(v)
+        {
+            return true;
+        }
+        if let Some(ty) = self.fn_current_params.get(v) {
+            if matches!(
+                ty.without_mut(),
+                Type::Qualified(
+                    _,
+                    OwnerQual::Borrow
+                        | OwnerQual::BorrowMut
+                        | OwnerQual::BorrowOwned
+                        | OwnerQual::BorrowOption
+                        | OwnerQual::BorrowOptionMut
+                        | OwnerQual::BorrowWeak
+                        | OwnerQual::BorrowShared
+                        | OwnerQual::Actor
+                        | OwnerQual::ActorTask
+                        | OwnerQual::Guard
+                        | OwnerQual::GuardTask
+                        | OwnerQual::Observed
+                )
+            ) {
+                return true;
+            }
+            if matches!(
+                self.decided_qual(v).as_ref(),
+                Some(
+                    OwnerQual::Borrow
+                        | OwnerQual::BorrowMut
+                        | OwnerQual::Actor
+                        | OwnerQual::ActorTask
+                        | OwnerQual::Guard
+                        | OwnerQual::GuardTask
+                        | OwnerQual::Observed
+                )
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn is_last_use_move(&self, expr: &Expr) -> bool {
         let ExprKind::Var(v) = &expr.kind else { return false };
         self.last_use_sites.contains(&(v.clone(), expr.line, expr.col))
@@ -3082,6 +3135,11 @@ impl Transpiler {
                 }
                 // Field read through an `'actor`/`'guard` struct field: `emit_expr` locks and clones.
                 if self.resolve_lock_field_ref(obj).is_some() {
+                    return self.emit_expr(expr);
+                }
+                // `arr[idx].field` / `dict[key].field` fusion: `emit_expr` projects `.field`
+                // directly out of the indexed place and clones only the field.
+                if matches!(&obj.kind, ExprKind::Index(..)) {
                     return self.emit_expr(expr);
                 }
                 let obj_s = self.emit_expr(obj);

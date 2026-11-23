@@ -681,6 +681,13 @@ impl Parser {
             // Same-line elif/else
             loop {
                 if self.check(&TokenKind::Elif) {
+                    if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Let) {
+                        let elif_line = self.line();
+                        let elif_col = self.col();
+                        self.advance();
+                        else_body = Some(vec![Stmt::IfLet(self.parse_if_let_tail(elif_line, elif_col)?)]);
+                        break;
+                    }
                     self.advance();
                     let saved = self.allow_noparen_closure;
                     self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -703,6 +710,13 @@ impl Parser {
                 loop {
                     self.skip_newlines();
                     if self.check(&TokenKind::Elif) {
+                        if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Let) {
+                            let elif_line = self.line();
+                            let elif_col = self.col();
+                            self.advance();
+                            else_body = Some(vec![Stmt::IfLet(self.parse_if_let_tail(elif_line, elif_col)?)]);
+                            break;
+                        }
                         self.advance();
                         let saved = self.allow_noparen_closure;
                         self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -738,6 +752,13 @@ impl Parser {
         loop {
             self.skip_newlines();
             if self.check(&TokenKind::Elif) {
+                if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Let) {
+                    let elif_line = self.line();
+                    let elif_col = self.col();
+                    self.advance();
+                    else_body = Some(vec![Stmt::IfLet(self.parse_if_let_tail(elif_line, elif_col)?)]);
+                    break;
+                }
                 self.advance();
                 let saved_elif = self.allow_noparen_closure;
                 self.allow_noparen_closure = false; self.allow_trailing_closure = false;
@@ -834,6 +855,12 @@ impl Parser {
         let line = self.line();
         let col = self.col();
         self.expect(&TokenKind::If)?;
+        self.parse_if_let_tail(line, col)
+    }
+
+    /// Parse the clauses, body, and trailing `elif`/`else` chain of an `if let`
+    /// or `elif let` (after the leading `If` or `Elif` token has been consumed).
+    fn parse_if_let_tail(&mut self, line: usize, col: usize) -> Result<IfLetStmt, ParseError> {
         // Parse one or more comma-separated clauses until `:`
         let clauses = self.parse_cond_clauses(&TokenKind::Colon)?;
         self.expect(&TokenKind::Colon)?;

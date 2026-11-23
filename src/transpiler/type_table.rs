@@ -1194,20 +1194,58 @@ impl super::Transpiler {
         }
     }
 
-    /// Whether the local `v` is held as a plain owned value, not behind a lock or a counted handle, and is not a
-    /// parameter: the representation half of `is_last_use_move` (a `Var` the analysis found last-used may only be
-    /// moved when it is). The emitter answers from its sets (`arc_vars`, `var_mutex_types`, `var_primitive_params`,
-    /// `fn_current_params`); the decisions pass says the same through `decision_table` (the qualifier chosen for the
-    /// local) and the signature. `check` compares the two per read (`LASTUSEREPMISMATCH`).
+    /// Whether `v` is held as a plain owned value, not behind a lock, reference, or counted handle:
+    /// the representation half of `is_last_use_move` (a `Var` the analysis found last-used may only
+    /// be moved when it is). The emitter answers from its sets (`arc_vars`, `var_mutex_types`,
+    /// `var_rwlock_types`, `var_primitive_params`, `fn_current_params`, `inferred_qualifiers`,
+    /// `ref_bound_vars`); the decisions pass says the same through `decision_table` (the qualifier
+    /// chosen for the local/param) and the signature. `check` compares the two per read (`LASTUSEREPMISMATCH`).
     pub(crate) fn last_use_representation_ok(&self, v: &str) -> bool {
-        let own = !self.arc_vars.contains(v)
-            && !self.var_mutex_types.contains(v)
-            && !self.var_primitive_params.contains(v)
-            && !self.fn_current_params.contains_key(v);
+        let param_ty = self.fn_current_params.get(v);
+        let param_explicit_non_owned = param_ty.is_some_and(|t| matches!(
+            t.without_mut(),
+            Type::Qualified(
+                _,
+                OwnerQual::Borrow
+                    | OwnerQual::BorrowMut
+                    | OwnerQual::BorrowOwned
+                    | OwnerQual::BorrowOption
+                    | OwnerQual::BorrowOptionMut
+                    | OwnerQual::BorrowWeak
+                    | OwnerQual::BorrowShared
+                    | OwnerQual::Actor
+                    | OwnerQual::ActorTask
+                    | OwnerQual::Guard
+                    | OwnerQual::GuardTask
+                    | OwnerQual::Observed
+                    | OwnerQual::Shared
+                    | OwnerQual::Weak
+                    | OwnerQual::Atomic
+            )
+        ));
+        let common_blocked = self.arc_vars.contains(v)
+            || self.var_mutex_types.contains(v)
+            || self.var_rwlock_types.contains(v)
+            || self.var_primitive_params.contains(v)
+            || self.fn_current_params_lent.contains(v)
+            || self.fn_current_params_rebind_only.contains(v)
+            || self.ref_bound_vars.contains(v)
+            || self.dyn_borrowed_vars.borrow().contains(v)
+            || param_explicit_non_owned;
+        let own = !common_blocked
+            && (param_ty.is_none()
+                || matches!(
+                    self.inferred_qualifiers.get(v),
+                    None | Some(OwnerQual::Inline | OwnerQual::Owned)
+                ));
         if !matches!(self.type_table_mode, TypeTableMode::Check | TypeTableMode::Walk) { return own; }
         let decided = self.decision_table.borrow().get(&(self.type_scope.clone(), v.to_string())).cloned();
-        let by_decision = !self.fn_current_params.contains_key(v)
-            && !matches!(decided, Some(OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Atomic | OwnerQual::Shared | OwnerQual::ActorTask | OwnerQual::GuardTask));
+        let by_decision = !common_blocked
+            && if param_ty.is_some() {
+                matches!(decided, None | Some(OwnerQual::Inline | OwnerQual::Owned))
+            } else {
+                !matches!(decided, Some(OwnerQual::Actor | OwnerQual::Guard | OwnerQual::Atomic | OwnerQual::Shared | OwnerQual::ActorTask | OwnerQual::GuardTask))
+            };
         if self.type_table_mode == TypeTableMode::Check {
             if !own { self.type_table.borrow_mut().rep_blocked += 1; }
             if by_decision == own { self.type_table.borrow_mut().rep_hits += 1; } else {

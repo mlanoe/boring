@@ -1275,6 +1275,9 @@ struct Transpiler {
     /// Declared return type of the current function, if known.
     /// Used to coerce last-expression returns with `Some()` when the return type is Optional.
     pub(crate) fn_return_ty: Option<Type>,
+    /// When true, an expression currently being emitted is expected to produce an Option<T>,
+    /// so non-optional branches in `if`/`match` expressions must be wrapped in `Some(...)`.
+    pub(crate) expected_optional: bool,
     /// Parameters of the current function (name → declared type).
     /// Set before emit_body; used by the qualifier inference pass for annotation hints
     /// and body-compatibility checks on union-qualified parameters.
@@ -1301,9 +1304,13 @@ struct Transpiler {
     /// demand may resolve them, never the size/priority fallback for an unconstrained candidate set.
     pub(crate) unlent_probe: std::collections::HashSet<String>,
     /// `(name, line, col)` of the `Var` occurrences in the function being emitted that are the
-    /// provably last use of their (owned, let-bound) variable — by-value reads there may be a
+    /// provably last use of their (owned) variable — by-value reads there may be a
     /// Rust move instead of a `.clone()`. See `last_use.rs`; empty outside a function body.
     pub(crate) last_use_sites: last_use::LastUseSites,
+    /// Pattern-bound variables (in `match` / `if let`) that are bound by reference in Rust
+    /// (e.g. from matching `self` or a borrowed parameter) and must therefore clone rather
+    /// than move when read by value.
+    pub(crate) ref_bound_vars: std::collections::HashSet<String>,
     /// Last-use sites by scope, made by the decisions pass (`None`: two bodies share the scope).
     pub(crate) last_use_table: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Option<last_use::LastUseSites>>>>,
     /// Local variables and parameters that are immutable (`let` binding, or plain param without
@@ -2105,6 +2112,7 @@ impl Transpiler {
             str_index_cache_vars: std::collections::HashSet::new(),
             impl_type_params: Vec::new(),
             fn_return_ty: None,
+            expected_optional: false,
             fn_current_params: std::collections::HashMap::new(),
             fn_current_param_lines: std::collections::HashMap::new(),
             fn_current_param_cols: std::collections::HashMap::new(),
@@ -2114,6 +2122,7 @@ impl Transpiler {
             unlent_method_params: std::collections::HashSet::new(),
             unlent_probe: std::collections::HashSet::new(),
             last_use_sites: std::collections::HashSet::new(),
+            ref_bound_vars: std::collections::HashSet::new(),
             last_use_table: Default::default(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),

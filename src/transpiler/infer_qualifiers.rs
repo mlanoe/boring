@@ -90,19 +90,21 @@ impl Transpiler {
                 // uses as `Type::TypeParam` (the implicit-generic spelling); when such a
                 // struct is actually declared, treat it as the named type it refers to.
                 Type::Named(n) | Type::TypeParam(n) if self.type_sizes.contains_key(n.as_str())
-                    || self.all_struct_types.contains(n.as_str()) => {
+                    || self.all_struct_types.contains(n.as_str())
+                    || self.all_enum_types.contains(n.as_str()) => {
                     anonymous_vars.insert(name.clone());
                     // Track the struct/enum type name so resolve_fallback knows it's a user struct type.
                     var_struct_types.insert(name.clone(), n.clone());
                     // Eligible for auto-ref inference — free functions only, known-size types only.
-                    // Structs with dynamic fields (arrays/dicts/sets: in all_struct_types but not
-                    // type_sizes) are eligible too — they benefit most, since a by-value param
-                    // would be cloned at every call site. Actor-source types (some function
-                    // returns `T'actor`/`T'guard`) stay excluded: bare `T` params of those
-                    // default to 'actor propagation instead.
+                    // Structs and enums with dynamic fields (arrays/dicts/sets: in
+                    // all_struct_types/all_enum_types but not type_sizes) are eligible too — they
+                    // benefit most, since a by-value param would be cloned at every call site.
+                    // Actor-source types (some function returns `T'actor`/`T'guard`) stay excluded:
+                    // bare `T` params of those default to 'actor propagation instead.
                     if !self.in_struct_method
                         && (self.type_sizes.contains_key(n.as_str())
-                            || (self.all_struct_types.contains(n.as_str())
+                            || ((self.all_struct_types.contains(n.as_str())
+                                || self.all_enum_types.contains(n.as_str()))
                                 && !self.actor_source_types.contains(n.as_str())))
                     {
                         auto_ref_param_vars.insert(name.clone());
@@ -389,16 +391,17 @@ impl Transpiler {
             );
         }
 
-        // Tail-expression inference: bare variable as last expression inherits return qualifier.
-        if let Some(ref rq) = return_qual {
-            if let Some(Stmt::Expr(e)) = stmts.iter().rev().find(|s| !matches!(s, Stmt::Defer(_))) {
-                if let ExprKind::Var(name) = &e.kind {
+        // Tail-expression inference: bare variable as last expression inherits return qualifier,
+        // and any bare parameter returned by value escapes (suppresses auto-ref).
+        if let Some(Stmt::Expr(e)) = stmts.iter().rev().find(|s| !matches!(s, Stmt::Defer(_))) {
+            if let ExprKind::Var(name) = &e.kind {
+                if let Some(ref rq) = return_qual {
                     if anonymous_vars.contains(name.as_str()) {
                         constrain_candidates(&mut candidates, name, std::slice::from_ref(rq), &alias_of);
-                        if auto_ref_param_vars.contains(name.as_str()) {
-                            has_qualifier_constraint.insert(name.clone());
-                        }
+                        mark_param_escapes(name, &alias_of, &auto_ref_param_vars, &mut has_qualifier_constraint);
                     }
+                } else if self.fn_return_ty.is_some() {
+                    mark_param_escapes(name, &alias_of, &auto_ref_param_vars, &mut has_qualifier_constraint);
                 }
             }
         }
@@ -594,13 +597,13 @@ impl Transpiler {
             }
             Stmt::Return(r) => {
                 if let Some(e) = &r.value {
-                    if let (Some(rq), ExprKind::Var(name)) = (return_qual, &e.kind) {
-                        if anonymous_vars.contains(name.as_str()) {
-                            constrain_candidates(candidates, name, std::slice::from_ref(rq), alias_of);
-                            if auto_ref_param_vars.contains(name.as_str()) {
-                                has_qualifier_constraint.insert(name.clone());
+                    if let ExprKind::Var(name) = &e.kind {
+                        if let Some(rq) = return_qual {
+                            if anonymous_vars.contains(name.as_str()) {
+                                constrain_candidates(candidates, name, std::slice::from_ref(rq), alias_of);
                             }
                         }
+                        mark_param_escapes(name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                     }
                     self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 }
@@ -748,14 +751,39 @@ impl Transpiler {
                                 if anonymous_vars.contains(v.as_str()) {
                                     self.unresolved_call_args.entry(v.clone()).or_insert_with(|| fn_name.clone());
                                 }
+                                // Unresolved callee (e.g. enum variant ctor, Some(d), closure param):
+                                // conservatively treat the argument as escaping by value.
+                                mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                             }
                         }
                     }
                     if let Some(param_types) = param_types {
                         for (i, arg) in args.iter().enumerate() {
                             let Some(param_ty) = param_types.get(i) else { continue };
-                            let Some(demanded) = qual_of_type(param_ty) else { continue };
                             let ExprKind::Var(var_name) = &arg.value.kind else { continue };
+                            let is_borrowed_param = matches!(
+                                param_ty.without_mut(),
+                                Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut
+                                    | OwnerQual::BorrowShared | OwnerQual::BorrowOption
+                                    | OwnerQual::BorrowOptionMut | OwnerQual::BorrowOwned
+                                    | OwnerQual::BorrowWeak)
+                            );
+                            if is_borrowed_param {
+                                continue;
+                            }
+                            let Some(demanded) = qual_of_type(param_ty) else {
+                                // Callee takes this parameter by value (no Borrow or owner qualifier):
+                                // if it's a non-primitive type, the argument escapes / is consumed.
+                                if matches!(
+                                    param_ty.without_mut(),
+                                    Type::Named(_) | Type::TypeParam(_) | Type::Array(_)
+                                        | Type::Dict(_, _) | Type::Set(_) | Type::Tuple(_)
+                                        | Type::Optional(_)
+                                ) {
+                                    mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                                }
+                                continue;
+                            };
                             if anonymous_vars.contains(var_name.as_str()) {
                                 // Cross-function propagation (docs/qualifiers.md's "Inferring
                                 // 'actor'task/'guard'task"): the callee's own signature already
@@ -810,15 +838,15 @@ impl Transpiler {
                                 constrain_candidates(candidates, var_name, &compatible, alias_of);
                                 // A concrete qualifier demand (not Borrow/BorrowMut) is a
                                 // qualifier-demand signal: auto-ref inference does not apply.
-                                if auto_ref_param_vars.contains(var_name.as_str())
-                                    && !matches!(demanded, OwnerQual::Borrow | OwnerQual::BorrowMut) {
-                                        has_qualifier_constraint.insert(var_name.clone());
-                                    }
+                                if !matches!(demanded, OwnerQual::Borrow | OwnerQual::BorrowMut) {
+                                    mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                                }
                             }
                         }
                     }
-                    // Struct constructor call: `Env(parent = x, ...)` — constrain named args
-                    // by the corresponding struct field's declared qualifier.
+                    // Struct constructor call: `Env(parent = x, ...)` or positional `Boxed(x)` —
+                    // storing a parameter in a struct field escapes it, and named args also
+                    // constrain by the corresponding struct field's declared qualifier.
                     let is_struct_ctor = fn_name.chars().next()
                         .map(|c| c.is_uppercase()).unwrap_or(false)
                         && self.struct_fields.contains_key(fn_name.as_str());
@@ -838,6 +866,7 @@ impl Transpiler {
                                     } else { (None, &arg.value) }
                                 } else { (None, &arg.value) };
                             let ExprKind::Var(var_name) = &val_expr.kind else { continue };
+                            mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                             if !anonymous_vars.contains(var_name.as_str()) { continue; }
                             let Some(field_name) = field_name_opt else { continue };
                             let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == field_name) else { continue };
@@ -1059,6 +1088,104 @@ impl Transpiler {
                                 self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates, auto_ref_param_vars, has_qualifier_constraint);
                             }
                         }
+                    }
+                }
+            }
+            ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
+                for elem in elems {
+                    if let ExprKind::Var(v) = &elem.kind {
+                        mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                    }
+                    self.walk_expr_for_qualifiers(elem, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::ArrayFill { value, count } => {
+                if let ExprKind::Var(v) = &value.kind {
+                    mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                self.walk_expr_for_qualifiers(value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.walk_expr_for_qualifiers(count, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            ExprKind::Dict(pairs) => {
+                for (k, v) in pairs {
+                    if let ExprKind::Var(vn) = &k.kind {
+                        mark_param_escapes(vn, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                    }
+                    if let ExprKind::Var(vn) = &v.kind {
+                        mark_param_escapes(vn, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                    }
+                    self.walk_expr_for_qualifiers(k, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                    self.walk_expr_for_qualifiers(v, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::Field(obj, _) | ExprKind::OptionalField(obj, _) | ExprKind::Cast(obj, _) | ExprKind::RelabelCast(obj, _) => {
+                self.walk_expr_for_qualifiers(obj, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            ExprKind::Index(obj, idx) | ExprKind::TryElse(obj, idx) | ExprKind::Else(obj, idx) => {
+                self.walk_expr_for_qualifiers(obj, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.walk_expr_for_qualifiers(idx, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            ExprKind::LabeledIndex(obj, args) | ExprKind::OptionalMethodCall(obj, _, args) => {
+                self.walk_expr_for_qualifiers(obj, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                for arg in args {
+                    self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::Pipe(lhs, _, args) => {
+                self.walk_expr_for_qualifiers(lhs, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                for arg in args {
+                    self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::GenericCall(callee, _, args) => {
+                self.walk_expr_for_qualifiers(callee, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                for arg in args {
+                    self.walk_expr_for_qualifiers(&arg.value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::Block(stmts) | ExprKind::Do(stmts) => {
+                for st in stmts {
+                    self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::TryElseBlock(b1, b2) => {
+                for st in b1 {
+                    self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                for st in b2 {
+                    self.walk_stmt_for_qualifiers(st, anonymous_vars, var_struct_types, alias_of, None, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::Range { start, end, .. } => {
+                self.walk_expr_for_qualifiers(start, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.walk_expr_for_qualifiers(end, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            ExprKind::SliceRange { start, end, .. } => {
+                if let Some(s) = start {
+                    self.walk_expr_for_qualifiers(s, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+                if let Some(e) = end {
+                    self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::ArrayComp { expr, count, .. } => {
+                self.walk_expr_for_qualifiers(expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.walk_expr_for_qualifiers(count, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            ExprKind::ArrayCompIter { expr, iter, .. } => {
+                self.walk_expr_for_qualifiers(expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                self.walk_expr_for_qualifiers(iter, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+            }
+            ExprKind::LabeledArrayComp { expr, clauses } => {
+                self.walk_expr_for_qualifiers(expr, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                for (_, c) in clauses {
+                    self.walk_expr_for_qualifiers(c, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
+                }
+            }
+            ExprKind::StringInterp(segs) => {
+                for seg in segs {
+                    if let crate::ast::StringSegment::Expr(e) = seg {
+                        self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                     }
                 }
             }
@@ -1883,6 +2010,21 @@ impl Transpiler {
 
 /// Intersect the candidate set for `var_name` (and its aliases) with `compatible`.
 /// Qualifiers not in `compatible` are eliminated.
+fn mark_param_escapes(
+    var_name: &str,
+    alias_of: &std::collections::HashMap<String, String>,
+    auto_ref_param_vars: &std::collections::HashSet<String>,
+    has_qualifier_constraint: &mut std::collections::HashSet<String>,
+) {
+    let root = alias_of.get(var_name).map(|s| s.as_str()).unwrap_or(var_name);
+    if auto_ref_param_vars.contains(root) {
+        has_qualifier_constraint.insert(root.to_string());
+    }
+    if auto_ref_param_vars.contains(var_name) {
+        has_qualifier_constraint.insert(var_name.to_string());
+    }
+}
+
 fn constrain_candidates(
     candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     var_name: &str,

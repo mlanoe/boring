@@ -1285,3 +1285,4 @@ interp_test!(optional_builtin_stored);
 interp_test!(optional_hole_untyped_let);
 interp_test!(optional_reassign_untyped_var);
 interp_test!(dict_untyped_index_optional_arg);
+interp_test!(optional_if_coercion);

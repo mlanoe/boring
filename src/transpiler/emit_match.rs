@@ -82,6 +82,15 @@ impl Transpiler {
         // to the end of the enclosing function and needs no cleanup at all.
         let scope = self.register_if_let_clause_bindings(&s.clauses);
         let cond_s = self.emit_cond_clauses(&s.clauses);
+        for c in &s.clauses {
+            if let CondClause::Let(name, expr) = c {
+                if let ExprKind::Var(vname) = &expr.kind {
+                    if self.is_ref_binding(vname) && !cond_s.contains(&format!("{}.clone()", vname)) {
+                        self.ref_bound_vars.insert(name.clone());
+                    }
+                }
+            }
+        }
         let header_at = self.out.len();
         self.line(&format!("if {} {{", cond_s));
         self.indent += 1;
@@ -97,6 +106,15 @@ impl Transpiler {
         for branch in &s.elif_branches {
             let scope = self.register_if_let_clause_bindings(&branch.clauses);
             let elif_cond_s = self.emit_cond_clauses(&branch.clauses);
+            for c in &branch.clauses {
+                if let CondClause::Let(name, expr) = c {
+                    if let ExprKind::Var(vname) = &expr.kind {
+                        if self.is_ref_binding(vname) && !elif_cond_s.contains(&format!("{}.clone()", vname)) {
+                            self.ref_bound_vars.insert(name.clone());
+                        }
+                    }
+                }
+            }
             self.line(&format!("}} else if {} {{", elif_cond_s));
             self.indent += 1;
             if use_value_body {
@@ -395,6 +413,7 @@ impl Transpiler {
         self.var_rwlock_types.remove(name);
         self.managed_refcell_vars.remove(name);
         self.managed_mutex_vars.remove(name);
+        self.ref_bound_vars.remove(name);
     }
 
     pub(crate) fn emit_cond_clauses(&self, clauses: &[CondClause]) -> String {
@@ -832,6 +851,17 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_match(&mut self, s: &MatchStmt, is_last: bool) {
+        let has_nil_arm = s.arms.iter().any(|arm| match &arm.body {
+            MatchBody::Expr(e) => matches!(&e.kind, ExprKind::Nil),
+            MatchBody::Block(stmts) => matches!(stmts.last(), Some(Stmt::Expr(e)) if matches!(&e.kind, ExprKind::Nil)),
+        });
+        let has_opt_arm = s.arms.iter().any(|arm| match &arm.body {
+            MatchBody::Expr(e) => self.expr_produces_optional(e),
+            MatchBody::Block(stmts) => self.body_produces_optional(stmts),
+        });
+        let is_optional_match = is_last && !self.fn_returns_void && (self.expected_optional || has_nil_arm || has_opt_arm);
+        let prev_expected_opt = self.expected_optional;
+        self.expected_optional = is_optional_match;
         // ── Special case: `match error:` with qualified enum-variant patterns ────────
         //
         // In the interpreter, `error` is the original thrown value (e.g. MyError::NotFound).
@@ -926,7 +956,13 @@ impl Transpiler {
                             MatchBody::Expr(e) => {
                                 if use_value_body {
                                     let val = self.emit_expr_owned(e);
-                                    self.line(&val);
+                                    if self.expected_optional && !self.expr_produces_optional(e) && val != "None" && !val.starts_with("Some(") {
+                                        self.line(&format!("Some({})", val));
+                                    } else if matches!(&e.kind, ExprKind::Nil) {
+                                        self.line("None");
+                                    } else {
+                                        self.line(&val);
+                                    }
                                 } else {
                                     let val = self.emit_expr_owned(e);
                                     self.line(&format!("{};", val));
@@ -934,7 +970,11 @@ impl Transpiler {
                             }
                             MatchBody::Block(stmts) => {
                                 if use_value_body {
-                                    self.emit_body(stmts);
+                                    if self.expected_optional {
+                                        self.emit_body_optional_last(stmts);
+                                    } else {
+                                        self.emit_body(stmts);
+                                    }
                                 } else {
                                     self.emit_loop_body(stmts);
                                 }
@@ -945,6 +985,7 @@ impl Transpiler {
                     }
                     self.indent -= 1;
                     self.line("}");
+                    self.expected_optional = prev_expected_opt;
                     return;
                 }
             }
@@ -1018,14 +1059,24 @@ impl Transpiler {
                         MatchBody::Expr(e) => {
                             let expr_s = self.emit_expr(e);
                             if use_value_body {
-                                self.line(&expr_s);
+                                if self.expected_optional && !self.expr_produces_optional(e) && expr_s != "None" && !expr_s.starts_with("Some(") {
+                                    self.line(&format!("Some({})", expr_s));
+                                } else if matches!(&e.kind, ExprKind::Nil) {
+                                    self.line("None");
+                                } else {
+                                    self.line(&expr_s);
+                                }
                             } else {
                                 self.line(&format!("{};", expr_s));
                             }
                         }
                         MatchBody::Block(stmts) => {
                             if use_value_body {
-                                self.emit_body(stmts);
+                                if self.expected_optional {
+                                    self.emit_body_optional_last(stmts);
+                                } else {
+                                    self.emit_body(stmts);
+                                }
                             } else {
                                 self.emit_loop_body(stmts);
                             }
@@ -1041,14 +1092,24 @@ impl Transpiler {
                         MatchBody::Expr(e) => {
                             let expr_s = self.emit_expr(e);
                             if use_value_body {
-                                self.line(&expr_s);
+                                if self.expected_optional && !self.expr_produces_optional(e) && expr_s != "None" && !expr_s.starts_with("Some(") {
+                                    self.line(&format!("Some({})", expr_s));
+                                } else if matches!(&e.kind, ExprKind::Nil) {
+                                    self.line("None");
+                                } else {
+                                    self.line(&expr_s);
+                                }
                             } else {
                                 self.line(&format!("{};", expr_s));
                             }
                         }
                         MatchBody::Block(stmts) => {
                             if use_value_body {
-                                self.emit_body(stmts);
+                                if self.expected_optional {
+                                    self.emit_body_optional_last(stmts);
+                                } else {
+                                    self.emit_body(stmts);
+                                }
                             } else {
                                 self.emit_loop_body(stmts);
                             }
@@ -1058,6 +1119,7 @@ impl Transpiler {
                 }
             }
             self.line("}");
+            self.expected_optional = prev_expected_opt;
             return;
         }
 
@@ -1195,15 +1257,19 @@ impl Transpiler {
         // by-reference parameter) still needs it, since there the bound field is an owned
         // value moved out of the match, and Rust requires `let mut` to take `&mut` of it.
         let subject_is_self = subj == "self";
+        let subject_is_ref = subject_is_self
+            || matches!(&s.subject.kind, ExprKind::Var(vname) if subj == *vname && self.is_ref_binding(vname))
+            || (is_smart_ptr && !matches!(&subj_ty, Some(Type::Qualified(_, OwnerQual::Owned))));
         self.line(&format!("match {} {{", subj));
         self.indent += 1;
         for arm in arms_ref {
-            self.emit_match_arm(arm, use_value_body, subject_is_self);
+            self.emit_match_arm(arm, use_value_body, subject_is_self, subject_is_ref);
         }
         self.indent -= 1;
         self.line("}");
 
         self.match_subject_enum = prev_match_enum;
+        self.expected_optional = prev_expected_opt;
     }
 
     /// Infer the enum name for a match subject so we can qualify variant patterns.
@@ -1305,11 +1371,19 @@ impl Transpiler {
         }
     }
 
-    pub(crate) fn emit_match_arm(&mut self, arm: &MatchArm, use_value_body: bool, subject_is_self: bool) {
+    pub(crate) fn emit_match_arm(&mut self, arm: &MatchArm, use_value_body: bool, subject_is_self: bool, subject_is_ref: bool) {
         // Collect bound variable names first so we can detect mutations in the arm body.
         let mut bound: Vec<String> = Vec::new();
         for p in &arm.patterns {
             Self::collect_pattern_bindings(p, &mut bound);
+        }
+        let mut newly_ref_bound: Vec<String> = Vec::new();
+        if subject_is_ref {
+            for b in &bound {
+                if self.ref_bound_vars.insert(b.clone()) {
+                    newly_ref_bound.push(b.clone());
+                }
+            }
         }
         // Infer types for match-arm bound variables from enum variant field types, ahead of
         // mutation detection below — resolving a bound name's struct type (e.g. a variant
@@ -1509,7 +1583,16 @@ impl Transpiler {
                 let prev_throws = self.in_throws;
                 self.in_throws = false;
                 let body_s = match &arm.body {
-                    MatchBody::Expr(e) => self.emit_expr(e),
+                    MatchBody::Expr(e) => {
+                        let expr_s = self.emit_expr(e);
+                        if self.expected_optional && !self.expr_produces_optional(e) && expr_s != "None" && !expr_s.starts_with("Some(") {
+                            format!("Some({})", expr_s)
+                        } else if matches!(&e.kind, ExprKind::Nil) {
+                            "None".to_string()
+                        } else {
+                            expr_s
+                        }
+                    }
                     MatchBody::Block(stmts) => {
                         // For block bodies we need a block expression.
                         let mut sub = self.make_sub();
@@ -1517,7 +1600,11 @@ impl Transpiler {
                         sub.fn_returns_void = self.fn_returns_void;
                         // Copy inner bound vars into sub.
                         for (n, t) in &inner_bound_types { sub.var_types.insert(n.clone(), t.clone()); }
-                        sub.emit_body(stmts);
+                        if self.expected_optional {
+                            sub.emit_body_optional_last(stmts);
+                        } else {
+                            sub.emit_body(stmts);
+                        }
                         sub.out.trim_end_matches('\n').to_string()
                     }
                 };
@@ -1537,22 +1624,17 @@ impl Transpiler {
         match &arm.body {
             MatchBody::Expr(e) => {
                 let expr_s = self.emit_expr(e);
-                // If the enclosing function returns Option<T>, wrap non-optional arm
-                // expressions in Some() so the caller doesn't need explicit `some(...)`.
-                let expr_s = if matches!(&self.fn_return_ty, Some(Type::Optional(_)))
-                    && !self.is_option_expr(e)
+                // If the enclosing function returns Option<T>, or match is in optional context,
+                // wrap non-optional arm expressions in Some() so the caller doesn't need explicit `some(...)`.
+                let expr_s = if (self.expected_optional || matches!(&self.fn_return_ty, Some(Type::Optional(_))))
+                    && !self.expr_produces_optional(e)
                     && expr_s != "None"
                     && !expr_s.starts_with("Some(")
                     && !matches!(&e.kind, ExprKind::Nil)
-                    && !matches!(&e.kind, ExprKind::Var(v) if self.optional_vars.contains(v.as_str()))
-                    && !matches!(&e.kind, ExprKind::Var(v) if self.local_type(v.as_str())
-                        .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false))
-                    && !matches!(&e.kind, ExprKind::Call(callee, _)
-                        if matches!(&callee.kind, ExprKind::Var(fn_name)
-                            if self.fn_return_types.get(fn_name.as_str())
-                                .map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)))
                 {
                     format!("Some({})", expr_s)
+                } else if matches!(&e.kind, ExprKind::Nil) {
+                    "None".to_string()
                 } else {
                     expr_s
                 };
@@ -1573,7 +1655,11 @@ impl Transpiler {
                 self.indent += 1;
                 for b in &boxed_bindings { self.line(b); }
                 if use_value_body {
-                    self.emit_body(stmts);
+                    if self.expected_optional {
+                        self.emit_body_optional_last(stmts);
+                    } else {
+                        self.emit_body(stmts);
+                    }
                 } else {
                     self.emit_loop_body(stmts);
                 }
@@ -1610,6 +1696,9 @@ impl Transpiler {
             else { self.var_mutex_task_types.remove(name.as_str()); }
         }
         // Remove actor tracking added for this arm (scoped to the arm body).
+        for name in &newly_ref_bound {
+            self.ref_bound_vars.remove(name.as_str());
+        }
         for name in &bound_actors {
             self.var_mutex_types.remove(name.as_str());
             self.managed_refcell_vars.remove(name.as_str());

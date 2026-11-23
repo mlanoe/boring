@@ -373,21 +373,99 @@ impl Transpiler {
                 .and_then(|item| self.resolve_expr_type(item))
                 .map(|ty| Type::Array(Box::new(ty))),
             // If-expression locals are common for selecting between resident
-            // GPU buffers.  Preserve a type only when every branch has a tail
-            // expression and all tails resolve to the same type.
+            // GPU buffers. Preserve a type when branches unify, treating mixed T and T? (or nil) as T?.
             ExprKind::If(if_stmt) => {
-                let tail_type = |body: &[Stmt]| match body.last() {
-                    Some(Stmt::Expr(tail)) => self.resolve_expr_type(tail),
-                    _ => None,
+                let tail_info = |body: &[Stmt]| -> (Option<Type>, bool) {
+                    match body.last() {
+                        Some(Stmt::Expr(e)) if matches!(&e.kind, ExprKind::Nil) => (None, true),
+                        Some(Stmt::Expr(tail)) => (self.resolve_expr_type(tail), false),
+                        _ => (None, false),
+                    }
                 };
-                let mut branch_types = if_stmt.branches.iter()
-                    .map(|(_, body)| tail_type(body));
-                let first = branch_types.next()??;
-                if !branch_types.all(|ty| ty.as_ref() == Some(&first)) {
+                let mut infos: Vec<(Option<Type>, bool)> = if_stmt.branches.iter()
+                    .map(|(_, body)| tail_info(body)).collect();
+                if let Some(eb) = &if_stmt.else_body {
+                    infos.push(tail_info(eb));
+                } else {
                     return None;
                 }
-                let else_ty = tail_type(if_stmt.else_body.as_deref()?)?;
-                (else_ty == first).then_some(first)
+                let mut non_nil_types = Vec::new();
+                let mut any_opt = false;
+                for (ty_opt, is_nil) in infos {
+                    if is_nil {
+                        any_opt = true;
+                    } else if let Some(ty) = ty_opt {
+                        non_nil_types.push(ty);
+                    } else {
+                        return None;
+                    }
+                }
+                if non_nil_types.is_empty() { return None; }
+                let mut inner_types = Vec::new();
+                for ty in &non_nil_types {
+                    if let Type::Optional(inner) = ty.without_mut() {
+                        any_opt = true;
+                        inner_types.push(inner.as_ref().clone());
+                    } else {
+                        inner_types.push(ty.clone());
+                    }
+                }
+                let first = inner_types.first()?.clone();
+                if inner_types.iter().all(|t| t == &first) {
+                    if any_opt {
+                        Some(Type::Optional(Box::new(first)))
+                    } else {
+                        Some(first)
+                    }
+                } else {
+                    None
+                }
+            }
+            ExprKind::Match(match_stmt) => {
+                let tail_info = |arm: &MatchArm| -> (Option<Type>, bool) {
+                    match &arm.body {
+                        MatchBody::Expr(e) if matches!(&e.kind, ExprKind::Nil) => (None, true),
+                        MatchBody::Expr(e) => (self.resolve_expr_type(e), false),
+                        MatchBody::Block(stmts) => match stmts.last() {
+                            Some(Stmt::Expr(e)) if matches!(&e.kind, ExprKind::Nil) => (None, true),
+                            Some(Stmt::Expr(e)) => (self.resolve_expr_type(e), false),
+                            _ => (None, false),
+                        },
+                    }
+                };
+                let infos: Vec<(Option<Type>, bool)> = match_stmt.arms.iter().map(tail_info).collect();
+                if infos.is_empty() { return None; }
+                let mut non_nil_types = Vec::new();
+                let mut any_opt = false;
+                for (ty_opt, is_nil) in infos {
+                    if is_nil {
+                        any_opt = true;
+                    } else if let Some(ty) = ty_opt {
+                        non_nil_types.push(ty);
+                    } else {
+                        return None;
+                    }
+                }
+                if non_nil_types.is_empty() { return None; }
+                let mut inner_types = Vec::new();
+                for ty in &non_nil_types {
+                    if let Type::Optional(inner) = ty.without_mut() {
+                        any_opt = true;
+                        inner_types.push(inner.as_ref().clone());
+                    } else {
+                        inner_types.push(ty.clone());
+                    }
+                }
+                let first = inner_types.first()?.clone();
+                if inner_types.iter().all(|t| t == &first) {
+                    if any_opt {
+                        Some(Type::Optional(Box::new(first)))
+                    } else {
+                        Some(first)
+                    }
+                } else {
+                    None
+                }
             }
             // `<T?-typed expr> else default` unwraps the optional to its inner `T`.
             ExprKind::Else(inner, _) => match self.resolve_expr_type(inner)? {
@@ -1126,6 +1204,82 @@ impl Transpiler {
                     .map(|t| matches!(t, Type::Optional(_)))
                     .unwrap_or(false))
                 .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Checks whether an arbitrary expression produces an `Option<T>` (or `nil` / `None`).
+    pub(crate) fn expr_produces_optional(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Nil => true,
+            _ if is_try_optional(expr) => true,
+            ExprKind::Call(callee, _) => {
+                if let ExprKind::Var(v) = &callee.kind {
+                    if v == "some" {
+                        return true;
+                    }
+                    if self.fn_return_types.get(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false) {
+                        return true;
+                    }
+                }
+                self.expr_is_declared_optional(expr)
+                    || matches!(self.resolve_expr_type(expr).as_ref().map(Type::without_mut), Some(Type::Optional(_)))
+            }
+            ExprKind::Var(v) => {
+                self.optional_vars.contains(v.as_str())
+                    || self.local_type(v.as_str()).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)
+                    || v.ends_with('?')
+                    || self.bare_self_field_type(v).map(|t| matches!(t, Type::Optional(_))).unwrap_or(false)
+            }
+            ExprKind::Field(obj, fname) => {
+                let sn = self.resolve_expr_struct_type(obj);
+                sn.and_then(|sn| self.struct_fields.get(sn.as_str()))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == fname))
+                    .map(|(_, ty)| matches!(ty, Type::Optional(_)))
+                    .unwrap_or(false)
+                    || self.expr_is_declared_optional(expr)
+                    || matches!(self.resolve_expr_type(expr).as_ref().map(Type::without_mut), Some(Type::Optional(_)))
+            }
+            ExprKind::MethodCall(recv, method, _) => {
+                if self.is_option_expr(expr) {
+                    return true;
+                }
+                if let Some(sn) = self.resolve_expr_struct_type(recv) {
+                    if self.struct_method_return_types
+                        .get(&format!("{}::{}", sn, method))
+                        .map(|t| matches!(t, Type::Optional(_)))
+                        .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                }
+                self.expr_is_declared_optional(expr)
+                    || matches!(self.resolve_expr_type(expr).as_ref().map(Type::without_mut), Some(Type::Optional(_)))
+            }
+            ExprKind::OptionalField(..) | ExprKind::OptionalMethodCall(..) => true,
+            ExprKind::If(if_stmt) => {
+                if_stmt.branches.iter().any(|(_, b)| self.body_produces_optional(b))
+                    || if_stmt.else_body.as_ref().map(|b| self.body_produces_optional(b)).unwrap_or(false)
+            }
+            ExprKind::Match(match_stmt) => {
+                match_stmt.arms.iter().any(|arm| match &arm.body {
+                    crate::ast::MatchBody::Expr(e) => self.expr_produces_optional(e),
+                    crate::ast::MatchBody::Block(stmts) => self.body_produces_optional(stmts),
+                })
+            }
+            ExprKind::Block(stmts) | ExprKind::Do(stmts) => self.body_produces_optional(stmts),
+            _ => {
+                self.is_option_expr(expr)
+                    || self.expr_is_declared_optional(expr)
+                    || matches!(self.resolve_expr_type(expr).as_ref().map(Type::without_mut), Some(Type::Optional(_)))
+            }
+        }
+    }
+
+    /// Checks whether the tail of a statement slice produces an `Option<T>` (or `nil` / `None`).
+    pub(crate) fn body_produces_optional(&self, body: &[Stmt]) -> bool {
+        match body.last() {
+            Some(Stmt::Expr(e)) => self.expr_produces_optional(e),
             _ => false,
         }
     }
@@ -6221,6 +6375,8 @@ impl Transpiler {
                     // A closure-typed parameter (`impl FnMut`) isn't `Clone`: forwarding moves it.
                     && !matches!(&a.value.kind, ExprKind::Var(vname) if self.fn_current_params.get(vname.as_str())
                         .is_some_and(|t| self.resolve_fn_field_type(t).is_some()))
+                    // Last use of an owned local/param/pattern-binding: move it instead of cloning.
+                    && !self.is_last_use_move(&a.value)
                     // Borrow params take a reference — no clone needed, the Borrow branch adds `&`.
                     && !matches!(param_ty, Some(Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)));
                 let emitted = if emitted_needs_clone {
@@ -8175,6 +8331,7 @@ impl Transpiler {
             string_arc_vars: self.string_arc_vars.clone(),
             impl_type_params: self.impl_type_params.clone(),
             fn_return_ty: self.fn_return_ty.clone(),
+            expected_optional: self.expected_optional,
             newtype_types: self.newtype_types.clone(),
             newtype_inner: self.newtype_inner.clone(),
             var_newtype_type: self.var_newtype_type.clone(),
@@ -8313,6 +8470,7 @@ impl Transpiler {
             unlent_method_params: self.unlent_method_params.clone(),
             unlent_probe: std::collections::HashSet::new(),
             last_use_sites: self.last_use_sites.clone(),
+            ref_bound_vars: self.ref_bound_vars.clone(),
             last_use_table: self.last_use_table.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),
             mut_local_vars: self.mut_local_vars.clone(),

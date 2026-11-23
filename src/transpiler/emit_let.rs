@@ -1309,30 +1309,17 @@ impl Transpiler {
         }
         // If-expression or match-expression with nil/some branches already produces Option<T>.
         if s.ty.is_none() {
-            fn body_ends_optional_sv(body: &[Stmt], fn_return_types: &std::collections::HashMap<String, crate::ast::Type>) -> bool {
-                match body.last() {
-                    Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
-                        || matches!(&e.kind, ExprKind::Call(callee, _)
-                            if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
-                        // Call to a function returning Optional
-                        || matches!(&e.kind, ExprKind::Call(callee, _)
-                            if matches!(&callee.kind, ExprKind::Var(fn_name)
-                                if fn_return_types.get(fn_name.as_str())
-                                    .map(|t| matches!(t, crate::ast::Type::Optional(_))).unwrap_or(false))),
-                    _ => false,
-                }
-            }
             if let ExprKind::If(if_stmt) = &s_value.kind {
-                let is_opt = if_stmt.branches.iter().any(|(_, b)| body_ends_optional_sv(b, &self.fn_return_types))
-                    || if_stmt.else_body.as_ref().map(|b| body_ends_optional_sv(b, &self.fn_return_types)).unwrap_or(false);
+                let is_opt = if_stmt.branches.iter().any(|(_, b)| self.body_produces_optional(b))
+                    || if_stmt.else_body.as_ref().map(|b| self.body_produces_optional(b)).unwrap_or(false);
                 if is_opt { self.optional_vars.insert(s.name.clone()); }
             }
-            // Match-expression with a nil arm also produces Option<T>.
+            // Match-expression with a nil or optional arm also produces Option<T>.
             if let ExprKind::Match(match_stmt) = &s_value.kind {
                 let is_opt = match_stmt.arms.iter().any(|arm| {
                     match &arm.body {
-                        crate::ast::MatchBody::Block(stmts) => body_ends_optional_sv(stmts, &self.fn_return_types),
-                        crate::ast::MatchBody::Expr(e) => matches!(&e.kind, ExprKind::Nil),
+                        crate::ast::MatchBody::Block(stmts) => self.body_produces_optional(stmts),
+                        crate::ast::MatchBody::Expr(e) => self.expr_produces_optional(e),
                     }
                 });
                 if is_opt { self.optional_vars.insert(s.name.clone()); }
@@ -2395,11 +2382,12 @@ impl Transpiler {
                 return raw;
             }
         }
-        // If-expression with mixed branches (some nil, some non-optional): emit via a
-        // sub-transpiler that has fn_return_ty = Optional(inner) so each branch
+        // If-expression or match-expression with mixed branches (some nil, some non-optional): emit via a
+        // sub-transpiler that has expected_optional = true so each branch
         // independently wraps non-nil values in Some() and nil → None.
-        if matches!(&value.kind, ExprKind::If(_)) {
+        if matches!(&value.kind, ExprKind::If(_) | ExprKind::Match(_)) {
             let mut sub = self.make_sub();
+            sub.expected_optional = true;
             sub.fn_return_ty = Some(Type::Optional(Box::new(inner.clone())));
             sub.suppress_ok_wrap = true;
             return sub.emit_expr(value);
@@ -2509,21 +2497,8 @@ impl Transpiler {
             // A built-in method call the resolver types as `T?` (`arr.first()`, `arr.find(..)`).
             || (matches!(&value.kind, ExprKind::MethodCall(..))
                 && matches!(self.resolve_expr_type(value).as_ref().map(Type::without_mut), Some(Type::Optional(_))))
-            // If-expression whose branches already produce Option (nil/some/method branches)
-            || matches!(&value.kind, ExprKind::If(if_stmt) if {
-                fn body_ends_optional(body: &[Stmt]) -> bool {
-                    match body.last() {
-                        Some(Stmt::Expr(e)) => matches!(&e.kind, ExprKind::Nil)
-                            || matches!(&e.kind, ExprKind::Call(callee, _)
-                                if matches!(&callee.kind, ExprKind::Var(v) if v == "some"))
-                            // Method call on a variable — likely returns Optional in Optional ctx.
-                            || matches!(&e.kind, ExprKind::MethodCall(_, _, _)),
-                        _ => false,
-                    }
-                }
-                if_stmt.branches.iter().any(|(_, b)| body_ends_optional(b))
-                    || if_stmt.else_body.as_ref().map(|b| body_ends_optional(b)).unwrap_or(false)
-            });
+            // Expression whose branches already produce Option
+            || self.expr_produces_optional(value);
         if already_opt {
             // An optional field read of a local/param (`Desc(view = n.view)`) is a partial move out of
             // the struct unless it is cloned (an `Option<Arc<dyn Trait>>` is a cheap pointer clone).

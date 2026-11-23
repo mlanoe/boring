@@ -765,19 +765,18 @@ impl Transpiler {
                 self.emit_expr_closure(params, body, *throws, *task),
 
             ExprKind::If(s) => {
-                // When the if-expression is used in an Optional context (fn_return_ty = Optional(T)),
-                // OR when the if-expression itself has a nil branch (making it implicitly Optional),
-                // non-nil branches must be wrapped in Some(...) and nil branches emit None.
+                // When the if-expression is used in an Optional context (expected_optional = true),
+                // OR when the if-expression itself has a nil or optional branch (making it implicitly Optional),
+                // non-optional branches must be wrapped in Some(...) and nil branches emit None.
                 fn branch_has_nil(body: &[crate::ast::Stmt]) -> bool {
                     matches!(body.last(), Some(crate::ast::Stmt::Expr(e)) if matches!(&e.kind, ExprKind::Nil))
                 }
                 let has_nil_branch = s.branches.iter().any(|(_, b)| branch_has_nil(b))
                     || s.else_body.as_ref().map(|b| branch_has_nil(b)).unwrap_or(false);
-                // Only apply Optional wrapping when there is an explicit nil branch.
-                // The Stmt::Expr tail handler wraps the whole if/else in Some() when
-                // needed — we must NOT apply fn_return_ty here or we double-wrap when
-                // the if/else is used as an intermediate let-binding value.
-                let optional_inner = if has_nil_branch {
+                let has_opt_branch = s.branches.iter().any(|(_, b)| self.body_produces_optional(b))
+                    || s.else_body.as_ref().map(|b| self.body_produces_optional(b)).unwrap_or(false);
+                let is_optional = self.expected_optional || has_nil_branch || has_opt_branch;
+                let optional_inner = if is_optional {
                     Some(crate::ast::Type::Named("_".to_string()))
                 } else {
                     None
@@ -786,6 +785,7 @@ impl Transpiler {
                 sub.fn_returns_void = false;
                 sub.suppress_ok_wrap = true;
                 sub.fn_return_ty = None; // prevent spurious Some() wrapping in branch bodies
+                sub.expected_optional = false;
                 // This if-expression is being emitted as an ordinary value (a let
                 // initializer, a nested sub-expression, ...), not the enclosing
                 // function's own tail position — reset GPU-residency tail-wrapping
@@ -823,6 +823,7 @@ impl Transpiler {
                 sub.fn_returns_void = false;
                 sub.suppress_ok_wrap = true; // prevent Ok() wrapping; keep ?-propagation
                 sub.fn_return_ty = None; // prevent spurious Some() wrapping in arm bodies
+                sub.expected_optional = self.expected_optional;
                 // Same reasoning as the `If` arm above: this match is an ordinary
                 // value, not the enclosing function's tail position.
                 sub.current_fn_returns_resident = None;
@@ -1948,6 +1949,23 @@ impl Transpiler {
     /// vars (`get_at`), dict/HashMap access (including `self.field[key]`), and plain
     /// array indexing (with `.clone()` unless this is itself an assignment target).
     fn emit_expr_index(&self, obj: &Expr, idx: &Expr) -> String {
+        self.emit_expr_index_inner(obj, idx, None)
+    }
+
+    fn emit_expr_index_inner(
+        &self,
+        obj: &Expr,
+        idx: &Expr,
+        project_field: Option<(&str, bool)>,
+    ) -> String {
+        let apply_owned_field = |base: String| -> String {
+            if let Some((mapped, _)) = project_field {
+                let expr = format!("{}.{}", base, mapped);
+                if mapped.contains(" as ") { format!("({})", expr) } else { expr }
+            } else {
+                base
+            }
+        };
         if let ExprKind::Var(name) = &obj.kind {
             if self.is_gpu_target
                 && !self.config.is_simd_target
@@ -1968,7 +1986,7 @@ impl Transpiler {
             if let Some(sn) = self.resolve_expr_struct_type(obj) {
                 if self.struct_method_names.get(&sn).is_some_and(|ms| ms.contains("get")) {
                     let arg = Arg { label: None, value: idx.clone(), spread: false, default_rest: false };
-                    return self.emit_method_call(obj, "get", &[arg]);
+                    return apply_owned_field(self.emit_method_call(obj, "get", &[arg]));
                 }
             }
         }
@@ -2019,7 +2037,7 @@ impl Transpiler {
                     }
                     (None, None)        => format!("{obj_s}.chars().collect::<String>()"),
                 };
-                return format!("{str_ptr}::<str>::from({collected}.as_str())");
+                return apply_owned_field(format!("{str_ptr}::<str>::from({collected}.as_str())"));
             }
             let start_s = start.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
             let end_s   = end.as_deref().map(|e| cast_idx(self.emit_expr(e), e));
@@ -2030,7 +2048,7 @@ impl Transpiler {
                 (None,    Some(e)) => format!("{dots}{e}"),
                 (None,    None)    => "..".to_string(),
             };
-            return format!("{}[{}].to_vec()", obj_s, range_s);
+            return apply_owned_field(format!("{}[{}].to_vec()", obj_s, range_s));
         }
         // `k.buf[i]` on a buffer the multi-target CPU host routes: one element, read from the
         // backend when it holds the newer data, instead of the whole buffer.
@@ -2040,12 +2058,13 @@ impl Transpiler {
                     if let Some(decl) = self.routed_array_field_of(kvar, kfield) {
                         let idx_s = self.emit_expr(idx);
                         let at = format!("{kvar}.__at_{kfield}(({idx_s}) as usize)");
-                        return if matches!(decl.qual, GpuQual::Surface) {
+                        let res = if matches!(decl.qual, GpuQual::Surface) {
                             at
                         } else {
                             let host_ty = super::emit_kernel::kernel_host_element_type(&super::emit_kernel::array_inner_type(&decl.ty));
                             format!("({at} as {host_ty})")
                         };
+                        return apply_owned_field(res);
                     }
                 }
             }
@@ -2057,6 +2076,9 @@ impl Transpiler {
                 let key_ref = self.emit_dict_key_borrow(idx);
                 let tail = if self.want_raw_dict_get.get() {
                     format!("__g.{}.get(__k).cloned()", sub)
+                } else if let Some((mapped, needs_clone)) = project_field {
+                    let clone_sfx = if needs_clone { ".clone()" } else { "" };
+                    format!("__g.{}.get(__k).expect(\"dict key not found\").{}{}", sub, mapped, clone_sfx)
                 } else {
                     format!("__g.{}.get(__k).cloned().expect(\"dict key not found\")", sub)
                 };
@@ -2072,12 +2094,19 @@ impl Transpiler {
                     let key_ref = self.emit_dict_key_borrow(idx);
                     let tail = if self.want_raw_dict_get.get() {
                         "__g.get(__k).cloned()".to_string()
+                    } else if let Some((mapped, needs_clone)) = project_field {
+                        let clone_sfx = if needs_clone { ".clone()" } else { "" };
+                        format!("__g.get(__k).expect(\"dict key not found\").{}{}", mapped, clone_sfx)
                     } else {
                         "__g.get(__k).cloned().expect(\"dict key not found\")".to_string()
                     };
                     return format!("{{ let __k = {}; let __g = {}; {} }}", key_ref, guard, tail);
                 }
                 let idx_s = self.emit_expr(idx);
+                if let Some((mapped, needs_clone)) = project_field {
+                    let clone_sfx = if needs_clone { ".clone()" } else { "" };
+                    return format!("{{ let __i = ({}) as usize; let __g = {}; __g[__i].{}{} }}", idx_s, guard, mapped, clone_sfx);
+                }
                 return format!("{{ let __i = ({}) as usize; let __g = {}; __g[__i].clone() }}", idx_s, guard);
             }
         }
@@ -2110,21 +2139,21 @@ impl Transpiler {
             // which is O(idx) and turns a sequential scan into O(n^2).
             if let ExprKind::Var(v) = &obj.kind {
                 if self.str_index_cache_vars.contains(v.as_str()) && self.immutable_local_vars.contains(v.as_str()) {
-                    return format!(
+                    return apply_owned_field(format!(
                         "{str_ptr}::<str>::from(__strchars_{v}[{idx_s}].to_string().as_str())"
-                    );
+                    ));
                 }
             }
             let obj_s = self.emit_expr(obj);
-            return format!(
+            return apply_owned_field(format!(
                 "{str_ptr}::<str>::from({obj_s}.chars().nth({idx_s}).expect(\"string index out of bounds\").to_string().as_str())"
-            );
+            ));
         }
         // When the index is an opaque collection index var (Option<usize> from
         // firstIndex/nextIndex), use the get_at(Option<usize>) trait method.
         if let ExprKind::Var(v) = &idx.kind {
             if self.index_vars.contains(v.as_str()) {
-                return format!("{}.get_at({})", self.emit_expr(obj), v);
+                return apply_owned_field(format!("{}.get_at({})", self.emit_expr(obj), v));
             }
         }
         // Dict vars (HashMap): use .get().cloned().unwrap() for bare access.
@@ -2168,6 +2197,11 @@ impl Transpiler {
             if self.want_raw_dict_get.get() {
                 return format!("{}.get({}).cloned()", obj_s, key_ref);
             }
+            if let Some((mapped, needs_clone)) = project_field {
+                let clone_sfx = if needs_clone { ".clone()" } else { "" };
+                let expr = format!("{}.get({}).expect(\"dict key not found\").{}{}", obj_s, key_ref, mapped, clone_sfx);
+                return if mapped.contains(" as ") { format!("({})", expr) } else { expr };
+            }
             return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s, key_ref);
         }
         // obj.field[key] where field is a dict-type struct field (HashMap): use dict-style access.
@@ -2208,6 +2242,11 @@ impl Transpiler {
                     if self.want_raw_dict_get.get() {
                         return format!("{}.get({}).cloned()", obj_s2, key_ref);
                     }
+                    if let Some((mapped, needs_clone)) = project_field {
+                        let clone_sfx = if needs_clone { ".clone()" } else { "" };
+                        let expr = format!("{}.get({}).expect(\"dict key not found\").{}{}", obj_s2, key_ref, mapped, clone_sfx);
+                        return if mapped.contains(" as ") { format!("({})", expr) } else { expr };
+                    }
                     return format!("{}.get({}).cloned().expect(\"dict key not found\")", obj_s2, key_ref);
                 }
             }
@@ -2233,6 +2272,10 @@ impl Transpiler {
         // not an lvalue, so `arr[i].clone() /= 4.0` fails to compile (E0067).
         if self.in_lhs_assign.get() {
             format!("{}[{}]", self.emit_expr(obj), idx_s)
+        } else if let Some((mapped, needs_clone)) = project_field {
+            let clone_sfx = if needs_clone { ".clone()" } else { "" };
+            let expr = format!("{}[{}].{}{}", self.emit_expr(obj), idx_s, mapped, clone_sfx);
+            if mapped.contains(" as ") { format!("({})", expr) } else { expr }
         } else {
             format!("{}[{}].clone()", self.emit_expr(obj), idx_s)
         }
@@ -2992,6 +3035,33 @@ impl Transpiler {
                 let is_throws_handle = self.throws_join_handle_vars.contains(type_name.as_str());
                 let is_join_handle   = self.join_handle_vars.contains(type_name.as_str());
                 return self.emit_task_await(type_name, field, is_throws_handle, is_join_handle, true);
+            }
+        }
+        // Fuse `arr[idx].field` (and `dict[key].field`) reads so we project `.field`
+        // directly out of the indexed place and clone only the field, rather than
+        // cloning the entire element struct first (`arr[idx].clone().field`).
+        if !self.in_lhs_assign.get() {
+            if let ExprKind::Index(arr, idx) = &obj.kind {
+                let struct_fields_opt = self.resolve_expr_struct_type(obj)
+                    .and_then(|sn| self.struct_fields.get(sn.as_str()));
+                let is_user_field = struct_fields_opt
+                    .map(|fields| fields.iter().any(|(fname, _)| fname == field))
+                    .unwrap_or(false);
+                if field != "done" || is_user_field {
+                    let field_decl = struct_fields_opt
+                        .and_then(|fields| fields.iter().find(|(name, _)| name == field));
+                    let is_resident = field_decl
+                        .is_some_and(|(_, ty)| ty.without_mut().gpu_resident_qual().is_some());
+                    let is_copy = field_decl
+                        .is_some_and(|(_, ty)| Self::is_copy_type(ty.without_mut()));
+                    let mapped = if is_user_field { field.as_str() } else { map_field(field) };
+                    let is_builtin_prop = mapped != field.as_str();
+                    let needs_clone = !is_resident && !is_builtin_prop && !is_copy;
+                    let saved_raw = self.want_raw_dict_get.replace(false);
+                    let res = self.emit_expr_index_inner(arr, idx, Some((mapped, needs_clone)));
+                    self.want_raw_dict_get.set(saved_raw);
+                    return res;
+                }
             }
         }
         // Project a resident field directly out of an indexed element instead of first

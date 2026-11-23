@@ -1,0 +1,43 @@
+# Regression fixture for PROP-02: non-consuming reference iteration for maps
+# Verifies that `for k, v in my_dict:` emits `.iter()` (borrowing) rather than
+# `.clone().into_iter()` or `.into_iter()` when the loop body only reads `k` and `v`.
+
+pub struct Block:
+    let int kind
+    let string label
+
+    pub req bool is_top():
+        return self.kind == 1
+
+pub struct Registry:
+    var {string=Block} blocks = {=}
+
+    pub req int count_tops_field():
+        var int count = 0
+        for id, b in blocks:
+            if b.is_top():
+                count += 1
+        return count
+
+pub req int count_tops_param({string=Block} my_dict):
+    var int count = 0
+    for k, v in my_dict:
+        if v.kind == 1:
+            count += 1
+    return count
+
+pub req int count_tops_local():
+    mut {string=Block} local_dict = {=}
+    local_dict["a"] = Block(kind: 1, label: "first")
+    var int count = 0
+    for k, v in local_dict:
+        if v.kind == 1:
+            count += 1
+    # Ensure local_dict was not moved by the loop
+    return count + local_dict.length
+
+pub req [Block] collect_values({string=Block} my_dict):
+    mut [Block] out = []
+    for k, v in my_dict:
+        out.push(v)
+    return out

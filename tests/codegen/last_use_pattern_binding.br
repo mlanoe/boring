@@ -1,0 +1,61 @@
+# Regression fixture for Proposition 5: Last-Use analysis extended to pattern bindings
+# (match / if let) and owned by-value function parameters.
+
+enum Payload:
+    A([int])
+    B(string)
+
+struct Holder:
+    pub var [int] xs
+
+def int consume([int]'inline xs):
+    let h = Holder(xs)
+    return h.xs.length
+
+def int both([int] a, Holder h):
+    return a.length + h.xs.length
+
+def int process_owned(Payload'inline p):
+    match p:
+        Payload.A(items):
+            return consume(items)
+        Payload.B(s):
+            return s.length
+
+def int process_borrowed(Payload& p):
+    match p:
+        Payload.A(items):
+            return consume(items)
+        Payload.B(s):
+            return s.length
+
+def int process_reused(Payload'inline p):
+    match p:
+        Payload.A(items):
+            let n = consume(items)
+            return n + items.length
+        Payload.B(s):
+            return s.length
+
+def int process_same_stmt(Payload'inline p):
+    match p:
+        Payload.A(items):
+            return both(items, Holder(items))
+        Payload.B(s):
+            return s.length
+
+def int process_if_let([int]? opt):
+    if let items = opt:
+        return consume(items)
+    return 0
+
+def int forward_owned([int]'inline xs):
+    return consume(xs)
+
+def main():
+    print process_owned(Payload.A([1, 2]))
+    print process_borrowed(Payload.A([1, 2]))
+    print process_reused(Payload.A([1, 2]))
+    print process_same_stmt(Payload.A([1, 2]))
+    print process_if_let([1, 2])
+    print forward_owned([1, 2])

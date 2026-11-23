@@ -1706,6 +1706,20 @@ ext Foo as Debug:\n    req int double():\n        self.x * 2\n";
     }
 
     #[test]
+    fn last_use_moves_match_pattern_binding_and_owned_param() {
+        let code = last_use_code("enum Payload:\n    A([int])\n    B(string)\n\ndef int consume([int]'inline xs):\n    let h = Holder(xs)\n    return h.xs.length\n\ndef int process_owned(Payload'inline p):\n    match p:\n        Payload.A(items):\n            return consume(items)\n        Payload.B(s):\n            return s.length\n\ndef int forward_owned([int]'inline xs):\n    return consume(xs)\n\ndef main():\n    print process_owned(Payload.A([1, 2]))\n    print forward_owned([1, 2])\n");
+        assert!(code.contains("return consume(items);"), "owned match pattern binding must move, got:\n{code}");
+        assert!(code.contains("return consume(xs);"), "owned param must move, got:\n{code}");
+        assert!(!code.contains("items.clone()") && !code.contains("xs.clone()"), "unexpected clone, got:\n{code}");
+    }
+
+    #[test]
+    fn last_use_keeps_clone_for_borrowed_match_subject() {
+        let code = last_use_code("enum Payload:\n    A([int])\n    B(string)\n\ndef int consume([int]'inline xs):\n    let h = Holder(xs)\n    return h.xs.length\n\ndef int process_borrowed(Payload& p):\n    match p:\n        Payload.A(items):\n            return consume(items)\n        Payload.B(s):\n            return s.length\n\ndef main():\n    print process_borrowed(Payload.A([1, 2]))\n");
+        assert!(code.contains("return consume(items.clone());"), "borrowed match subject must clone, got:\n{code}");
+    }
+
+    #[test]
     fn untyped_literal_collection_local_is_cloned_when_reused() {
         let code = last_use_code("enum W:\n    L([int] items)\n\ndef main():\n    let b = [1, 2]\n    let w = W.L(b)\n    print b.length\n");
         assert!(code.contains("W::L(b.clone())"), "unannotated literal local must clone, got:\n{code}");
@@ -3168,4 +3182,48 @@ def run():
         assert!(code.contains("Arc<std::sync::Mutex<State>>"), "expected Arc<Mutex<State>>, got:\n{}", code);
         assert!(code.contains("Arc::new(std::sync::Mutex::new(makeState()))"), "expected Arc::new(Mutex::new(makeState())), got:\n{}", code);
         assert!(code.contains("mutate(&mut *st.lock().unwrap())"), "expected mutate(&mut *st.lock().unwrap()), got:\n{}", code);
+    }
+
+    #[test]
+    fn test_already_qualified_actor_field_and_return_not_double_wrapped() {
+        let src = r#"
+struct Session:
+    var int id = 0
+
+struct Server:
+    var Session'actor session
+
+def Session'actor make_session():
+    Session(id = 2)
+
+def test(Server'actor srv):
+    let s = Server(session = Session(id = 1))
+    let cur = s.session
+    let parent = srv.session
+    let made = make_session()
+    print cur.id
+    print parent.id
+    print made.id
+"#;
+        let code = transpile_src_with_config(src, TranspileConfig::default());
+        assert!(
+            code.contains("let cur: Arc<std::sync::Mutex<Session>> = Arc::clone(&s.session);"),
+            "expected Arc::clone(&s.session) for cur, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Arc::clone(&srv.lock().unwrap().session)"),
+            "expected Arc::clone(&srv.lock().unwrap().session) for parent, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("Arc::new(std::sync::Mutex::new(Arc::clone("),
+            "must not double-wrap Arc::clone in Arc<Mutex<...>>, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("Arc::new(std::sync::Mutex::new(make_session("),
+            "must not double-wrap already-actor fn return in Arc<Mutex<...>>, got:\n{}",
+            code
+        );
     }

@@ -1,0 +1,66 @@
+def int? maybe_val(bool flag, int val):
+    if flag:
+        return val
+    nil
+
+def int? return_if(bool flag, int val):
+    if flag:
+        maybe_val(true, val)
+    else:
+        val
+
+def int? return_if_explicit(bool flag, int val):
+    return if flag: maybe_val(true, val) else: val
+
+def int? test_match(int mode, int val):
+    let int? m = match mode:
+        0: maybe_val(true, val)
+        1: val + 10
+        2: nil
+        _: 999
+    m
+
+struct Box:
+    int? item
+    req int? get():
+        self.item
+
+def main():
+    # 1. Typed let with if/else: branch 1 is T?, branch 2 is T
+    let int? a1 = if true: maybe_val(true, 42) else: 10
+    let int? a2 = if false: maybe_val(true, 42) else: 10
+    print("{a1 else -1} {a2 else -1}")
+
+    # 2. Untyped let with if/else: branch 1 is T?, branch 2 is T
+    let b1 = if true: maybe_val(true, 100) else: 200
+    let b2 = if false: maybe_val(true, 100) else: 200
+    print("{b1 else -1} {b2 else -1}")
+
+    # 3. Branch 1 is T, branch 2 is T?
+    let int? c1 = if true: 300 else: maybe_val(false, 400)
+    let int? c2 = if false: 300 else: maybe_val(false, 400)
+    print("{c1 else -1} {c2 else -1}")
+
+    # 4. Tail expression if/else returning T?
+    let d1 = return_if(true, 50)
+    let d2 = return_if(false, 50)
+    print("{d1 else -1} {d2 else -1}")
+
+    # 5. Return if/else
+    let e1 = return_if_explicit(true, 60)
+    let e2 = return_if_explicit(false, 60)
+    print("{e1 else -1} {e2 else -1}")
+
+    # 6. Match expression with mixed arms: T?, T, nil
+    let m0 = test_match(0, 70)
+    let m1 = test_match(1, 70)
+    let m2 = test_match(2, 70)
+    let m3 = test_match(3, 70)
+    print("{m0 else -1} {m1 else -1} {m2 else -1} {m3 else -1}")
+
+    # 7. Method call returning T? vs plain T
+    let b = Box(item = 88)
+    let int? f1 = if true: b.get() else: 99
+    let int? f2 = if false: b.get() else: 99
+    print("{f1 else -1} {f2 else -1}")
+

@@ -1,0 +1,78 @@
+# Regression fixture for PROP-06: automatic &T borrow inference for read-only parameters
+
+struct BigData:
+    [int] items
+    string label
+
+struct Boxed:
+    BigData inner
+
+enum Tree:
+    Leaf(int v)
+    Node([Tree] children)
+
+req int inspect_len(BigData d):
+    return d.items.len()
+
+req int relay_inspect(BigData d):
+    return inspect_len(d)
+
+req int sum_items([int] xs):
+    var total = 0
+    for x in xs:
+        total += x
+    return total
+
+req bool has_key({string=int} m, string k):
+    return m.contains(k)
+
+req int tree_noop(Tree t):
+    return 1
+
+# Escaping / mutating cases must NOT be auto-borrowed as &T:
+req BigData passthrough(BigData d):
+    return d
+
+req BigData passthrough_alias(BigData d):
+    let x = d
+    return x
+
+req [BigData] in_arr(BigData d):
+    return [d]
+
+req Boxed wrap(BigData d):
+    return Boxed(d)
+
+def void add_item(mut BigData d, int x):
+    d.items.push(x)
+
+req int tree_count(Tree t):
+    match t:
+        Tree.Leaf(_): 1
+        Tree.Node(cs): cs.len()
+
+def main():
+    var b = BigData([1, 2, 3], "test")
+    let n = inspect_len(b)
+    let r = relay_inspect(b)
+    let s = sum_items(b.items)
+    let m = {"a"= 1}
+    let hk = has_key(m, "a")
+    let t = Tree.Leaf(42)
+    let tn = tree_noop(t)
+    add_item(b, 4)
+    let p = passthrough(b)
+    let pa = passthrough_alias(b)
+    let arr = in_arr(b)
+    let w = wrap(b)
+    let tc = tree_count(t)
+    print n
+    print r
+    print s
+    print hk
+    print tn
+    print p.items.len()
+    print pa.items.len()
+    print arr.len()
+    print w.inner.items.len()
+    print tc

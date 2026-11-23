@@ -1,0 +1,33 @@
+# Test fixture for Proposition 2: index field access fusion
+# records[i].status should emit records[i as usize].status.clone()
+# instead of records[i as usize].clone().status
+
+pub struct Record:
+    pub int status
+    pub string name
+
+pub struct Store:
+    pub [Record] records = []
+
+    pub req int get_status(int i):
+        return records[i].status
+
+    pub req string get_name(int i):
+        return records[i].name
+
+    pub def set_status(int i, int s):
+        records[i].status = s
+
+pub req int get_dict_status({string=Record} by_id, string k):
+    return by_id[k].status
+
+pub struct Block:
+    pub int kind
+    pub string id
+
+pub struct ExecutionContext:
+    pub [Block] body = []
+
+pub req int get_block_kind(ExecutionContext cur, int frame_index):
+    let stmt_kind = cur.body[frame_index].kind
+    return stmt_kind

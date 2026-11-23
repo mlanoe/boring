@@ -825,9 +825,55 @@ impl Transpiler {
             && !self.loop_body_mutates_var(&s.body, &s.vars[0])
             && crate::transpiler::helpers::only_read_uses(&s.body, &s.vars[0],
                 &|callee, is_method| self.callee_lends_args(callee, is_method));
+        // `for k, v in dict:` over a dict whose body only reads `k` and `v`:
+        // iterate by reference (`dict.iter()`) instead of cloning the whole map
+        // (`dict.clone().into_iter()`) or consuming it (`dict.into_iter()`).
+        let dict_borrow_loop = if s.vars.len() == 2 && !needs_auto_enumerate
+            && matches!(&s.iterable.kind, ExprKind::Var(_) | ExprKind::Field(..))
+        {
+            let body_returns_var = |name: &str| -> bool {
+                let found = std::cell::Cell::new(false);
+                let mut body = s.body.clone();
+                let mut on_expr = |_: &mut Expr| {};
+                let mut on_stmt = |st: &mut Stmt| {
+                    if let Stmt::Return(r) = st {
+                        if r.value.as_ref().is_some_and(|e| matches!(&e.kind, ExprKind::Var(v) if v == name)) {
+                            found.set(true);
+                        }
+                    }
+                };
+                crate::ast_walk::Walker { expr: &mut on_expr, stmt: &mut on_stmt }.stmts(&mut body);
+                found.get()
+            };
+            let var_is_borrow_safe = |name: &str, ty: &Type| -> bool {
+                if self.loop_body_mutates_var(&s.body, name) || body_returns_var(name) {
+                    return false;
+                }
+                let can_pass_as_arg = match ty.without_mut() {
+                    Type::Named(n) => (self.struct_fields.contains_key(n.as_str())
+                        && !self.type_sizes.contains_key(n.as_str())
+                        && !self.struct_holds_dyn(n, false, &mut vec![]))
+                        || n == "string" || n == "str",
+                    Type::Str | Type::Array(_) | Type::Dict(_, _) | Type::Set(_) => true,
+                    _ => false,
+                };
+                crate::transpiler::helpers::only_read_uses(&s.body, name,
+                    &|callee, is_method| can_pass_as_arg && self.callee_lends_args(callee, is_method))
+            };
+            self.resolve_iterable_type(&s.iterable).as_ref()
+                .and_then(|t| match t.without_mut() {
+                    Type::Dict(k, v) => Some((k.without_mut().clone(), v.without_mut().clone())),
+                    _ => None,
+                })
+                .is_some_and(|(k_ty, v_ty)| {
+                    var_is_borrow_safe(&s.vars[0], &k_ty) && var_is_borrow_safe(&s.vars[1], &v_ty)
+                })
+        } else {
+            false
+        };
         let iter_expr = match &s.iterable.kind {
             _ if iter_mut_loop => format!("{}.iter_mut()", iter),
-            _ if borrow_loop => format!("{}.iter()", iter),
+            _ if borrow_loop || dict_borrow_loop => format!("{}.iter()", iter),
             // A bound read through a lock (`0..st.items.length` on an `'actor`/`Slot` state)
             // leaves its guard alive as a temporary for the whole `for` — the body re-locking the
             // same cell would deadlock. Evaluate the range first, so the guard dies there.

@@ -1,0 +1,55 @@
+def string classify(int mode, int? opt):
+    if mode == 0:
+        return "zero_mode"
+    elif let val = opt:
+        return "has_val: {val}"
+    else:
+        return "empty"
+
+def string classify_mixed(int mode, int? opt):
+    if mode == 0:
+        return "zero"
+    elif mode < 0:
+        return "neg"
+    elif let val = opt, val > 10:
+        return "big: {val}"
+    elif let val = opt:
+        return "small: {val}"
+    elif mode == 99:
+        return "ninety_nine"
+    else:
+        return "other"
+
+def string classify_expr(int mode, int? opt):
+    let res = if mode == 0:
+        "zero"
+    elif let val = opt:
+        "val: {val}"
+    else:
+        "none"
+    return res
+
+def string classify_inline(int mode, int? opt):
+    if mode == 0: return "zero" elif let val = opt: return "val: {val}" else: return "none"
+
+def run():
+    print(classify(0, 42))
+    print(classify(1, 42))
+    print(classify(1, nil))
+
+    print(classify_mixed(0, 5))
+    print(classify_mixed(-1, 5))
+    print(classify_mixed(1, 20))
+    print(classify_mixed(1, 5))
+    print(classify_mixed(99, nil))
+    print(classify_mixed(2, nil))
+
+    print(classify_expr(0, 7))
+    print(classify_expr(1, 7))
+    print(classify_expr(1, nil))
+
+    print(classify_inline(0, 9))
+    print(classify_inline(1, 9))
+    print(classify_inline(1, nil))
+
+run()
