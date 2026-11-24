@@ -398,6 +398,7 @@ boring/
 
 The complete language reference is in [`docs/book.md`](docs/book.md).
 It covers every construct with Boring source, Rust equivalent, and explanatory notes.
+Native ECS (`data` / `@component` / `@resource` types, `where`-filtered systems, `query` expressions and `@game` app bootstrapping, lowered to Bevy) is described in [`docs/ecs.md`](docs/ecs.md).
 
 ---
 

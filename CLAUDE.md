@@ -234,6 +234,21 @@ md["x"] = 99     # insert
 md["a"] = 100    # update
 ```
 
+## Queries, filtered loops, subscripts
+
+```boring
+let big = (query x in nums where x > 2 |> x * 10).collect()   # `all` (default) is lazy → .collect()
+let f   = query first? x in nums where x > 3                    # also first / any / any? / single / single?
+for n in nums where n % 2 == 1:                                 # filter guard on any `for`
+    print n
+```
+
+`obj[k]` → `obj.get(k)`, `obj[k] = v` → `obj.set(k, v)`, `obj[k] += v` → both: define `req get(...)` / `def set(..., value)` on a struct or `data` type; several parameters → labelled indexing `g[x = 2, y = 3]`; no `set` → read-only. See [book.md](docs/book.md) ("Collection queries", "Subscript operator").
+
+## Native ECS (Bevy)
+
+`data X:` is a pure value type (no `'actor`/`'shared` fields); `@component data X` / `@resource` (on a `data` type or a top-level `let`/`var`) map to Bevy `Component`/`Resource`; systems are plain `def`/`req` functions with a `where` archetype filter (`where Player and not Frozen`, `changed X`, `added X` — conjunctive only, no `or` and no value conditions yet); `query (A, B) where C` / `query single? (A) where C` / `query any where C` fetch entities; `@game` on a `data` generates the `App`, `build_app()` and `main()`. `data`/`component`/`resource`/`where` stay valid identifiers. Full reference: [docs/ecs.md](docs/ecs.md).
+
 ## Trailing array-block sugar
 
 When a callee's last parameter is `[dyn Trait]` (a trait-object array — see "Traits as types" in book.md), a bare call name followed by `:` and an indented one-item-per-line block desugars to that trailing array argument (generalizes trailing closures, which key off `Fn(...)`-typed last params instead):

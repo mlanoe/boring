@@ -2495,7 +2495,7 @@ impl Transpiler {
             .filter(|p| p.ty.is_some())
             .map(|p| (p.name.clone(), pre_inferred_param_quals.get(&p.name).cloned()))
             .collect();
-        let prev_pinned_param_quals = std::mem::replace(&mut self.pinned_param_quals, Some(pinned));
+        let prev_pinned_param_quals = self.pinned_param_quals.replace(pinned);
         self.emit_body(&f.body);
         self.pinned_param_quals = prev_pinned_param_quals;
         self.last_use_sites = prev_last_use_sites;

@@ -12,13 +12,14 @@ program         ::= item* EOF
 item            ::= attr* "pub"? use_decl
                   | attr* "pub"? fn_decl
                   | attr* "pub"? struct_decl
+                  | attr* "pub"? data_decl      # `data` / `component` / `resource` (ECS value types)
                   | attr* "pub"? enum_decl
                   | attr* "pub"? trait_decl
                   | ext_decl
                   | kernel_decl      # GPU kernel struct (--target cuda / --target metal)
                   | mod_decl
                   | alias_decl       # top-level type alias: `use Name as Type`
-                  | let_stmt
+                  | attr* let_stmt   # attrs: `@resource var int score = 0` (ECS global resource)
                   | stmt             # scripting mode: bare statements at top level
 
 # Top-level type alias (distinct from `use mod.path.Item` which is an import).
@@ -63,7 +64,7 @@ use_decl        ::= "use" mod_path ".*" NEWLINE                                 
 
 mod_path        ::= path_seg ("." path_seg)*
 path_seg        ::= IDENT | keyword_as_ident   # keywords like `sync` are valid path segments
-keyword_as_ident ::= "sync" | "type" | "mod" | "new" | "set" | "init" | …
+keyword_as_ident ::= "sync" | "type" | "mod" | "new" | "set" | "get" | "init" | "data" | "component" | "resource" | "where" | …
 # The last dot-segment is always an item name, never a module name — this is
 # why there is NO form for "the whole module a.b.c, no glob, no items": a
 # multi-segment path always treats its final segment as a selected item.
@@ -149,6 +150,9 @@ shorthand_fn_decl ::= attr* type (IDENT ".")? IDENT type_params? "(" param_list?
 
 modifier        ::= "throws" IDENT?  # may raise; optional concrete error type: `throws MyError`
                   | "task"            # async; may block / runs concurrently
+                  | "where" ecs_where_clause   # ECS system archetype filter, before or after `throws`:
+                                               #   def movement(mut Pos p) where Player and not Frozen:
+                                               # (see "Query expressions" below; docs/ecs.md)
 
 fn_body         ::= expr NEWLINE                     # inline — implicit return
                   | block                            # indented block
@@ -268,6 +272,18 @@ struct_decl     ::= attr* "struct" IDENT type_params? ("as" type_list)? ":" NEWL
                     DEDENT
                   | attr* "struct" IDENT type_params? ("as" type_list)? ":" "pass" NEWLINE    # empty struct
                   | attr* "struct" IDENT type_params? ("as" type_list)? ":" "native" NEWLINE  # runtime struct
+
+# `data` — pure value type (same body as a struct). Fields may not carry sharing/lock
+# qualifiers (`'actor`, `'shared`, …), so the type is always `Send + Sync + 'static`.
+# Auto-derives Debug, Clone, PartialEq (+ Eq/Hash when every field allows it; Copy/Default
+# for a field-less `pass` body).
+# `component X:` ≡ `@component data X:` (Bevy Component); `resource X:` ≡ `@resource data X:`
+# (Bevy Resource). `@game` on a `data`/`struct` synthesizes the Bevy App, `build_app()` and
+# `main()` (docs/ecs.md §11). `data`, `component` and `resource` stay usable as identifiers.
+data_decl       ::= attr* ("data" | "component" | "resource") IDENT type_params? ("as" type_list)? ":" NEWLINE INDENT
+                      struct_member+
+                    DEDENT
+                  | attr* ("data" | "component" | "resource") IDENT type_params? ("as" type_list)? ":" "pass" NEWLINE   # unit tag
 
 struct_member   ::= field_decl
                   | init_decl
@@ -642,7 +658,7 @@ defer_stmt      ::= "defer" ":" block        # multiline block
                   | "defer" stmt             # inline without colon
 
 if_stmt         ::= "if" expr ":" fn_body
-                    ("elif" expr ":" fn_body)*
+                    ("elif" cond_clause ("," cond_clause)* ":" fn_body)*   # `elif let` allowed after a plain boolean `if`
                     ("else" ":"? fn_body)?
 
 # Multi-clause if-let: one or more `let` bindings and/or boolean conditions.
@@ -988,7 +1004,7 @@ primary_expr    ::= INT | FLOAT | STRING | STRING_INTERP | BOOL | "nil"
 #   query any [where ecs_where_clause]
 #
 #   Examples:
-#     query (Transform, Velocity) where With<Player>
+#     query (Transform, Velocity) where Player
 #     query single (Transform) where Ball
 #     query single? (Transform) where Ball
 #     query any where Ball
@@ -1009,12 +1025,25 @@ ecs_component_list  ::= "(" ecs_component ("," ecs_component)* ")"
 
 ecs_component       ::= "mut"? IDENT
 
-ecs_query_pattern   ::= ecs_component_list
-                      | IDENT IDENT                     # e.g. `Player p`
+# ECS `for` loop binders: no parentheses, comma-separated; `entity` binds the
+# current Entity; a bare component type binds a lower-cased name (`Pos` → `pos`).
+#   for entity, mut Transform t, Velocity v where not Frozen:
+#   for Player p:
+ecs_query_pattern   ::= ecs_loop_binder ("," ecs_loop_binder)*
 
-ecs_where_clause    ::= IDENT                           # e.g. With<Component> or bare Component tag
-                      | IDENT "<" IDENT ">"
-                      | "(" ecs_where_clause ("," ecs_where_clause)* ")"
+ecs_loop_binder     ::= "entity"
+                      | "mut"? type "?"? IDENT?
+
+ecs_where_clause    ::= ecs_filter_term (("and" | ",") ecs_filter_term)*
+                      | "(" ecs_filter_term (("and" | ",") ecs_filter_term)* ")"
+
+ecs_filter_term     ::= IDENT                           # component present     → With<IDENT>
+                      | "not" IDENT                     # component absent      → Without<IDENT>
+                      | "changed" IDENT                 # changed this frame    → Changed<IDENT>
+                      | "added" IDENT                   # added this frame      → Added<IDENT>
+# `changed` / `added` are contextual (ordinary identifiers elsewhere). Terms are
+# conjunctive only: there is no `or` and no nested parentheses, and a value
+# condition (`where h.current <= 0`) is not accepted in this position.
 
 # `join` — await all tasks in a list concurrently and return a list of results.
 #   let results = join [f1, f2, f3]   → await all three futures in parallel

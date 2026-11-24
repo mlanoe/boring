@@ -95,6 +95,7 @@ main    = "main.br"     # optional, defaults to main.br
 ```sh
 boring hello.br              # interpret directly
 boring build hello.br        # emit a Cargo project next to the file
+boring check hello.br        # parse + semantic checks only (same diagnostics as run/build), no execution
 ```
 
 ### Hello, World
@@ -1445,6 +1446,8 @@ format_num(255, base = 16)          # hex, pad=false
 format_num(255, base = 16, pad = true)
 ```
 
+Every parameter without a default must be supplied: a call that omits one (`format_num()`) is a checker **error** in `boring run`, `boring build` and `boring check` alike — it is never run, and never emitted as Rust that rustc would reject. A `T?` parameter without a default is still required (there is no implicit `nil`; write `T? x = nil` to make it optional). The other call-shape diagnostics — too many positional arguments, an unknown label, an argument bound twice — remain warnings.
+
 **Rust equivalent**
 ```rust
 // Rust has no labeled args — keyword crates simulate them;
@@ -1811,7 +1814,16 @@ else:
     print "nothing matched"
 ```
 
-A plain boolean `elif` (no `let`) is also allowed, as in the `c > 10` branch above.
+A plain boolean `elif` (no `let`) is also allowed, as in the `c > 10` branch above. The reverse works too: an `elif let` may follow a plain boolean `if` (or `elif`), in statement, expression and inline forms:
+
+```boring
+if mode == 0:
+    print "zero"
+elif let v = opt, v > 10:
+    print "big: {v}"
+else:
+    print "other"
+```
 
 #### `if let` as an expression
 
@@ -10921,6 +10933,8 @@ Two constructors fall out exactly the way an ordinary defaulted parameter alread
 ## 34. Entity Component System (ECS)
 
 Boring treats ECS (Entity Component System) as a first-class language citizen, lowering directly to high-performance archetype ECS architectures such as Bevy ECS.
+
+This chapter is the language reference; the full design and the generated Bevy code for each construct are in [`docs/ecs.md`](ecs.md).
 
 ### Core Principles
 1. **Zero Boilerplate**: No manual generic wrappers (`Query<(&Transform, &Velocity)>`, `Res<Time>`, `ResMut<Score>`), manual iterators, or system parameter wiring.

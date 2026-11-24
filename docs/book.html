@@ -160,7 +160,8 @@ version = &quot;0.1.0&quot;
 main    = &quot;main.br&quot;     # optional, defaults to main.br</code></pre></div>
 <h3 id="running-a-single-file">Running a single file</h3>
 <div class="code-block" data-lang="sh"><span class="lang-label">sh</span><pre><code>boring hello.br              # interpret directly
-boring build hello.br        # emit a Cargo project next to the file</code></pre></div>
+boring build hello.br        # emit a Cargo project next to the file
+boring check hello.br        # parse + semantic checks only (same diagnostics as run/build), no execution</code></pre></div>
 <h3 id="hello-world">Hello, World</h3>
 <div class="code-block" data-lang="boring"><span class="lang-label">boring</span><pre><code>print <span class="s">"Hello, World!"</span></code></pre></div>
 <p><strong>Rust equivalent</strong></p>
@@ -858,6 +859,7 @@ s = s.<span class="fn">removeAt</span>(s.<span class="fn">firstIndex</span>())</
 <span class="fn">format_num</span>(<span class="nb">255</span>)                    <span class="co"># base=10, pad=false</span>
 <span class="fn">format_num</span>(<span class="nb">255</span>, base = <span class="nb">16</span>)          <span class="co"># hex, pad=false</span>
 <span class="fn">format_num</span>(<span class="nb">255</span>, base = <span class="nb">16</span>, pad = <span class="kw">true</span>)</code></pre></div>
+<p>Every parameter without a default must be supplied: a call that omits one (<code>format_num()</code>) is a checker <strong>error</strong> in <code>boring run</code>, <code>boring build</code> and <code>boring check</code> alike — it is never run, and never emitted as Rust that rustc would reject. A <code>T?</code> parameter without a default is still required (there is no implicit <code>nil</code>; write <code>T? x = nil</code> to make it optional). The other call-shape diagnostics — too many positional arguments, an unknown label, an argument bound twice — remain warnings.</p>
 <p><strong>Rust equivalent</strong></p>
 <div class="code-block" data-lang="rust"><span class="lang-label">rust</span><pre><code><span class="co">// Rust has no labeled args — keyword crates simulate them;</span>
 <span class="co">// boring compiles labeled calls to positional in declaration order.</span>
@@ -5967,6 +5969,7 @@ NetworkClient<span class="lf">&#x27;shared</span> <span class="fn">networkClient
 <hr>
 <h2 id="34-entity-component-system-ecs">34. Entity Component System (ECS)</h2>
 <p>Boring treats ECS (Entity Component System) as a first-class language citizen, lowering directly to high-performance archetype ECS architectures such as Bevy ECS.</p>
+<p>This chapter is the language reference; the full design and the generated Bevy code for each construct are in <a href="ecs.html">`docs/ecs.md`</a>.</p>
 <h3 id="core-principles">Core Principles</h3>
 <ol><li><strong>Zero Boilerplate</strong>: No manual generic wrappers (<code>Query&lt;(&amp;Transform, &amp;Velocity)&gt;</code>, <code>Res&lt;Time&gt;</code>, <code>ResMut&lt;Score&gt;</code>), manual iterators, or system parameter wiring.</li><li><strong>Pure Value Types (<code>data</code>)</strong>: Pure data structures without pointer or reference overhead (<code>&#x27;actor</code>, <code>&#x27;shared</code>), maximizing CPU cache locality and enabling safe parallel execution.</li><li><strong>Explicit Components (<code>@component data</code>)</strong>: Components are declared with <code>@component data</code>, ensuring cache-optimal storage.</li><li><strong>Global Resources (<code>@resource</code>) &amp; Direct Signatures</strong>: Global state is declared simply with <code>@resource</code>, accessible and mutable like standard variables (<code>score += 10</code>) and passed cleanly into signatures (<code>Score score</code>, <code>mut Score score</code>).</li><li><strong>Universal Systems (<code>def</code> / <code>req</code> with <code>where</code>)</strong>: Systems operate across matching entities and components using standard function syntax.</li><li><strong>Inline Queries (<code>query</code>)</strong>: Zero-allocation query views (<code>query (Entity, Transform) where Brick</code>) and entity fetchers (<code>query single</code>, <code>query first</code>, <code>query any</code>).</li><li><strong>Ambient Context &amp; Infrastructure</strong>: Access system services (<code>time.delta</code>, <code>input.pressed</code>, <code>commands.spawn</code>, resources) directly, with qualified fallbacks (<code>ecs.time</code>, <code>ecs.input</code>, <code>resource.&lt;name&gt;</code>) when shadowed by local variables.</li><li><strong>Unified ECS Modules (<code>use ecs.&lt;module&gt;</code>)</strong>: Clean modular imports for specialized subsystems (<code>use ecs.asset...</code>, <code>use ecs.input...</code>).</li></ol>
 <h3 id="1-components-component-data">1. Components: <code>@component data</code></h3>
