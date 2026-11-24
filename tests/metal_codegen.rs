@@ -306,6 +306,199 @@ fn host_array_passed_to_float32_gpu_param_runs_on_metal() {
     assert_eq!(stdout.trim_end(), "4");
 }
 
+// whisper-boring (`audio_gpu.br`, `decoder.br`): a `warn "..."` inside a GPU host function was
+// emitted as a bare `warn(...)` call (E0423), and a struct method — emitted by the general pass,
+// whose `gpu_kernels` is empty — passing a resident local to a free function whose GPU parameter
+// only feeds a kernel constructor (`sum_gpu(d)` → `Summer(x)`) downloaded it to a `Vec<f32>`
+// where the callee takes `&BoringKernelArg<f32>` (E0308).
+const WARN_AND_METHOD_RESIDENT_ARG: &str = r#"
+kernel Doubler:
+    let [float32]'global src
+    mut [float32]'unified dst
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        dst = [0.0 for ..<nn]
+    def ():
+        let i = .thread.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+
+kernel Summer:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 for ..<1]
+    def ():
+        if .thread.x == 0:
+            var float32 acc = 0.0
+            for j in 0..<n:
+                acc += src[j]
+            out[0] = acc
+
+pub req [float32]'kernel'unified double_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Doubler(x, n)
+    kernel:
+        k(block = 64, grid = 1)
+    k.dst
+
+pub req float32 sum_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Summer(x, n)
+    kernel:
+        k(block = 1, grid = 1)
+    let [float32] o = k.out
+    o[0]
+
+def float32 warned([float32] x, int n) throws:
+    if n > 2:
+        let float32 secs = 1.5
+        warn "audio is {secs:.1f}s, truncating"
+    let [float32]'kernel'unified d = double_gpu(x, n)
+    sum_gpu(d, n)
+
+struct Model:
+    let int n = 4
+    def float32 step() throws:
+        let [float32] x = [1.0 for ..<self.n]
+        let [float32]'kernel'unified d = double_gpu(x, self.n)
+        sum_gpu(d, self.n)
+
+def float32 run_model() throws:
+    mut m = Model()
+    m.step()
+
+def main() throws:
+    let [float32] x = [1.0, 2.0, 3.0, 4.0]
+    let float32 a = warned(x, 4)
+    print a
+    let float32 b = run_model()
+    print b
+"#;
+
+#[test]
+fn warn_in_gpu_host_fn_and_method_resident_arg_codegen() {
+    let (_, rs) = metal_codegen("warn_method_resident_arg", WARN_AND_METHOD_RESIDENT_ARG);
+    assert!(rs.contains(r#"eprintln!("[WARN] audio is {:.1}s, truncating", secs);"#),
+        "`warn` in a GPU host function must print `[WARN] ...` on stderr:\n{rs}");
+    assert!(!rs.contains("warn(format!"), "no bare `warn(...)` call may remain:\n{rs}");
+    assert!(rs.contains("Ok(sum_gpu(&d, self.n.clone())?)"),
+        "a resident local passed from a struct method must be lent as `&BoringKernelArg`:\n{rs}");
+    assert!(!rs.contains("sum_gpu(match &d"), "no download of the resident argument:\n{rs}");
+}
+
+#[test]
+fn warn_in_gpu_host_fn_and_method_resident_arg_runs_on_metal() {
+    let test_name = "warn_method_resident_arg_run";
+    run_metal(test_name, WARN_AND_METHOD_RESIDENT_ARG);
+    let manifest = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("metal_codegen").join(test_name).join("test_metal").join("Cargo.toml");
+    let run = common::SharedCargo::new("metal_codegen")
+        .args(["run", "--quiet", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo: {e}"));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "generated Metal program failed:\n{stdout}\n{stderr}");
+    assert_eq!(stdout.trim_end(), "20\n8");
+    assert!(stderr.contains("[WARN] audio is 1.5s, truncating"), "{stderr}");
+}
+
+// A kernel-touching `main` (emitted by the GPU host emitter) calling into code the general pass
+// emitted: a `throws` struct method got no `?` (`let b: f32 = m.step();`, E0308), a host array
+// passed to a struct method was moved where the method borrows it, and a host array passed to a
+// free function whose parameter residency inference tagged `'kernel'global` (it flows into a GPU
+// function through a method) was wrapped in `BoringKernelArg::Host(..)` although the general
+// pass emitted that parameter as `&Vec<f32>` (E0308).
+const HOST_CALLS_INTO_GENERAL_PASS: &str = r#"
+kernel Doubler:
+    let [float32]'global src
+    mut [float32]'unified dst
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        dst = [0.0 for ..<nn]
+    def ():
+        let i = .thread.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+
+kernel Summer:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 for ..<1]
+    def ():
+        if .thread.x == 0:
+            var float32 acc = 0.0
+            for j in 0..<n:
+                acc += src[j]
+            out[0] = acc
+
+pub req [float32]'kernel'unified double_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Doubler(x, n)
+    kernel:
+        k(block = 64, grid = 1)
+    k.dst
+
+pub req float32 sum_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Summer(x, n)
+    kernel:
+        k(block = 1, grid = 1)
+    let [float32] o = k.out
+    o[0]
+
+struct Model:
+    let int n = 4
+    def float32 step() throws:
+        let [float32] x = [1.0 for ..<self.n]
+        let [float32]'kernel'unified d = double_gpu(x, self.n)
+        sum_gpu(d, self.n)
+
+    def float32 step_on([float32] x) throws:
+        let [float32]'kernel'unified d = double_gpu(x, self.n)
+        sum_gpu(d, self.n)
+
+def float32 run_model([float32] x) throws:
+    mut m = Model()
+    m.step_on(x)
+
+def main() throws:
+    let [float32] x = [1.0, 2.0, 3.0, 4.0]
+    let [float32]'kernel'unified d = double_gpu(x, 4)
+    print sum_gpu(d, 4)
+    mut m = Model()
+    let float32 b = m.step()
+    print b
+    print m.step()
+    print run_model(x)
+    print m.step_on(x)
+"#;
+
+#[test]
+fn host_calls_into_general_pass_methods_and_plain_params_codegen() {
+    let (_, rs) = metal_codegen("host_calls_into_general_pass", HOST_CALLS_INTO_GENERAL_PASS);
+    assert!(rs.contains("let b: f32 = m.step()?;"), "a `throws` method call must be `?`-propagated:\n{rs}");
+    assert!(rs.contains("m.step_on(&x)?"), "a method's borrowed array argument must be lent:\n{rs}");
+    assert!(rs.contains("run_model(&(x))?"), "a plain general-pass parameter must not be wrapped:\n{rs}");
+    assert!(!rs.contains("run_model(BoringKernelArg::Host("), "{rs}");
+}
+
+#[test]
+fn host_calls_into_general_pass_methods_and_plain_params_run_on_metal() {
+    let stdout = run_metal_stdout("host_calls_into_general_pass_run", HOST_CALLS_INTO_GENERAL_PASS);
+    assert_eq!(stdout.trim_end(), "20\n8\n8\n20\n20");
+}
+
 // A host array that also feeds a GPU function is tagged `'kernel'global` by residency inference,
 // and so are the host-only helper parameters it flows through (`lin`, `rd`): they must still be
 // read-only borrows (`&Vec<T>`), like any unqualified array parameter, so a helper called twice

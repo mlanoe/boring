@@ -1743,3 +1743,16 @@ transpile_test!(optional_hole_untyped_let);
 transpile_test!(optional_reassign_untyped_var);
 transpile_test!(dict_untyped_index_optional_arg);
 transpile_test!(optional_if_coercion);
+// 0.9.15 regressions of 803d835: `coll[i].field` on an `'actor`/`'guard` element must lock it;
+// a parameter keeps its signature qualifier in nested body slices (match arms, if branches), and
+// that qualifier is inferred knowing the function's return type (a returned parameter escapes);
+// a borrowed parameter compared with a value compares through the reference; a `mut` parameter
+// stays lent whatever it is passed to; `return x` in a match arm of a `T?` function is `Some(x)`, and a `let` initialised
+// by a match/if inside such an arm is not.
+transpile_test!(indexed_lock_field_read);
+transpile_test!(param_qual_nested_slice);
+transpile_test!(param_returned_via_alias);
+transpile_test!(borrowed_param_compare);
+transpile_test!(mut_param_forwarded);
+transpile_test!(optional_match_arm_return);
+transpile_test!(optional_let_in_arm);

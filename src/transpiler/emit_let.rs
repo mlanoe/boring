@@ -1764,6 +1764,15 @@ impl Transpiler {
     }
 
     pub(crate) fn emit_let(&mut self, s: &LetStmt, is_last: bool) {
+        // A `let` initializer is never the optional tail of an enclosing match/if
+        // (`expected_optional`): `let v = match k: A: 1 ...` inside an arm of a `T?` function
+        // is a plain `T` unless the binding itself is declared optional (handled below).
+        let prev_expected_optional = std::mem::replace(&mut self.expected_optional, false);
+        self.emit_let_stmt(s, is_last);
+        self.expected_optional = prev_expected_optional;
+    }
+
+    fn emit_let_stmt(&mut self, s: &LetStmt, is_last: bool) {
         if let Some(v) = &s.value { self.check_copied_field_literal(v); }
         // A local declared with a qualifier group (`Counter'many a`) whose call sites resolved it to
         // a shared handle: emit it exactly as if written with that qualifier (`Counter'actor a`).
@@ -1902,9 +1911,33 @@ impl Transpiler {
         // `Vec<T>` made every later `v = <resident call>` a blocking device-to-host readback
         // (a Metal batch flush). A host-typed non-literal initialiser (`mut [T]'kernel'unified v = cache.hk`) starts the slot in
         // the Host variant too. A non-empty literal stays a plain host array.
-        let resident_init = s.value.as_ref().filter(|_value_expr| {
-            self.is_gpu_target
-                && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some())
+        //
+        // SIMD (PROP-02 "Option A") makes every `'kernel`-typed local a slot. The real GPU
+        // backends keep the narrower rule: a slot only inside a resident-returning function,
+        // when initialised from an already-resident value, or as a `mut`/`var` placeholder
+        // in a program that has resident-returning functions. An ordinary host array that is
+        // merely *passed* to a kernel (`let [float32]'kernel'global x = [..]`, often with the
+        // qualifier inferred from the callee's parameter) stays a plain `Vec<T>`, so host
+        // initialisation (`x[i] = ...`) and host method calls taking `[T]` keep working.
+        let declared_kernel_ty = self.is_gpu_target
+            && s.ty.as_ref().is_some_and(|ty| ty.without_mut().gpu_resident_qual().is_some());
+        let resident_init = s.value.as_ref().filter(|value_expr| {
+            if !declared_kernel_ty { return false; }
+            if self.config.is_simd_target { return true; }
+            let value_is_already_resident = self.expr_is_gpu_resident_field(value_expr)
+                || matches!(&value_expr.kind, ExprKind::Var(v)
+                    if !self.with_open_names.contains(v.as_str())
+                        && (self.resident_call_vars.contains_key(v.as_str())
+                            || self.current_fn_gpu_arg_param_names.contains(v.as_str())
+                            || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
+                || matches!(&value_expr.kind, ExprKind::Call(callee, _)
+                    if matches!(&callee.kind, ExprKind::Var(name)
+                        if self.fn_returns_resident.contains_key(name.as_str())));
+            self.current_fn_returns_resident.is_some()
+                || value_is_already_resident
+                || (s.binding.is_mutable()
+                    && !self.fn_returns_resident.is_empty()
+                    && !matches!(&value_expr.kind, ExprKind::Array(e) if !e.is_empty()))
         });
         if let Some(value_expr) = resident_init {
             let kw = if s.binding.is_mutable() { "let mut" } else { "let" };
@@ -1929,6 +1962,20 @@ impl Transpiler {
             self.known_local_vars.insert(s.name.clone());
             return;
         }
+        // A `'kernel`-typed local that is not a residency slot is a plain host `Vec<T>`:
+        // `emit_let_value` must not wrap its initialiser in `BoringKernelArg::Host(..)`.
+        // A redeclaration also drops any slot of the same name from an earlier binding.
+        if declared_kernel_ty {
+            self.resident_call_vars.remove(s.name.as_str());
+            let prev = self.plain_kernel_let.replace(true);
+            self.emit_let_inner_plain(s);
+            self.plain_kernel_let.set(prev);
+            return;
+        }
+        self.emit_let_inner_plain(s);
+    }
+
+    fn emit_let_inner_plain(&mut self, s: &LetStmt) {
         // Validate `mut` qualifier combinations.
         if s.binding == BindingKind::Mut {
             if let Some(ty) = &s.ty {
@@ -2924,6 +2971,7 @@ impl Transpiler {
         // was never affected — only `mut`/`var mut` bindings were.
         let declared_ty = declared_ty.map(Type::without_mut);
         if self.config.is_gpu_target
+            && !self.plain_kernel_let.get()
             && declared_ty.is_some_and(|t| t.gpu_resident_qual().is_some())
         {
             if matches!(&value.kind, ExprKind::Call(callee, _)
@@ -2939,7 +2987,7 @@ impl Transpiler {
                             || self.current_fn_gpu_arg_param_names.contains(v.as_str())
                             || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
             {
-                return format!("({}).clone()", self.emit_expr(value));
+                return clone_of_place(&self.emit_expr(value));
             }
             let inner = match declared_ty.unwrap() {
                 Type::Qualified(inner, _) => inner.as_ref(),
@@ -3550,7 +3598,7 @@ impl Transpiler {
                             || self.current_fn_gpu_arg_param_names.contains(v.as_str())
                             || self.current_fn_gpu_borrow_param_names.contains(v.as_str())))
             {
-                return format!("({}).clone()", self.emit_expr(value));
+                return clone_of_place(&self.emit_expr(value));
             }
             let inner = match field_ty.unwrap() {
                 Type::Qualified(inner, _) => inner.as_ref(),
@@ -3995,4 +4043,24 @@ impl Transpiler {
             }
         }
     }
+}
+
+/// `<place>.clone()` for an already-resident `BoringKernelArg` read by value (`h.b`,
+/// `hs[(0) as usize].a`, a slot variable): parenthesised only when the emitted text is not a
+/// plain postfix place (a leading unary operator, or a top-level space such as `x as T`), so
+/// the common case reads `w = h.b.clone();`.
+pub(crate) fn clone_of_place(place: &str) -> String {
+    let mut depth = 0i32;
+    let mut simple = !place.is_empty() && !place.starts_with(['*', '&', '-', '!']);
+    for c in place.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            c if depth == 0 && (c.is_whitespace() || matches!(c, '+' | '-' | '*' | '/' | '?' | '|' | '<' | '>' | '=')) => {
+                simple = false;
+            }
+            _ => {}
+        }
+    }
+    if simple { format!("{place}.clone()") } else { format!("({place}).clone()") }
 }

@@ -1,0 +1,57 @@
+# Regression (0.9.15): a parameter's qualifier is decided once, for the signature; the
+# qualifier inference re-run on a nested body slice (match arm, if branch) must not decide
+# it again. A parameter matched on (owned) and forwarded inside an arm to a callee that
+# borrows it was passed without `&` (`expected &J, found J`).
+
+enum J:
+    A(int)
+    B(string)
+
+    req bool isA():
+        match self:
+            A(_): true
+            B(_): false
+
+struct Cfg:
+    int level
+    string tag
+
+# Only reads `raw`: borrowed (`raw: &J`).
+int? j1(J raw):
+    if raw.isA(): return 1
+    nil
+
+int? j2(J raw):
+    match raw:
+        A(_):
+            guard let v = j1(raw) else return nil
+            v
+        _: nil
+
+int weight(Cfg c):
+    c.level * 2
+
+Cfg keep(Cfg c, bool twice):
+    if twice:
+        print weight(c)
+    c
+
+int pick(Cfg c, J j):
+    match j:
+        A(n):
+            if n > 0:
+                weight(c) + n
+            else:
+                weight(c)
+        B(s):
+            print s
+            0
+
+def main():
+    let a = j2(J.A(7)) else -1
+    let b = j2(J.B("x")) else -1
+    print "{a} {b}"
+    let c = keep(Cfg(3, "t"), true)
+    print c.tag
+    print pick(c, J.A(4))
+    print pick(c, J.B("b"))

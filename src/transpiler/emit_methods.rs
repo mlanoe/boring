@@ -7821,6 +7821,21 @@ impl Transpiler {
         }
     }
 
+    /// `coll[i]` / `dict[k]` whose element is itself a lock handle — the same test as the
+    /// `Index` arm of `resolve_lock_field_ref`, without emitting anything. A field read on such
+    /// an element must go through that lock, never through the fused `coll[i].field`
+    /// projection (`emit_expr_field`).
+    pub(crate) fn index_elem_is_lock_handle(&self, obj: &Expr) -> bool {
+        if !matches!(&obj.kind, ExprKind::Index(..) | ExprKind::LabeledIndex(..)) {
+            return false;
+        }
+        self.resolve_expr_type(obj).is_some_and(|t| {
+            let cur = t.without_mut();
+            matches!(cur, Type::Qualified(_, OwnerQual::Actor | OwnerQual::Guard))
+                || self.is_managed_owned_user(cur)
+        })
+    }
+
     /// Resolves `obj` to a struct field whose declared type is `'actor`/`'actor'task`/`'guard`/
     /// `'guard'task` (a bare implicit-self field `bn`, `self.bn`, or `some_struct_var.bn`): the lock
     /// handle's Rust place expression plus the field's declared type. A field accessed *through* such a
@@ -8443,6 +8458,7 @@ impl Transpiler {
             struct_type_param_names: self.struct_type_param_names.clone(),
             want_raw_option_pop: std::cell::Cell::new(false),
             want_raw_dict_get: std::cell::Cell::new(false),
+            plain_kernel_let: std::cell::Cell::new(false),
             managed_refcell_vars: self.managed_refcell_vars.clone(),
             managed_param_shadows: self.managed_param_shadows.clone(),
             struct_method_return_types: self.struct_method_return_types.clone(),
@@ -8471,6 +8487,7 @@ impl Transpiler {
             unlent_probe: std::collections::HashSet::new(),
             last_use_sites: self.last_use_sites.clone(),
             ref_bound_vars: self.ref_bound_vars.clone(),
+            pinned_param_quals: self.pinned_param_quals.clone(),
             last_use_table: self.last_use_table.clone(),
             immutable_local_vars: self.immutable_local_vars.clone(),
             mut_local_vars: self.mut_local_vars.clone(),

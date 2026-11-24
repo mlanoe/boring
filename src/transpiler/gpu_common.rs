@@ -250,6 +250,112 @@ pub(crate) fn resident_return_type(
     }
 }
 
+/// `print`/`error`/`warn`/`info`/`debug`/`trace` called from a GPU host function: the
+/// Rust macro the standard transpiler (`emit_expr.rs`) emits for the same builtin, given
+/// the already-rendered first argument (`None` for a zero-argument call). Log levels
+/// print `[LEVEL] message` on stderr, like `boring run`. `None` for any other name.
+pub(crate) fn host_display_builtin(name: &str, inner: Option<String>) -> Option<String> {
+    let (mac, prefix) = match name {
+        "print" => ("println", String::new()),
+        "error" | "warn" | "info" | "debug" | "trace" => ("eprintln", format!("[{}] ", name.to_uppercase())),
+        _ => return None,
+    };
+    let Some(inner) = inner else {
+        return Some(if prefix.is_empty() { format!("{mac}!()") } else { format!("{mac}!(\"{}\")", prefix.trim_end()) });
+    };
+    // A rendered interpolation (`format!("...", args)`) lifts into the macro itself.
+    if let Some(inner_args) = inner.strip_prefix("format!(\"").and_then(|s| s.strip_suffix(')')) {
+        return Some(format!("{mac}!(\"{prefix}{inner_args})"));
+    }
+    Some(format!("{mac}!(\"{prefix}{{}}\", {inner})"))
+}
+
+/// Splits a Rust parameter list (`a: &Vec<f32>, b: (isize, f32)`) at its top-level commas.
+fn split_rust_params(params: &str) -> Vec<String> {
+    let (mut out, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
+    for c in params.chars() {
+        match c {
+            '(' | '<' | '[' => { depth += 1; cur.push(c) }
+            ')' | '>' | ']' => { depth -= 1; cur.push(c) }
+            ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() { out.push(cur); }
+    out
+}
+
+/// The Rust parameter types of free function `name` as the general pass emitted it in `code`
+/// (empty when `code` has no such function, e.g. a kernel-touching one the host emits itself).
+pub(crate) fn general_fn_param_types(code: &str, name: &str) -> Vec<String> {
+    let needle = format!("fn {name}(");
+    let Some(sig) = code.lines().find_map(|l| {
+        let t = l.trim_start();
+        let t = t.strip_prefix("pub ").unwrap_or(t);
+        t.starts_with(&needle).then(|| t.to_string())
+    }) else { return Vec::new() };
+    let rest = &sig[needle.len()..];
+    let mut depth = 0i32;
+    let end = rest.char_indices().find_map(|(i, c)| match c {
+        '(' | '<' | '[' => { depth += 1; None }
+        ')' if depth == 0 => Some(i),
+        ')' | '>' | ']' => { depth -= 1; None }
+        _ => None,
+    }).unwrap_or(rest.len());
+    split_rust_params(&rest[..end]).iter()
+        .map(|p| p.split_once(':').map(|(_, t)| t.trim().to_string()).unwrap_or_default())
+        .collect()
+}
+
+/// Per parameter of free function `name`, `Some(takes_ref)` when the general pass emitted it as
+/// plain host data (no `BoringKernelArg`). Residency inference may tag a host-only array
+/// parameter `'kernel'global`; the general pass drops that qualifier again
+/// (`unqualify_host_only_gpu_array_params`), so a host caller must not wrap the argument in
+/// `BoringKernelArg::Host(..)` for it. `None` for a position (or function) it didn't emit.
+pub(crate) fn general_plain_params(code: &str, name: &str) -> Vec<Option<bool>> {
+    general_fn_param_types(code, name).iter()
+        .map(|t| (!t.is_empty() && !t.contains("BoringKernelArg")).then(|| t.starts_with('&')))
+        .collect()
+}
+
+/// How the general pass emitted method `method` of struct `ty` in `code` (its `impl ty` block):
+/// one passing mode per non-`self` parameter (`"&mut"`, `"&"`, `"box"` for `Box<dyn ..>`,
+/// `"f64"`/`"f32"` for a float scalar, `""` by value) and whether it returns a `Result` (a
+/// `throws` method, which a host caller `?`-propagates). `None` when no such method is found.
+pub(crate) fn general_impl_method_sig(code: &str, ty: &str, method: &str) -> Option<(Vec<&'static str>, bool)> {
+    let mut in_impl = false;
+    for l in code.lines() {
+        if l.trim().is_empty() { continue; }
+        if !l.starts_with(char::is_whitespace) {
+            let t = l.trim_end();
+            in_impl = t.starts_with("impl ") && t.trim_end_matches(" {").split_whitespace().last() == Some(ty)
+                || t.starts_with("impl<") && t.trim_end_matches(" {").ends_with(&format!(" {ty}"));
+            continue;
+        }
+        if !in_impl { continue; }
+        let t = l.trim_start();
+        let t = t.strip_prefix("pub ").unwrap_or(t);
+        let Some(rest) = t.strip_prefix(&format!("fn {method}(")) else { continue };
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in rest.char_indices() {
+            match c { '(' | '<' | '[' => depth += 1, ')' | '>' | ']' if depth > 0 => depth -= 1, ')' => { end = Some(i); break; } _ => {} }
+        }
+        let end = end?;
+        let mut modes: Vec<&'static str> = split_rust_params(&rest[..end]).iter().map(|p| {
+            let ty = p.split_once(':').map(|(_, ty)| ty.trim()).unwrap_or("");
+            if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" }
+            else if ty.starts_with("Box<dyn ") { "box" } else if ty == "f64" { "f64" } else if ty == "f32" { "f32" } else { "" }
+        }).collect();
+        if modes.is_empty() { return None; }
+        modes.remove(0); // `self`
+        let returns_result = rest[end + 1..].trim_start().strip_prefix("->")
+            .is_some_and(|r| r.trim_start().starts_with("Result<"));
+        return Some((modes, returns_result));
+    }
+    None
+}
+
 pub(crate) fn is_gpu_array_param(ty: &Type) -> bool {
     matches!(ty.without_mut(), Type::Qualified(inner, OwnerQual::GpuGlobal | OwnerQual::GpuUnified)
         if matches!(inner.without_mut(), Type::Array(_) | Type::ArrayN(_, _) | Type::ArrayNExpr(_, _) | Type::LabeledArray(_, _)))

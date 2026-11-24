@@ -1,0 +1,45 @@
+# Regression (0.9.15): a `mut` struct parameter lends the caller's value (`&mut`), even when
+# the body also hands it to a function that takes its parameter by value (`isIdle` below,
+# whose parameter is stored into a struct). 803d835's escape analysis counted that as an
+# escape of the `mut` parameter and took it by value (`mut rt: Runtime`), so the writes made
+# through it landed on a copy: the caller saw no click at all.
+
+struct Runtime:
+    var int clicks = 0
+    var mut [string] events = []
+
+    def click(string what):
+        clicks += 1
+        events.push(what)
+
+struct Snap:
+    Runtime rt
+
+bool isIdle(Runtime rt):
+    let s = Snap(rt)
+    s.rt.clicks == 0
+
+def press(mut Runtime rt, string what):
+    rt.click(what)
+
+def act(mut Runtime rt, string what):
+    let idle = isIdle(rt)
+    if idle:
+        print "first"
+    if what == "twice":
+        press(rt, what)
+    rt.click(what)
+
+bool perform(mut Runtime rt, string what):
+    if what == "":
+        return false
+    act(rt, what)
+    true
+
+def main():
+    mut rt = Runtime()
+    print perform(rt, "a")
+    print perform(rt, "twice")
+    print perform(rt, "")
+    print rt.clicks
+    print rt.events.length

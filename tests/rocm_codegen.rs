@@ -2181,3 +2181,145 @@ def main() throws:
     assert!(rs.contains("async fn spawn_handler("),
         "spawn_handler calls the now-async outer and must become async too (three hops removed), got:\n{rs}");
 }
+
+// `warn "..."` (and the other log levels) inside a GPU host function: `eprintln!("[WARN] ...")`,
+// not a bare `warn(...)` call (E0423) — found by whisper-boring's `audio_gpu.br` on Metal.
+#[test]
+fn warn_in_gpu_host_fn_prints_on_stderr() {
+    let (_, rs) = rocm_codegen("warn_in_gpu_host_fn", r#"
+kernel Doubler:
+    let [float32]'global src
+    mut [float32]'unified dst
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        dst = [0.0 for ..<nn]
+    def ():
+        let i = .thread.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+
+kernel Summer:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 for ..<1]
+    def ():
+        if .thread.x == 0:
+            var float32 acc = 0.0
+            for j in 0..<n:
+                acc += src[j]
+            out[0] = acc
+
+pub req [float32]'kernel'unified double_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Doubler(x, n)
+    kernel:
+        k(block = 64, grid = 1)
+    k.dst
+
+pub req float32 sum_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Summer(x, n)
+    kernel:
+        k(block = 1, grid = 1)
+    let [float32] o = k.out
+    o[0]
+
+def float32 warned([float32] x, int n) throws:
+    if n > 2:
+        let float32 secs = 1.5
+        warn "audio is {secs:.1f}s, truncating"
+    let [float32]'kernel'unified d = double_gpu(x, n)
+    sum_gpu(d, n)
+
+def main() throws:
+    let [float32] x = [1.0, 2.0, 3.0, 4.0]
+    let float32 a = warned(x, 4)
+    print a
+"#);
+    assert!(rs.contains(r#"eprintln!("[WARN] audio is {:.1}s, truncating", secs);"#), "{rs}");
+    assert!(!rs.contains("warn(format!"), "{rs}");
+}
+
+// A kernel-touching `main` calling into code the general pass emitted: a `throws` struct method
+// is `?`-propagated, a method's borrowed array argument is lent, and a free-function parameter
+// the general pass emitted as plain `&Vec<f32>` is not wrapped in `BoringKernelArg::Host(..)`
+// (see `metal_codegen`'s `host_calls_into_general_pass_*`).
+#[test]
+fn host_calls_into_general_pass_methods_and_plain_params() {
+    let (_, rs) = rocm_codegen("host_calls_into_general_pass", r#"
+kernel Doubler:
+    let [float32]'global src
+    mut [float32]'unified dst
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        dst = [0.0 for ..<nn]
+    def ():
+        let i = .thread.x
+        if i < n:
+            dst[i] = src[i] * 2.0
+
+kernel Summer:
+    let [float32]'global src
+    mut [float32]'unified out
+    let int n
+    init([float32]'global s, int nn):
+        src = s
+        n = nn
+        out = [0.0 for ..<1]
+    def ():
+        if .thread.x == 0:
+            var float32 acc = 0.0
+            for j in 0..<n:
+                acc += src[j]
+            out[0] = acc
+
+pub req [float32]'kernel'unified double_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Doubler(x, n)
+    kernel:
+        k(block = 64, grid = 1)
+    k.dst
+
+pub req float32 sum_gpu([float32]'kernel'global x, int n) throws:
+    mut k = Summer(x, n)
+    kernel:
+        k(block = 1, grid = 1)
+    let [float32] o = k.out
+    o[0]
+
+struct Model:
+    let int n = 4
+    def float32 step() throws:
+        let [float32] x = [1.0 for ..<self.n]
+        let [float32]'kernel'unified d = double_gpu(x, self.n)
+        sum_gpu(d, self.n)
+
+    def float32 step_on([float32] x) throws:
+        let [float32]'kernel'unified d = double_gpu(x, self.n)
+        sum_gpu(d, self.n)
+
+def float32 run_model([float32] x) throws:
+    mut m = Model()
+    m.step_on(x)
+
+def main() throws:
+    let [float32] x = [1.0, 2.0, 3.0, 4.0]
+    let [float32]'kernel'unified d = double_gpu(x, 4)
+    print sum_gpu(d, 4)
+    mut m = Model()
+    let float32 b = m.step()
+    print b
+    print m.step()
+    print run_model(x)
+    print m.step_on(x)
+"#);
+    assert!(rs.contains("let b: f32 = m.step()?;"), "{rs}");
+    assert!(rs.contains("m.step_on(&x)?"), "{rs}");
+    assert!(rs.contains("run_model(&(x))?"), "{rs}");
+    assert!(!rs.contains("run_model(BoringKernelArg::Host("), "{rs}");
+}

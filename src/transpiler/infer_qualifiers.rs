@@ -398,10 +398,10 @@ impl Transpiler {
                 if let Some(ref rq) = return_qual {
                     if anonymous_vars.contains(name.as_str()) {
                         constrain_candidates(&mut candidates, name, std::slice::from_ref(rq), &alias_of);
-                        mark_param_escapes(name, &alias_of, &auto_ref_param_vars, &mut has_qualifier_constraint);
+                        self.mark_param_escapes(name, &alias_of, &auto_ref_param_vars, &mut has_qualifier_constraint);
                     }
                 } else if self.fn_return_ty.is_some() {
-                    mark_param_escapes(name, &alias_of, &auto_ref_param_vars, &mut has_qualifier_constraint);
+                    self.mark_param_escapes(name, &alias_of, &auto_ref_param_vars, &mut has_qualifier_constraint);
                 }
             }
         }
@@ -561,6 +561,8 @@ impl Transpiler {
             }
         }
 
+        self.pin_param_quals(stmts);
+
         // Bare `'observed` locals: read back whatever the ordinary bare-struct
         // resolution above just produced (`Inline`/`Owned`/`Actor`/`ActorTask`/`Guard`/
         // `GuardTask` — `Shared` was excluded up front, so it never appears here) and
@@ -570,6 +572,65 @@ impl Transpiler {
         for (name, struct_name) in &observed_bare {
             if let Some(q) = self.inferred_qualifiers.get(name).cloned() {
                 self.observed_locals.insert(name.clone(), (struct_name.clone(), q));
+            }
+        }
+    }
+
+    /// The parameter `var_name` (or the parameter it aliases) leaves the function by value
+    /// (returned, stored, forwarded to a by-value parameter, ...): no universal borrow for it.
+    /// Not for a `mut` parameter: it lends the caller's own value (`&mut`, docs/book.md "`mut` vs
+    /// `var` on a struct parameter") whatever the body does with it — taking it by value would
+    /// silently drop the callee's writes, and forwarding it to another `mut` parameter (a bare
+    /// type in `fn_sigs`, itself lent) is a reborrow, not an escape.
+    /// Not on a GPU target either: the cuda/rocm/metal host emitters render every free function
+    /// they own with its struct/array/dict/set parameters as `&T` and coerce call arguments from
+    /// the *declared* types (`gpu_common::is_ref_worthy_type`, `fn_ref_params`), so a parameter
+    /// this pass took by value would disagree with them at every call crossing the two emitters
+    /// (boring-llm: `fold_cache(model, cache)`, `expected GenCache, found &GenCache`).
+    fn mark_param_escapes(
+        &self,
+        var_name: &str,
+        alias_of: &std::collections::HashMap<String, String>,
+        auto_ref_param_vars: &std::collections::HashSet<String>,
+        has_qualifier_constraint: &mut std::collections::HashSet<String>,
+    ) {
+        if self.config.is_gpu_target {
+            return;
+        }
+        let root = alias_of.get(var_name).map(|s| s.as_str()).unwrap_or(var_name);
+        for name in [root, var_name] {
+            if auto_ref_param_vars.contains(name) && !self.fn_current_params_mut.contains(name) {
+                has_qualifier_constraint.insert(name.to_string());
+            }
+        }
+    }
+
+    /// While a function body is being emitted, put its parameters back to the qualifier the
+    /// signature gave them (`pinned_param_quals`, set by `emit_fn`). This pass may run on a
+    /// nested slice of the body (a match arm, an `if` branch), where a parameter's uses are only
+    /// partly visible: e.g. `match raw:` at the top makes `raw` owned, while the arm that merely
+    /// forwards `raw` to a borrowing callee would decide it borrowed — and its call site would then
+    /// pass the owned value where `&T` is expected. A name the slice itself binds (a local
+    /// shadowing the parameter) is left to this pass.
+    fn pin_param_quals(&mut self, stmts: &[Stmt]) {
+        let Some(pinned) = self.pinned_param_quals.clone() else { return };
+        let mut local_names = std::collections::HashSet::new();
+        {
+            let (mut alias_of, mut var_struct_types) = (std::collections::HashMap::new(), std::collections::HashMap::new());
+            let (mut mut_bindings, mut tick_bindings) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+            let mut union_initial = std::collections::HashMap::new();
+            for stmt in stmts {
+                collect_anonymous_vars(stmt, &mut local_names, &mut alias_of, &mut var_struct_types, &mut mut_bindings, &mut tick_bindings);
+                collect_group_local_lets(stmt, &mut local_names, &mut union_initial, &mut var_struct_types, &mut mut_bindings);
+            }
+        }
+        for (name, q) in pinned {
+            if local_names.contains(name.as_str()) || !self.fn_current_params.contains_key(name.as_str()) {
+                continue;
+            }
+            match q {
+                Some(q) => { self.inferred_qualifiers.insert(name, q); }
+                None => { self.inferred_qualifiers.remove(name.as_str()); }
             }
         }
     }
@@ -603,7 +664,7 @@ impl Transpiler {
                                 constrain_candidates(candidates, name, std::slice::from_ref(rq), alias_of);
                             }
                         }
-                        mark_param_escapes(name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                        self.mark_param_escapes(name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                     }
                     self.walk_expr_for_qualifiers(e, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 }
@@ -753,7 +814,7 @@ impl Transpiler {
                                 }
                                 // Unresolved callee (e.g. enum variant ctor, Some(d), closure param):
                                 // conservatively treat the argument as escaping by value.
-                                mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                                self.mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                             }
                         }
                     }
@@ -780,7 +841,7 @@ impl Transpiler {
                                         | Type::Dict(_, _) | Type::Set(_) | Type::Tuple(_)
                                         | Type::Optional(_)
                                 ) {
-                                    mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                                    self.mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                                 }
                                 continue;
                             };
@@ -839,19 +900,21 @@ impl Transpiler {
                                 // A concrete qualifier demand (not Borrow/BorrowMut) is a
                                 // qualifier-demand signal: auto-ref inference does not apply.
                                 if !matches!(demanded, OwnerQual::Borrow | OwnerQual::BorrowMut) {
-                                    mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                                    self.mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                                 }
                             }
                         }
                     }
                     // Struct constructor call: `Env(parent = x, ...)` or positional `Boxed(x)` —
-                    // storing a parameter in a struct field escapes it, and named args also
-                    // constrain by the corresponding struct field's declared qualifier.
+                    // storing a parameter in a struct field escapes it (no universal borrow), and
+                    // the member it lands in constrains its qualifier like any other demand: the
+                    // labelled field, or for a positional argument the field at its position.
                     let is_struct_ctor = fn_name.chars().next()
                         .map(|c| c.is_uppercase()).unwrap_or(false)
                         && self.struct_fields.contains_key(fn_name.as_str());
                     if is_struct_ctor {
                         let fields = self.struct_fields.get(fn_name.as_str()).cloned().unwrap_or_default();
+                        let mut positional = 0usize;
                         for arg in args {
                             // Resolve both explicit label (`field= x`) and closure-style (`field: x`).
                             let (field_name_opt, val_expr): (Option<&String>, &Expr) =
@@ -864,9 +927,14 @@ impl Transpiler {
                                             (Some(field_name), e.as_ref())
                                         } else { (None, &arg.value) }
                                     } else { (None, &arg.value) }
-                                } else { (None, &arg.value) };
+                                } else {
+                                    // A positional argument fills the field at its position.
+                                    let field = fields.get(positional).map(|(n, _)| n);
+                                    positional += 1;
+                                    (field, &arg.value)
+                                };
                             let ExprKind::Var(var_name) = &val_expr.kind else { continue };
-                            mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                            self.mark_param_escapes(var_name, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                             if !anonymous_vars.contains(var_name.as_str()) { continue; }
                             let Some(field_name) = field_name_opt else { continue };
                             let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == field_name) else { continue };
@@ -1094,14 +1162,14 @@ impl Transpiler {
             ExprKind::Array(elems) | ExprKind::Tuple(elems) | ExprKind::Set(elems) => {
                 for elem in elems {
                     if let ExprKind::Var(v) = &elem.kind {
-                        mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                        self.mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                     }
                     self.walk_expr_for_qualifiers(elem, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 }
             }
             ExprKind::ArrayFill { value, count } => {
                 if let ExprKind::Var(v) = &value.kind {
-                    mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                    self.mark_param_escapes(v, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                 }
                 self.walk_expr_for_qualifiers(value, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                 self.walk_expr_for_qualifiers(count, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
@@ -1109,10 +1177,10 @@ impl Transpiler {
             ExprKind::Dict(pairs) => {
                 for (k, v) in pairs {
                     if let ExprKind::Var(vn) = &k.kind {
-                        mark_param_escapes(vn, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                        self.mark_param_escapes(vn, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                     }
                     if let ExprKind::Var(vn) = &v.kind {
-                        mark_param_escapes(vn, alias_of, auto_ref_param_vars, has_qualifier_constraint);
+                        self.mark_param_escapes(vn, alias_of, auto_ref_param_vars, has_qualifier_constraint);
                     }
                     self.walk_expr_for_qualifiers(k, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
                     self.walk_expr_for_qualifiers(v, anonymous_vars, var_struct_types, alias_of, candidates, auto_ref_param_vars, has_qualifier_constraint);
@@ -2010,21 +2078,6 @@ impl Transpiler {
 
 /// Intersect the candidate set for `var_name` (and its aliases) with `compatible`.
 /// Qualifiers not in `compatible` are eliminated.
-fn mark_param_escapes(
-    var_name: &str,
-    alias_of: &std::collections::HashMap<String, String>,
-    auto_ref_param_vars: &std::collections::HashSet<String>,
-    has_qualifier_constraint: &mut std::collections::HashSet<String>,
-) {
-    let root = alias_of.get(var_name).map(|s| s.as_str()).unwrap_or(var_name);
-    if auto_ref_param_vars.contains(root) {
-        has_qualifier_constraint.insert(root.to_string());
-    }
-    if auto_ref_param_vars.contains(var_name) {
-        has_qualifier_constraint.insert(var_name.to_string());
-    }
-}
-
 fn constrain_candidates(
     candidates: &mut std::collections::HashMap<String, Vec<OwnerQual>>,
     var_name: &str,

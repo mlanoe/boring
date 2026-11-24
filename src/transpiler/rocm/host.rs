@@ -1909,6 +1909,10 @@ impl HostEmitter {
         } else {
             "std::sync::Arc<str>".into()
         };
+        // The general pass's signatures, read back by the call emission below
+        // (`general_plain_params`, `general_struct_method_call`): needed before any
+        // kernel-touching function body is emitted, not just when the code is spliced.
+        self.general_code_text = general_code.to_string();
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
         {
             let mut fn_used: Vec<String> = Vec::new();
@@ -3266,25 +3270,7 @@ impl HostEmitter {
 
     /// The declared Rust parameter types of the general pass's `fn name(...)`; empty when unknown.
     fn general_fn_param_types(&self, name: &str) -> Vec<String> {
-        let needle = format!("fn {name}(");
-        let Some(sig) = self.general_code_text.lines().find_map(|l| {
-            let t = l.trim_start();
-            let t = t.strip_prefix("pub ").unwrap_or(t);
-            t.starts_with(&needle).then(|| t.to_string())
-        }) else { return Vec::new() };
-        let rest = &sig[needle.len()..];
-        let (mut depth, mut cur, mut out) = (0i32, String::new(), Vec::new());
-        for c in rest.chars() {
-            match c {
-                '(' | '<' | '[' => { depth += 1; cur.push(c) }
-                ')' if depth == 0 => break,
-                ')' | '>' | ']' => { depth -= 1; cur.push(c) }
-                ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
-                _ => cur.push(c),
-            }
-        }
-        if !cur.trim().is_empty() { out.push(cur); }
-        out.iter().map(|p| p.split_once(':').map(|(_, t)| t.trim().to_string()).unwrap_or_default()).collect()
+        general_fn_param_types(&self.general_code_text, name)
     }
 
     /// The parameter modes of method `method` of the struct value `recv` (a setup value of a
@@ -3292,47 +3278,31 @@ impl HostEmitter {
     fn setup_method_modes(&self, recv: &Expr, method: &str) -> Option<Vec<&'static str>> {
         let ExprKind::Var(n) = &recv.kind else { return None };
         let (_, ty) = self.setup_fields.iter().find(|(f, _)| f == n)?;
-        let ty = ty.trim_start_matches('&');
-        let mut in_impl = false;
-        for l in self.general_code_text.lines() {
-            if l.trim().is_empty() { continue; }
-            if !l.starts_with(char::is_whitespace) {
-                let t = l.trim_end();
-                in_impl = t.starts_with("impl ") && t.trim_end_matches(" {").split_whitespace().last() == Some(ty)
-                    || t.starts_with("impl<") && t.trim_end_matches(" {").ends_with(&format!(" {ty}"));
-                continue;
+        general_impl_method_sig(&self.general_code_text, ty.trim_start_matches('&'), method).map(|(modes, _)| modes)
+    }
+
+    /// A method call on a value of a user struct whose `impl` the general pass emitted
+    /// (`m.step(x)`, `m` a `Model` local): each argument passed the way the generated
+    /// signature takes it, and a `throws` method `?`-propagated from a `throws` caller.
+    /// `None` when the receiver's struct or the method isn't known.
+    fn general_struct_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ty = self.tenv.expr_struct_name(obj, self.self_type.as_deref())?;
+        let (modes, returns_result) = general_impl_method_sig(&self.general_code_text, &ty, method)?;
+        if modes.len() != args.len() { return None; }
+        let args_s: Vec<String> = args.iter().zip(&modes).map(|(a, mode)| {
+            let v = self.expr(&a.value);
+            match *mode {
+                "&mut" => format!("&mut {v}"),
+                "&" => format!("&{v}"),
+                "box" => format!("Box::new({v})"),
+                "f64" => format!("(({v}) as f64)"),
+                "f32" => format!("(({v}) as f32)"),
+                _ if matches!(&a.value.kind, ExprKind::Var(_)) => format!("{v}.clone()"),
+                _ => v,
             }
-            if !in_impl { continue; }
-            let t = l.trim_start();
-            let t = t.strip_prefix("pub ").unwrap_or(t);
-            if let Some(rest) = t.strip_prefix(&format!("fn {method}(")) {
-                let mut depth = 0i32;
-                let mut end = None;
-                for (i, c) in rest.char_indices() {
-                    match c { '(' | '<' | '[' => depth += 1, ')' | '>' | ']' if depth > 0 => depth -= 1, ')' => { end = Some(i); break; } _ => {} }
-                }
-                let params = &rest[..end?];
-                let (mut parts, mut cur, mut d) = (Vec::new(), String::new(), 0i32);
-                for c in params.chars() {
-                    match c {
-                        '(' | '<' | '[' => { d += 1; cur.push(c) }
-                        ')' | '>' | ']' => { d -= 1; cur.push(c) }
-                        ',' if d == 0 => parts.push(std::mem::take(&mut cur)),
-                        _ => cur.push(c),
-                    }
-                }
-                if !cur.trim().is_empty() { parts.push(cur); }
-                let mut modes: Vec<&'static str> = parts.iter().map(|p| {
-                    let ty = p.split_once(':').map(|(_, ty)| ty.trim()).unwrap_or("");
-                    if ty.starts_with("&mut ") { "&mut" } else if ty.starts_with('&') { "&" }
-                    else if ty.starts_with("Box<dyn ") { "box" } else if ty == "f64" { "f64" } else if ty == "f32" { "f32" } else { "" }
-                }).collect();
-                if modes.is_empty() { return None; }
-                modes.remove(0); // `self`
-                return Some(modes);
-            }
-        }
-        None
+        }).collect();
+        let call = format!("{}.{method}({})", self.expr(obj), args_s.join(", "));
+        Some(if returns_result && self.in_throws { format!("{call}?") } else { call })
     }
 
     fn emit_sub_block(&mut self, stmts: &[Stmt]) -> String {
@@ -3649,18 +3619,13 @@ impl HostEmitter {
                         };
                     }
                 }
-                // `print(expr)` → `println!(...)`
+                // `print(expr)` → `println!(...)`, `warn(expr)` (and the other log levels) → `eprintln!("[WARN] ...")`
                 if let ExprKind::Var(name) = &callee.kind {
-                    if name == "print" {
-                        if let Some(arg) = args.first() {
-                            let inner = self.expr(&arg.value);
-                            if inner.starts_with("format!(") {
-                                let inner_args = &inner["format!(".len()..inner.len()-1];
-                                return format!("println!({})", inner_args);
-                            }
-                            return format!("println!(\"{{}}\", {})", inner);
+                    if matches!(name.as_str(), "print" | "error" | "warn" | "info" | "debug" | "trace") {
+                        let inner = args.first().map(|arg| self.expr(&arg.value));
+                        if let Some(call) = host_display_builtin(name, inner) {
+                            return call;
                         }
-                        return "println!()".into();
                     }
                 }
                 // `abs(x)`/`sqrt(x)`/… → `(x).abs()`/`(x).sqrt()`/…
@@ -3768,7 +3733,14 @@ impl HostEmitter {
                 let mut_ref_flags = callee_name.and_then(|n| self.fn_mut_params.get(n)).cloned();
                 let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
                 let borrow_flags = callee_name.and_then(|n| self.fn_gpu_borrow_params.get(n)).cloned();
+                let plain_params = callee_name.map(|n| general_plain_params(&self.general_code_text, n)).unwrap_or_default();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    // A parameter the general pass emitted as plain host data (see `general_plain_params`).
+                    if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
+                        if let Some(takes_ref) = plain_params.get(i).copied().flatten() {
+                            return self.coerce_call_arg(&a.value, takes_ref);
+                        }
+                    }
                     if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
                         let lend = borrow_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                         if let ExprKind::Var(name) = &a.value.kind {
@@ -3880,6 +3852,9 @@ impl HostEmitter {
                         }
                     }).collect();
                     return format!("{}.{method}({})", self.expr(obj), args_s.join(", "));
+                }
+                if let Some(call) = self.general_struct_method_call(obj, method, args) {
+                    return call;
                 }
                 // `Type.method(...)` (an external static/associated call — `File.create`,
                 // `File.open`, ...) → `Type::method(...)`, mirroring the general

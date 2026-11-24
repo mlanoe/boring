@@ -1,0 +1,31 @@
+# Regression (0.9.15): a parameter returned by value through a local alias (`var t = base`
+# ... `t`) escapes, so it is taken by value. The signature's own qualifier pass ran without
+# the function's return type and borrowed it (`base: &Theme`), while callers declared
+# earlier passed a value (`expected &Theme, found Theme`).
+
+struct Theme:
+    string name
+    int size = 10
+
+Theme macTheme():
+    themeOn(Theme(name = "mac"))
+
+Theme bigger(Theme t, int by):
+    Theme(name = t.name, size = t.size + by)
+
+Theme themeOn(Theme base):
+    var t = base
+    t = bigger(t, 2)
+    t = bigger(t, 3)
+    t
+
+Theme same(Theme base):
+    base
+
+def main():
+    let m = macTheme()
+    print "{m.name} {m.size}"
+    let s = same(Theme(name = "plain"))
+    print "{s.name} {s.size}"
+    let o = themeOn(s)
+    print "{o.name} {o.size} {s.size}"

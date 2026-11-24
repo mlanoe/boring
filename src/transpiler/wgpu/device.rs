@@ -2876,11 +2876,16 @@ fn wgsl_zero(ty: &Type) -> &'static str {
 /// compile-time NaN/Inf division result (see `expr`'s `ExprKind::BinOp` `Div` case).
 /// Deliberately narrow: only the literal shapes that actually show up constructing an
 /// Inf/NaN sentinel (`1.0 / 0.0`, `-1.0 / 0.0`, `0.0 / 0.0`), not general constant folding.
+/// A literal cast to `float32` (`(0.0 as float32) / (0.0 as float32)`, the form the
+/// GGUF f16-scale decoders in `tensor_host.rs` use) is emitted as `f32(0.0)` and folds
+/// just the same, so it counts too.
 fn const_float_value(expr: &Expr) -> Option<f64> {
     match &expr.kind {
         ExprKind::Float(f) => Some(*f),
         ExprKind::Int(n) => Some(*n as f64),
         ExprKind::UnaryOp(UnaryOp::Neg, inner) => const_float_value(inner).map(|v| -v),
+        ExprKind::Cast(inner, ty) if matches!(ty, Type::Float32)
+            || matches!(ty, Type::Named(n) if n == "float32") => const_float_value(inner),
         _ => None,
     }
 }

@@ -2685,7 +2685,33 @@ impl Transpiler {
         }
         let ls = self.emit_expr(l);
         let rs = self.emit_expr(r);
+        // A parameter passed as `&T` (inferred auto-borrow, or a written `T&`) compared with a
+        // value: `&T == T` has no `PartialEq` impl, so compare through the reference. Both sides
+        // references (`a == b`) compare as is.
+        if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq) {
+            // A pattern variable bound by reference (`ref_bound_vars`) is a `&T` as well.
+            let ref_bound = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if self.ref_bound_vars.contains(v.as_str()));
+            let (l_ref, r_ref) = (self.is_borrowed_param_expr(l), self.is_borrowed_param_expr(r));
+            if l_ref != r_ref && !(l_ref && ref_bound(r)) && !(r_ref && ref_bound(l)) {
+                let ls = if l_ref { format!("(*{})", ls) } else { ls };
+                let rs = if r_ref { format!("(*{})", rs) } else { rs };
+                return format!("({} {} {})", ls, binop_str(op), rs);
+            }
+        }
         format!("({} {} {})", ls, binop_str(op), rs)
+    }
+
+    /// `v`, a parameter of the current function emitted as a plain Rust reference (`&T` /
+    /// `&mut T`): a written `T&`/`mut T&`, or a bare struct/enum/collection parameter the
+    /// qualifier inference borrowed.
+    fn is_borrowed_param_expr(&self, e: &Expr) -> bool {
+        let ExprKind::Var(v) = &e.kind else { return false };
+        let Some(ty) = self.fn_current_params.get(v.as_str()) else { return false };
+        if matches!(ty.without_mut(), Type::Qualified(_, OwnerQual::Borrow | OwnerQual::BorrowMut)) {
+            return true;
+        }
+        !matches!(ty.without_mut(), Type::Qualified(..) | Type::Optional(_))
+            && matches!(self.decided_qual(v), Some(OwnerQual::Borrow | OwnerQual::BorrowMut))
     }
 
     /// Emit `.value`/`.wait` on a JoinHandle whose inner Result (if any) needs its
@@ -3040,7 +3066,10 @@ impl Transpiler {
         // Fuse `arr[idx].field` (and `dict[key].field`) reads so we project `.field`
         // directly out of the indexed place and clone only the field, rather than
         // cloning the entire element struct first (`arr[idx].clone().field`).
-        if !self.in_lhs_assign.get() {
+        // Not when the element is itself a lock handle (`'actor`/`'guard`, or a managed-mode
+        // `'owned` user type): `resolve_lock_field_ref` below must take the lock on the indexed
+        // place first — projecting `.field` straight out of `Arc<Mutex<T>>` does not compile.
+        if !self.in_lhs_assign.get() && !self.index_elem_is_lock_handle(obj) {
             if let ExprKind::Index(arr, idx) = &obj.kind {
                 let struct_fields_opt = self.resolve_expr_struct_type(obj)
                     .and_then(|sn| self.struct_fields.get(sn.as_str()));

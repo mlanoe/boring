@@ -1520,7 +1520,7 @@ impl Transpiler {
             }
         }
         if self.expr_is_gpu_resident_field(expr) {
-            return Some(format!("({}).clone()", self.emit_expr(expr)));
+            return Some(super::emit_let::clone_of_place(&self.emit_expr(expr)));
         }
         let ExprKind::Field(obj, field) = &expr.kind else { return None };
         let ExprKind::Var(var_name) = &obj.kind else { return None };
@@ -1599,7 +1599,7 @@ impl Transpiler {
             }
         }
         if self.expr_is_gpu_resident_field(expr) {
-            return Some(format!("({}).clone()", self.emit_expr(expr)));
+            return Some(super::emit_let::clone_of_place(&self.emit_expr(expr)));
         }
         None
     }

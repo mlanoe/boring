@@ -1,0 +1,45 @@
+# Regression (0.9.15): a `let` initialised by a match/if expression inside an arm of a match
+# that is the optional tail of a `T?` function is a plain value. 803d835's `expected_optional`
+# leaked into the initializer and wrapped every branch in `Some(..)` (`expected Value, found
+# Option<Value>`), as in the self-hosted interpreter's `let lit_val = match lit: ...`. The
+# flag is set when an arm's body is a bare `nil` (`Pat.Never: nil`).
+
+enum Lit:
+    Int(int)
+    Str(string)
+
+enum Pat:
+    Never
+    Literal(Lit)
+    Named(string)
+
+bool same(int a, int b):
+    a == b
+
+[int]? matches(Pat p, int subject):
+    match p:
+        Pat.Never: nil
+        Pat.Literal(lit):
+            let v = match lit:
+                Lit.Int(n): n
+                Lit.Str(s): s.length
+            if same(subject, v):
+                []
+            else:
+                nil
+        Pat.Named(name):
+            let short = if name.contains("."): name.split(".")[1] else name
+            if short == "x":
+                [subject]
+            else:
+                nil
+
+def main():
+    let a = matches(Pat.Literal(Lit.Int(3)), 3) else [-1]
+    print a.length
+    let b = matches(Pat.Literal(Lit.Str("ab")), 3) else [-1]
+    print b[0]
+    let c = matches(Pat.Named("t.x"), 7) else [-1]
+    print c[0]
+    let d = matches(Pat.Never, 1) else [-2]
+    print d[0]

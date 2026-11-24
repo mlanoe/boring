@@ -469,6 +469,10 @@ impl HostEmitter {
         } else {
             "std::sync::Arc<str>".into()
         };
+        // The general pass's signatures, read back by the call emission below
+        // (`general_plain_params`, `general_struct_method_call`): needed before any
+        // kernel-touching function body is emitted, not just when the code is spliced.
+        self.general_code_text = general_code.to_string();
         self.tenv = crate::transpiler::host_types::HostTypeEnv::from_program(program);
         {
             let mut fn_used: Vec<String> = Vec::new();
@@ -3014,6 +3018,30 @@ impl HostEmitter {
         }
     }
 
+    /// A method call on a value of a user struct whose `impl` the general pass emitted
+    /// (`m.step(x)`, `m` a `Model` local): each argument passed the way the generated
+    /// signature takes it, and a `throws` method `?`-propagated from a `throws` caller.
+    /// `None` when the receiver's struct or the method isn't known.
+    fn general_struct_method_call(&mut self, obj: &Expr, method: &str, args: &[Arg]) -> Option<String> {
+        let ty = self.tenv.expr_struct_name(obj, self.self_type.as_deref())?;
+        let (modes, returns_result) = general_impl_method_sig(&self.general_code_text, &ty, method)?;
+        if modes.len() != args.len() { return None; }
+        let args_s: Vec<String> = args.iter().zip(&modes).map(|(a, mode)| {
+            let v = self.expr(&a.value);
+            match *mode {
+                "&mut" => format!("&mut {v}"),
+                "&" => format!("&{v}"),
+                "box" => format!("Box::new({v})"),
+                "f64" => format!("(({v}) as f64)"),
+                "f32" => format!("(({v}) as f32)"),
+                _ if matches!(&a.value.kind, ExprKind::Var(_)) => format!("{v}.clone()"),
+                _ => v,
+            }
+        }).collect();
+        let call = format!("{}.{method}({})", self.expr(obj), args_s.join(", "));
+        Some(if returns_result && self.in_throws { format!("{call}?") } else { call })
+    }
+
     /// Emit `stmts` through a fresh sub-emitter sharing this one's tracking maps,
     /// returning the rendered body as a single Rust block-expression string
     /// (`{ ... }`). Shared by `ExprKind::Closure`'s `ClosureBody::Block` case and
@@ -3366,18 +3394,13 @@ impl HostEmitter {
                         };
                     }
                 }
-                // `print(expr)` → `println!(...)`
+                // `print(expr)` → `println!(...)`, `warn(expr)` (and the other log levels) → `eprintln!("[WARN] ...")`
                 if let ExprKind::Var(name) = &callee.kind {
-                    if name == "print" {
-                        if let Some(arg) = args.first() {
-                            let inner = self.expr(&arg.value);
-                            if inner.starts_with("format!(") {
-                                let inner_args = &inner["format!(".len()..inner.len()-1];
-                                return format!("println!({})", inner_args);
-                            }
-                            return format!("println!(\"{{}}\", {})", inner);
+                    if matches!(name.as_str(), "print" | "error" | "warn" | "info" | "debug" | "trace") {
+                        let inner = args.first().map(|arg| self.expr(&arg.value));
+                        if let Some(call) = host_display_builtin(name, inner) {
+                            return call;
                         }
-                        return "println!()".into();
                     }
                 }
                 // `abs(x)`/`sqrt(x)`/… → `(x).abs()`/`(x).sqrt()`/…
@@ -3485,7 +3508,14 @@ impl HostEmitter {
                 let mut_ref_flags = callee_name.and_then(|n| self.fn_mut_params.get(n)).cloned();
                 let gpu_flags = callee_name.and_then(|n| self.fn_gpu_array_params.get(n)).cloned();
                 let borrow_flags = callee_name.and_then(|n| self.fn_gpu_borrow_params.get(n)).cloned();
+                let plain_params = callee_name.map(|n| general_plain_params(&self.general_code_text, n)).unwrap_or_default();
                 let args_s: Vec<String> = args.iter().enumerate().map(|(i, a)| {
+                    // A parameter the general pass emitted as plain host data (see `general_plain_params`).
+                    if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
+                        if let Some(takes_ref) = plain_params.get(i).copied().flatten() {
+                            return self.coerce_call_arg(&a.value, takes_ref);
+                        }
+                    }
                     if gpu_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false) {
                         let lend = borrow_flags.as_ref().and_then(|f| f.get(i).copied()).unwrap_or(false);
                         if let ExprKind::Var(name) = &a.value.kind {
@@ -3605,6 +3635,9 @@ impl HostEmitter {
                         }).collect();
                         return format!("{}::{}({})", name, method, args_s.join(", "));
                     }
+                }
+                if let Some(call) = self.general_struct_method_call(obj, method, args) {
+                    return call;
                 }
                 if let ExprKind::Var(name) = &obj.kind {
                     if self.screen_var.as_deref() == Some(name.as_str()) && args.len() == 1 {

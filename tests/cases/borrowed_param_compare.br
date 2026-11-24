@@ -1,0 +1,33 @@
+# Regression (0.9.15): bare enum parameters are now borrowed when the body only reads them
+# (`k: &K`), so comparing one with a value emitted `&K == K` (`can't compare `&K` with `K``).
+# A borrowed parameter compared with a value is compared through the reference.
+
+enum K:
+    A
+    B
+    C(int)
+
+struct P:
+    int x
+    int y
+
+bool isBare(K k):
+    k == K.A or k == K.B
+
+bool same(K a, K b):
+    a == b
+
+bool notC1(K k):
+    K.C(1) != k
+
+bool atOrigin(P p):
+    p == P(0, 0)
+
+def main():
+    print isBare(K.A)
+    print isBare(K.C(2))
+    print same(K.C(3), K.C(3))
+    print notC1(K.C(1))
+    print notC1(K.B)
+    print atOrigin(P(0, 0))
+    print atOrigin(P(1, 0))

@@ -756,6 +756,11 @@ struct Transpiler {
     /// mis-transpiled to array-style `table[(k) as usize]` indexing wrapped in `Some(...)`
     /// — see docs/dict-index-optional-return-bug.md.
     pub(crate) want_raw_dict_get: std::cell::Cell<bool>,
+    /// True while emitting a `'kernel`-typed `let` that `emit_let_inner` decided is a plain
+    /// host `Vec<T>` (not a `BoringKernelArg` residency slot): tells `emit_let_value` not to
+    /// wrap the initialiser in `BoringKernelArg::Host(..)`. Uses Cell<bool> because
+    /// `emit_let_value` takes &self.
+    pub(crate) plain_kernel_let: std::cell::Cell<bool>,
     /// Are we inside a `req` (non-mutating, &self) function body?
     pub(crate) in_req_fn: bool,
     /// Are we emitting a struct/enum method (self_ty.is_some())?
@@ -1311,6 +1316,13 @@ struct Transpiler {
     /// (e.g. from matching `self` or a borrowed parameter) and must therefore clone rather
     /// than move when read by value.
     pub(crate) ref_bound_vars: std::collections::HashSet<String>,
+    /// While a function body is emitted: the qualifier its signature gave each typed parameter
+    /// (`None` = by value). `infer_qualifiers` runs again on every nested body slice (match arm,
+    /// `if` branch, ...) and would otherwise re-decide the parameters from that slice alone —
+    /// e.g. a parameter matched on at the top (owned) but only passed along inside an arm (looks
+    /// borrowable there) — so call sites and moves inside the slice would disagree with the
+    /// signature. See `pin_param_quals` (infer_qualifiers.rs).
+    pub(crate) pinned_param_quals: Option<std::collections::HashMap<String, Option<OwnerQual>>>,
     /// Last-use sites by scope, made by the decisions pass (`None`: two bodies share the scope).
     pub(crate) last_use_table: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Option<last_use::LastUseSites>>>>,
     /// Local variables and parameters that are immutable (`let` binding, or plain param without
@@ -1940,6 +1952,7 @@ impl Transpiler {
             struct_type_param_names: std::collections::HashMap::new(),
             want_raw_option_pop: std::cell::Cell::new(false),
             want_raw_dict_get: std::cell::Cell::new(false),
+            plain_kernel_let: std::cell::Cell::new(false),
             in_req_fn: false,
             in_struct_method: false,
             in_async: false,
@@ -2123,6 +2136,7 @@ impl Transpiler {
             unlent_probe: std::collections::HashSet::new(),
             last_use_sites: std::collections::HashSet::new(),
             ref_bound_vars: std::collections::HashSet::new(),
+            pinned_param_quals: None,
             last_use_table: Default::default(),
             immutable_local_vars: std::collections::HashSet::new(),
             mut_local_vars: std::collections::HashSet::new(),
@@ -4585,6 +4599,20 @@ impl Transpiler {
         let mut flags_by_fn: std::collections::HashMap<&str, Vec<bool>> = all_fns.iter()
             .map(|f| (f.name.as_str(), vec![false; f.params.len()]))
             .collect();
+        // The cuda/metal/rocm general pass has an empty `gpu_kernels`, so also take the kernels the
+        // program itself declares, as `compute_gpu_borrow_params` does. Without them a function
+        // whose GPU array parameter only feeds a kernel constructor (`argmax_gpu(logits)` →
+        // `ArgMax(logits)`) is not flagged here, and a call to it from a struct method (emitted
+        // by this general pass) downloads the caller's resident value to a `Vec<T>` where the
+        // host-emitted callee takes `&BoringKernelArg<T>` (E0308).
+        let mut program_kernel_decls = self.kernel_decls.clone();
+        if self.is_gpu_target {
+            for item in &program.items {
+                if let Item::Kernel(k) = item {
+                    program_kernel_decls.entry(k.name.clone()).or_insert_with(|| k.clone());
+                }
+            }
+        }
 
         // See `Checker::collect_gpu_arg_params` — this bound is never actually hit,
         // just a guard against a future logic error turning this into an infinite loop.
@@ -4600,7 +4628,7 @@ impl Transpiler {
                 });
                 for (i, p) in f.params.iter().enumerate() {
                     let explicitly_resident = p.ty.as_ref().is_some_and(is_gpu_array_type);
-                    let kernel_decls = &self.kernel_decls;
+                    let kernel_decls = &program_kernel_decls;
                     let struct_fields = &self.gpu_struct_fields;
                     let known = &flags_by_fn;
                     let imported_gpu_arg_params = &self.fn_gpu_arg_params;

@@ -1,0 +1,24 @@
+# Regression (0.9.15): the `coll[i].field` read fusion projected the field straight out of
+# the indexed element, skipping the lock of an `'actor`/`'guard` element
+# (`error[E0609]: no field `x` on type `Arc<Mutex<Point>>``).
+
+struct Point:
+    var float x
+    var float y
+    var string name = "p"
+
+def main():
+    mut [Point'actor] arr = []
+    arr.push(Point(1.0, 2.0, "first"))
+    arr.push(Point(3.0, 4.0, "second"))
+    mut {string = Point'guard} byName = {=}
+    byName["a"] = Point(5.0, 6.0, "alpha")
+    print arr[0].x
+    print arr[1].y + arr[0].y
+    print arr[1].name
+    print byName["a"].x
+    print "{byName["a"].name}!"
+    var total = 0.0
+    for i in 0..<2:
+        total += arr[i].x
+    print total

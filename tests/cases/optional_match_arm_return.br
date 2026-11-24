@@ -1,0 +1,36 @@
+# Regression (0.9.15): in a function returning `T?`, a `return value` nested in a non-last
+# statement of a match arm (`if let ...: return (a, b)`) must still return `Some(..)`;
+# 803d835 emitted the arm as an optional-tail slice and dropped the wrapping there.
+
+enum Num:
+    Small(int)
+    Pair(int?, int?)
+    Nothing
+
+(int, int)? split(Num n):
+    match n:
+        Small(v): (v, 1)
+        Pair(a, b):
+            if let x = a:
+                if let y = b:
+                    return (x, y)
+            nil
+        Nothing: nil
+
+int? firstOf(Num n):
+    match n:
+        Pair(a, _):
+            if let x = a:
+                return x
+            nil
+        _: nil
+
+def main():
+    let s = split(Num.Small(3)) else (0, 0)
+    print "{s.0} {s.1}"
+    let p = split(Num.Pair(4, 5)) else (0, 0)
+    print "{p.0} {p.1}"
+    let q = split(Num.Pair(4, nil)) else (-1, -1)
+    print "{q.0} {q.1}"
+    let f = firstOf(Num.Pair(9, nil)) else -1
+    print f

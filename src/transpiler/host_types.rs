@@ -243,6 +243,12 @@ impl HostTypeEnv {
         }
     }
 
+    /// The user struct `e` is known to be a value of (a tracked local, `self`, a constructor
+    /// call, a field or method result of a known struct type), if any.
+    pub(crate) fn expr_struct_name(&self, e: &Expr, self_type: Option<&str>) -> Option<String> {
+        self.expr_struct(e, self_type)
+    }
+
     /// True when `obj`'s resolved struct type declares a field or method `member`.
     pub(crate) fn is_real_member(&self, obj: &Expr, member: &str, self_type: Option<&str>) -> bool {
         self.expr_struct(obj, self_type)

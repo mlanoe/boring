@@ -2148,7 +2148,14 @@ impl Transpiler {
             let forced_borrows = self.method_borrow_positions(f, self_ty);
             // A method whose parameters were resolved to `&T` is inferred like a free function.
             self.in_struct_method = self_ty.is_some() && forced_borrows.is_empty();
+            // Infer in this function's own context, as `decide_program` / `pre_infer_fn_qualifiers`
+            // do: its return type (a parameter returned by value escapes), and no enclosing
+            // function's pinned parameters.
+            let prev_ret_for_infer = std::mem::replace(&mut self.fn_return_ty, f.return_ty.clone());
+            let prev_pinned_for_infer = self.pinned_param_quals.take();
             self.infer_qualifiers(&f.body);
+            self.fn_return_ty = prev_ret_for_infer;
+            self.pinned_param_quals = prev_pinned_for_infer;
             for &i in &forced_borrows {
                 // The signature the call sites were given is authoritative.
                 self.inferred_qualifiers.insert(f.params[i].name.clone(), OwnerQual::Borrow);
@@ -2482,7 +2489,15 @@ impl Transpiler {
         }
         let sites = self.last_use_for(f);
         let prev_last_use_sites = std::mem::replace(&mut self.last_use_sites, sites);
+        // Every `infer_qualifiers` run inside this body (one per nested slice) keeps the
+        // parameters at the qualifier the signature above gave them (`pinned_param_quals`).
+        let pinned: std::collections::HashMap<String, Option<crate::ast::OwnerQual>> = f.params.iter()
+            .filter(|p| p.ty.is_some())
+            .map(|p| (p.name.clone(), pre_inferred_param_quals.get(&p.name).cloned()))
+            .collect();
+        let prev_pinned_param_quals = std::mem::replace(&mut self.pinned_param_quals, Some(pinned));
         self.emit_body(&f.body);
+        self.pinned_param_quals = prev_pinned_param_quals;
         self.last_use_sites = prev_last_use_sites;
         // Cross-function propagation: update fn_sigs with inferred param qualifiers so that
         // callers defined after this function see the qualified signature and can propagate
@@ -3394,9 +3409,15 @@ impl Transpiler {
         let last_idx = non_defers.len().saturating_sub(1);
         for (i, stmt) in non_defers.iter().enumerate() {
             if i < last_idx {
-                // Non-last stmts: emit normally without Optional context.
-                let saved = self.fn_return_ty.take();
+                // Non-last stmts: emit without the slice's Optional tail context, but with the
+                // return type in force on entry — a `return (a, b)` there leaves the enclosing
+                // function (a match arm in tail position of an `Option` function: `Some(..)`),
+                // and an if-expression's own branches enter with `None` already.
+                // Nor is a non-last statement the optional tail (`expected_optional`).
+                let saved = std::mem::replace(&mut self.fn_return_ty, saved_return_ty.clone());
+                let saved_opt = std::mem::replace(&mut self.expected_optional, false);
                 self.emit_stmt(stmt, false);
+                self.expected_optional = saved_opt;
                 self.fn_return_ty = saved;
             } else {
                 // Last stmt: emit with Optional context so nil→None, T→Some(T).
