@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `Res`/`ResMut` parameters of a native ECS system lowered to Bevy came out in a different order on every `boring build`** when the system calls a helper that reaches resources through `ecs.resource.*`: the helper's resource usage was kept in a `HashSet` and merged into the system signature in hash order, so regenerating the same source reordered parameters such as `(res_target_costume_dims, res_mouse_state, ...)` (scratch-boring's `run_pending_threads`, `sync_reporter_watchers`, `check_greater_than_hats`, `check_touching_object_hats`) and produced a spurious diff in committed `boring_gen.rs` files. The helper usage is now an ordered set: read-only `Res` parameters still come before `ResMut`, and the ones a helper contributes are in name order (test: `test_ecs_system_resource_param_order_is_deterministic`).
+
 ---
 
 ## [0.9.15] — 2026-11-24 *(cargo test: 5043/5043 passing across 181 suites, 5 ignored · clippy: clean · self-hosted interpreter functional: 188/188)*

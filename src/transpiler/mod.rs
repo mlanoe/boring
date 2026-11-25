@@ -705,10 +705,15 @@ pub(crate) struct ResourceInfo {
     pub is_type: bool,
 }
 
+/// Resources a (non-system) function reaches through `ecs.resource.*`,
+/// directly or via its callees. Ordered sets on purpose: a system that calls
+/// the function merges these into its own `Res`/`ResMut` parameter list in
+/// iteration order, and a `HashSet` made that order (and so the generated
+/// system signature) change from one transpile to the next.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FnEcsUsage {
-    pub(crate) reads: std::collections::HashSet<String>,
-    pub(crate) writes: std::collections::HashSet<String>,
+    pub(crate) reads: std::collections::BTreeSet<String>,
+    pub(crate) writes: std::collections::BTreeSet<String>,
 }
 
 // ─── Transpiler state ─────────────────────────────────────────────────────────

@@ -594,6 +594,52 @@ def run_threads():
     }
 
     #[test]
+    fn test_ecs_system_resource_param_order_is_deterministic() {
+        // A system's `Res`/`ResMut` parameters merged in from a helper's
+        // `ecs.resource.*` usage used to follow `HashSet` iteration order,
+        // so every regeneration could reorder them (spurious diffs in
+        // committed `boring_gen.rs` files). The output must be byte-identical
+        // across runs; each transpile below builds fresh `HashSet`s with
+        // fresh random hash keys, so a hash-ordered emission shows up here.
+        let mut src = String::new();
+        for name in ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"] {
+            src.push_str(&format!(
+                "@resource\ndata {name}:\n    [int] items\n\n    def void put(int slot, int val):\n        self.items[slot] = val\n\n    req int value_at(int slot):\n        self.items[slot]\n\n"
+            ));
+        }
+        src.push_str("\
+def helper(int slot):
+    let a = ecs.resource.alpha.value_at(slot)
+    let b = ecs.resource.bravo.value_at(slot)
+    let c = ecs.resource.charlie.value_at(slot)
+    let d = ecs.resource.delta.value_at(slot)
+    ecs.resource.echo.put(slot, a + b)
+    ecs.resource.foxtrot.put(slot, c + d)
+    ecs.resource.golf.put(slot, 1)
+    let h = ecs.resource.hotel.value_at(slot)
+
+@schedule(Update)
+def run_system():
+    helper(0)
+");
+        let signature = |code: &str| -> String {
+            code.lines().find(|l| l.contains("pub fn run_system(")).unwrap_or("<missing>").to_string()
+        };
+        let first = transpile_src_with_config(&src, TranspileConfig::default());
+        // Read-only resources first, then the written ones, each group in a stable order.
+        assert!(first.contains(
+            "pub fn run_system(res_alpha: Res<Alpha>, res_bravo: Res<Bravo>, res_charlie: Res<Charlie>, res_delta: Res<Delta>, res_hotel: Res<Hotel>, \
+             mut res_echo: ResMut<Echo>, mut res_foxtrot: ResMut<Foxtrot>, mut res_golf: ResMut<Golf>)"),
+            "unexpected run_system signature: {}", signature(&first));
+        for _ in 0..12 {
+            let again = transpile_src_with_config(&src, TranspileConfig::default());
+            assert!(first == again,
+                "ECS system output differs between two transpiles of the same source:\n{}\nvs\n{}",
+                signature(&first), signature(&again));
+        }
+    }
+
+    #[test]
     fn test_ecs_resource_subscript_in_def() {
         let src = "\
 @resource
